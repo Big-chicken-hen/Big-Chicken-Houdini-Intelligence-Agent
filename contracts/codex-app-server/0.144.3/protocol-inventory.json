@@ -1,0 +1,1419 @@
+{
+  "format_version": 1,
+  "codex_cli_version": "0.144.3",
+  "schema_draft": "http://json-schema.org/draft-07/schema#",
+  "generated_schema_root": "schemas/codex-app-server/0.144.3",
+  "aggregates": {
+    "client_requests": {
+      "path": "ClientRequest.json",
+      "sha256": "6ca3831bee314191a6947ddd092567f8665e3d4235cf502b17eb619da9623d7f",
+      "methods": [
+        {
+          "method": "account/login/cancel",
+          "params_definition": "CancelLoginAccountParams",
+          "schema_title": "Account/login/cancelRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/login/start",
+          "params_definition": "LoginAccountParams",
+          "schema_title": "Account/login/startRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/logout",
+          "params_definition": null,
+          "schema_title": "Account/logoutRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/rateLimitResetCredit/consume",
+          "params_definition": "ConsumeAccountRateLimitResetCreditParams",
+          "schema_title": "Account/rateLimitResetCredit/consumeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/rateLimits/read",
+          "params_definition": null,
+          "schema_title": "Account/rateLimits/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/read",
+          "params_definition": "GetAccountParams",
+          "schema_title": "Account/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/sendAddCreditsNudgeEmail",
+          "params_definition": "SendAddCreditsNudgeEmailParams",
+          "schema_title": "Account/sendAddCreditsNudgeEmailRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/usage/read",
+          "params_definition": null,
+          "schema_title": "Account/usage/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/workspaceMessages/read",
+          "params_definition": null,
+          "schema_title": "Account/workspaceMessages/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "app/list",
+          "params_definition": "AppsListParams",
+          "schema_title": "App/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "command/exec",
+          "params_definition": "CommandExecParams",
+          "schema_title": "Command/execRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "command/exec/resize",
+          "params_definition": "CommandExecResizeParams",
+          "schema_title": "Command/exec/resizeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "command/exec/terminate",
+          "params_definition": "CommandExecTerminateParams",
+          "schema_title": "Command/exec/terminateRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "command/exec/write",
+          "params_definition": "CommandExecWriteParams",
+          "schema_title": "Command/exec/writeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "config/batchWrite",
+          "params_definition": "ConfigBatchWriteParams",
+          "schema_title": "Config/batchWriteRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "config/mcpServer/reload",
+          "params_definition": null,
+          "schema_title": "Config/mcpServer/reloadRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "config/read",
+          "params_definition": "ConfigReadParams",
+          "schema_title": "Config/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "config/value/write",
+          "params_definition": "ConfigValueWriteParams",
+          "schema_title": "Config/value/writeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "configRequirements/read",
+          "params_definition": null,
+          "schema_title": "ConfigRequirements/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "experimentalFeature/enablement/set",
+          "params_definition": "ExperimentalFeatureEnablementSetParams",
+          "schema_title": "ExperimentalFeature/enablement/setRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "experimentalFeature/list",
+          "params_definition": "ExperimentalFeatureListParams",
+          "schema_title": "ExperimentalFeature/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "externalAgentConfig/detect",
+          "params_definition": "ExternalAgentConfigDetectParams",
+          "schema_title": "ExternalAgentConfig/detectRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "externalAgentConfig/import",
+          "params_definition": "ExternalAgentConfigImportParams",
+          "schema_title": "ExternalAgentConfig/importRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "externalAgentConfig/import/readHistories",
+          "params_definition": null,
+          "schema_title": "ExternalAgentConfig/import/readHistoriesRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "feedback/upload",
+          "params_definition": "FeedbackUploadParams",
+          "schema_title": "Feedback/uploadRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/copy",
+          "params_definition": "FsCopyParams",
+          "schema_title": "Fs/copyRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/createDirectory",
+          "params_definition": "FsCreateDirectoryParams",
+          "schema_title": "Fs/createDirectoryRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/getMetadata",
+          "params_definition": "FsGetMetadataParams",
+          "schema_title": "Fs/getMetadataRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/readDirectory",
+          "params_definition": "FsReadDirectoryParams",
+          "schema_title": "Fs/readDirectoryRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/readFile",
+          "params_definition": "FsReadFileParams",
+          "schema_title": "Fs/readFileRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/remove",
+          "params_definition": "FsRemoveParams",
+          "schema_title": "Fs/removeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/unwatch",
+          "params_definition": "FsUnwatchParams",
+          "schema_title": "Fs/unwatchRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/watch",
+          "params_definition": "FsWatchParams",
+          "schema_title": "Fs/watchRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/writeFile",
+          "params_definition": "FsWriteFileParams",
+          "schema_title": "Fs/writeFileRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "fuzzyFileSearch",
+          "params_definition": "FuzzyFileSearchParams",
+          "schema_title": "FuzzyFileSearchRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "hooks/list",
+          "params_definition": "HooksListParams",
+          "schema_title": "Hooks/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "initialize",
+          "params_definition": "InitializeParams",
+          "schema_title": "InitializeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "marketplace/add",
+          "params_definition": "MarketplaceAddParams",
+          "schema_title": "Marketplace/addRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "marketplace/remove",
+          "params_definition": "MarketplaceRemoveParams",
+          "schema_title": "Marketplace/removeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "marketplace/upgrade",
+          "params_definition": "MarketplaceUpgradeParams",
+          "schema_title": "Marketplace/upgradeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "mcpServer/oauth/login",
+          "params_definition": "McpServerOauthLoginParams",
+          "schema_title": "McpServer/oauth/loginRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "mcpServer/resource/read",
+          "params_definition": "McpResourceReadParams",
+          "schema_title": "McpServer/resource/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "mcpServer/tool/call",
+          "params_definition": "McpServerToolCallParams",
+          "schema_title": "McpServer/tool/callRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "mcpServerStatus/list",
+          "params_definition": "ListMcpServerStatusParams",
+          "schema_title": "McpServerStatus/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "model/list",
+          "params_definition": "ModelListParams",
+          "schema_title": "Model/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "modelProvider/capabilities/read",
+          "params_definition": "ModelProviderCapabilitiesReadParams",
+          "schema_title": "ModelProvider/capabilities/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "permissionProfile/list",
+          "params_definition": "PermissionProfileListParams",
+          "schema_title": "PermissionProfile/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/install",
+          "params_definition": "PluginInstallParams",
+          "schema_title": "Plugin/installRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/installed",
+          "params_definition": "PluginInstalledParams",
+          "schema_title": "Plugin/installedRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/list",
+          "params_definition": "PluginListParams",
+          "schema_title": "Plugin/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/read",
+          "params_definition": "PluginReadParams",
+          "schema_title": "Plugin/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/share/checkout",
+          "params_definition": "PluginShareCheckoutParams",
+          "schema_title": "Plugin/share/checkoutRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/share/delete",
+          "params_definition": "PluginShareDeleteParams",
+          "schema_title": "Plugin/share/deleteRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/share/list",
+          "params_definition": "PluginShareListParams",
+          "schema_title": "Plugin/share/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/share/save",
+          "params_definition": "PluginShareSaveParams",
+          "schema_title": "Plugin/share/saveRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/share/updateTargets",
+          "params_definition": "PluginShareUpdateTargetsParams",
+          "schema_title": "Plugin/share/updateTargetsRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/skill/read",
+          "params_definition": "PluginSkillReadParams",
+          "schema_title": "Plugin/skill/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "plugin/uninstall",
+          "params_definition": "PluginUninstallParams",
+          "schema_title": "Plugin/uninstallRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "review/start",
+          "params_definition": "ReviewStartParams",
+          "schema_title": "Review/startRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "skills/config/write",
+          "params_definition": "SkillsConfigWriteParams",
+          "schema_title": "Skills/config/writeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "skills/extraRoots/set",
+          "params_definition": "SkillsExtraRootsSetParams",
+          "schema_title": "Skills/extraRoots/setRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "skills/list",
+          "params_definition": "SkillsListParams",
+          "schema_title": "Skills/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/approveGuardianDeniedAction",
+          "params_definition": "ThreadApproveGuardianDeniedActionParams",
+          "schema_title": "Thread/approveGuardianDeniedActionRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/archive",
+          "params_definition": "ThreadArchiveParams",
+          "schema_title": "Thread/archiveRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/compact/start",
+          "params_definition": "ThreadCompactStartParams",
+          "schema_title": "Thread/compact/startRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/delete",
+          "params_definition": "ThreadDeleteParams",
+          "schema_title": "Thread/deleteRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/fork",
+          "params_definition": "ThreadForkParams",
+          "schema_title": "Thread/forkRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/goal/clear",
+          "params_definition": "ThreadGoalClearParams",
+          "schema_title": "Thread/goal/clearRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/goal/get",
+          "params_definition": "ThreadGoalGetParams",
+          "schema_title": "Thread/goal/getRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/goal/set",
+          "params_definition": "ThreadGoalSetParams",
+          "schema_title": "Thread/goal/setRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/inject_items",
+          "params_definition": "ThreadInjectItemsParams",
+          "schema_title": "Thread/injectItemsRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/list",
+          "params_definition": "ThreadListParams",
+          "schema_title": "Thread/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/loaded/list",
+          "params_definition": "ThreadLoadedListParams",
+          "schema_title": "Thread/loaded/listRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/metadata/update",
+          "params_definition": "ThreadMetadataUpdateParams",
+          "schema_title": "Thread/metadata/updateRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/name/set",
+          "params_definition": "ThreadSetNameParams",
+          "schema_title": "Thread/name/setRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/read",
+          "params_definition": "ThreadReadParams",
+          "schema_title": "Thread/readRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/resume",
+          "params_definition": "ThreadResumeParams",
+          "schema_title": "Thread/resumeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/rollback",
+          "params_definition": "ThreadRollbackParams",
+          "schema_title": "Thread/rollbackRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/shellCommand",
+          "params_definition": "ThreadShellCommandParams",
+          "schema_title": "Thread/shellCommandRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/start",
+          "params_definition": "ThreadStartParams",
+          "schema_title": "Thread/startRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/unarchive",
+          "params_definition": "ThreadUnarchiveParams",
+          "schema_title": "Thread/unarchiveRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/unsubscribe",
+          "params_definition": "ThreadUnsubscribeParams",
+          "schema_title": "Thread/unsubscribeRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "turn/interrupt",
+          "params_definition": "TurnInterruptParams",
+          "schema_title": "Turn/interruptRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "turn/start",
+          "params_definition": "TurnStartParams",
+          "schema_title": "Turn/startRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "turn/steer",
+          "params_definition": "TurnSteerParams",
+          "schema_title": "Turn/steerRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "windowsSandbox/readiness",
+          "params_definition": null,
+          "schema_title": "WindowsSandbox/readinessRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "windowsSandbox/setupStart",
+          "params_definition": "WindowsSandboxSetupStartParams",
+          "schema_title": "WindowsSandbox/setupStartRequest",
+          "declared_experimental": false
+        }
+      ]
+    },
+    "server_requests": {
+      "path": "ServerRequest.json",
+      "sha256": "7c8a2c6fe03d6afdf8a83f91fa5eb55e7ae630fe2e43a167691ab917dccc9556",
+      "methods": [
+        {
+          "method": "account/chatgptAuthTokens/refresh",
+          "params_definition": "ChatgptAuthTokensRefreshParams",
+          "schema_title": "Account/chatgptAuthTokens/refreshRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "applyPatchApproval",
+          "params_definition": "ApplyPatchApprovalParams",
+          "schema_title": "ApplyPatchApprovalRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "attestation/generate",
+          "params_definition": "AttestationGenerateParams",
+          "schema_title": "Attestation/generateRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "execCommandApproval",
+          "params_definition": "ExecCommandApprovalParams",
+          "schema_title": "ExecCommandApprovalRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/commandExecution/requestApproval",
+          "params_definition": "CommandExecutionRequestApprovalParams",
+          "schema_title": "Item/commandExecution/requestApprovalRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/fileChange/requestApproval",
+          "params_definition": "FileChangeRequestApprovalParams",
+          "schema_title": "Item/fileChange/requestApprovalRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/permissions/requestApproval",
+          "params_definition": "PermissionsRequestApprovalParams",
+          "schema_title": "Item/permissions/requestApprovalRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/tool/call",
+          "params_definition": "DynamicToolCallParams",
+          "schema_title": "Item/tool/callRequest",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/tool/requestUserInput",
+          "params_definition": "ToolRequestUserInputParams",
+          "schema_title": "Item/tool/requestUserInputRequest",
+          "declared_experimental": true
+        },
+        {
+          "method": "mcpServer/elicitation/request",
+          "params_definition": "McpServerElicitationRequestParams",
+          "schema_title": "McpServer/elicitation/requestRequest",
+          "declared_experimental": false
+        }
+      ]
+    },
+    "server_notifications": {
+      "path": "ServerNotification.json",
+      "sha256": "67669e13a8af9449da30acdbd83a6108fd54ed92b79849dee381aece1521937f",
+      "methods": [
+        {
+          "method": "account/login/completed",
+          "params_definition": "AccountLoginCompletedNotification",
+          "schema_title": "Account/login/completedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/rateLimits/updated",
+          "params_definition": "AccountRateLimitsUpdatedNotification",
+          "schema_title": "Account/rateLimits/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "account/updated",
+          "params_definition": "AccountUpdatedNotification",
+          "schema_title": "Account/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "app/list/updated",
+          "params_definition": "AppListUpdatedNotification",
+          "schema_title": "App/list/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "command/exec/outputDelta",
+          "params_definition": "CommandExecOutputDeltaNotification",
+          "schema_title": "Command/exec/outputDeltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "configWarning",
+          "params_definition": "ConfigWarningNotification",
+          "schema_title": "ConfigWarningNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "deprecationNotice",
+          "params_definition": "DeprecationNoticeNotification",
+          "schema_title": "DeprecationNoticeNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "error",
+          "params_definition": "ErrorNotification",
+          "schema_title": "ErrorNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "externalAgentConfig/import/completed",
+          "params_definition": "ExternalAgentConfigImportCompletedNotification",
+          "schema_title": "ExternalAgentConfig/import/completedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "externalAgentConfig/import/progress",
+          "params_definition": "ExternalAgentConfigImportProgressNotification",
+          "schema_title": "ExternalAgentConfig/import/progressNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "fs/changed",
+          "params_definition": "FsChangedNotification",
+          "schema_title": "Fs/changedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "fuzzyFileSearch/sessionCompleted",
+          "params_definition": "FuzzyFileSearchSessionCompletedNotification",
+          "schema_title": "FuzzyFileSearch/sessionCompletedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "fuzzyFileSearch/sessionUpdated",
+          "params_definition": "FuzzyFileSearchSessionUpdatedNotification",
+          "schema_title": "FuzzyFileSearch/sessionUpdatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "guardianWarning",
+          "params_definition": "GuardianWarningNotification",
+          "schema_title": "GuardianWarningNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "hook/completed",
+          "params_definition": "HookCompletedNotification",
+          "schema_title": "Hook/completedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "hook/started",
+          "params_definition": "HookStartedNotification",
+          "schema_title": "Hook/startedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/agentMessage/delta",
+          "params_definition": "AgentMessageDeltaNotification",
+          "schema_title": "Item/agentMessage/deltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/autoApprovalReview/completed",
+          "params_definition": "ItemGuardianApprovalReviewCompletedNotification",
+          "schema_title": "Item/autoApprovalReview/completedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/autoApprovalReview/started",
+          "params_definition": "ItemGuardianApprovalReviewStartedNotification",
+          "schema_title": "Item/autoApprovalReview/startedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/commandExecution/outputDelta",
+          "params_definition": "CommandExecutionOutputDeltaNotification",
+          "schema_title": "Item/commandExecution/outputDeltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/commandExecution/terminalInteraction",
+          "params_definition": "TerminalInteractionNotification",
+          "schema_title": "Item/commandExecution/terminalInteractionNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/completed",
+          "params_definition": "ItemCompletedNotification",
+          "schema_title": "Item/completedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/fileChange/outputDelta",
+          "params_definition": "FileChangeOutputDeltaNotification",
+          "schema_title": "Item/fileChange/outputDeltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/fileChange/patchUpdated",
+          "params_definition": "FileChangePatchUpdatedNotification",
+          "schema_title": "Item/fileChange/patchUpdatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/mcpToolCall/progress",
+          "params_definition": "McpToolCallProgressNotification",
+          "schema_title": "Item/mcpToolCall/progressNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/plan/delta",
+          "params_definition": "PlanDeltaNotification",
+          "schema_title": "Item/plan/deltaNotification",
+          "declared_experimental": true
+        },
+        {
+          "method": "item/reasoning/summaryPartAdded",
+          "params_definition": "ReasoningSummaryPartAddedNotification",
+          "schema_title": "Item/reasoning/summaryPartAddedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/reasoning/summaryTextDelta",
+          "params_definition": "ReasoningSummaryTextDeltaNotification",
+          "schema_title": "Item/reasoning/summaryTextDeltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/reasoning/textDelta",
+          "params_definition": "ReasoningTextDeltaNotification",
+          "schema_title": "Item/reasoning/textDeltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "item/started",
+          "params_definition": "ItemStartedNotification",
+          "schema_title": "Item/startedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "mcpServer/oauthLogin/completed",
+          "params_definition": "McpServerOauthLoginCompletedNotification",
+          "schema_title": "McpServer/oauthLogin/completedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "mcpServer/startupStatus/updated",
+          "params_definition": "McpServerStatusUpdatedNotification",
+          "schema_title": "McpServer/startupStatus/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "model/rerouted",
+          "params_definition": "ModelReroutedNotification",
+          "schema_title": "Model/reroutedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "model/safetyBuffering/updated",
+          "params_definition": "ModelSafetyBufferingUpdatedNotification",
+          "schema_title": "Model/safetyBuffering/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "model/verification",
+          "params_definition": "ModelVerificationNotification",
+          "schema_title": "Model/verificationNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "process/exited",
+          "params_definition": "ProcessExitedNotification",
+          "schema_title": "Process/exitedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "process/outputDelta",
+          "params_definition": "ProcessOutputDeltaNotification",
+          "schema_title": "Process/outputDeltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "remoteControl/status/changed",
+          "params_definition": "RemoteControlStatusChangedNotification",
+          "schema_title": "RemoteControl/status/changedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "serverRequest/resolved",
+          "params_definition": "ServerRequestResolvedNotification",
+          "schema_title": "ServerRequest/resolvedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "skills/changed",
+          "params_definition": "SkillsChangedNotification",
+          "schema_title": "Skills/changedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/archived",
+          "params_definition": "ThreadArchivedNotification",
+          "schema_title": "Thread/archivedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/closed",
+          "params_definition": "ThreadClosedNotification",
+          "schema_title": "Thread/closedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/compacted",
+          "params_definition": "ContextCompactedNotification",
+          "schema_title": "Thread/compactedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/deleted",
+          "params_definition": "ThreadDeletedNotification",
+          "schema_title": "Thread/deletedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/goal/cleared",
+          "params_definition": "ThreadGoalClearedNotification",
+          "schema_title": "Thread/goal/clearedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/goal/updated",
+          "params_definition": "ThreadGoalUpdatedNotification",
+          "schema_title": "Thread/goal/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/name/updated",
+          "params_definition": "ThreadNameUpdatedNotification",
+          "schema_title": "Thread/name/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/realtime/closed",
+          "params_definition": "ThreadRealtimeClosedNotification",
+          "schema_title": "Thread/realtime/closedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/realtime/error",
+          "params_definition": "ThreadRealtimeErrorNotification",
+          "schema_title": "Thread/realtime/errorNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/realtime/itemAdded",
+          "params_definition": "ThreadRealtimeItemAddedNotification",
+          "schema_title": "Thread/realtime/itemAddedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/realtime/outputAudio/delta",
+          "params_definition": "ThreadRealtimeOutputAudioDeltaNotification",
+          "schema_title": "Thread/realtime/outputAudio/deltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/realtime/sdp",
+          "params_definition": "ThreadRealtimeSdpNotification",
+          "schema_title": "Thread/realtime/sdpNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/realtime/started",
+          "params_definition": "ThreadRealtimeStartedNotification",
+          "schema_title": "Thread/realtime/startedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/realtime/transcript/delta",
+          "params_definition": "ThreadRealtimeTranscriptDeltaNotification",
+          "schema_title": "Thread/realtime/transcript/deltaNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/realtime/transcript/done",
+          "params_definition": "ThreadRealtimeTranscriptDoneNotification",
+          "schema_title": "Thread/realtime/transcript/doneNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/settings/updated",
+          "params_definition": "ThreadSettingsUpdatedNotification",
+          "schema_title": "Thread/settings/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/started",
+          "params_definition": "ThreadStartedNotification",
+          "schema_title": "Thread/startedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/status/changed",
+          "params_definition": "ThreadStatusChangedNotification",
+          "schema_title": "Thread/status/changedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/tokenUsage/updated",
+          "params_definition": "ThreadTokenUsageUpdatedNotification",
+          "schema_title": "Thread/tokenUsage/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "thread/unarchived",
+          "params_definition": "ThreadUnarchivedNotification",
+          "schema_title": "Thread/unarchivedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "turn/completed",
+          "params_definition": "TurnCompletedNotification",
+          "schema_title": "Turn/completedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "turn/diff/updated",
+          "params_definition": "TurnDiffUpdatedNotification",
+          "schema_title": "Turn/diff/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "turn/moderationMetadata",
+          "params_definition": "TurnModerationMetadataNotification",
+          "schema_title": "Turn/moderationMetadataNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "turn/plan/updated",
+          "params_definition": "TurnPlanUpdatedNotification",
+          "schema_title": "Turn/plan/updatedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "turn/started",
+          "params_definition": "TurnStartedNotification",
+          "schema_title": "Turn/startedNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "warning",
+          "params_definition": "WarningNotification",
+          "schema_title": "WarningNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "windows/worldWritableWarning",
+          "params_definition": "WindowsWorldWritableWarningNotification",
+          "schema_title": "Windows/worldWritableWarningNotification",
+          "declared_experimental": false
+        },
+        {
+          "method": "windowsSandbox/setupCompleted",
+          "params_definition": "WindowsSandboxSetupCompletedNotification",
+          "schema_title": "WindowsSandbox/setupCompletedNotification",
+          "declared_experimental": false
+        }
+      ]
+    },
+    "client_notifications": {
+      "path": "ClientNotification.json",
+      "sha256": "a30b3041578845b11add3d07d5a63cd3a12d5d126e87b8c591862b4aeb68d97c",
+      "methods": [
+        {
+          "method": "initialized",
+          "params_definition": null,
+          "schema_title": "InitializedNotification",
+          "declared_experimental": false
+        }
+      ]
+    }
+  },
+  "response_schemas": [
+    {
+      "path": "ApplyPatchApprovalResponse.json",
+      "sha256": "1b1c691b986c23e8dd91a182e716d0366de6ec69bf62f83f208efa9f4c53e6ee"
+    },
+    {
+      "path": "AttestationGenerateResponse.json",
+      "sha256": "f7c8935c414ac74060cbc0fd4b298c022757e2dea50b3d21a7d507cb24d3318d"
+    },
+    {
+      "path": "ChatgptAuthTokensRefreshResponse.json",
+      "sha256": "0407a673d393e20836652e1c8449e851dac0b510819712aa05be3a80e92c9115"
+    },
+    {
+      "path": "CommandExecutionRequestApprovalResponse.json",
+      "sha256": "42010a48dd9ad989171728c30338e1ff8144c31bd33921cbfb5608fd6c85a3b5"
+    },
+    {
+      "path": "DynamicToolCallResponse.json",
+      "sha256": "50410ccaaefc9871a42fa25ee0c0d4f488a6f0e08c35856842e12d3103410fd1"
+    },
+    {
+      "path": "ExecCommandApprovalResponse.json",
+      "sha256": "2582a07c4028d06e0ed67c1b7563469882bbc66640237be182d309fe4ad1d1eb"
+    },
+    {
+      "path": "FileChangeRequestApprovalResponse.json",
+      "sha256": "7ccbd29e5f8840c7c8aa96c5c3b6d52bc71ec5c5d7e1ad05ab958afd44c0c94c"
+    },
+    {
+      "path": "FuzzyFileSearchResponse.json",
+      "sha256": "45d5c686e50887d8fb590ecc090e05fb5b0023305682e932b4dc4db4c0f55045"
+    },
+    {
+      "path": "JSONRPCResponse.json",
+      "sha256": "94ecf5e81bdbc2af858afad0044b95c7fb4decf77d7fd7d6321324dad79eef57"
+    },
+    {
+      "path": "McpServerElicitationRequestResponse.json",
+      "sha256": "b9658ba208bfc7ecb3139c4d9742608f260e1583bd6cd11666dce289c975d670"
+    },
+    {
+      "path": "PermissionsRequestApprovalResponse.json",
+      "sha256": "60abc8a0d1c1f24be5be8fafbeb8a2bd0c327ba44088c74ba414b31acdfd4489"
+    },
+    {
+      "path": "ToolRequestUserInputResponse.json",
+      "sha256": "14ede53c2e51b289fb3c80903292d4b0f0b387eae217dbb257c201b2b7c65bf1"
+    },
+    {
+      "path": "v1/InitializeResponse.json",
+      "sha256": "86dcd236d0576a82c85b933586dc45731260eab1b6edb3447b03f790277322b1"
+    },
+    {
+      "path": "v2/AppsListResponse.json",
+      "sha256": "a15c7dac1858bddc9f665482f658a1720a973d50684e64faadafcabb76d6fed2"
+    },
+    {
+      "path": "v2/CancelLoginAccountResponse.json",
+      "sha256": "8691ac0cb3c82ec8df9f523ac8571cb99b00efa2d5531bcc13c6ef34bd7892d2"
+    },
+    {
+      "path": "v2/CommandExecResizeResponse.json",
+      "sha256": "bc16449a418538843e3f8ec485ce19481ea066952c38764e34dd981eda0c776c"
+    },
+    {
+      "path": "v2/CommandExecResponse.json",
+      "sha256": "0dbcacaa27d794d801e701513a8cfb9d247cf20624c9a05bb6231866ebeeecb8"
+    },
+    {
+      "path": "v2/CommandExecTerminateResponse.json",
+      "sha256": "7d59565735c556579512b9480aa8813de45d8bdfeaf9310a99ed59c13e04dab4"
+    },
+    {
+      "path": "v2/CommandExecWriteResponse.json",
+      "sha256": "0000c7901037e77c508002f290f693a09113cfcb4370ae6159a25a4c0be61815"
+    },
+    {
+      "path": "v2/ConfigReadResponse.json",
+      "sha256": "6891153c46366e5e0dbb08c618689f56d804482140c54079c1998bca3c97ccbc"
+    },
+    {
+      "path": "v2/ConfigRequirementsReadResponse.json",
+      "sha256": "cc014e3d2fd31d6ba497276d9e0ff4243d656bd79a520e9eb4a949ec8f9ca8eb"
+    },
+    {
+      "path": "v2/ConfigWriteResponse.json",
+      "sha256": "b21d63578d3ef4a0c11042c4387b139f281c0796299ec4639d78f27d46c8fc0d"
+    },
+    {
+      "path": "v2/ConsumeAccountRateLimitResetCreditResponse.json",
+      "sha256": "1b4a2dba3ee75970a66195ce8355cccb99f3fe3489c726721463ae75c085ffe6"
+    },
+    {
+      "path": "v2/ExperimentalFeatureEnablementSetResponse.json",
+      "sha256": "806b13a0e11bb7840cc04b1b806eee98e9f7f1b3463cec320d075fade7e07b90"
+    },
+    {
+      "path": "v2/ExperimentalFeatureListResponse.json",
+      "sha256": "6b894c2a092dac26f4108f14152569277e1401e44b946c94f43cb55901f01cec"
+    },
+    {
+      "path": "v2/ExternalAgentConfigDetectResponse.json",
+      "sha256": "00fd0f32ae1e45db8cecccb8fb91f92691476c6971fab688ee911d36b13e936b"
+    },
+    {
+      "path": "v2/ExternalAgentConfigImportHistoriesReadResponse.json",
+      "sha256": "5da5df9afc138cd8e7bd0ee61156b86d020a4597910604c96aef86656927b210"
+    },
+    {
+      "path": "v2/ExternalAgentConfigImportResponse.json",
+      "sha256": "668d9cabd7ada5e0135e15df5d029d5ba642ccc6aae974c86dbfce11d3cfee04"
+    },
+    {
+      "path": "v2/FeedbackUploadResponse.json",
+      "sha256": "b643e47a774302f708ba6629f7571e9b9ace68abeb7516ab0123da9a497b7c4a"
+    },
+    {
+      "path": "v2/FsCopyResponse.json",
+      "sha256": "df42cb70d864ccae345cec48e7454234d7e904fdaee35c5dbba523d3251b159b"
+    },
+    {
+      "path": "v2/FsCreateDirectoryResponse.json",
+      "sha256": "8ca90dc2b3f1e3923bbee1a1a582f3d6126a86562a5bf4506c403d11bfdea5dc"
+    },
+    {
+      "path": "v2/FsGetMetadataResponse.json",
+      "sha256": "0b6c65e501e1572d4d6193a658d27c55f0f25475193286d5e673149dbd57ee73"
+    },
+    {
+      "path": "v2/FsReadDirectoryResponse.json",
+      "sha256": "9b7009479142b1ead2031b2df4c3effa50469efc30708db0aa3bdaba4d574137"
+    },
+    {
+      "path": "v2/FsReadFileResponse.json",
+      "sha256": "4e89ccdca494a9acce354225c21faab4e78a8e8685e198b4a9779ca0ab9aebb5"
+    },
+    {
+      "path": "v2/FsRemoveResponse.json",
+      "sha256": "df87770e3ae6d4816cfd6e291a892d87f64f599a9ba43167b162a4fa83e42a94"
+    },
+    {
+      "path": "v2/FsUnwatchResponse.json",
+      "sha256": "d2243dffb042d67ccd8f96792d5740bc1339003f57e943445ef22b1e22f3692b"
+    },
+    {
+      "path": "v2/FsWatchResponse.json",
+      "sha256": "19b4f715108d7e5953200aa0c887138c20498e113a64c9b38863cee2e31c5e04"
+    },
+    {
+      "path": "v2/FsWriteFileResponse.json",
+      "sha256": "3a946ef3ac33632489f9df1826c9cca670b2dc70184225684372911d2a34a9bd"
+    },
+    {
+      "path": "v2/GetAccountRateLimitsResponse.json",
+      "sha256": "26bed5356b0b7abd8f3f5bdd2f55d16123e340b038afee26a35d5470f4c17f5b"
+    },
+    {
+      "path": "v2/GetAccountResponse.json",
+      "sha256": "f681035a67d7779fa90a43c38b2deffaa230a32cfe10de87729b67ed97555621"
+    },
+    {
+      "path": "v2/GetAccountTokenUsageResponse.json",
+      "sha256": "b4cb098e35c43a7e3b8c9211c3c1b12a79e5d89afdcf40304e6b777e25a8c74b"
+    },
+    {
+      "path": "v2/GetWorkspaceMessagesResponse.json",
+      "sha256": "158650c7c3e8909cfb5a02a0bcc0ee765455fd33c212817b3ae64225c7873991"
+    },
+    {
+      "path": "v2/HooksListResponse.json",
+      "sha256": "8d556e8266f0da180467a7cfe20552e68687db6f66caa5b167ebf617685d80b6"
+    },
+    {
+      "path": "v2/ListMcpServerStatusResponse.json",
+      "sha256": "9f57363d187ee9581e88cc2fe8ed85e4b692353ae96b616689e934702442af4a"
+    },
+    {
+      "path": "v2/LoginAccountResponse.json",
+      "sha256": "511432a4ea31cdd585ced7e7c2a573f2f2b6306269e9e36da9114b20537e933c"
+    },
+    {
+      "path": "v2/LogoutAccountResponse.json",
+      "sha256": "ac14ddfca2ec6092b0039be8720262d5a9930484d23e62544d2ef0b7e1db7926"
+    },
+    {
+      "path": "v2/MarketplaceAddResponse.json",
+      "sha256": "016e57c26a6f4cb6eeb853c877dd613921f8affe05cc49ff6ac80563f3d37665"
+    },
+    {
+      "path": "v2/MarketplaceRemoveResponse.json",
+      "sha256": "dd80fbf34262773465cf667a1b29ee147dafcf717ad0b4056c4f65f45baae223"
+    },
+    {
+      "path": "v2/MarketplaceUpgradeResponse.json",
+      "sha256": "f1cadefec92a2538c7fa8fe15d3fb60b5d76d1bdd39da1119d899f3933d1654f"
+    },
+    {
+      "path": "v2/McpResourceReadResponse.json",
+      "sha256": "afc28bec6078e86f4c3abd08bb4b07faeda47a6b95d0271f32af8d293c28f648"
+    },
+    {
+      "path": "v2/McpServerOauthLoginResponse.json",
+      "sha256": "7a8369f66ca874851a82752b4d6579763cc1ffb44bdf1a37268ee15ab4eadc6b"
+    },
+    {
+      "path": "v2/McpServerRefreshResponse.json",
+      "sha256": "54a77812db02175dc69053870e582d3b314af6f161f0c76846f3563b0f9487c4"
+    },
+    {
+      "path": "v2/McpServerToolCallResponse.json",
+      "sha256": "83d100ccf933b4a1ce657bc7532a79c783dcde8b4d059a2f2cc985d51538ad88"
+    },
+    {
+      "path": "v2/ModelListResponse.json",
+      "sha256": "59039842824f56f4fbdf0379b54a940986fca63e1f4577493d2498005dcbafe9"
+    },
+    {
+      "path": "v2/ModelProviderCapabilitiesReadResponse.json",
+      "sha256": "e5e93e7d50e0f7c2c640ffe4d53107b97e36943680504184932fcfab4c132e71"
+    },
+    {
+      "path": "v2/PermissionProfileListResponse.json",
+      "sha256": "c4ccf5f00f326e13a0886ccde89bad06dc961e118e26229289a6ced166018808"
+    },
+    {
+      "path": "v2/PluginInstalledResponse.json",
+      "sha256": "0340d18a7f27121ea5054723858fd901cca0d699be122065b1f1cc0692f42533"
+    },
+    {
+      "path": "v2/PluginInstallResponse.json",
+      "sha256": "92aed7fa5993040d7d2430c7c3b38795ddde5de0626e468d7a0801bb7d7426ed"
+    },
+    {
+      "path": "v2/PluginListResponse.json",
+      "sha256": "5f5d21f61aaa27e5cb50dc8f0bb7d77c0162ce0adcdf272a1eb6fa906cb218ea"
+    },
+    {
+      "path": "v2/PluginReadResponse.json",
+      "sha256": "873fce37fbfacd73af87ebab816510a6ac491927d88611ca1a75e6f46439016e"
+    },
+    {
+      "path": "v2/PluginShareCheckoutResponse.json",
+      "sha256": "4ae360ca0bf382cfe88e8baca70a7b5e700a3d9414cb3925c44812de1430997c"
+    },
+    {
+      "path": "v2/PluginShareDeleteResponse.json",
+      "sha256": "ae881a7f898f5287354de5adf6f42094cef9029a9b9376bfd12aa1b0fe0b3106"
+    },
+    {
+      "path": "v2/PluginShareListResponse.json",
+      "sha256": "145997b5a0a59911cfc20fa3f15f3fa0e915e88c2d28de1b8e195fe9233b1045"
+    },
+    {
+      "path": "v2/PluginShareSaveResponse.json",
+      "sha256": "50241c6132ada20f175c9cd1bedad0c9d82c6f8685a7845a2f517f2978b8e439"
+    },
+    {
+      "path": "v2/PluginShareUpdateTargetsResponse.json",
+      "sha256": "233b8d8f34eef31d0ee5dc86110028651e9e74e899332204c0871c8f8820cbe5"
+    },
+    {
+      "path": "v2/PluginSkillReadResponse.json",
+      "sha256": "ec7edbbcc67ee6d4d5fcc707d152b9ebb3b1e8fe3e27bee035094a2b806bc600"
+    },
+    {
+      "path": "v2/PluginUninstallResponse.json",
+      "sha256": "f6a0c9c8dfd9e3fc4a535ecfa606f12922c09e469a37d6b1c6e189f45cacb89e"
+    },
+    {
+      "path": "v2/ReviewStartResponse.json",
+      "sha256": "9c7fbfd79763d9af65505992f7a9e84d6a430feac3ff22cc54dbe8adac1a314b"
+    },
+    {
+      "path": "v2/SendAddCreditsNudgeEmailResponse.json",
+      "sha256": "7c5fcdd7a08408b41f1d2d04761bc3e60ec1d8010e63a612cc42efaff968c26d"
+    },
+    {
+      "path": "v2/SkillsConfigWriteResponse.json",
+      "sha256": "fe29c58a71cb9ab1048602970bcbe8059facab90879fdf7607d3c3158f21ee34"
+    },
+    {
+      "path": "v2/SkillsExtraRootsSetResponse.json",
+      "sha256": "b659ec17a196eaa3a23273a3e2d5596460ea329bc3ade249971576bc723d9e96"
+    },
+    {
+      "path": "v2/SkillsListResponse.json",
+      "sha256": "9d7dcc8cc75aac6be70803a941eedc9594725b66eacaa54062a3b6518acf70d5"
+    },
+    {
+      "path": "v2/ThreadApproveGuardianDeniedActionResponse.json",
+      "sha256": "628336c7cdabd508d5202695502bb0f9ce42fdde380f5efdd4b033cf215d93e5"
+    },
+    {
+      "path": "v2/ThreadArchiveResponse.json",
+      "sha256": "2e021dabd0930ae3e2beb68cd0ddbafc40fc20cfbf8dbcb5e2f9c0493d06a08c"
+    },
+    {
+      "path": "v2/ThreadCompactStartResponse.json",
+      "sha256": "74674e47f33e37d7d97d144eac1789ef0580a1fc12d45a5675bb97caa08d803a"
+    },
+    {
+      "path": "v2/ThreadDeleteResponse.json",
+      "sha256": "333c0c5df96d78d1bcbdb19b57ddfa941de9a02bdae1c29d13c5311c2cdf6527"
+    },
+    {
+      "path": "v2/ThreadForkResponse.json",
+      "sha256": "f3ce10b3a2f9af0ee6758e34c0ef8cc0cc92f140d465763a11b644a0ed3ffa07"
+    },
+    {
+      "path": "v2/ThreadGoalClearResponse.json",
+      "sha256": "2f8ca66feaaaec3d3d0144ce23c65702c764ba92c4820dd3a6b84f7635c1655f"
+    },
+    {
+      "path": "v2/ThreadGoalGetResponse.json",
+      "sha256": "8bf8015d45a3dbf02ffd02a90c524aabe2916334bea435e59fad0498d64c4845"
+    },
+    {
+      "path": "v2/ThreadGoalSetResponse.json",
+      "sha256": "be5a571f10afdae3ad5a61db0891fa8a66001c1d5ab618163a131efa461061ac"
+    },
+    {
+      "path": "v2/ThreadInjectItemsResponse.json",
+      "sha256": "93d909e5b49b44da02072d340f8ad0ecd417d448ccf27fe50be7e369c7864159"
+    },
+    {
+      "path": "v2/ThreadListResponse.json",
+      "sha256": "9cc28ca2aa488ddfd38d88cce06db6baa7fec47cc9cf88529428cf129bfd418f"
+    },
+    {
+      "path": "v2/ThreadLoadedListResponse.json",
+      "sha256": "681bacf8a22e64427f2de8b67a2d3dba925e68f35ca5556a96a4c9fbc8eca85c"
+    },
+    {
+      "path": "v2/ThreadMetadataUpdateResponse.json",
+      "sha256": "9c6661adf47b3866bc44bf304499c671961e2aa1906795842480131446ac893b"
+    },
+    {
+      "path": "v2/ThreadReadResponse.json",
+      "sha256": "86adff6de376b567306c20ccb23ec4684c427324cf8ae96f2016e31fdc58023e"
+    },
+    {
+      "path": "v2/ThreadResumeResponse.json",
+      "sha256": "5ecc84d9fd4dd40e3fac783330130a2a3c616f6bfa6d92cf0c95d5e53f94da5e"
+    },
+    {
+      "path": "v2/ThreadRollbackResponse.json",
+      "sha256": "c5139703ff64ed4c7e574c4d587a3c37ebbbd5dbb989a896dd673c766568d868"
+    },
+    {
+      "path": "v2/ThreadSetNameResponse.json",
+      "sha256": "f8763716433feea94f7c1ebd59b6cea4c261432e83240c13a8d49ba8185aa567"
+    },
+    {
+      "path": "v2/ThreadShellCommandResponse.json",
+      "sha256": "fd4911613f6a6da2ca13b75342501d4d61f64e00a1083c6d60038369b8caeefe"
+    },
+    {
+      "path": "v2/ThreadStartResponse.json",
+      "sha256": "a075f6984d1aaba8fe1f2f439fc8e8c19d5be532b250162d694166fa3fcf1d88"
+    },
+    {
+      "path": "v2/ThreadUnarchiveResponse.json",
+      "sha256": "13af2f439087984eb769407e3d2f1f624033cb9bad815d34b6208ceb38e9cfa8"
+    },
+    {
+      "path": "v2/ThreadUnsubscribeResponse.json",
+      "sha256": "14cd8baac4521c8101698de3df2d7a8e509ece6bf9b8b5d11162d9391064b4ae"
+    },
+    {
+      "path": "v2/TurnInterruptResponse.json",
+      "sha256": "531de6be06fe979b5963f249bab82498a175e614bf65ac12fb2e849dfe60bcf1"
+    },
+    {
+      "path": "v2/TurnStartResponse.json",
+      "sha256": "7cfae42a4652fe38119d6a0a625910357c869c448c985513a4cd5966031e18bc"
+    },
+    {
+      "path": "v2/TurnSteerResponse.json",
+      "sha256": "a669b85e3b75b86468e39e6a2f760966bffe83f378b514c6898fb04b838cd78d"
+    },
+    {
+      "path": "v2/WindowsSandboxReadinessResponse.json",
+      "sha256": "002d645f1c0967ac8a4b1a0954e2c7561f8e299bd62dfe494026ae377d64c79e"
+    },
+    {
+      "path": "v2/WindowsSandboxSetupStartResponse.json",
+      "sha256": "29a24d86a75d5c76d5ae82fc8a3136fe2f0bc5785f5bfd033a0abc05834090d3"
+    }
+  ]
+}
+
