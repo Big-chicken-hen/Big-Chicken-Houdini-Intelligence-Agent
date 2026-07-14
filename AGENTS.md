@@ -36,6 +36,6 @@ These rules have the highest priority for every development round in this reposi
 - Do not limit architecture to SOP; add context-specific adapters for OBJ, SOP, DOP, LOP, VOP, MaterialX, COP, TOP, KineFX, and APEX as their phases are authorized.
 - Never automatically save or overwrite HIP files, modify HDA definitions, delete nodes, or scan arbitrary filesystem locations.
 
-## Current phase: P0-B
+## Current phase: P1-V
 
-P0-B is limited to repository initialization, architecture and safety documentation, the minimal Python package, a path-checking module, and standard-library unit tests. It must not implement deletion, moving, cleanup, dependency installation, Houdini connectivity, scene operations, business tools, or later-phase capabilities. Stop after offline verification and wait for explicit P0-C approval.
+P1-V is limited to the pinned Codex 0.144.3 stdio client, authenticated loopback Bridge, Houdini 21.0.440 PySide6 Python Panel, project-local launcher, and offline/finitely bounded connection tests. It must not log in, persist chat content, use experimental or excluded app-server methods, modify a Houdini scene, create scene tools, or begin P2. P1-V working-tree changes remain uncommitted until the user explicitly approves their submission.

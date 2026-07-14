@@ -29,6 +29,17 @@
         "response_schema": "v1/InitializeResponse.json"
       },
       {
+        "method": "account/read",
+        "params_definition": "GetAccountParams",
+        "response_schema": "v2/GetAccountResponse.json"
+      },
+      {
+        "method": "model/list",
+        "params_definition": "ModelListParams",
+        "response_schema": "v2/ModelListResponse.json",
+        "purpose": "p1-read-only-model-catalog"
+      },
+      {
         "method": "thread/start",
         "params_definition": "ThreadStartParams",
         "response_schema": "v2/ThreadStartResponse.json"
@@ -225,6 +236,21 @@
         "method": "model/safetyBuffering/updated",
         "params_definition": "ModelSafetyBufferingUpdatedNotification",
         "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "account/rateLimits/updated",
+        "params_definition": "AccountRateLimitsUpdatedNotification",
+        "purpose": "passive-observation-only"
+      },
+      {
+        "method": "mcpServer/startupStatus/updated",
+        "params_definition": "McpServerStatusUpdatedNotification",
+        "purpose": "passive-observation-only"
+      },
+      {
+        "method": "remoteControl/status/changed",
+        "params_definition": "RemoteControlStatusChangedNotification",
+        "purpose": "passive-observation-only"
       }
     ]
   },

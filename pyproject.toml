@@ -6,4 +6,4 @@ requires-python = ">=3.10"
 
 [tool.hia]
 project-root = "E:\\houdini-intelligence-agent"
-phase = "P0-B"
+phase = "P1-V"

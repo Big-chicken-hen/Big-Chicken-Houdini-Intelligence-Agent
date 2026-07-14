@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="houdini_intelligence" label="Houdini Intelligence" icon="MISC_python">
+    <script><![CDATA[from hia_panel.panel import HoudiniIntelligencePanel
+
+
+def onCreateInterface():
+    return HoudiniIntelligencePanel(kwargs.get("paneTab"))
+]]></script>
+    <includeInToolbarMenu menu_position="200" create_separator="true"/>
+    <help><![CDATA[Codex conversation client. P1-V does not modify the Houdini scene.]]></help>
+  </interface>
+</pythonPanelDocument>

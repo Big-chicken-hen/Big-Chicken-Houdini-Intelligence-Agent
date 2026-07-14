@@ -14,6 +14,7 @@ from hia_core.codex_protocol import (  # noqa: E402
     CORE_CLIENT_NOTIFICATIONS,
     CORE_CLIENT_REQUESTS,
     CORE_SERVER_NOTIFICATIONS,
+    P1_PASSIVE_SERVER_NOTIFICATIONS,
     REQUIRED_EXCLUSIONS,
     SCHEMA_DRAFT,
     SUPPORTED_CODEX_VERSION,
@@ -60,6 +61,45 @@ class CodexProtocolContractTests(unittest.TestCase):
             self.allowed_methods("client_requests"),
         )
 
+    def test_account_read_p1_extension_is_allowlisted(self) -> None:
+        entries = {
+            entry["method"]: entry
+            for entry in self.allowlist["allowed"]["client_requests"]
+        }
+        self.assertEqual(
+            "v2/GetAccountResponse.json",
+            entries["account/read"]["response_schema"],
+        )
+
+    def test_model_list_p1_extension_is_stable_and_read_only(self) -> None:
+        entries = {
+            entry["method"]: entry
+            for entry in self.allowlist["allowed"]["client_requests"]
+        }
+        model_list = entries["model/list"]
+        self.assertEqual("ModelListParams", model_list["params_definition"])
+        self.assertEqual(
+            "v2/ModelListResponse.json",
+            model_list["response_schema"],
+        )
+        self.assertEqual(
+            "p1-read-only-model-catalog",
+            model_list["purpose"],
+        )
+
+        inventoried = {
+            entry["method"]: entry
+            for entry in self.inventory["aggregates"]["client_requests"]["methods"]
+        }["model/list"]
+        self.assertEqual("ModelListParams", inventoried["params_definition"])
+        self.assertFalse(inventoried["declared_experimental"])
+        for category in (
+            "server_requests",
+            "server_notifications",
+            "client_notifications",
+        ):
+            self.assertNotIn("model/list", self.allowed_methods(category))
+
     def test_initialized_notification_is_exact(self) -> None:
         self.assertEqual(
             CORE_CLIENT_NOTIFICATIONS,
@@ -80,6 +120,53 @@ class CodexProtocolContractTests(unittest.TestCase):
             CORE_SERVER_NOTIFICATIONS,
             self.allowed_methods("server_notifications"),
         )
+
+    def test_p1_passive_notifications_are_stable_and_receive_only(self) -> None:
+        expected_definitions = {
+            "account/rateLimits/updated": "AccountRateLimitsUpdatedNotification",
+            "mcpServer/startupStatus/updated": "McpServerStatusUpdatedNotification",
+            "remoteControl/status/changed": (
+                "RemoteControlStatusChangedNotification"
+            ),
+        }
+        self.assertEqual(
+            set(expected_definitions),
+            set(P1_PASSIVE_SERVER_NOTIFICATIONS),
+        )
+
+        allowlisted = {
+            entry["method"]: entry
+            for entry in self.allowlist["allowed"]["server_notifications"]
+        }
+        inventoried = {
+            entry["method"]: entry
+            for entry in self.inventory["aggregates"]["server_notifications"]["methods"]
+        }
+        for method, params_definition in expected_definitions.items():
+            self.assertEqual(
+                params_definition,
+                allowlisted[method]["params_definition"],
+            )
+            self.assertEqual(
+                "passive-observation-only",
+                allowlisted[method]["purpose"],
+            )
+            self.assertEqual(
+                params_definition,
+                inventoried[method]["params_definition"],
+            )
+            self.assertFalse(inventoried[method]["declared_experimental"])
+
+        for category in (
+            "client_requests",
+            "server_requests",
+            "client_notifications",
+        ):
+            self.assertTrue(
+                P1_PASSIVE_SERVER_NOTIFICATIONS.isdisjoint(
+                    self.allowed_methods(category)
+                )
+            )
 
     def test_policy_is_deny_by_default(self) -> None:
         self.assertEqual("deny-by-default", self.allowlist["policy"])
@@ -138,4 +225,3 @@ class CodexProtocolContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

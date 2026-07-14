@@ -22,6 +22,8 @@ The Bridge may depend only on the methods in this section. Every other generated
 | Method | Response Schema |
 |---|---|
 | `initialize` | `v1/InitializeResponse.json` |
+| `account/read` | `v2/GetAccountResponse.json` |
+| `model/list` | `v2/ModelListResponse.json` |
 | `thread/start` | `v2/ThreadStartResponse.json` |
 | `thread/resume` | `v2/ThreadResumeResponse.json` |
 | `thread/read` | `v2/ThreadReadResponse.json` |
@@ -30,6 +32,10 @@ The Bridge may depend only on the methods in this section. Every other generated
 | `turn/interrupt` | `v2/TurnInterruptResponse.json` |
 
 The required client notification after initialization is `initialized`.
+
+P1-V explicitly authorizes the stable, non-experimental `account/read` method so the Panel can report authenticated versus login-required state. It remains read-only and does not initiate login.
+
+P1-V also authorizes the stable, non-experimental `model/list` method as a read-only extension for the Panel model picker. The Bridge always requests `includeHidden=false` with a page size of 100, follows only returned opaque cursors, permits at most 16 pages and 512 response entries, rejects repeated cursors and malformed responses, and exposes a sanitized subset of non-hidden model metadata. This authorization does not permit model configuration writes and does not modify `config.toml`.
 
 ### Approval requests from the server
 
@@ -41,7 +47,7 @@ The required client notification after initialization is `initialized`.
 
 The legacy `applyPatchApproval` and `execCommandApproval` request names are not in the stable core. The Bridge must not silently translate between legacy and stable approval methods.
 
-### Streaming and lifecycle notifications
+### Streaming, lifecycle, and passive observation notifications
 
 The allowed stream includes:
 
@@ -53,8 +59,9 @@ The allowed stream includes:
 - Approved command/file activity: `item/commandExecution/outputDelta`, `item/commandExecution/terminalInteraction`, `item/fileChange/outputDelta`, and `item/fileChange/patchUpdated`.
 - Tool and request flow: `item/mcpToolCall/progress` and `serverRequest/resolved`.
 - Model lifecycle: `model/rerouted`, `model/verification`, and `model/safetyBuffering/updated`.
+- P1-V passive observations: `account/rateLimits/updated`, `mcpServer/startupStatus/updated`, and `remoteControl/status/changed`.
 
-These notifications allow the Panel to render text, plans, reasoning summaries, approvals, tool progress, diffs, completion state, warnings, and token usage without storing a second chat history.
+These notifications allow the Panel to render text, plans, reasoning summaries, approvals, tool progress, diffs, completion state, warnings, and token usage without storing a second chat history. The three P1-V observation notifications are receive-only: they do not authorize remote-control requests, screen takeover, or any additional MCP tool.
 
 ## Explicit exclusions
 
@@ -66,7 +73,7 @@ The protocol is deny-by-default and additionally freezes the following named exc
 - Thread shell execution: no `thread/shellCommand` dependency.
 - WebSocket transport: no `ws`, `wss`, or app-server WebSocket dependency. Bridge-to-app-server transport is stable stdio JSONL only.
 
-Realtime thread notifications, filesystem APIs, account APIs, plugin/marketplace APIs, Windows sandbox setup, remote control, fuzzy search, and all other generated surfaces remain outside the core because they are absent from the allowlist.
+Other realtime thread notifications, filesystem APIs, unallowlisted account APIs, plugin/marketplace APIs, Windows sandbox setup, remote-control requests and control behavior, fuzzy search, and all other generated surfaces remain outside the core because they are absent from the allowlist.
 
 Unknown server requests are rejected. Unknown notifications are logged and ignored with a metric so an additive notification cannot crash the Panel, but it gains no behavior until admitted by a reviewed contract.
 

@@ -28,6 +28,8 @@ AGGREGATE_SCHEMAS = {
 CORE_CLIENT_REQUESTS = frozenset(
     {
         "initialize",
+        "account/read",
+        "model/list",
         "thread/start",
         "thread/resume",
         "thread/read",
@@ -42,6 +44,13 @@ CORE_APPROVAL_REQUESTS = frozenset(
         "item/commandExecution/requestApproval",
         "item/fileChange/requestApproval",
         "item/permissions/requestApproval",
+    }
+)
+P1_PASSIVE_SERVER_NOTIFICATIONS = frozenset(
+    {
+        "account/rateLimits/updated",
+        "mcpServer/startupStatus/updated",
+        "remoteControl/status/changed",
     }
 )
 CORE_SERVER_NOTIFICATIONS = frozenset(
@@ -75,7 +84,7 @@ CORE_SERVER_NOTIFICATIONS = frozenset(
         "model/verification",
         "model/safetyBuffering/updated",
     }
-)
+) | P1_PASSIVE_SERVER_NOTIFICATIONS
 
 REQUIRED_EXCLUSIONS = {
     "experimental": frozenset(
