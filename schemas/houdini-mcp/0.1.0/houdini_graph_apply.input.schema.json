@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hia:houdini-mcp:0.1.0:houdini_graph_apply:input",
   "title": "houdini_graph_apply input",
-  "description": "A closed, declarative, create-only request for the canonical P2-V table graph. Approval proof is verified outside these untrusted MCP arguments by the trusted Bridge/Panel envelope.",
+  "description": "Apply one already validated generic declarative graph as a new HIA-owned container. Approval is verified outside untrusted MCP arguments and binds the complete canonical graph, expected session, revision, target, and digest.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,88 +15,43 @@
     "idempotency_key",
     "deadline_ms",
     "permission_level",
-    "graph_version",
-    "operation",
-    "parent",
-    "container",
-    "nodes",
-    "connections",
-    "output_node",
-    "output_flags",
-    "undo_policy",
-    "rollback_policy"
+    "graph",
+    "canonical_graph_digest"
   ],
   "properties": {
-    "request_id": { "$ref": "#/$defs/identifier" },
-    "thread_id": { "$ref": "#/$defs/identifier" },
-    "turn_id": { "$ref": "#/$defs/identifier" },
-    "hip_session_id": { "$ref": "#/$defs/identifier" },
-    "expected_hip_fingerprint": { "$ref": "#/$defs/sha256" },
-    "base_scene_revision": { "$ref": "#/$defs/sceneRevision" },
-    "idempotency_key": { "$ref": "#/$defs/idempotencyKey" },
-    "deadline_ms": { "$ref": "#/$defs/deadlineMs" },
-    "permission_level": { "const": "scene_write" },
-    "graph_version": { "const": "0.1.0" },
-    "operation": { "const": "create_table" },
-    "parent": { "const": "/obj" },
-    "container": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "type"],
-      "properties": {
-        "name": { "$ref": "#/$defs/containerName" },
-        "type": { "const": "geo" }
-      }
+    "request_id": {
+      "$ref": "#/$defs/identifier"
     },
-    "nodes": {
-      "type": "array",
-      "minItems": 7,
-      "maxItems": 7,
-      "uniqueItems": true,
-      "items": {
-        "oneOf": [
-          { "$ref": "#/$defs/boxNode" },
-          { "$ref": "#/$defs/mergeNode" },
-          { "$ref": "#/$defs/outputNode" }
-        ]
-      },
-      "allOf": [
-        { "$ref": "#/$defs/containsTabletop" },
-        { "$ref": "#/$defs/containsLegFrontLeft" },
-        { "$ref": "#/$defs/containsLegFrontRight" },
-        { "$ref": "#/$defs/containsLegBackLeft" },
-        { "$ref": "#/$defs/containsLegBackRight" },
-        { "$ref": "#/$defs/containsMerge" },
-        { "$ref": "#/$defs/containsOutput" }
-      ]
+    "thread_id": {
+      "$ref": "#/$defs/identifier"
     },
-    "connections": {
-      "type": "array",
-      "minItems": 6,
-      "maxItems": 6,
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/approvedConnection" },
-      "allOf": [
-        { "$ref": "#/$defs/containsTabletopConnection" },
-        { "$ref": "#/$defs/containsLegFrontLeftConnection" },
-        { "$ref": "#/$defs/containsLegFrontRightConnection" },
-        { "$ref": "#/$defs/containsLegBackLeftConnection" },
-        { "$ref": "#/$defs/containsLegBackRightConnection" },
-        { "$ref": "#/$defs/containsOutputConnection" }
-      ]
+    "turn_id": {
+      "$ref": "#/$defs/identifier"
     },
-    "output_node": { "const": "OUT_TABLE" },
-    "output_flags": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["display", "render"],
-      "properties": {
-        "display": { "const": true },
-        "render": { "const": true }
-      }
+    "hip_session_id": {
+      "$ref": "#/$defs/identifier"
     },
-    "undo_policy": { "const": "single_hou_undos_group" },
-    "rollback_policy": { "const": "remove_created_container_on_failure" }
+    "expected_hip_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "base_scene_revision": {
+      "$ref": "#/$defs/sceneRevision"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotencyKey"
+    },
+    "deadline_ms": {
+      "$ref": "#/$defs/deadlineMs"
+    },
+    "permission_level": {
+      "const": "scene_write"
+    },
+    "graph": {
+      "$ref": "#/$defs/graph"
+    },
+    "canonical_graph_digest": {
+      "$ref": "#/$defs/digest"
+    }
   },
   "$defs": {
     "identifier": {
@@ -114,273 +69,515 @@
     "sceneRevision": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 9223372036854775807
-    },
-    "sha256": {
-      "type": "string",
-      "minLength": 64,
-      "maxLength": 64,
-      "pattern": "^[a-f0-9]{64}$"
+      "maximum": 9007199254740991
     },
     "deadlineMs": {
-      "description": "Single-entry execution budget. The trusted Bridge envelope converts it once to an absolute monotonic deadline that downstream hops cannot reset.",
       "type": "integer",
       "minimum": 100,
       "maximum": 60000
     },
-    "containerName": {
+    "fingerprint": {
       "type": "string",
-      "minLength": 11,
-      "maxLength": 42,
-      "pattern": "^HIA_Table_[A-Za-z0-9][A-Za-z0-9_]{0,31}$"
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Fa-f0-9]{16,128}$"
     },
-    "finiteDimension": {
-      "type": "number",
-      "exclusiveMinimum": 0,
-      "maximum": 100
+    "digest": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
     },
-    "finiteTranslation": {
-      "type": "number",
-      "minimum": -100,
-      "maximum": 100
+    "parameterName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
     },
-    "sizeTuple": {
-      "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
-      "prefixItems": [
-        { "$ref": "#/$defs/finiteDimension" },
-        { "$ref": "#/$defs/finiteDimension" },
-        { "$ref": "#/$defs/finiteDimension" }
+    "localId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "nameHint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"
+    },
+    "floatValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
       ],
-      "items": false
-    },
-    "translateTuple": {
-      "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
-      "prefixItems": [
-        { "$ref": "#/$defs/finiteTranslation" },
-        { "$ref": "#/$defs/finiteTranslation" },
-        { "$ref": "#/$defs/finiteTranslation" }
-      ],
-      "items": false
-    },
-    "boxParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["unit", "size", "translate"],
       "properties": {
-        "unit": { "const": "meters" },
-        "size": { "$ref": "#/$defs/sizeTuple" },
-        "translate": { "$ref": "#/$defs/translateTuple" }
-      }
-    },
-    "emptyParameters": {
-      "type": "object",
-      "additionalProperties": false,
-      "maxProperties": 0
-    },
-    "boxNode": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "type", "parameters"],
-      "properties": {
-        "name": {
-          "enum": [
-            "tabletop_box",
-            "leg_front_left",
-            "leg_front_right",
-            "leg_back_left",
-            "leg_back_right"
-          ]
+        "type": {
+          "const": "float"
         },
-        "type": { "const": "box" },
-        "parameters": { "$ref": "#/$defs/boxParameters" }
+        "value": {
+          "type": "number",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        }
       }
     },
-    "mergeNode": {
+    "intValue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "type", "parameters"],
+      "required": [
+        "type",
+        "value"
+      ],
       "properties": {
-        "name": { "const": "merge_table" },
-        "type": { "const": "merge" },
-        "parameters": { "$ref": "#/$defs/emptyParameters" }
+        "type": {
+          "const": "int"
+        },
+        "value": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
       }
     },
-    "outputNode": {
+    "boolValue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "type", "parameters"],
+      "required": [
+        "type",
+        "value"
+      ],
       "properties": {
-        "name": { "const": "OUT_TABLE" },
-        "type": { "const": "null" },
-        "parameters": { "$ref": "#/$defs/emptyParameters" }
+        "type": {
+          "const": "bool"
+        },
+        "value": {
+          "type": "boolean"
+        }
       }
     },
-    "containsTabletop": {
-      "contains": {
-        "type": "object",
-        "required": ["name"],
-        "properties": { "name": { "const": "tabletop_box" } }
-      },
-      "minContains": 1,
-      "maxContains": 1
+    "stringValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "string"
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+        }
+      }
     },
-    "containsLegFrontLeft": {
-      "contains": {
-        "type": "object",
-        "required": ["name"],
-        "properties": { "name": { "const": "leg_front_left" } }
-      },
-      "minContains": 1,
-      "maxContains": 1
+    "floatTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "items_type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "tuple"
+        },
+        "items_type": {
+          "const": "float"
+        },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "number",
+            "minimum": -1000000000,
+            "maximum": 1000000000
+          }
+        }
+      }
     },
-    "containsLegFrontRight": {
-      "contains": {
-        "type": "object",
-        "required": ["name"],
-        "properties": { "name": { "const": "leg_front_right" } }
-      },
-      "minContains": 1,
-      "maxContains": 1
+    "intTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "items_type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "tuple"
+        },
+        "items_type": {
+          "const": "int"
+        },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          }
+        }
+      }
     },
-    "containsLegBackLeft": {
-      "contains": {
-        "type": "object",
-        "required": ["name"],
-        "properties": { "name": { "const": "leg_back_left" } }
-      },
-      "minContains": 1,
-      "maxContains": 1
+    "boolTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "items_type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "tuple"
+        },
+        "items_type": {
+          "const": "bool"
+        },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "boolean"
+          }
+        }
+      }
     },
-    "containsLegBackRight": {
-      "contains": {
-        "type": "object",
-        "required": ["name"],
-        "properties": { "name": { "const": "leg_back_right" } }
-      },
-      "minContains": 1,
-      "maxContains": 1
+    "stringTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "items_type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "tuple"
+        },
+        "items_type": {
+          "const": "string"
+        },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+          }
+        }
+      }
     },
-    "containsMerge": {
-      "contains": {
-        "type": "object",
-        "required": ["name"],
-        "properties": { "name": { "const": "merge_table" } }
-      },
-      "minContains": 1,
-      "maxContains": 1
-    },
-    "containsOutput": {
-      "contains": {
-        "type": "object",
-        "required": ["name"],
-        "properties": { "name": { "const": "OUT_TABLE" } }
-      },
-      "minContains": 1,
-      "maxContains": 1
-    },
-    "approvedConnection": {
+    "typedValue": {
       "oneOf": [
-        { "$ref": "#/$defs/tabletopConnection" },
-        { "$ref": "#/$defs/legFrontLeftConnection" },
-        { "$ref": "#/$defs/legFrontRightConnection" },
-        { "$ref": "#/$defs/legBackLeftConnection" },
-        { "$ref": "#/$defs/legBackRightConnection" },
-        { "$ref": "#/$defs/outputConnection" }
+        {
+          "$ref": "#/$defs/floatValue"
+        },
+        {
+          "$ref": "#/$defs/intValue"
+        },
+        {
+          "$ref": "#/$defs/boolValue"
+        },
+        {
+          "$ref": "#/$defs/stringValue"
+        },
+        {
+          "$ref": "#/$defs/floatTuple"
+        },
+        {
+          "$ref": "#/$defs/intTuple"
+        },
+        {
+          "$ref": "#/$defs/boolTuple"
+        },
+        {
+          "$ref": "#/$defs/stringTuple"
+        }
       ]
     },
-    "tabletopConnection": {
+    "nodeType": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "context",
+            "name"
+          ],
+          "properties": {
+            "context": {
+              "const": "Sop"
+            },
+            "name": {
+              "type": "string",
+              "enum": [
+                "box",
+                "transform",
+                "merge",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "graphTarget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "target", "input"],
+      "required": [
+        "parent_path",
+        "root_local_id",
+        "root_type",
+        "name_hint",
+        "ownership"
+      ],
       "properties": {
-        "source": { "const": "tabletop_box" },
-        "target": { "const": "merge_table" },
-        "input": { "const": 0 }
+        "parent_path": {
+          "const": "/obj"
+        },
+        "root_local_id": {
+          "const": "root"
+        },
+        "root_type": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "context",
+            "name"
+          ],
+          "properties": {
+            "context": {
+              "const": "Object"
+            },
+            "name": {
+              "const": "geo"
+            }
+          }
+        },
+        "name_hint": {
+          "type": "string",
+          "minLength": 11,
+          "maxLength": 74,
+          "pattern": "^HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}$"
+        },
+        "ownership": {
+          "const": "hia_owned_new"
+        }
       }
     },
-    "legFrontLeftConnection": {
+    "parameterAssignment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "target", "input"],
+      "required": [
+        "name",
+        "value"
+      ],
       "properties": {
-        "source": { "const": "leg_front_left" },
-        "target": { "const": "merge_table" },
-        "input": { "const": 1 }
+        "name": {
+          "$ref": "#/$defs/parameterName"
+        },
+        "value": {
+          "$ref": "#/$defs/typedValue"
+        }
       }
     },
-    "legFrontRightConnection": {
+    "graphNode": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "target", "input"],
+      "required": [
+        "id",
+        "type",
+        "name_hint",
+        "parent",
+        "parameters",
+        "flags"
+      ],
       "properties": {
-        "source": { "const": "leg_front_right" },
-        "target": { "const": "merge_table" },
-        "input": { "const": 2 }
+        "id": {
+          "$ref": "#/$defs/localId"
+        },
+        "type": {
+          "$ref": "#/$defs/nodeType"
+        },
+        "name_hint": {
+          "$ref": "#/$defs/nameHint"
+        },
+        "parent": {
+          "const": "root"
+        },
+        "parameters": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/parameterAssignment"
+          }
+        },
+        "flags": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "display",
+            "render"
+          ],
+          "properties": {
+            "display": {
+              "type": "boolean"
+            },
+            "render": {
+              "type": "boolean"
+            }
+          }
+        }
       }
     },
-    "legBackLeftConnection": {
+    "sourceEndpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "target", "input"],
+      "required": [
+        "node",
+        "output"
+      ],
       "properties": {
-        "source": { "const": "leg_back_left" },
-        "target": { "const": "merge_table" },
-        "input": { "const": 3 }
+        "node": {
+          "$ref": "#/$defs/localId"
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        }
       }
     },
-    "legBackRightConnection": {
+    "destinationEndpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "target", "input"],
+      "required": [
+        "node",
+        "input"
+      ],
       "properties": {
-        "source": { "const": "leg_back_right" },
-        "target": { "const": "merge_table" },
-        "input": { "const": 4 }
+        "node": {
+          "$ref": "#/$defs/localId"
+        },
+        "input": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        }
       }
     },
-    "outputConnection": {
+    "connection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "target", "input"],
+      "required": [
+        "source",
+        "destination"
+      ],
       "properties": {
-        "source": { "const": "merge_table" },
-        "target": { "const": "OUT_TABLE" },
-        "input": { "const": 0 }
+        "source": {
+          "$ref": "#/$defs/sourceEndpoint"
+        },
+        "destination": {
+          "$ref": "#/$defs/destinationEndpoint"
+        }
       }
     },
-    "containsTabletopConnection": {
-      "contains": { "$ref": "#/$defs/tabletopConnection" },
-      "minContains": 1,
-      "maxContains": 1
+    "layout": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "direction"
+          ],
+          "properties": {
+            "mode": {
+              "const": "network_editor"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "left_to_right",
+                "top_to_bottom"
+              ]
+            }
+          }
+        }
+      ]
     },
-    "containsLegFrontLeftConnection": {
-      "contains": { "$ref": "#/$defs/legFrontLeftConnection" },
-      "minContains": 1,
-      "maxContains": 1
-    },
-    "containsLegFrontRightConnection": {
-      "contains": { "$ref": "#/$defs/legFrontRightConnection" },
-      "minContains": 1,
-      "maxContains": 1
-    },
-    "containsLegBackLeftConnection": {
-      "contains": { "$ref": "#/$defs/legBackLeftConnection" },
-      "minContains": 1,
-      "maxContains": 1
-    },
-    "containsLegBackRightConnection": {
-      "contains": { "$ref": "#/$defs/legBackRightConnection" },
-      "minContains": 1,
-      "maxContains": 1
-    },
-    "containsOutputConnection": {
-      "contains": { "$ref": "#/$defs/outputConnection" },
-      "minContains": 1,
-      "maxContains": 1
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "context",
+        "target",
+        "nodes",
+        "connections",
+        "layout"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "0.1.0"
+        },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "root",
+            "children"
+          ],
+          "properties": {
+            "root": {
+              "const": "Object"
+            },
+            "children": {
+              "const": "Sop"
+            }
+          }
+        },
+        "target": {
+          "$ref": "#/$defs/graphTarget"
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/graphNode"
+          }
+        },
+        "connections": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/connection"
+          }
+        },
+        "layout": {
+          "$ref": "#/$defs/layout"
+        }
+      }
     }
   }
 }

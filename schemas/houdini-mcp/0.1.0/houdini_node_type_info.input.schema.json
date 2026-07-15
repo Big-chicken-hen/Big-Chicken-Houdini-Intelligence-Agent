@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hia:houdini-mcp:0.1.0:houdini_node_type_info:input",
   "title": "houdini_node_type_info input",
+  "description": "Read live parameter schemas for a bounded deny-by-default set of Object and SOP node types. Live Houdini metadata is authoritative.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,7 +14,7 @@
     "idempotency_key",
     "deadline_ms",
     "permission_level",
-    "queries"
+    "node_types"
   ],
   "properties": {
     "request_id": { "$ref": "#/$defs/identifier" },
@@ -24,12 +25,12 @@
     "idempotency_key": { "$ref": "#/$defs/idempotencyKey" },
     "deadline_ms": { "$ref": "#/$defs/deadlineMs" },
     "permission_level": { "const": "scene_read" },
-    "queries": {
+    "node_types": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 4,
+      "maxItems": 16,
       "uniqueItems": true,
-      "items": { "$ref": "#/$defs/approvedNodeTypeQuery" }
+      "items": { "$ref": "#/$defs/nodeType" }
     }
   },
   "$defs": {
@@ -48,32 +49,34 @@
     "sceneRevision": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 9223372036854775807
+      "maximum": 9007199254740991
     },
     "deadlineMs": {
-      "description": "Single-entry execution budget. The trusted Bridge envelope converts it once to an absolute monotonic deadline that downstream hops cannot reset.",
       "type": "integer",
       "minimum": 100,
       "maximum": 60000
     },
-    "approvedNodeTypeQuery": {
+    "nodeType": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["category", "name"],
+          "required": ["context", "name"],
           "properties": {
-            "category": { "const": "Object" },
+            "context": { "const": "Object" },
             "name": { "const": "geo" }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["category", "name"],
+          "required": ["context", "name"],
           "properties": {
-            "category": { "const": "Sop" },
-            "name": { "enum": ["box", "merge", "null"] }
+            "context": { "const": "Sop" },
+            "name": {
+              "type": "string",
+              "enum": ["box", "transform", "merge", "null"]
+            }
           }
         }
       ]

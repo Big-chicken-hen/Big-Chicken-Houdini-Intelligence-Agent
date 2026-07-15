@@ -2,29 +2,34 @@
 
 ## Review status and authorization boundary
 
-This document is a design-review artifact for Gate B. It does not authorize a live Houdini connection, creation or modification of Houdini nodes, startup of the Houdini GUI, creation of project MCP configuration, or implementation of the tool host, Bridge queue, Panel executor, or `hou` calls.
+This corrected Gate B0 design package is approved and frozen as a pre-release contract. That approval authorizes Gate B1 offline adaptation only; it does not authorize a live Houdini connection, creation or modification of Houdini nodes, startup of the Houdini GUI, project MCP configuration, registration or startup of a real MCP service, a live Panel executor, or any `hou` call.
 
-P2-V begins implementation only after the architecture, versioned tool Schemas, threat model, and test plan have been reviewed. A later, separately approved live-write sub-gate is required before `houdini_graph_apply` may mutate a real HIP session.
+Gate B1 may adapt the preserved uncommitted drafts to this exact five-tool contract with pure-Python fakes and offline tests. A later, separately approved live-read or live-write sub-gate is required before any component may connect to Houdini or `houdini_graph_apply` may mutate a real HIP session.
+
+Schema version `0.1.0` is frozen pre-release. This five-tool contract is an in-place correction of a rejected, unapproved four-tool draft that was never published or enabled; Git history preserves that draft for audit. Any future breaking change requires a new schema version rather than reusing `0.1.0`.
 
 Codex remains the sole intelligent agent, planner, dialogue owner, and memory source. The MCP adapter, Bridge, Panel executor, and Houdini runtime perform only deterministic validation, transport, execution, and verification. They do not add an Agent, LLM, planner, RAG system, semantic memory, prompt rewriting, or screen control.
 
 ## P2-V scope
 
-The first visible scene-operation slice accepts a request such as “生成一张简单、可编辑的四条腿桌子。” and allows Codex to construct one editable procedural table in the current Houdini session through four reviewed tools:
+P2-V defines one general declarative graph surface. A table is the first acceptance fixture, not a tool, product boundary, fixed topology, or naming convention. The same contract must represent structurally different assets such as a stool, cabinet, steps, or simple building blocks without adding object-specific fields.
+
+The exact reviewed tools are:
 
 1. `houdini_scene_info`
 2. `houdini_node_type_info`
-3. `houdini_graph_apply`
-4. `houdini_graph_verify`
+3. `houdini_graph_validate`
+4. `houdini_graph_apply`
+5. `houdini_graph_verify`
 
-P2-V does not provide arbitrary Python, HScript, expressions, `eval`, shell execution, filesystem access, HIP save, rendering, caching, HDA creation or publishing, node deletion as a public tool, modification of an existing user node, or access outside the approved `/obj/HIA_Table_*` container scope.
+The current version enables only bounded OBJ/SOP creation beneath one new, validated `/obj/HIA_Graph_<id>` container. Context is a versioned field: later OBJ, SOP, DOP, LOP, VOP, MaterialX, COP, TOP, KineFX, or APEX adapters require a separately reviewed schema version rather than an open enum. P2-V does not provide arbitrary Python, HScript, expressions, callbacks, `eval`, shell execution, filesystem access, HIP save, rendering, caching, HDA creation or publishing, node deletion as a public tool, modification of an existing user node, or references outside the request-owned container.
 
 ## Trust and transport path
 
 ```text
 Codex app-server (pinned 0.144.3; reasoning and tool selection)
     -> project-local MCP subprocess over stdio
-Project-local Houdini MCP adapter (four deterministic tools only)
+Project-local Houdini MCP adapter (five deterministic tools only)
     -> authenticated HTTP to 127.0.0.1:<random-port>
 Existing Bearer-authenticated loopback Bridge (validation and bounded queue)
     <- nonblocking authenticated polling / result posting
@@ -41,14 +46,14 @@ No component in this path uses Computer Use or screen takeover. The only scene m
 
 ### Codex app-server and Codex
 
-- Codex interprets the user request and selects one of the four tools.
-- Codex supplies declarative graph intent; it does not send executable code.
+- Codex interprets the user's asset request and selects from the five tools.
+- Codex supplies a general declarative graph intent; it does not send executable code or object-specific hidden instructions.
 - The pinned Codex 0.144.3 capability and generated stable protocol baseline remain authoritative for this project.
 - Existing exclusions remain in force: no experimental Schema, `dynamicTools`, process API, `thread/shellCommand`, or app-server WebSocket.
 
 ### Project-local stdio MCP adapter
 
-- Publishes exactly the four P2-V tools with versioned JSON Schema.
+- Publishes exactly the five P2-V tools with versioned JSON Schema.
 - Denies every unregistered tool and rejects unknown fields where the versioned Schema requires a closed object.
 - Performs structural, size, count, string, enum, and deadline validation before forwarding a request.
 - Converts schema-admitted execution failures into structured MCP tool results without leaking tokens, tracebacks, or internal paths; cancellation, queue, and shutdown failures remain bounded adapter errors.
@@ -84,7 +89,7 @@ No component in this path uses Computer Use or screen takeover. The only scene m
 
 No P2 component hard-codes a Houdini installation directory, Houdini version, Python version, or the existence and parameter layout of a node type.
 
-The launcher or process supervisor discovers candidate Houdini installations only within separately authorized, bounded locations. Once the Panel is loaded, a trusted internal capability attestation reports the live process nonce, build, platform, Python ABI, HIP identity, available contexts, node-type catalog digest, and the eight reviewed schema hashes. This attestation is transport state, not an untrusted tool argument or a public `houdini_scene_info` response. `houdini_node_type_info` returns only the bounded node metadata defined by its output schema.
+The launcher or process supervisor discovers candidate Houdini installations only within separately authorized, bounded locations. Once the Panel is loaded, a trusted internal capability attestation reports the live process nonce, build, platform, Python ABI, HIP identity, available contexts, node-type catalog digest, and the ten reviewed canonical-JSON schema hashes. Schema digests use sorted-key, whitespace-free UTF-8 JSON so Git line-ending conversion cannot change protocol identity. This attestation is transport state, not an untrusted tool argument or a public `houdini_scene_info` response. `houdini_node_type_info` returns only the bounded node metadata defined by its output schema.
 
 Static recipes may name reviewed logical types such as an OBJ geometry container, SOP box, SOP merge, and SOP output/null, but the live schema is authoritative. A missing or unattested live process returns `HOUDINI_UNAVAILABLE`. A build, catalog, schema-hash, type, parameter, tuple, or context mismatch returns `CAPABILITY_MISMATCH`. The executor does not guess a substitute or fall back to Python.
 
@@ -94,10 +99,11 @@ The public schemas require an exact `hip_session_id` and `base_scene_revision`, 
 
 | Tool | Access | P2-V purpose | Mutation |
 |---|---|---|---|
-| `houdini_scene_info` | Read-only | Echo the exact HIP session/revision envelope and return the bounded fingerprint, frame, FPS, dirty flag, HIA-owned container list, and active HIA container defined by the output schema. | None |
-| `houdini_node_type_info` | Read-only | Return a bounded, sanitized description of specifically requested reviewed OBJ/SOP types and parameters from the live catalog. | None |
-| `houdini_graph_apply` | Exact approval required | Apply one declarative graph inside a new `/obj/HIA_Table_*` container under revision and idempotency controls. | Creates only the request-owned container and its reviewed children. |
-| `houdini_graph_verify` | Read-only | Verify names, types, parameters, wiring, flags, errors, scope, and revision for an HIA-owned graph. | None |
+| `houdini_scene_info` | Read-only | Return the bounded HIP session, revision, enabled contexts, and summaries of HIA-owned graphs. | None |
+| `houdini_node_type_info` | Read-only | Resolve a requested allowlisted OBJ/SOP type and its writable typed-parameter Schema from the current Houdini instance. The live Schema is authoritative. | None |
+| `houdini_graph_validate` | Read-only | Validate, normalize, summarize, and compute the canonical digest of a declarative graph without changing scene state. | None |
+| `houdini_graph_apply` | Exact approval required | Apply the exact normalized graph inside one new `/obj/HIA_Graph_<id>` container under session, revision, deadline, digest, and idempotency controls. | Creates only the request-owned container and declared children. |
+| `houdini_graph_verify` | Read-only | Read and verify the created graph's nodes, typed parameters, connections, flags, cook state, scope, and canonical graph digest. | None |
 
 The read-only tools do not return arbitrary scene dumps, scripts, parameter expressions, secrets, environment variables, or filesystem paths. Requests and responses are bounded by explicit maximum counts and string sizes in the versioned Schemas.
 
@@ -134,28 +140,35 @@ Queue cancellation, queue capacity, and Bridge shutdown are adapter/transport ou
 
 ## Deterministic cross-field validation
 
-JSON Schema closes and bounds each accepted value, but B1 must also run deterministic validators for relations that the eight schemas do not express completely:
+JSON Schema closes and bounds each accepted value, but B1 must also run deterministic validators for relations that the ten schemas do not express completely:
 
-- result correlation must echo the submitted request, session, base revision, and idempotency key, and the resulting revision may not regress;
-- an apply replay record must be keyed by the same idempotency key and canonical digest as the top-level request;
-- `container_path`, every created path, and every residual path must agree with the exact request-owned container;
-- node-type results must be unique and correspond exactly to the requested query set;
-- verification check status, issues, overall validity, and graph digest must be mutually consistent;
-- success and failure branches must agree with `ok`, `structured_error`, created/changed paths, replay state, and revision advancement.
+- request-local node IDs and name hints are unique, parameter names are unique per node, parent references resolve inside the graph, and every connection endpoint resolves to an owned node and valid port;
+- the graph is acyclic where the enabled context requires it, connection inputs are not multiply assigned, and all node/connection/count bounds hold;
+- the current SOP slice has exactly one display node and one render node, both flags identify the same declared node, and no implicit output role is inferred from its name;
+- every live-resolved type and parameter exists in the current attested Houdini catalog, uses an admitted typed value (`float`, `int`, `bool`, `string`, or homogeneous tuple), and exposes no expression, callback, code, file, or spare-parameter surface;
+- the target is a new HIA-owned root matching `/obj/HIA_Graph_<id>`, and no graph item may address a pre-existing or external node;
+- normalization is deterministic and the canonical graph digest changes for any target, node, type, parameter, connection, flag, or layout change; a separate request/approval digest also binds session, revision, idempotency, deadline, and correlation fields;
+- result correlation echoes the submitted request, session, base revision, idempotency key, and graph digest, and the resulting revision may not regress;
+- an apply replay record is keyed by the same idempotency key and canonical digest as the top-level request;
+- `container_path`, every created path, and every residual path agree with the exact request-owned container;
+- node-type results correspond exactly and uniquely to the requested query set;
+- validation/verification check status, issues, overall validity, normalized graph, and graph digest are mutually consistent;
+- success and failure branches agree with `ok`, `structured_error`, created/changed paths, replay state, and revision advancement.
 
 Any mismatch is rejected before it can complete another request. No validator evaluates strings, imports `hou`, or broadens an enum.
 
 ## Request queue and execution sequence
 
-1. Codex invokes one of the four MCP tools.
+1. Codex invokes one of the five MCP tools.
 2. The adapter validates the versioned Schema, attaches transport correlation, and submits the request to the authenticated Bridge.
-3. For `houdini_graph_apply`, the request remains non-executable until an exact approval proof is attached to the canonical request hash.
-4. The Panel obtains work through bounded, authenticated, nonblocking polling. At most one live-HIP write enters `starting` or `inProgress` state.
-5. The Panel main-thread executor performs all precondition checks against current live state. It rejects a changed HIP session, stale revision, expired deadline, reused idempotency key with different content, absent approval, unapproved type or parameter, existing target name, or out-of-scope path before mutation.
-6. A read-only tool executes directly on the main thread. A write executes as the transaction described below.
-7. The executor verifies the resulting state and increments the scene revision only for a successful committed mutation.
-8. The Panel posts the structured result to the Bridge; the Bridge resolves the waiting adapter call once.
-9. Retries using the same idempotency key and identical canonical request return the recorded result without creating a second graph. Reuse with different content returns `IDEMPOTENCY_CONFLICT`.
+3. `houdini_graph_validate` resolves the live allowlist, normalizes the complete graph, computes its summary and digest, and returns without scene mutation.
+4. For `houdini_graph_apply`, the request remains non-executable until an exact approval proof binds that normalized graph and its correlation fields.
+5. The Panel obtains work through bounded, authenticated, nonblocking polling. At most one live-HIP write enters `starting` or `inProgress` state.
+6. The Panel main-thread executor repeats all precondition checks against current live state. It rejects a changed HIP session, stale revision, expired deadline, changed digest, reused idempotency key with different content, absent approval, unapproved type or parameter, existing target name, or out-of-scope reference before mutation.
+7. A read-only tool executes directly on the main thread. A write executes as the transaction described below.
+8. The executor performs mandatory internal verification and increments the scene revision only for a successful committed mutation.
+9. The Panel posts the structured result to the Bridge; the Bridge resolves the waiting adapter call once.
+10. Retries using the same idempotency key and identical canonical request return the recorded result without creating a second graph. Reuse with different content returns `IDEMPOTENCY_CONFLICT`.
 
 Disconnects never imply success. An uncertain write result is reconciled by `idempotency_key`, HIP session, revision, and the exact owned container before any retry is considered.
 
@@ -163,9 +176,9 @@ Disconnects never imply success. An uncertain write result is reconciled by `ide
 
 ### Exact approval
 
-Approval is per invocation and binds the canonical request hash, Thread, Turn, HIP session, base revision, idempotency key, target container, node/connection counts, parameter summary, and stated side effects. It is invalid after any bound value changes. P2-V provides no permanent approval and no wildcard approval for future graphs.
+Approval is per invocation and binds the complete normalized graph, graph schema version, canonical graph digest, request/approval digest, `request_id`, Thread, Turn, HIP session and fingerprint, base revision, permission level, idempotency key, trusted absolute deadline, target/root, every live-resolved node type, every name and parent reference, every typed parameter, every connection, every display/render flag, optional layout request, and a closed side-effect summary. Any change invalidates approval. The natural-language phrase that led Codex to the graph is not approval authority. P2-V provides no permanent, wildcard, or object-class approval.
 
-The approval UI must explicitly state that one new procedural table container will be created in the current scene and that the operation does not save the HIP. Denial or dismissal returns `APPROVAL_DENIED` without calling a mutating `hou` API.
+The approval UI must show a bounded exact summary of the new HIA-owned graph and state that the operation does not save the HIP. Denial or dismissal returns `APPROVAL_DENIED` without calling a mutating `hou` API.
 
 ### Preconditions
 
@@ -173,31 +186,28 @@ The approval UI must explicitly state that one new procedural table container wi
 - `base_scene_revision` equals the current revision; last-write-wins is forbidden.
 - The deadline has not expired.
 - The idempotency record is new or is an exact replay with a known result.
-- The target is one direct child of `/obj` and matches the reviewed `HIA_Table_<id>` naming grammar.
+- The target is one direct child of `/obj` and matches the reviewed `HIA_Graph_<id>` naming grammar.
 - The target name does not already exist.
 - Every node type, node name, parameter, value, and connection passes the live-schema and static-policy checks.
 - The canonical request has a matching, unexpired approval proof.
 
 ### Allowed mutation
 
-The executor creates one new OBJ geometry container and only the reviewed SOP children declared inside it. It cannot traverse to or reference an existing user node, alter the current selection as a required side effect, or modify `/obj` children outside the new container.
+The executor creates one new OBJ geometry container and only the normalized SOP nodes declared inside it. It cannot traverse to or reference an existing user node, alter the current selection as a required side effect, or modify `/obj` children outside the new container.
 
-The minimum accepted table graph is:
+The normalized graph contains:
 
-```text
-/obj/HIA_Table_<id>
-  tabletop_box
-  leg_front_left
-  leg_front_right
-  leg_back_left
-  leg_back_right
-  merge_table
-  OUT_TABLE
-```
+- a versioned context declaration (OBJ root with SOP children in this stage);
+- a target/root policy requiring one new HIA-owned container;
+- bounded request-local node IDs, live-resolved allowlisted types, name hints, and parent references;
+- closed typed parameters using only finite `float`, `int`, `bool`, bounded `string`, or homogeneous tuples;
+- owned-node source/output to destination/input connections;
+- explicit display/render flags and an optional bounded layout request;
+- exact session, revision, idempotency, deadline, and canonical graph digest.
 
-The tabletop and four legs expose ordinary editable size and position parameters. The four legs and tabletop connect to `merge_table`; `OUT_TABLE` receives the merged result and receives the display flag. Node types and actual parameter names are resolved against the live catalog before mutation.
+The initial safe type allowlist may remain deliberately small (`Object/geo`, `Sop/box`, `Sop/transform`, `Sop/merge`, and `Sop/null`), but it is a capability allowlist rather than an asset recipe. Node types and parameter names are resolved against the live catalog before mutation. The same schema must accept fixtures with different node counts, names, parameter values, and topology.
 
-The entire creation executes inside one `hou.undos.group`, so one user Undo removes the complete request-owned table. The tool never invokes Undo on the user's behalf after a successful commit.
+The entire creation executes inside one `hou.undos.group`, so one user Undo removes the complete request-owned graph. The tool never invokes Undo on the user's behalf after a successful commit.
 
 ### Failure containment
 
@@ -207,10 +217,10 @@ If those proofs are unavailable, the executor stops and returns a high-severity 
 
 ### Postconditions
 
-- The container and required seven children exist with the expected live types.
+- The container and all normalized declared children exist with the expected live types.
 - Connections match the approved declaration.
 - Parameter values round-trip to the accepted values.
-- `OUT_TABLE` has the display flag and no unapproved node has a display flag.
+- Display/render flags exactly match the normalized declaration and no undeclared node receives a flag.
 - Cook and node errors are returned as bounded warnings/errors.
 - Every created path is below the exact request-owned container.
 - `created_nodes` is complete, `changed_nodes` contains no pre-existing path, and the successful revision advances exactly once.
@@ -227,7 +237,7 @@ Idempotency state stores only technical correlation and a canonical request/resu
 
 ## Project-scoped Codex MCP configuration plan
 
-A later reviewed implementation will create project-scoped `.codex` configuration only if separately authorized. It will register one local stdio MCP server using an absolute project-local command, an explicit project `cwd`, and argument arrays. The server itself exposes exactly the four P2-V tools, and the Codex configuration additionally restricts it with `enabled_tools` to those same four names.
+A later reviewed implementation will create project-scoped `.codex` configuration only if separately authorized. It will register one local stdio MCP server using an absolute project-local command, an explicit project `cwd`, and argument arrays. The server itself exposes exactly the five P2-V tools, and the Codex configuration additionally restricts it with `enabled_tools` to those same five names.
 
 Per-tool approval policy will set `houdini_graph_apply` to prompt for each invocation. Read-only tool approval policy will be selected explicitly during configuration review and will not broaden the write permission. The configuration will not contain API keys, login material, a shell command string, a network listener, or any additional MCP tool.
 
@@ -238,26 +248,45 @@ The official Codex configuration reference documents stdio server `command`/`cwd
 - Only `127.0.0.1` with a random port and random Bearer token is used for Bridge control traffic.
 - The token is never logged, returned in tool results, persisted in chat, or placed in command-line arguments.
 - The adapter has no arbitrary URL, command, environment, or path parameter.
-- The four-tool allowlist is enforced independently by Codex configuration, MCP registration, Bridge routing, and Panel dispatch.
+- The five-tool allowlist is enforced independently by Codex configuration, MCP registration, Bridge routing, and Panel dispatch.
 - A read tool cannot be upgraded into a write by a request field.
 - All `hou` calls execute on the Houdini UI thread; the live HIP has one writer.
-- No request can create outside one new `/obj/HIA_Table_*` container or refer to existing user nodes.
+- No request can create outside one new `/obj/HIA_Graph_*` container or refer to existing user nodes.
 - No save, file write, render, HDA, Python, HScript, expression, `eval`, shell, or public delete surface exists.
 - Manual edits cause conflict rather than last-write-wins.
 - Unknown fields, types, methods, node types, parameters, paths, and states fail closed.
 - The live Houdini schema overrides static assumptions; no fallback executes arbitrary code.
 
-## Gate B0 decisions frozen for B1
+## Reference-image workflow and future tool families
 
-B1 uses these conservative defaults; changing one requires a versioned contract review:
+Reference images remain Codex inputs, not inputs to a second vision service. The intended loop is:
+
+```text
+user image
+  -> Codex native visual understanding
+  -> Codex produces a general graph request
+  -> houdini_graph_validate
+  -> exact normalized-graph approval
+  -> houdini_graph_apply
+  -> separately authorized independent render or screenshot
+  -> Codex native visual review and iteration
+```
+
+Codex alone performs visual interpretation, modeling choices, uncertainty handling, planning, dialogue, and memory. OpenCV may later supply bounded deterministic measurements, but no additional visual Agent, model, planner, RAG layer, or semantic-memory service is permitted.
+
+Capabilities that exceed the current OBJ/SOP graph transaction require separately reviewed versioned tool families. They are not fields, modes, escape hatches, or opaque payloads inside `houdini_graph_apply`: geometry/query, MaterialX/materials, Solaris/LOP, Karma render jobs, animation/keyframes, simulation/cache jobs, HDA validation/publishing, and approval-gated controlled Python jobs each receive their own future contract and phase gate.
+
+## Frozen Gate B0 defaults for B1
+
+These conservative defaults are frozen for Gate B1. Changing one requires a versioned contract review:
 
 1. Bridge routing is limited to `POST /v1/scene/requests`, `GET /v1/scene/requests/{request_id}/result`, `GET /v1/scene/requests/next`, `POST /v1/scene/requests/{request_id}/approval`, `POST /v1/scene/requests/{request_id}/result`, and `POST /v1/scene/requests/{request_id}/cancel`. `POST` accepts atomically and returns HTTP 202 with the request ID, canonical digest, and pending state, or HTTP 200 for an already terminal exact replay. The adapter obtains a terminal HTTP 200 result through result long-polls of at most 1,000 ms until the original absolute deadline; 202 remains pending and never means scene success. No unbounded HTTP request exists.
 2. The typed scene-approval route is independent of P1's app-server `/v1/approval` route and cannot answer one of its requests. Its closed body contains only `decision=allow|deny`, the exact `request_digest`, Bridge `launch_id`, and `generation`. The authenticated Bridge stamps receipt time and, only for an exact pending apply, creates an internal one-use proof expiring at the earlier of the absolute request deadline or 60 seconds. The proof is never returned to MCP arguments; digest/generation mismatch, duplicate decision, expiry, or disconnect denies execution.
 3. The queue holds at most 32 requests, an event/result poll waits at most 1,000 ms, and an HTTP JSON body is at most 262,144 bytes. The schema's 100–60,000 ms budget is converted once to an absolute monotonic deadline that no retry or poll can reset.
 4. The stdio adapter admits only JSON-RPC `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, and `notifications/cancelled`. It advertises only MCP protocol `2024-11-05` for the offline baseline. A UTF-8 JSONL line is at most 262,144 bytes with nesting at most 32. An unknown request receives JSON-RPC method-not-found; an unknown notification is safely recorded and ignored because notifications have no response; malformed, duplicate-key, non-finite, oversized, or over-deep input terminates that protocol session and never replays a write. Compatibility with pinned Codex 0.144.3 remains unverified until the separately approved finite registration probe.
 5. Canonical bytes are UTF-8 JSON with recursively sorted object keys, no insignificant whitespace, preserved Unicode, rejected duplicate keys, and rejected NaN/infinity. SHA-256 binds contract version, tool name, request/Thread/Turn, HIP session/fingerprint, base revision, idempotency key, permission, trusted absolute monotonic deadline, and complete arguments.
-6. Identifiers, names, node/connection counts, numeric limits, and strings are exactly those in the versioned schemas: one `HIA_Table_<id>` container, seven child roles, and six fixed connections. B1 adds no aliases.
-7. B1 accepts only a fixed fake capability attestation whose process/session/catalog/schema digests match its fixture. The trusted session snapshot is bound to one Bridge launch identifier and monotonically increasing generation; Panel disconnect, Bridge restart, HIP replacement, or generation change invalidates it. Without a current attestation, all four tools fail with `HOUDINI_UNAVAILABLE`; a mismatch fails with `CAPABILITY_MISMATCH`. No live dispatch exists in B1.
+6. Identifiers, names, node/connection counts, typed values, flags, layout, and strings are exactly bounded by the versioned general graph schemas. The schema contains no asset role, fixed object topology, fixed dimensions, or hidden recipe. B1 adds no aliases.
+7. B1 accepts only a fixed fake capability attestation whose process/session/catalog/schema digests match its fixtures. The trusted session snapshot is bound to one Bridge launch identifier and monotonically increasing generation; Panel disconnect, Bridge restart, HIP replacement, or generation change invalidates it. Without a current attestation, all five tools fail with `HOUDINI_UNAVAILABLE`; a mismatch fails with `CAPABILITY_MISMATCH`. No live dispatch exists in B1.
 8. Approval is external to untrusted MCP arguments, one-use, and bound to the canonical digest. It expires at the earlier of the trusted absolute request deadline or 60 seconds after grant. Denial, dismissal, disconnect, reuse, or any changed bound field fails without queueing a write.
 9. Cancellation before executor claim is terminal. Cancellation after claim is only a request to the deterministic executor and cannot be reported as successful until a terminal result exists. Queue overflow and shutdown reject new work; shutdown resolves every pending waiter once.
 10. Idempotency records are in-memory, scoped to the current Bridge/HIP session, and capped at 256 terminal entries. Exact same-key/same-digest replays return the recorded result; changed digests return `IDEMPOTENCY_CONFLICT`. B1 never assumes success across a restart or automatically retries an indeterminate write.
@@ -271,23 +300,23 @@ No unresolved live item may be filled by a permissive default.
 
 ### B0 — Design review
 
-Produce and review architecture, four versioned tool Schemas, threat model, and test plan. No MCP configuration, service startup, Houdini process, or `hou` write is authorized.
+Produce and review architecture, five versioned tool pairs, general graph fixtures, threat model, offline contract tests, and test plan. The contract test rejects asset-specific roles and fixed structures in protocol files. No MCP configuration, service startup, Houdini process, or `hou` write is authorized.
 
 ### B1 — Offline transport and contract implementation
 
-Implement the stdio MCP adapter, four-tool deny-by-default registration, authenticated Bridge queue, structured results, and a fake Panel executor. B1 is fake-only and live-disabled: validate all Schema, approval, revision, idempotency, Unicode, timeout, authentication, replay, and shutdown behavior without importing `hou`, starting Houdini, or dispatching to a live process.
+After corrected B0 approval, implement the stdio MCP adapter, five-tool deny-by-default registration, deterministic general graph validator, authenticated Bridge queue, structured results, and a fake Panel executor. B1 is fake-only and live-disabled: validate all Schema, approval, revision, idempotency, Unicode, timeout, authentication, replay, and shutdown behavior against at least two structurally different fixtures without importing `hou`, starting Houdini, or dispatching to a live process.
 
 ### B2 — Read-only Houdini capability slice
 
-After separate approval, load only the Panel-side read adapter in a manually started Houdini session. Before any dispatch, require an attestation bound to the current Houdini process nonce, build, HIP session/fingerprint, revision, catalog digest, and reviewed schema hashes. At most `houdini_scene_info` and `houdini_node_type_info` may then be enabled; `houdini_graph_apply` and `houdini_graph_verify` remain disabled. Missing attestation returns `HOUDINI_UNAVAILABLE`; mismatch returns `CAPABILITY_MISMATCH`. Do not mutate the scene.
+After separate approval, load only the Panel-side read adapter in a manually started Houdini session. Before any dispatch, require an attestation bound to the current Houdini process nonce, build, HIP session/fingerprint, revision, catalog digest, and reviewed schema hashes. At most `houdini_scene_info` and `houdini_node_type_info` may then be enabled; `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify` remain disabled. Missing attestation returns `HOUDINI_UNAVAILABLE`; mismatch returns `CAPABILITY_MISMATCH`. Do not mutate the scene.
 
 ### B3 — Write-path simulation and approval acceptance
 
 Use a pure-Python fake scene graph and executor, with no `hou` module, to prove exact approval binding, single-writer serialization, transaction boundaries, modeled one-step Undo semantics, conflict rejection, idempotent replay, rollback confinement, and postcondition verification. No real HIP mutation is authorized and fake behavior is not evidence about Houdini.
 
-### B4 — Separately approved live table write
+### B4 — Separately approved live graph write
 
-Only after B0–B3 evidence is reviewed, request explicit approval for one live `houdini_graph_apply` against the displayed HIP session, base revision, canonical graph, and target container. Verify the minimum editable table, response structure, replay behavior, and one user Undo. Do not save the HIP.
+Only after B0–B3 evidence is reviewed, request explicit approval for one live `houdini_graph_apply` against the displayed HIP session, base revision, complete normalized graph, canonical digest, and target container. Verify a selected acceptance fixture, response structure, replay behavior, and one user Undo. Object semantics are supplied by Codex and the fixture, never by the tool. Do not save the HIP.
 
 ### B5 — P2-V closeout
 

@@ -2,47 +2,47 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hia:houdini-mcp:0.1.0:houdini_node_type_info:output",
   "title": "houdini_node_type_info output",
+  "description": "Bounded live node-type metadata. The response reports capability rather than assuming a static Houdini build.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "request_id",
     "ok",
+    "request_id",
+    "thread_id",
+    "turn_id",
     "hip_session_id",
     "base_scene_revision",
-    "scene_revision",
     "idempotency_key",
-    "created_nodes",
-    "changed_nodes",
-    "artifacts",
-    "job_id",
+    "scene_revision",
+    "result",
     "warnings",
-    "structured_error",
-    "node_types"
+    "structured_error"
   ],
   "properties": {
-    "request_id": { "$ref": "#/$defs/identifier" },
     "ok": { "type": "boolean" },
+    "request_id": { "$ref": "#/$defs/identifier" },
+    "thread_id": { "$ref": "#/$defs/identifier" },
+    "turn_id": { "$ref": "#/$defs/identifier" },
     "hip_session_id": { "$ref": "#/$defs/identifier" },
     "base_scene_revision": { "$ref": "#/$defs/sceneRevision" },
-    "scene_revision": { "$ref": "#/$defs/sceneRevision" },
     "idempotency_key": { "$ref": "#/$defs/idempotencyKey" },
-    "created_nodes": { "$ref": "#/$defs/emptyNodeList" },
-    "changed_nodes": { "$ref": "#/$defs/emptyNodeList" },
-    "artifacts": { "$ref": "#/$defs/emptyArtifactList" },
-    "job_id": { "type": "null" },
-    "warnings": { "$ref": "#/$defs/warnings" },
+    "scene_revision": { "$ref": "#/$defs/sceneRevision" },
+    "result": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/nodeTypeResult" }
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/message" }
+    },
     "structured_error": {
       "oneOf": [
         { "type": "null" },
-        { "$ref": "#/$defs/structuredError" }
+        { "$ref": "#/$defs/error" }
       ]
-    },
-    "node_types": {
-      "type": "array",
-      "minItems": 0,
-      "maxItems": 4,
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/nodeTypeInfo" }
     }
   },
   "allOf": [
@@ -53,14 +53,14 @@
       },
       "then": {
         "properties": {
-          "structured_error": { "type": "null" },
-          "node_types": { "minItems": 1 }
+          "result": { "$ref": "#/$defs/nodeTypeResult" },
+          "structured_error": { "type": "null" }
         }
       },
       "else": {
         "properties": {
-          "structured_error": { "$ref": "#/$defs/structuredError" },
-          "node_types": { "maxItems": 0 }
+          "result": { "type": "null" },
+          "structured_error": { "$ref": "#/$defs/error" }
         }
       }
     }
@@ -72,355 +72,338 @@
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
     },
-    "sceneRevision": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 9223372036854775807
-    },
     "idempotencyKey": {
       "type": "string",
       "minLength": 16,
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$"
     },
-    "emptyNodeList": {
-      "type": "array",
-      "maxItems": 0,
-      "items": false
+    "sceneRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
     },
-    "emptyArtifactList": {
-      "type": "array",
-      "maxItems": 0,
-      "items": false
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
     },
-    "warning": {
+    "nodeTypeResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message"],
+      "required": ["node_types"],
       "properties": {
-        "code": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
-        },
-        "message": { "type": "string", "minLength": 1, "maxLength": 512 }
-      }
-    },
-    "warnings": {
-      "type": "array",
-      "maxItems": 32,
-      "items": { "$ref": "#/$defs/warning" }
-    },
-    "errorIssue": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["code", "message"],
-      "properties": {
-        "code": {
-          "enum": [
-            "INVALID_ARGUMENT",
-            "HIP_SESSION_MISMATCH",
-            "SCENE_CONFLICT",
-            "NODE_TYPE_NOT_ALLOWED",
-            "CAPABILITY_MISMATCH",
-            "MAIN_THREAD_REQUIRED",
-            "HOUDINI_UNAVAILABLE",
-            "DEADLINE_EXCEEDED"
-          ]
-        },
-        "message": { "type": "string", "minLength": 1, "maxLength": 512 }
-      }
-    },
-    "errorDetails": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["issues"],
-      "properties": {
-        "issues": {
+        "node_types": {
           "type": "array",
-          "maxItems": 32,
-          "items": { "$ref": "#/$defs/errorIssue" }
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/nodeTypeInfo" }
         }
       }
     },
-    "structuredError": {
+    "nodeTypeInfo": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message", "retryable", "details"],
+      "required": [
+        "context",
+        "requested_name",
+        "resolved_name",
+        "available",
+        "creatable",
+        "schema_source",
+        "parameters",
+        "input_count",
+        "output_count"
+      ],
+      "properties": {
+        "context": {
+          "type": "string",
+          "enum": ["Object", "Sop"]
+        },
+        "requested_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "resolved_name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "available": { "type": "boolean" },
+        "creatable": { "type": "boolean" },
+        "schema_source": { "const": "live_houdini_instance" },
+        "parameters": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "$ref": "#/$defs/parameterInfo" }
+        },
+        "input_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "output_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        }
+      }
+    },
+    "parameterInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "label",
+        "value_type",
+        "tuple_size",
+        "writable",
+        "allows_expression",
+        "default_value"
+      ],
+      "properties": {
+        "name": { "$ref": "#/$defs/parameterName" },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "value_type": {
+          "type": "string",
+          "enum": ["float", "int", "bool", "string", "tuple"]
+        },
+        "tuple_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "writable": { "type": "boolean" },
+        "allows_expression": { "const": false },
+        "default_value": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/typedValue" }
+          ]
+        }
+      }
+    },
+    "parameterName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+    },
+    "typedValue": {
+      "oneOf": [
+        { "$ref": "#/$defs/floatValue" },
+        { "$ref": "#/$defs/intValue" },
+        { "$ref": "#/$defs/boolValue" },
+        { "$ref": "#/$defs/stringValue" },
+        { "$ref": "#/$defs/floatTuple" },
+        { "$ref": "#/$defs/intTuple" },
+        { "$ref": "#/$defs/boolTuple" },
+        { "$ref": "#/$defs/stringTuple" }
+      ]
+    },
+    "floatValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "float" },
+        "value": {
+          "type": "number",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        }
+      }
+    },
+    "intValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "int" },
+        "value": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "boolValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "bool" },
+        "value": { "type": "boolean" }
+      }
+    },
+    "stringValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "string" },
+        "value": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+        }
+      }
+    },
+    "floatTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items_type", "value"],
+      "properties": {
+        "type": { "const": "tuple" },
+        "items_type": { "const": "float" },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "number",
+            "minimum": -1000000000,
+            "maximum": 1000000000
+          }
+        }
+      }
+    },
+    "intTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items_type", "value"],
+      "properties": {
+        "type": { "const": "tuple" },
+        "items_type": { "const": "int" },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          }
+        }
+      }
+    },
+    "boolTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items_type", "value"],
+      "properties": {
+        "type": { "const": "tuple" },
+        "items_type": { "const": "bool" },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "type": "boolean" }
+        }
+      }
+    },
+    "stringTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items_type", "value"],
+      "properties": {
+        "type": { "const": "tuple" },
+        "items_type": { "const": "string" },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+          }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
       "properties": {
         "code": {
+          "type": "string",
           "enum": [
-            "AUTH_REQUIRED",
             "INVALID_ARGUMENT",
             "SCHEMA_INVALID",
-            "PERMISSION_DENIED",
             "NODE_TYPE_NOT_ALLOWED",
+            "NODE_TYPE_UNAVAILABLE",
+            "PARAMETER_NOT_ALLOWED",
+            "PARAMETER_TYPE_MISMATCH",
+            "PATH_SCOPE_VIOLATION",
+            "GRAPH_INVALID",
+            "TOPOLOGY_NOT_ALLOWED",
+            "DIGEST_MISMATCH",
+            "APPROVAL_REQUIRED",
+            "APPROVAL_DENIED",
+            "APPROVAL_MISMATCH",
+            "APPROVAL_EXPIRED",
+            "DEADLINE_EXCEEDED",
             "HIP_SESSION_MISMATCH",
             "SCENE_CONFLICT",
-            "DEADLINE_EXCEEDED",
-            "CAPABILITY_MISMATCH",
+            "IDEMPOTENCY_CONFLICT",
+            "NAME_CONFLICT",
             "MAIN_THREAD_REQUIRED",
-            "BRIDGE_DISCONNECTED",
+            "CAPABILITY_MISMATCH",
             "HOUDINI_UNAVAILABLE",
+            "WRITE_IN_PROGRESS",
+            "GRAPH_NOT_FOUND",
+            "OWNERSHIP_MISMATCH",
+            "COOK_FAILED",
+            "VERIFY_FAILED",
+            "POSTCONDITION_FAILED",
+            "ROLLBACK_FAILED",
+            "SCENE_STATE_INDETERMINATE",
+            "BRIDGE_DISCONNECTED",
             "INTERNAL_ERROR"
           ]
         },
-        "message": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "retryable": { "type": "boolean" },
-        "details": { "$ref": "#/$defs/errorDetails" }
-      }
-    },
-    "emptyParameterList": {
-      "type": "array",
-      "maxItems": 0,
-      "items": false
-    },
-    "boxParameterList": {
-      "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
-      "prefixItems": [
-        { "const": "unit" },
-        { "const": "size" },
-        { "const": "translate" }
-      ],
-      "items": false
-    },
-    "boundedLiveNumber": {
-      "type": "number",
-      "minimum": -1000000,
-      "maximum": 1000000
-    },
-    "liveDefaultTuple": {
-      "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
-      "prefixItems": [
-        { "$ref": "#/$defs/boundedLiveNumber" },
-        { "$ref": "#/$defs/boundedLiveNumber" },
-        { "$ref": "#/$defs/boundedLiveNumber" }
-      ],
-      "items": false
-    },
-    "liveBoundary": {
-      "oneOf": [
-        { "type": "null" },
-        { "$ref": "#/$defs/boundedLiveNumber" }
-      ]
-    },
-    "sizeLiveParameter": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "semantic",
-        "live_name",
-        "tuple_size",
-        "numeric_type",
-        "storage_type",
-        "writable",
-        "available",
-        "default_values",
-        "hard_minimum",
-        "hard_maximum",
-        "logical_unit"
-      ],
-      "properties": {
-        "semantic": { "const": "size" },
-        "live_name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"
-        },
-        "tuple_size": { "const": 3 },
-        "numeric_type": { "const": "real" },
-        "storage_type": { "enum": ["float32", "float64"] },
-        "writable": { "type": "boolean" },
-        "available": { "type": "boolean" },
-        "default_values": { "$ref": "#/$defs/liveDefaultTuple" },
-        "hard_minimum": { "$ref": "#/$defs/liveBoundary" },
-        "hard_maximum": { "$ref": "#/$defs/liveBoundary" },
-        "logical_unit": { "const": "meters" }
-      }
-    },
-    "translateLiveParameter": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "semantic",
-        "live_name",
-        "tuple_size",
-        "numeric_type",
-        "storage_type",
-        "writable",
-        "available",
-        "default_values",
-        "hard_minimum",
-        "hard_maximum",
-        "logical_unit"
-      ],
-      "properties": {
-        "semantic": { "const": "translate" },
-        "live_name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"
-        },
-        "tuple_size": { "const": 3 },
-        "numeric_type": { "const": "real" },
-        "storage_type": { "enum": ["float32", "float64"] },
-        "writable": { "type": "boolean" },
-        "available": { "type": "boolean" },
-        "default_values": { "$ref": "#/$defs/liveDefaultTuple" },
-        "hard_minimum": { "$ref": "#/$defs/liveBoundary" },
-        "hard_maximum": { "$ref": "#/$defs/liveBoundary" },
-        "logical_unit": { "const": "meters" }
-      }
-    },
-    "boxLiveParameterList": {
-      "type": "array",
-      "minItems": 2,
-      "maxItems": 2,
-      "prefixItems": [
-        { "$ref": "#/$defs/sizeLiveParameter" },
-        { "$ref": "#/$defs/translateLiveParameter" }
-      ],
-      "items": false
-    },
-    "implementationIdentity": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["builtin", "has_definition", "policy_compatible"],
-          "properties": {
-            "builtin": { "const": true },
-            "has_definition": { "const": false },
-            "policy_compatible": { "const": true }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["builtin", "has_definition", "policy_compatible"],
-          "properties": {
-            "builtin": { "const": false },
-            "has_definition": { "const": true },
-            "policy_compatible": { "const": false }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["builtin", "has_definition", "policy_compatible"],
-          "properties": {
-            "builtin": { "const": true },
-            "has_definition": { "const": true },
-            "policy_compatible": { "const": false }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["builtin", "has_definition", "policy_compatible"],
-          "properties": {
-            "builtin": { "const": false },
-            "has_definition": { "const": false },
-            "policy_compatible": { "const": false }
-          }
+        "message": { "$ref": "#/$defs/message" },
+        "details": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/detailEntry" }
         }
-      ]
+      }
     },
-    "nodeTypeInfo": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["category", "name", "available", "implementation", "min_inputs", "max_inputs", "declarative_parameters", "live_parameters"],
-          "properties": {
-            "category": { "const": "Object" },
-            "name": { "const": "geo" },
-            "available": { "type": "boolean" },
-            "implementation": { "$ref": "#/$defs/implementationIdentity" },
-            "min_inputs": { "const": 0 },
-            "max_inputs": { "const": 0 },
-            "declarative_parameters": { "$ref": "#/$defs/emptyParameterList" },
-            "live_parameters": { "$ref": "#/$defs/emptyParameterList" }
-          }
+    "detailEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
         },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["category", "name", "available", "implementation", "min_inputs", "max_inputs", "declarative_parameters", "live_parameters"],
-          "properties": {
-            "category": { "const": "Sop" },
-            "name": { "const": "box" },
-            "available": { "type": "boolean" },
-            "implementation": { "$ref": "#/$defs/implementationIdentity" },
-            "min_inputs": { "const": 0 },
-            "max_inputs": { "const": 0 },
-            "declarative_parameters": { "$ref": "#/$defs/boxParameterList" },
-            "live_parameters": {
-              "oneOf": [
-                { "$ref": "#/$defs/emptyParameterList" },
-                { "$ref": "#/$defs/boxLiveParameterList" }
-              ]
-            }
-          },
-          "allOf": [
+        "value": {
+          "oneOf": [
             {
-              "if": {
-                "required": ["available", "implementation"],
-                "properties": {
-                  "available": { "const": true },
-                  "implementation": {
-                    "required": ["policy_compatible"],
-                    "properties": { "policy_compatible": { "const": true } }
-                  }
-                }
-              },
-              "then": {
-                "properties": { "live_parameters": { "$ref": "#/$defs/boxLiveParameterList" } }
-              },
-              "else": {
-                "properties": { "live_parameters": { "$ref": "#/$defs/emptyParameterList" } }
-              }
-            }
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+            },
+            {
+              "type": "number",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            { "type": "boolean" },
+            { "type": "null" }
           ]
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["category", "name", "available", "implementation", "min_inputs", "max_inputs", "declarative_parameters", "live_parameters"],
-          "properties": {
-            "category": { "const": "Sop" },
-            "name": { "const": "merge" },
-            "available": { "type": "boolean" },
-            "implementation": { "$ref": "#/$defs/implementationIdentity" },
-            "min_inputs": { "const": 0 },
-            "max_inputs": { "const": 64 },
-            "declarative_parameters": { "$ref": "#/$defs/emptyParameterList" },
-            "live_parameters": { "$ref": "#/$defs/emptyParameterList" }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["category", "name", "available", "implementation", "min_inputs", "max_inputs", "declarative_parameters", "live_parameters"],
-          "properties": {
-            "category": { "const": "Sop" },
-            "name": { "const": "null" },
-            "available": { "type": "boolean" },
-            "implementation": { "$ref": "#/$defs/implementationIdentity" },
-            "min_inputs": { "const": 1 },
-            "max_inputs": { "const": 1 },
-            "declarative_parameters": { "$ref": "#/$defs/emptyParameterList" },
-            "live_parameters": { "$ref": "#/$defs/emptyParameterList" }
-          }
         }
-      ]
+      }
     }
   }
 }

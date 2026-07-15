@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hia:houdini-mcp:0.1.0:houdini_scene_info:input",
   "title": "houdini_scene_info input",
+  "description": "Bounded read request for the current Houdini session, enabled contexts, and HIA-owned graph summaries.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -12,7 +13,8 @@
     "base_scene_revision",
     "idempotency_key",
     "deadline_ms",
-    "permission_level"
+    "permission_level",
+    "include_graph_summaries"
   ],
   "properties": {
     "request_id": { "$ref": "#/$defs/identifier" },
@@ -22,7 +24,8 @@
     "base_scene_revision": { "$ref": "#/$defs/sceneRevision" },
     "idempotency_key": { "$ref": "#/$defs/idempotencyKey" },
     "deadline_ms": { "$ref": "#/$defs/deadlineMs" },
-    "permission_level": { "const": "scene_read" }
+    "permission_level": { "const": "scene_read" },
+    "include_graph_summaries": { "type": "boolean" }
   },
   "$defs": {
     "identifier": {
@@ -40,10 +43,10 @@
     "sceneRevision": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 9223372036854775807
+      "maximum": 9007199254740991
     },
     "deadlineMs": {
-      "description": "Single-entry execution budget. The trusted Bridge envelope converts it once to an absolute monotonic deadline that downstream hops cannot reset.",
+      "description": "Single-entry execution budget. A trusted boundary converts it once to an absolute monotonic deadline.",
       "type": "integer",
       "minimum": 100,
       "maximum": 60000

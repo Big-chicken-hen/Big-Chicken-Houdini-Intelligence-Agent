@@ -1,27 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hia:houdini-mcp:0.1.0:houdini_graph_verify:output",
-  "title": "houdini_graph_verify output",
-  "description": "Bounded verification of an already created generic graph, including nodes, typed parameters, connections, flags, cook state, and digest.",
+  "$id": "urn:hia:houdini-mcp:0.1.0:houdini_graph_validate:input",
+  "title": "houdini_graph_validate input",
+  "description": "Pure validation and canonical normalization of a bounded declarative HIA-owned graph. It never modifies the scene.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "ok",
     "request_id",
     "thread_id",
     "turn_id",
     "hip_session_id",
+    "expected_hip_fingerprint",
     "base_scene_revision",
     "idempotency_key",
-    "scene_revision",
-    "result",
-    "warnings",
-    "structured_error"
+    "deadline_ms",
+    "permission_level",
+    "graph"
   ],
   "properties": {
-    "ok": {
-      "type": "boolean"
-    },
     "request_id": {
       "$ref": "#/$defs/identifier"
     },
@@ -34,63 +30,25 @@
     "hip_session_id": {
       "$ref": "#/$defs/identifier"
     },
+    "expected_hip_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
     "base_scene_revision": {
       "$ref": "#/$defs/sceneRevision"
     },
     "idempotency_key": {
       "$ref": "#/$defs/idempotencyKey"
     },
-    "scene_revision": {
-      "$ref": "#/$defs/sceneRevision"
+    "deadline_ms": {
+      "$ref": "#/$defs/deadlineMs"
     },
-    "result": {
-      "oneOf": [
-        {
-          "type": "null"
-        },
-        {
-          "$ref": "#/$defs/verifyResult"
-        }
-      ]
+    "permission_level": {
+      "const": "scene_read"
     },
-    "warnings": {
-      "type": "array",
-      "maxItems": 64,
-      "items": {
-        "$ref": "#/$defs/message"
-      }
-    },
-    "structured_error": {
-      "oneOf": [
-        {
-          "type": "null"
-        },
-        {
-          "$ref": "#/$defs/error"
-        }
-      ]
+    "graph": {
+      "$ref": "#/$defs/graph"
     }
   },
-  "allOf": [
-    {
-      "if": {
-        "required": ["ok"],
-        "properties": { "ok": { "const": true } }
-      },
-      "then": {
-        "properties": {
-          "result": { "$ref": "#/$defs/verifyResult" },
-          "structured_error": { "type": "null" }
-        }
-      },
-      "else": {
-        "properties": {
-          "result": { "type": "null" },
-          "structured_error": { "$ref": "#/$defs/error" }
-        }
-      }
-    }
-  ],
   "$defs": {
     "identifier": {
       "type": "string",
@@ -109,20 +67,22 @@
       "minimum": 0,
       "maximum": 9007199254740991
     },
-    "digest": {
-      "type": "string",
-      "pattern": "^[A-Fa-f0-9]{64}$"
+    "deadlineMs": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 60000
     },
-    "graphPath": {
+    "fingerprint": {
       "type": "string",
       "minLength": 16,
-      "maxLength": 160,
-      "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}$"
+      "maxLength": 128,
+      "pattern": "^[A-Fa-f0-9]{16,128}$"
     },
-    "message": {
+    "parameterName": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 1024
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
     },
     "localId": {
       "type": "string",
@@ -130,101 +90,11 @@
       "maxLength": 64,
       "pattern": "^[a-z][a-z0-9_]{0,63}$"
     },
-    "nodePath": {
+    "nameHint": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 320,
-      "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}/[A-Za-z][A-Za-z0-9_]{0,63}$"
-    },
-    "detailEntry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "key",
-        "value"
-      ],
-      "properties": {
-        "key": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
-        },
-        "value": {
-          "oneOf": [
-            {
-              "type": "string",
-              "maxLength": 1024,
-              "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
-            },
-            {
-              "type": "number",
-              "minimum": -9007199254740991,
-              "maximum": 9007199254740991
-            },
-            { "type": "boolean" },
-            { "type": "null" }
-          ]
-        }
-      }
-    },
-    "error": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "code",
-        "message",
-        "details"
-      ],
-      "properties": {
-        "code": {
-          "type": "string",
-          "enum": [
-            "INVALID_ARGUMENT",
-            "SCHEMA_INVALID",
-            "NODE_TYPE_NOT_ALLOWED",
-            "NODE_TYPE_UNAVAILABLE",
-            "PARAMETER_NOT_ALLOWED",
-            "PARAMETER_TYPE_MISMATCH",
-            "PATH_SCOPE_VIOLATION",
-            "GRAPH_INVALID",
-            "TOPOLOGY_NOT_ALLOWED",
-            "DIGEST_MISMATCH",
-            "APPROVAL_REQUIRED",
-            "APPROVAL_DENIED",
-            "APPROVAL_MISMATCH",
-            "APPROVAL_EXPIRED",
-            "DEADLINE_EXCEEDED",
-            "HIP_SESSION_MISMATCH",
-            "SCENE_CONFLICT",
-            "IDEMPOTENCY_CONFLICT",
-            "NAME_CONFLICT",
-            "MAIN_THREAD_REQUIRED",
-            "CAPABILITY_MISMATCH",
-            "HOUDINI_UNAVAILABLE",
-            "WRITE_IN_PROGRESS",
-            "GRAPH_NOT_FOUND",
-            "OWNERSHIP_MISMATCH",
-            "COOK_FAILED",
-            "VERIFY_FAILED",
-            "POSTCONDITION_FAILED",
-            "ROLLBACK_FAILED",
-            "SCENE_STATE_INDETERMINATE",
-            "BRIDGE_DISCONNECTED",
-            "INTERNAL_ERROR"
-          ]
-        },
-        "message": {
-          "$ref": "#/$defs/message"
-        },
-        "details": {
-          "type": "array",
-          "maxItems": 32,
-          "items": {
-            "$ref": "#/$defs/detailEntry"
-          }
-        }
-      }
+      "maxLength": 64,
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"
     },
     "floatValue": {
       "type": "object",
@@ -430,61 +300,122 @@
         }
       ]
     },
-    "observedParameter": {
+    "nodeType": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "context",
+            "name"
+          ],
+          "properties": {
+            "context": {
+              "const": "Sop"
+            },
+            "name": {
+              "type": "string",
+              "enum": [
+                "box",
+                "transform",
+                "merge",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "graphTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parent_path",
+        "root_local_id",
+        "root_type",
+        "name_hint",
+        "ownership"
+      ],
+      "properties": {
+        "parent_path": {
+          "const": "/obj"
+        },
+        "root_local_id": {
+          "const": "root"
+        },
+        "root_type": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "context",
+            "name"
+          ],
+          "properties": {
+            "context": {
+              "const": "Object"
+            },
+            "name": {
+              "const": "geo"
+            }
+          }
+        },
+        "name_hint": {
+          "type": "string",
+          "minLength": 11,
+          "maxLength": 74,
+          "pattern": "^HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}$"
+        },
+        "ownership": {
+          "const": "hia_owned_new"
+        }
+      }
+    },
+    "parameterAssignment": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "name",
-        "value",
-        "expression_present"
+        "value"
       ],
       "properties": {
         "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+          "$ref": "#/$defs/parameterName"
         },
         "value": {
           "$ref": "#/$defs/typedValue"
-        },
-        "expression_present": {
-          "const": false
         }
       }
     },
-    "observedNode": {
+    "graphNode": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "request_local_id",
-        "path",
-        "context",
-        "resolved_type",
+        "id",
+        "type",
+        "name_hint",
+        "parent",
         "parameters",
-        "flags",
-        "cook_state"
+        "flags"
       ],
       "properties": {
-        "request_local_id": {
+        "id": {
           "$ref": "#/$defs/localId"
         },
-        "path": {
-          "$ref": "#/$defs/nodePath"
+        "type": {
+          "$ref": "#/$defs/nodeType"
         },
-        "context": {
-          "const": "Sop"
+        "name_hint": {
+          "$ref": "#/$defs/nameHint"
         },
-        "resolved_type": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256
+        "parent": {
+          "const": "root"
         },
         "parameters": {
           "type": "array",
           "maxItems": 64,
+          "uniqueItems": true,
           "items": {
-            "$ref": "#/$defs/observedParameter"
+            "$ref": "#/$defs/parameterAssignment"
           }
         },
         "flags": {
@@ -502,37 +433,46 @@
               "type": "boolean"
             }
           }
-        },
-        "cook_state": {
-          "type": "string",
-          "enum": [
-            "not_cooked",
-            "clean",
-            "warning",
-            "error"
-          ]
         }
       }
     },
-    "observedEndpoint": {
+    "sourceEndpoint": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "node",
-        "index"
+        "output"
       ],
       "properties": {
         "node": {
           "$ref": "#/$defs/localId"
         },
-        "index": {
+        "output": {
           "type": "integer",
           "minimum": 0,
           "maximum": 63
         }
       }
     },
-    "observedConnection": {
+    "destinationEndpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "input"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/localId"
+        },
+        "input": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        }
+      }
+    },
+    "connection": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -541,69 +481,54 @@
       ],
       "properties": {
         "source": {
-          "$ref": "#/$defs/observedEndpoint"
+          "$ref": "#/$defs/sourceEndpoint"
         },
         "destination": {
-          "$ref": "#/$defs/observedEndpoint"
+          "$ref": "#/$defs/destinationEndpoint"
         }
       }
     },
-    "verificationCheck": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "name",
-        "passed",
-        "message"
-      ],
-      "properties": {
-        "name": {
-          "type": "string",
-          "enum": [
-            "session",
-            "revision",
-            "target",
-            "ownership",
-            "nodes",
-            "parameters",
-            "connections",
-            "flags",
-            "cook",
-            "graph_digest"
-          ]
+    "layout": {
+      "oneOf": [
+        {
+          "type": "null"
         },
-        "passed": {
-          "type": "boolean"
-        },
-        "message": {
-          "$ref": "#/$defs/message"
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "direction"
+          ],
+          "properties": {
+            "mode": {
+              "const": "network_editor"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "left_to_right",
+                "top_to_bottom"
+              ]
+            }
+          }
         }
-      }
+      ]
     },
-    "verifyResult": {
+    "graph": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "valid",
-        "root_path",
-        "ownership",
+        "schema_version",
         "context",
-        "expected_graph_digest",
-        "observed_graph_digest",
-        "digest_matches",
+        "target",
         "nodes",
         "connections",
-        "checks"
+        "layout"
       ],
       "properties": {
-        "valid": {
-          "type": "boolean"
-        },
-        "root_path": {
-          "$ref": "#/$defs/graphPath"
-        },
-        "ownership": {
-          "const": "hia_owned"
+        "schema_version": {
+          "const": "0.1.0"
         },
         "context": {
           "type": "object",
@@ -621,37 +546,28 @@
             }
           }
         },
-        "expected_graph_digest": {
-          "$ref": "#/$defs/digest"
-        },
-        "observed_graph_digest": {
-          "$ref": "#/$defs/digest"
-        },
-        "digest_matches": {
-          "type": "boolean"
+        "target": {
+          "$ref": "#/$defs/graphTarget"
         },
         "nodes": {
           "type": "array",
           "minItems": 1,
           "maxItems": 128,
+          "uniqueItems": true,
           "items": {
-            "$ref": "#/$defs/observedNode"
+            "$ref": "#/$defs/graphNode"
           }
         },
         "connections": {
           "type": "array",
           "maxItems": 256,
+          "uniqueItems": true,
           "items": {
-            "$ref": "#/$defs/observedConnection"
+            "$ref": "#/$defs/connection"
           }
         },
-        "checks": {
-          "type": "array",
-          "minItems": 10,
-          "maxItems": 10,
-          "items": {
-            "$ref": "#/$defs/verificationCheck"
-          }
+        "layout": {
+          "$ref": "#/$defs/layout"
         }
       }
     }

@@ -45,6 +45,8 @@ This policy has the highest priority. When safety cannot be proven, stop and ask
 - Run all available tests and report their actual results. Mark unavailable live checks as unverified and explain why.
 - Stay within the currently authorized phase and stop at its boundary.
 
-## Current P2-V design-review boundary
+## Current P2-V Gate B1 boundary
 
-This sub-gate creates only architecture, versioned schemas, a threat model, offline contract tests, and a test plan for four named Houdini tools. It starts no MCP adapter, Bridge scene endpoint, Houdini process, network listener, or scene operation; it imports no `hou`; it writes no `.codex/config.toml`; and it implements no tool handler. Live scene work requires a later, separate approval after the design package is reviewed.
+The corrected Gate B0 contract is frozen as pre-release `0.1.0` with five general, versioned, deny-by-default HIA-owned graph tools. The contract admits only bounded OBJ/SOP graph descriptions, a new `/obj/HIA_Graph_<id>` ownership root, live-resolved allowlisted node types, closed typed parameters, owned-node connections, flags, optional layout, exact session/revision, idempotency, deadline, and canonical digest. Approval binds the complete normalized graph and all correlation fields; changing any node, type, parameter, connection, flag, target, session, revision, deadline, or digest invalidates it.
+
+A table is only a fixture. Protocol and production code must not encode table-specific roles, a fixed number of boxes, fixed dimensions, or one fixed topology. Gate B1 may adapt the preserved local drafts only for deterministic five-tool offline contracts, an authenticated bounded queue, and a pure-Python fake executor shared with a structurally different fixture. It must not start a real MCP service or Houdini, import `hou`, modify a scene, save a HIP, render, publish an HDA, expose arbitrary code, use QtNetwork, or create `.codex/config.toml`. Stop before B2 and keep B1 changes uncommitted pending review.

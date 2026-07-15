@@ -16,11 +16,11 @@ Acceptance: the UI stays responsive; restart resumes the same Codex Thread; the 
 
 ## P2 — Houdini MCP foundation
 
-Deliverables: Houdini MCP host; Scene Gateway; main-thread queue; deterministic node/parameter/connect operations; revision checks; idempotency; undo grouping; structured errors; audit trail.
+Deliverables: Houdini MCP host; Scene Gateway; main-thread queue; deterministic general HIA-owned graph validation/application/verification; revision checks; idempotency; undo grouping; structured errors; audit trail.
 
-Acceptance: a natural-language request can create an editable procedural SOP table; one Undo reverts the complete approved operation; retries do not duplicate work; stale revisions fail instead of overwriting scene changes.
+Acceptance: natural-language requests can produce multiple editable procedural OBJ/SOP networks through the same general graph contract; a table is the first fixture, and a structurally different fixture proves there is no object-semantic hard-coding. One Undo reverts each complete approved graph transaction; retries do not duplicate work; stale revisions fail instead of overwriting scene changes.
 
-P2-V begins with a mandatory design-review gate: architecture, the exact four-tool schema inventory, threat model, and test plan are produced and verified offline before an MCP adapter, Bridge scene route, Panel executor, or `hou` write is implemented. Design approval does not itself authorize a live scene operation.
+P2-V Gate B0 is frozen pre-release with its architecture, exact five-tool schema inventory, threat model, fixtures, offline contract tests, and test plan. Gate B1 may implement only the offline deterministic adapter, queue, contract, and fake executor for `houdini_scene_info`, `houdini_node_type_info`, `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify`. B0/B1 approval does not authorize a live scene operation.
 
 ## P3 — Image modeling
 
@@ -66,7 +66,7 @@ Acceptance: app-server and Houdini are never directly exposed; disconnects and w
 
 ## Milestones
 
-- P2: natural language produces a procedural editable table.
+- P2: natural language produces general procedural editable graphs; the first table fixture and at least one non-table fixture use the same protocol.
 - P4: reference images produce a model that Codex visually reviews and improves.
 - P7: a versioned HDA is tested and published automatically.
 - P9: multi-agent, network-worker, and full DCC production capabilities are hardened.

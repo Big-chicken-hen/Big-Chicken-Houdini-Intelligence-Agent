@@ -2,15 +2,15 @@
 
 ## Status and authorization boundary
 
-This document is the verification plan for the first Houdini scene-operation vertical slice. It is a design-review artifact only. Creating this plan does not authorize an MCP process, a Houdini connection, a `hou` call, or a scene write.
+This approved Gate B0 verification plan is frozen pre-release for the first Houdini scene-operation vertical slice. Its approval authorizes Gate B1 offline adaptation only, not a real MCP process, Houdini connection, `hou` call, or scene write.
 
-Offline B1 implementation begins only after the architecture, tool schemas, threat model, and this plan pass B0 review. B1 is fake-only and live-disabled. Automated verification must not start Houdini GUI. B2 and every later live-Houdini test require separate approval; a later live write test additionally requires exact approval for the proposed graph and active HIP session.
+Gate B1 may now preserve and adapt the existing uncommitted drafts against the exact frozen contract. B1 is fake-only and live-disabled. Automated verification must not start Houdini GUI. B2 and every later live-Houdini test require separate approval; a later live write test additionally requires exact approval for the proposed graph and active HIP session.
 
 ## Acceptance claim
 
-The P2-V claim is satisfied only when the exact natural-language request “生成一张简单、可编辑的四条腿桌子。” causes Codex to choose the reviewed `houdini_graph_apply` tool and an approved call creates one new, editable SOP table under a new `/obj/HIA_Table_<id>` container. One Houdini Undo must remove that whole container, a retry must not create a duplicate, and no pre-existing node may change.
+P2-V succeeds only when Codex can use the same five-tool general graph contract to validate and create multiple editable OBJ/SOP networks under new `/obj/HIA_Graph_<id>` containers. A table is the first acceptance fixture, while a structurally different stairs fixture proves that the protocol contains no object-specific roles, fixed primitive count, dimensions, or topology. Each approved graph must be removable by one Houdini Undo, exact retries must not duplicate work, changed retries must fail, and no pre-existing node may change.
 
-Passing schema tests alone does not prove this claim. Evidence is accumulated in five layers and the live acceptance layer is mandatory.
+Passing Schema tests alone does not prove live Houdini behavior. Evidence is accumulated in five layers and the separately approved live acceptance layer is mandatory before any live claim.
 
 ## Test environments
 
@@ -30,12 +30,13 @@ These tests run with Python `-B` and require no third-party package.
 
 ### Contract inventory
 
-- `P2-C001`: `manifestVersion` is `1.0`, `schemaVersion` is `0.1.0`, and the manifest exposes exactly `houdini_scene_info`, `houdini_node_type_info`, `houdini_graph_apply`, and `houdini_graph_verify`.
+- `P2-C001`: `manifestVersion` is `1.0`, `schemaVersion` is frozen pre-release `0.1.0`, `contractStatus` is `frozen_pre_release`, and the manifest exposes exactly `houdini_scene_info`, `houdini_node_type_info`, `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify`. The rejected four-tool draft was never published or enabled; breaking changes must increment the schema version.
 - `P2-C002`: every referenced input and output schema exists, parses as UTF-8 JSON, uses JSON Schema draft 2020-12, and has an object root with `additionalProperties: false`.
-- `P2-C003`: annotations mark only `houdini_graph_apply` as write-capable; it is idempotent, not open-world, and not destructive to existing data. The other three tools are read-only.
-- `P2-C004`: tool and schema names contain no aliases that could expose a generic node, parameter, Python, shell, HScript, expression, file, render, HDA, delete, or save tool.
-- `P2-C005`: the manifest records the SHA-256 of each of the eight reviewed schemas and every hash matches the exact UTF-8 file bytes.
-- `P2-C006`: JSON loading rejects duplicate object keys and non-finite constants; every local `$ref` resolves inside its own schema. Tests distinguish accepted object boundaries from constraint fragments such as `if`, `then`, and `contains`.
+- `P2-C003`: annotations mark only `houdini_graph_apply` as write-capable; it is idempotent, not open-world, and not destructive to existing data. The other four tools are read-only.
+- `P2-C004`: only the five reviewed graph-level tools are exposed. No standalone node/parameter mutation alias, arbitrary Python, shell, HScript, expression, file, render, HDA, delete, or save tool exists.
+- `P2-C005`: the manifest records `schemaDigestEncoding=canonical-json-utf8-v1`; each of the ten SHA-256 values is computed from strict parsed JSON serialized as sorted-key, whitespace-free UTF-8 with preserved Unicode. Line-ending or indentation conversion cannot change protocol identity.
+- `P2-C006`: protocol files contain no asset-specific node role, fixed object topology, fixed primitive count, or object dimensions. A source-contract denylist rejects legacy table-role tokens outside `tests/fixtures`.
+- `P2-C007`: JSON loading rejects duplicate object keys and non-finite constants; every local `$ref` resolves inside its own schema. Tests distinguish accepted object boundaries from constraint fragments such as `if`, `then`, and `contains`.
 
 ### Request envelope
 
@@ -46,21 +47,23 @@ These tests run with Python `-B` and require no third-party package.
 
 ### Declarative graph
 
-- `P2-C020`: the valid table fixture has parent `/obj`, one `geo` container matching `HIA_Table_<id>`, five `box` nodes, one `merge`, one `null`, six connections, and output `OUT_TABLE`.
-- `P2-C021`: the seven required child roles occur exactly once. Missing, duplicate, renamed, or additional roles fail.
-- `P2-C022`: only OBJ `geo` and SOP `box`, `merge`, and `null` types are accepted. Namespaces, version suffixes, HDAs, Python nodes, subnet injection, and category changes fail.
-- `P2-C023`: box nodes accept only three-number `size` and `translate` tuples within the reviewed bounds. Parameter names, expressions, strings, ramps, buttons, and spare parameters fail.
-- `P2-C024`: connections are acyclic and exactly match five boxes into distinct merge inputs followed by merge into `OUT_TABLE`. Self-links, cross-container paths, unknown endpoints, duplicate input slots, and extra wiring fail.
-- `P2-C025`: parent path, container type, output role, unit, rollback policy, and Undo label are constants. Absolute filesystem paths, `..`, UNC, device, ADS, and URI values have no accepted field.
+- `P2-C020`: both `tests/fixtures/p2_v/table_graph.json` and `tests/fixtures/p2_v/stairs_graph.json` validate through the same Schema and deterministic cross-field test oracle, and differ in node count, names, parameter values, and topology. Their static parameter names are offline candidates only; live acceptance must replace or reject them according to `houdini_node_type_info` from the active build.
+- `P2-C021`: context is versioned and currently permits only an OBJ root with SOP children. The target must be one new HIA-owned `Object/geo` container matching `HIA_Graph_<id>` beneath `/obj`.
+- `P2-C022`: request-local node IDs and name hints are bounded and unique, parent references resolve, and only `Sop/box`, `Sop/transform`, `Sop/merge`, and `Sop/null` are admitted for this version. Namespaces, unreviewed versions, HDAs, Python nodes, and category changes fail.
+- `P2-C023`: parameter names are unique per node and assignments are closed typed values: finite `float`, bounded `int`, `bool`, bounded inert `string`, or a homogeneous bounded tuple. Expressions, callbacks, code, backticks, ramps, buttons, multiparms, file paths, and spare parameters fail.
+- `P2-C024`: connections refer only to owned request-local node IDs and bounded source/output and destination/input ports. Unknown endpoints, duplicate input slots, cycles where prohibited, self-links, external paths, and cross-container references fail.
+- `P2-C025`: explicit display/render flags and optional bounded layout are admitted; undeclared flags and layout modes fail. The current SOP slice requires exactly one display node and one render node, both flags on the same declared node; its name has no implicit output role and no topology is fixed.
+- `P2-C026`: the approval binding covers `request_id`, Thread, Turn, HIP session and fingerprint, expected revision, permission, idempotency key, trusted deadline, graph Schema version, complete normalized target/nodes/types/names/parents/parameters/connections/flags/layout, canonical graph digest, and a closed side-effect summary. Mutation of any bound field changes the request/approval digest and invalidates the prior approval.
+- `P2-C027`: absolute filesystem paths, `..`, UNC, device paths, ADS, URI values, environment expansion, executable text, and references to existing scene nodes have no accepted field.
 
 ### Responses and errors
 
-- `P2-C030`: every output contains `ok`, HIP session, scene revision, node-change arrays, warnings, and a nullable structured error.
-- `P2-C031`: successful apply output reports only nodes created inside its new container, a stable graph digest, idempotency replay state, and the fixed Undo label.
+- `P2-C030`: every output contains `ok`, request/Thread/Turn correlation, HIP session, base and resulting scene revisions, idempotency key, result, warnings, and a structured error branch. Schema conditionals require exactly one coherent branch: success has a non-null result and null error; failure has null result and a non-null bounded error. Only apply reports created/changed paths, and every such path remains inside the request-owned HIA graph.
+- `P2-C031`: successful validate/apply/verify outputs agree on one stable canonical graph digest; apply reports only nodes created inside its new container, idempotency replay state, and the reviewed Undo label.
 - `P2-C032`: error objects are JSON serializable and contain a stable code, safe message, retryability, and non-secret details. Tracebacks and Bearer tokens are never the sole or exposed response.
 - `P2-C033`: deterministic validation requires output correlation to echo request/session/revision/idempotency fields, prevents revision regression, and rejects a container path or replay record that does not match the submitted request.
 - `P2-C034`: node-type results correspond uniquely and exactly to the query set; verification checks, issues, validity, and graph digest cannot contradict one another.
-- `P2-C035`: without a current fake attestation matching the reviewed contract hashes, B1 fails all four tools with `HOUDINI_UNAVAILABLE` or `CAPABILITY_MISMATCH`; no live fallback exists.
+- `P2-C035`: without a current fake attestation matching the reviewed contract hashes, B1 fails all five tools with `HOUDINI_UNAVAILABLE` or `CAPABILITY_MISMATCH`; no live fallback exists.
 
 ## Layer 2: pure deterministic components
 
@@ -68,15 +71,16 @@ These tests are written before any `hou` implementation and use fakes.
 
 ### Validation and canonicalization
 
-- Canonical JSON hashing is order-stable and includes the HIP session, base revision, permission level, and complete graph.
-- The approval digest and graph digest change when any node, parameter, connection, flag, session, revision, or side effect changes.
+- Canonical graph hashing is order-stable and includes the graph-contract version, target/root, and complete normalized graph. A separate request/approval digest additionally binds HIP session, base revision, permission level, idempotency key, deadline, Thread/Turn, and side-effect summary.
+- The graph digest changes when any target, node, live type, typed parameter, connection, flag, or layout item changes. The request/approval digest also changes when session, revision, idempotency key, deadline, correlation, or side effects change.
+- `houdini_graph_validate` is pure: its fake scene fingerprint and revision are unchanged, repeated normalization produces identical bytes/digest, and its result is the only graph form eligible for approval.
 - Validation is deny-by-default and completes before queue insertion.
 - Unknown tool names, protocol methods, fields, node types, parameters, and error codes fail closed.
 
 ### Approval
 
 - A read-only call cannot be relabeled as a write call after validation.
-- `houdini_graph_apply` creates a Panel approval containing the exact container, seven children, parameters, six connections, HIP session, base revision, Undo label, and argument digest.
+- `houdini_graph_apply` creates a Panel approval containing the exact normalized target, every child/type/name/parent/parameter/connection/flag/layout item, graph Schema version, request/Thread/Turn, HIP session/fingerprint, base revision, permission level, idempotency key, trusted deadline, Undo label, closed side-effect summary, and both graph/request digests.
 - Denial, dismissal, expiry, Panel disconnect, digest mismatch, or session change produces no queued scene operation.
 - Approval is one-use, request-bound, Turn-bound, session-bound, and time-bounded. It cannot become a permanent grant.
 - A late approval for an old request cannot authorize a newer request.
@@ -104,7 +108,7 @@ These tests are written before any `hou` implementation and use fakes.
 
 ## Layer 3: fake MCP, Bridge, and Panel integration
 
-- Initialize a standard stdio MCP session and verify `tools/list` exposes exactly four schemas. JSON-RPC alone is written to stdout; diagnostics use stderr.
+- Initialize a standard stdio MCP session and verify `tools/list` exposes exactly five schemas. JSON-RPC alone is written to stdout; diagnostics use stderr.
 - Admit only `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, and `notifications/cancelled` for the frozen offline MCP `2024-11-05` baseline. Unknown requests receive method-not-found, unknown notifications are safely ignored, and malformed, duplicate-key, non-finite, over-262,144-byte, or over-depth-32 lines terminate the fake protocol session without replay.
 - Reject unlisted MCP methods and tools before an authenticated Bridge request is emitted.
 - Confirm the adapter connects only to the inherited `127.0.0.1:<random>` Bridge URL and sends the runtime Bearer token without logging it.
@@ -124,10 +128,10 @@ This layer requires separate approval to start Houdini, but it performs no scene
 
 - Discover the active Houdini build and executable at runtime; do not trust a compiled path or documentation value.
 - Confirm the Python and PySide versions, current UI thread identity, HIP session creation, and main-thread scheduling primitive.
-- Query the live OBJ/SOP catalogs for `geo`, `box`, `merge`, and `null` and record exact type names.
-- Query the live parameter templates required for box size and translation and record tuple lengths, numeric types, defaults, and bounds.
+- Query the live OBJ/SOP catalogs for `Object/geo`, `Sop/box`, `Sop/transform`, `Sop/merge`, and `Sop/null` and record exact type names.
+- Query the live parameter templates required by the approved fixture, record tuple lengths, value types, defaults, bounds, expression/callback capability, and intersect them with the static safety allowlist.
 - If the live schema conflicts with the static tool contract, stop with `CAPABILITY_MISMATCH`; do not guess or auto-expand the allowlist.
-- Confirm no Python SOP, HDA, file, render, save, delete, expression, or shell surface is discoverable through the four P2 tool schemas.
+- Confirm no Python SOP, HDA, file, render, save, delete, expression, callback, or shell surface is discoverable through the five P2 tool schemas.
 - Enable at most `houdini_scene_info` and `houdini_node_type_info`. Keep `houdini_graph_verify` and `houdini_graph_apply` disabled throughout B2.
 
 ## Layer 5: live Houdini write acceptance
@@ -140,25 +144,17 @@ This is not authorized by approval of this design document. Before running it, s
 2. Verify the requested container name does not exist.
 3. Display the exact approval payload and obtain one decision.
 
-### Successful table
+### Successful general graph fixtures
 
-1. Send “生成一张简单、可编辑的四条腿桌子。” through the Panel.
-2. Record that Codex, not a hard-coded prompt mapper, chose `houdini_graph_apply` and supplied a schema-valid declarative graph.
-3. Assert one new `/obj/HIA_Table_<id>` exists with exactly:
-
-   ```text
-   tabletop_box
-   leg_front_left
-   leg_front_right
-   leg_back_left
-   leg_back_right
-   merge_table
-   OUT_TABLE
-   ```
-
-4. Assert the five boxes expose editable numeric size and translation tuples, all five feed unique inputs of `merge_table`, `merge_table` feeds `OUT_TABLE`, and only `OUT_TABLE` has the final display/render flags.
-5. Cook the output and require no node error. Compare bounds to the declared graph within a documented numeric tolerance.
-6. Assert the scene revision advanced exactly as defined and the response lists no changed pre-existing node.
+1. Ask Codex to create the asset represented by `tests/fixtures/p2_v/table_graph.json`. Record that Codex native reasoning, not a hard-coded prompt mapper or object-specific tool, produced a general graph request.
+2. Run `houdini_graph_validate` and record its normalized graph, bounded summary, and canonical digest. Assert the read-only operation changes neither the scene fingerprint nor revision.
+3. Display and approve the complete normalized graph. Submit the unchanged graph and digest to `houdini_graph_apply`.
+4. Assert one new `/obj/HIA_Graph_<id>` exists and its live nodes, names, typed parameters, connections, display/render flags, cook status, and graph digest exactly match the normalized declaration. No pre-existing node may appear in `changed_nodes`.
+5. Run `houdini_graph_verify` and require it to agree with the validate/apply digest and report no undeclared node, parameter, connection, or flag.
+6. Repeat the validate/approve/apply/verify workflow in a fresh disposable HIP for `tests/fixtures/p2_v/stairs_graph.json`. Its node count and topology must differ from the first fixture while using the same five tools and Schema.
+7. Assert neither execution path branches on an asset label, special node role, fixed primitive count, fixed dimensions, or one fixed connection pattern.
+8. Cook the declared outputs and require no node error. Compare any declared geometric bounds within a documented numeric tolerance without inventing object semantics.
+9. Assert the scene revision advances exactly as defined for each apply and remains unchanged for validate/verify reads.
 
 ### Undo and isolation
 
@@ -178,11 +174,11 @@ This is not authorized by approval of this design document. Before running it, s
 
 ### Failure injection
 
-Inject deterministic failures after container creation, after a box, after connection creation, and before final flag assignment. Each failure must remove only the container created by that request within the same bounded operation. Existing nodes must remain byte-for-byte equivalent under the structural fixture. A rollback failure is a critical `ROLLBACK_FAILED` result and must never be reported as success.
+Inject deterministic failures after container creation, after creation of a declared node, after a typed parameter assignment, after a connection, and before final flag assignment. Each failure must remove only the container created by that request within the same bounded operation. Existing nodes must remain byte-for-byte equivalent under the structural fixture. A rollback failure is a critical `ROLLBACK_FAILED` result and must never be reported as success.
 
 ## Required structured error matrix
 
-At minimum, schema-valid tool-result tests exercise the codes admitted by the relevant output schema, including `INVALID_ARGUMENT`, `TOOL_NOT_ALLOWED`, `NODE_TYPE_NOT_ALLOWED`, `PARAMETER_NOT_ALLOWED`, `TOPOLOGY_NOT_ALLOWED`, `APPROVAL_REQUIRED`, `APPROVAL_DENIED`, `APPROVAL_EXPIRED`, `DEADLINE_EXCEEDED`, `HIP_SESSION_MISMATCH`, `SCENE_CONFLICT`, `IDEMPOTENCY_CONFLICT`, `NAME_CONFLICT`, `MAIN_THREAD_REQUIRED`, `CAPABILITY_MISMATCH`, `HOUDINI_UNAVAILABLE`, `COOK_FAILED`, `ROLLBACK_FAILED`, `BRIDGE_DISCONNECTED`, and `INTERNAL_ERROR`. Separately, adapter/transport tests exercise `CANCELLED`, `QUEUE_FULL`, and `SHUTTING_DOWN` without inserting those values into tool outputs.
+Schema-valid tool-result tests cover the closed union admitted by every output schema: `INVALID_ARGUMENT`, `SCHEMA_INVALID`, `NODE_TYPE_NOT_ALLOWED`, `NODE_TYPE_UNAVAILABLE`, `PARAMETER_NOT_ALLOWED`, `PARAMETER_TYPE_MISMATCH`, `PATH_SCOPE_VIOLATION`, `GRAPH_INVALID`, `TOPOLOGY_NOT_ALLOWED`, `DIGEST_MISMATCH`, `APPROVAL_REQUIRED`, `APPROVAL_DENIED`, `APPROVAL_MISMATCH`, `APPROVAL_EXPIRED`, `DEADLINE_EXCEEDED`, `HIP_SESSION_MISMATCH`, `SCENE_CONFLICT`, `IDEMPOTENCY_CONFLICT`, `NAME_CONFLICT`, `MAIN_THREAD_REQUIRED`, `CAPABILITY_MISMATCH`, `HOUDINI_UNAVAILABLE`, `WRITE_IN_PROGRESS`, `GRAPH_NOT_FOUND`, `OWNERSHIP_MISMATCH`, `COOK_FAILED`, `VERIFY_FAILED`, `POSTCONDITION_FAILED`, `ROLLBACK_FAILED`, `SCENE_STATE_INDETERMINATE`, `BRIDGE_DISCONNECTED`, and `INTERNAL_ERROR`. Separately, adapter/transport tests exercise `AUTH_REQUIRED`, `TOOL_NOT_ALLOWED`, `MALFORMED_REQUEST`, `REQUEST_TOO_LARGE`, `CANCELLED`, `QUEUE_FULL`, and `SHUTTING_DOWN` without inserting those values into tool outputs.
 
 Every error test also asserts `ok=false`, no false created/changed paths, no secret fields, and a safe retryability value.
 
@@ -203,10 +199,10 @@ Screenshots are optional supporting evidence and never substitute for `hou`-deri
 
 ## Design-review exit criteria
 
-Before implementation approval:
+Frozen B0 evidence:
 
-- The four-tool inventory, schemas, architecture, threat model, and this plan agree exactly.
+- The five-tool inventory, ten schemas, fixtures, architecture, threat model, and this plan agree exactly.
 - All JSON files parse, references resolve, forbidden capabilities are absent, and offline contract tests pass.
 - Existing P0/P1 tests remain green.
-- No MCP adapter, Bridge scene endpoint, Panel executor, `.codex/config.toml` entry, or `hou` implementation exists yet.
+- The pre-existing B1 adapter, Bridge, contract, and fake-executor drafts were excluded from B0 evidence. B1 may now adapt them offline, but they remain unregistered and unexecuted as product capability. No `.codex/config.toml`, live Panel executor, Houdini process, or `hou` implementation is enabled.
 - The working tree remains uncommitted until the user reviews this design package and explicitly approves the next sub-gate.
