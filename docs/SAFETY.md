@@ -45,6 +45,6 @@ This policy has the highest priority. When safety cannot be proven, stop and ask
 - Run all available tests and report their actual results. Mark unavailable live checks as unverified and explain why.
 - Stay within the currently authorized phase and stop at its boundary.
 
-## P0-B boundary
+## Current P2-V design-review boundary
 
-P0-B creates only documentation, minimal packaging metadata, a validation-only path policy, and offline standard-library tests. It starts no service, installs no dependency, creates no virtual environment, connects to no Houdini process, performs no scene operation, and implements no business capability.
+This sub-gate creates only architecture, versioned schemas, a threat model, offline contract tests, and a test plan for four named Houdini tools. It starts no MCP adapter, Bridge scene endpoint, Houdini process, network listener, or scene operation; it imports no `hou`; it writes no `.codex/config.toml`; and it implements no tool handler. Live scene work requires a later, separate approval after the design package is reviewed.

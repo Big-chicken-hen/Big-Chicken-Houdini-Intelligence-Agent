@@ -36,6 +36,6 @@ These rules have the highest priority for every development round in this reposi
 - Do not limit architecture to SOP; add context-specific adapters for OBJ, SOP, DOP, LOP, VOP, MaterialX, COP, TOP, KineFX, and APEX as their phases are authorized.
 - Never automatically save or overwrite HIP files, modify HDA definitions, delete nodes, or scan arbitrary filesystem locations.
 
-## Current phase: P1-V
+## Current phase: P2-V design review
 
-P1-V is limited to the pinned Codex 0.144.3 stdio client, authenticated loopback Bridge, Houdini 21.0.440 PySide6 Python Panel, project-local launcher, and offline/finitely bounded connection tests. It must not log in, persist chat content, use experimental or excluded app-server methods, modify a Houdini scene, create scene tools, or begin P2. P1-V working-tree changes remain uncommitted until the user explicitly approves their submission.
+P1-V is complete. The currently authorized P2-V sub-gate is limited to architecture, four versioned tool schemas, a threat model, an offline contract test, and a test plan for the first table-creation vertical slice. It must not create or register an MCP adapter, add Bridge scene endpoints, import or call `hou`, start Houdini, modify a scene, write `.codex/config.toml`, or implement any tool handler. Stop after offline verification and wait for the user to review this design package and separately approve implementation.

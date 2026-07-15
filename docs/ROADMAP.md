@@ -20,6 +20,8 @@ Deliverables: Houdini MCP host; Scene Gateway; main-thread queue; deterministic 
 
 Acceptance: a natural-language request can create an editable procedural SOP table; one Undo reverts the complete approved operation; retries do not duplicate work; stale revisions fail instead of overwriting scene changes.
 
+P2-V begins with a mandatory design-review gate: architecture, the exact four-tool schema inventory, threat model, and test plan are produced and verified offline before an MCP adapter, Bridge scene route, Panel executor, or `hou` write is implemented. Design approval does not itself authorize a live scene operation.
+
 ## P3 — Image modeling
 
 Deliverables: single/multiview image input; ModelSpec; reference cameras and backplates; scale markers; foundational procedural SOP recipes; explicit evidence and uncertainty fields.
