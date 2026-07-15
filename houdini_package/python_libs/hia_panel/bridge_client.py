@@ -1,18 +1,26 @@
-"""Asynchronous QtNetwork client for the authenticated local Bridge."""
+"""Asynchronous standard-library client for the authenticated local Bridge."""
 
 from __future__ import annotations
 
-import json
+import queue
+import threading
+import time
+import uuid
+from collections.abc import Callable
 from typing import Any
 
-from PySide6 import QtCore, QtNetwork
+from PySide6 import QtCore
 
+from .http_transport import HttpTransport
 from .network_response import normalize_bridge_response
 
 
 _RECONCILIATION_TIMEOUT_MS = 5_000
 _EVENT_POLL_TIMEOUT_MS = 20_000
 _DEFAULT_REQUEST_TIMEOUT_MS = 15_000
+_RESULT_DRAIN_INTERVAL_MS = 25
+_MAX_RESULTS_PER_TICK = 128
+_RESULT_QUEUE_LIMIT = 256
 
 
 class BridgeClient(QtCore.QObject):
@@ -22,40 +30,60 @@ class BridgeClient(QtCore.QObject):
     actionCompleted = QtCore.Signal(str, dict)
     requestFailed = QtCore.Signal(str, dict)
 
-    def __init__(self, base_url: str, token: str, parent: QtCore.QObject | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        parent: QtCore.QObject | None = None,
+        *,
+        transport_factory: Callable[..., HttpTransport] = HttpTransport,
+    ) -> None:
         super().__init__(parent)
-        self._base_url = base_url.rstrip("/")
-        self._token = token.encode("utf-8")
-        self._manager = QtNetwork.QNetworkAccessManager(self)
-        self._manager.finished.connect(self._finished)
+        self._result_queue: queue.Queue[dict[str, Any]] = queue.Queue(
+            maxsize=_RESULT_QUEUE_LIMIT
+        )
+        self._state_lock = threading.Lock()
+        self._generation = 1
+        self._closed = False
         self._event_request_active = False
+        self._active_event_request_id: str | None = None
+        self._pending: dict[str, dict[str, Any]] = {}
+        self._latest_request_by_context: dict[str, str] = {}
+        self._transport = transport_factory(base_url, token, self._result_queue)
 
-    def get_health(self) -> None:
-        self._request("GET", "/v1/health", context="health")
+        # This is the only UI-thread timer used by the transport.  Workers put
+        # plain dictionaries into the queue; only this slot emits Qt signals.
+        self._drain_timer = QtCore.QTimer(self)
+        self._drain_timer.setInterval(_RESULT_DRAIN_INTERVAL_MS)
+        self._drain_timer.timeout.connect(self._drain_results)
+        self._drain_timer.start()
 
-    def get_session(self, *, context: str = "session") -> None:
+    def get_health(self) -> str | None:
+        return self._request("GET", "/v1/health", context="health")
+
+    def get_session(self, *, context: str = "session") -> str | None:
         """Read Bridge session state with a caller-supplied correlation context."""
 
-        self._request("GET", "/v1/session", context=context)
+        return self._request("GET", "/v1/session", context=context)
 
-    def get_models(self) -> None:
+    def get_models(self) -> str | None:
         """Read the Bridge-sanitized stable Codex model catalog."""
 
-        self._request("GET", "/v1/models", context="models")
+        return self._request("GET", "/v1/models", context="models")
 
-    def start_thread(self, *, model: str | None = None) -> None:
+    def start_thread(self, *, model: str | None = None) -> str | None:
         payload: dict[str, Any] = {"action": "start"}
         if model is not None:
             payload["model"] = model
-        self._request(
+        return self._request(
             "POST",
             "/v1/session",
             payload,
             context="session_start",
         )
 
-    def resume_thread(self, thread_id: str) -> None:
-        self._request(
+    def resume_thread(self, thread_id: str) -> str | None:
+        return self._request(
             "POST",
             "/v1/session",
             {"action": "resume", "thread_id": thread_id},
@@ -69,39 +97,61 @@ class BridgeClient(QtCore.QObject):
         model: str | None = None,
         effort: str | None = None,
         context: str = "turn_start",
-    ) -> None:
+    ) -> str | None:
         payload: dict[str, Any] = {"text": text}
         if model is not None:
             payload["model"] = model
         if effort is not None:
             payload["effort"] = effort
-        self._request(
+        return self._request(
             "POST",
             "/v1/turn",
             payload,
             context=context,
         )
 
-    def interrupt(self, *, context: str = "interrupt") -> None:
-        self._request("POST", "/v1/interrupt", {}, context=context)
+    def interrupt(self, *, context: str = "interrupt") -> str | None:
+        return self._request("POST", "/v1/interrupt", {}, context=context)
 
-    def resolve_approval(self, request_id: Any, decision: str) -> None:
-        self._request(
+    def resolve_approval(self, request_id: Any, decision: str) -> str | None:
+        return self._request(
             "POST",
             "/v1/approval",
             {"request_id": request_id, "decision": decision},
             context=f"approval_{decision}",
         )
 
-    def poll_events(self, after: int, timeout: int = 15) -> None:
-        if self._event_request_active:
-            return
-        self._event_request_active = True
-        path = f"/v1/events?after={int(after)}&timeout={int(timeout)}"
-        self._request("GET", path, context="events")
+    def poll_events(self, after: int, timeout: int = 15) -> str | None:
+        # Normalize caller values before claiming the single event slot so an
+        # invalid value cannot leave polling permanently marked active.
+        after_value = int(after)
+        timeout_value = int(timeout)
+        path = f"/v1/events?after={after_value}&timeout={timeout_value}"
+        with self._state_lock:
+            if self._closed or self._event_request_active:
+                return None
+            self._event_request_active = True
+        return self._request("GET", path, context="events", event_request=True)
 
-    def shutdown(self) -> None:
-        self._request("POST", "/v1/shutdown", {}, context="shutdown")
+    def dispose(self) -> None:
+        """Idempotently release only this Panel's local client resources.
+
+        The Bridge belongs to the launcher and may be shared by more than one
+        Panel instance.  Disposing a Panel must therefore never request
+        process-wide Bridge termination.
+        """
+
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._generation += 1
+            self._pending.clear()
+            self._latest_request_by_context.clear()
+            self._event_request_active = False
+            self._active_event_request_id = None
+        self._drain_timer.stop()
+        self._transport.close(max_wait_seconds=0.0)
 
     def _request(
         self,
@@ -110,64 +160,146 @@ class BridgeClient(QtCore.QObject):
         payload: dict[str, Any] | None = None,
         *,
         context: str,
-    ) -> None:
-        request = QtNetwork.QNetworkRequest(QtCore.QUrl(self._base_url + path))
-        request.setRawHeader(b"Authorization", b"Bearer " + self._token)
-        request.setRawHeader(b"Accept", b"application/json")
-        request.setRawHeader(b"Cache-Control", b"no-store")
+        event_request: bool = False,
+    ) -> str | None:
         if context.startswith("session_reconcile:"):
-            transfer_timeout = _RECONCILIATION_TIMEOUT_MS
+            timeout_ms = _RECONCILIATION_TIMEOUT_MS
         elif context == "events":
-            transfer_timeout = _EVENT_POLL_TIMEOUT_MS
+            timeout_ms = _EVENT_POLL_TIMEOUT_MS
         else:
-            transfer_timeout = _DEFAULT_REQUEST_TIMEOUT_MS
-        request.setTransferTimeout(transfer_timeout)
-        if method == "GET":
-            reply = self._manager.get(request)
-        else:
-            request.setRawHeader(b"Content-Type", b"application/json")
-            encoded = json.dumps(
-                payload or {},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            reply = self._manager.post(request, encoded)
-        reply.setProperty("hia_context", context)
-        reply.setProperty("hia_method", method)
-        reply.setProperty("hia_path", path)
-        deadline = QtCore.QTimer(reply)
-        deadline.setSingleShot(True)
-        deadline.timeout.connect(reply.abort)
-        reply.finished.connect(deadline.stop)
-        deadline.start(transfer_timeout)
+            timeout_ms = _DEFAULT_REQUEST_TIMEOUT_MS
 
-    def _finished(self, reply: QtNetwork.QNetworkReply) -> None:
-        if bool(reply.property("hia_finished_processed")):
+        request_id = uuid.uuid4().hex
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        with self._state_lock:
+            if self._closed:
+                if event_request:
+                    self._event_request_active = False
+                return None
+            generation = self._generation
+            self._pending[request_id] = {
+                "generation": generation,
+                "context": context,
+                "method": method,
+                "path": path,
+                "deadline": deadline,
+            }
+            self._latest_request_by_context[context] = request_id
+            if event_request:
+                self._active_event_request_id = request_id
+        try:
+            self._transport.submit(
+                method=method,
+                path=path,
+                payload=payload,
+                context=context,
+                request_id=request_id,
+                generation=generation,
+                timeout_ms=timeout_ms,
+                deadline_monotonic=deadline,
+                event_request=event_request,
+            )
+        except Exception:
+            # Keep the same result path even for a local submission failure so
+            # only the main-thread drain timer emits Qt signals.
+            try:
+                self._result_queue.put_nowait(
+                    {
+                        "request_id": request_id,
+                        "generation": generation,
+                        "context": context,
+                        "method": method,
+                        "path": path,
+                        "raw": b"",
+                        "http_status": None,
+                        "error_kind": "transport_error",
+                        "error_message": "Unable to queue Bridge request",
+                        "elapsed_ms": 0,
+                    }
+                )
+            except queue.Full:
+                # The main-thread deadline will produce the bounded failure.
+                pass
+        return request_id
+
+    @QtCore.Slot()
+    def _drain_results(self) -> None:
+        self._expire_deadlines()
+        for _ in range(_MAX_RESULTS_PER_TICK):
+            try:
+                result = self._result_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                self._consume_result(result)
+            finally:
+                self._result_queue.task_done()
+
+    def _expire_deadlines(self) -> None:
+        now = time.monotonic()
+        with self._state_lock:
+            expired = [
+                (request_id, dict(pending))
+                for request_id, pending in self._pending.items()
+                if float(pending.get("deadline", now + 1.0)) <= now
+            ]
+        for request_id, pending in expired:
+            self._consume_result(
+                {
+                    "request_id": request_id,
+                    "generation": pending["generation"],
+                    "context": pending["context"],
+                    "method": pending["method"],
+                    "path": pending["path"],
+                    "raw": b"",
+                    "http_status": None,
+                    "error_kind": "timeout",
+                    "error_message": "Bridge request timed out",
+                    "elapsed_ms": 0,
+                }
+            )
+
+    def _consume_result(self, result: object) -> None:
+        if not isinstance(result, dict):
             return
-        reply.setProperty("hia_finished_processed", True)
-        context = str(reply.property("hia_context"))
-        method = str(reply.property("hia_method"))
-        path = str(reply.property("hia_path"))
-        if context == "events":
-            self._event_request_active = False
-        raw = bytes(reply.readAll())
-        qt_error_code = self._integer_value(reply.error())
-        status_attribute = getattr(
-            QtNetwork.QNetworkRequest,
-            "HttpStatusCodeAttribute",
-            None,
-        )
-        if status_attribute is None:
-            status_attribute = QtNetwork.QNetworkRequest.Attribute.HttpStatusCodeAttribute
-        http_status = self._integer_value(reply.attribute(status_attribute))
+        request_id = result.get("request_id")
+        generation = result.get("generation")
+        if not isinstance(request_id, str) or not isinstance(generation, int):
+            return
+        with self._state_lock:
+            pending = self._pending.get(request_id)
+            if pending is None or pending.get("generation") != generation:
+                return
+            self._pending.pop(request_id, None)
+            context = str(pending.get("context", ""))
+            is_latest = self._latest_request_by_context.get(context) == request_id
+            if is_latest:
+                self._latest_request_by_context.pop(context, None)
+            if self._active_event_request_id == request_id:
+                self._active_event_request_id = None
+                self._event_request_active = False
+            if self._closed or generation != self._generation or not is_latest:
+                return
+
+        method = str(pending.get("method", ""))
+        path = str(pending.get("path", ""))
+        raw = result.get("raw", b"")
+        if not isinstance(raw, bytes):
+            raw = b""
         payload = normalize_bridge_response(
             raw,
-            qt_error_code=qt_error_code,
-            error_string=reply.errorString(),
-            http_status=http_status,
+            error_kind=(
+                str(result["error_kind"])
+                if result.get("error_kind") is not None
+                else None
+            ),
+            error_message=str(result.get("error_message", "")),
+            http_status=self._integer_value(result.get("http_status")),
             context=context,
             method=method,
             path=path,
+            request_id=request_id,
+            generation=generation,
         )
         if not payload.get("ok", False):
             self.requestFailed.emit(context, payload)
@@ -179,7 +311,6 @@ class BridgeClient(QtCore.QObject):
             self.eventsReceived.emit(payload)
         else:
             self.actionCompleted.emit(context, payload)
-        reply.deleteLater()
 
     @staticmethod
     def _integer_value(value: Any) -> int | None:

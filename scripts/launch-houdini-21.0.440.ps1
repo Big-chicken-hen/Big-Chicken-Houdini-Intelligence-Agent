@@ -146,6 +146,8 @@ $bridgeProcess.StartInfo = $bridgeInfo
 $bridgeStarted = $false
 $bootstrap = $null
 $houdiniProcess = $null
+$houdiniStarted = $false
+$houdiniExited = $false
 $houdiniExitCode = 0
 $ownedCodexPid = $null
 
@@ -196,10 +198,20 @@ try {
     if (-not $houdiniProcess.Start()) {
         throw 'Houdini process did not start'
     }
+    $houdiniStarted = $true
     $houdiniProcess.WaitForExit()
+    $houdiniExited = $houdiniProcess.HasExited
     $houdiniExitCode = $houdiniProcess.ExitCode
 } finally {
-    if ($bridgeStarted -and $null -eq $ownedCodexPid -and -not $bridgeProcess.HasExited) {
+    $bridgeCleanupAllowed = (-not $houdiniStarted) -or (
+        $houdiniExited -and
+        $null -ne $houdiniProcess -and
+        $houdiniProcess.HasExited
+    )
+    if (-not $bridgeCleanupAllowed -and $bridgeStarted -and -not $bridgeProcess.HasExited) {
+        Write-Warning 'Houdini exit was not confirmed; leaving the shared Bridge running.'
+    }
+    if ($bridgeCleanupAllowed -and $bridgeStarted -and $null -eq $ownedCodexPid -and -not $bridgeProcess.HasExited) {
         $childProcesses = Get-CimInstance `
             -ClassName Win32_Process `
             -Filter "ParentProcessId = $($bridgeProcess.Id)" `
@@ -214,7 +226,7 @@ try {
             $ownedCodexPid = [int]$ownedCodex.ProcessId
         }
     }
-    if ($bridgeStarted -and $null -ne $bootstrap -and -not $bridgeProcess.HasExited) {
+    if ($bridgeCleanupAllowed -and $bridgeStarted -and $null -ne $bootstrap -and -not $bridgeProcess.HasExited) {
         try {
             $headers = @{ Authorization = "Bearer $($bootstrap.token)" }
             Invoke-RestMethod `
@@ -228,11 +240,11 @@ try {
             Write-Warning "Graceful Bridge shutdown failed: $($_.Exception.Message)"
         }
     }
-    if ($bridgeStarted -and -not $bridgeProcess.HasExited -and -not $bridgeProcess.WaitForExit(7000)) {
+    if ($bridgeCleanupAllowed -and $bridgeStarted -and -not $bridgeProcess.HasExited -and -not $bridgeProcess.WaitForExit(7000)) {
         $bridgeProcess.Kill()
         $bridgeProcess.WaitForExit()
     }
-    if ($null -ne $ownedCodexPid) {
+    if ($bridgeCleanupAllowed -and $null -ne $ownedCodexPid) {
         $codexProcess = Get-Process -Id $ownedCodexPid -ErrorAction SilentlyContinue
         if ($null -ne $codexProcess) {
             Write-Warning 'Codex app-server survived Bridge shutdown; terminating the exact child process.'

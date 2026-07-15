@@ -132,15 +132,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.approval_group.setVisible(False)
         root.addWidget(self.approval_group)
 
-        self.input_edit = QtWidgets.QPlainTextEdit()
+        self.input_edit = QtWidgets.QTextEdit()
         self.input_edit.setPlaceholderText("输入自然语言请求。本阶段只连接 Codex，不操作 Houdini 场景。")
         self.input_edit.setMaximumHeight(110)
-        self.input_edit.setAttribute(
-            QtCore.Qt.WidgetAttribute.WA_InputMethodEnabled,
-            True,
-        )
-        self.input_edit.setInputMethodHints(QtCore.Qt.InputMethodHint.ImhNone)
-        self.input_edit.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         root.addWidget(self.input_edit)
 
         action_row = QtWidgets.QHBoxLayout()
@@ -829,10 +823,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _schedule_poll(self, delay_ms: int) -> None:
         if not self._polling_enabled or self._client is None:
             return
-        QtCore.QTimer.singleShot(
-            delay_ms,
-            lambda: self._client.poll_events(self._event_sequence),
-        )
+        QtCore.QTimer.singleShot(delay_ms, self._poll_once)
+
+    @QtCore.Slot()
+    def _poll_once(self) -> None:
+        if not self._polling_enabled or self._client is None:
+            return
+        self._client.poll_events(self._event_sequence)
 
     def _append_system(self, text: str) -> None:
         self.conversation.moveCursor(QtGui.QTextCursor.MoveOperation.End)
@@ -840,6 +837,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._polling_enabled = False
-        if self._client is not None:
-            self._client.shutdown()
+        client = self._client
+        self._client = None
+        if client is not None:
+            client.dispose()
         super().closeEvent(event)

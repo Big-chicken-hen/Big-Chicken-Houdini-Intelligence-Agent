@@ -17,7 +17,8 @@ from hia_panel.turn_state import PanelTurnState, TurnPhase  # noqa: E402
 
 
 class _HeadlessQWidget:
-    pass
+    def closeEvent(self, event: Any) -> None:
+        event.base_close_calls += 1
 
 
 class _HeadlessTimer:
@@ -172,6 +173,7 @@ class _BridgeClientShim:
         self.interrupt_contexts: list[str] = []
         self.session_contexts: list[str] = []
         self.model_requests = 0
+        self.dispose_calls = 0
 
     def start_thread(self, *, model: str | None) -> None:
         self.thread_requests.append(model)
@@ -194,6 +196,14 @@ class _BridgeClientShim:
 
     def get_session(self, *, context: str) -> None:
         self.session_contexts.append(context)
+
+    def dispose(self) -> None:
+        self.dispose_calls += 1
+
+
+class _CloseEvent:
+    def __init__(self) -> None:
+        self.base_close_calls = 0
 
 
 def _make_panel() -> Any:
@@ -278,6 +288,21 @@ class PanelWiringTests(unittest.TestCase):
         self.assertTrue(panel.resume_thread_button.isEnabled())
         self.assertTrue(panel.send_button.isEnabled())
         self.assertFalse(panel.stop_button.isEnabled())
+
+    def test_close_event_only_disposes_local_client_and_is_repeat_safe(self) -> None:
+        panel = _make_panel()
+        client = panel._client
+        event = _CloseEvent()
+        panel._polling_enabled = True
+
+        panel.closeEvent(event)
+        panel.closeEvent(event)
+
+        self.assertFalse(panel._polling_enabled)
+        self.assertIsNone(panel._client)
+        self.assertEqual(1, client.dispose_calls)
+        self.assertEqual(2, event.base_close_calls)
+        self.assertFalse(hasattr(client, "shutdown"))
 
     def test_no_active_interrupt_is_authoritative_after_final_delta(self) -> None:
         panel = _make_panel()

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -15,10 +16,12 @@ BRIDGE_CLIENT_PATH = PANEL_LIB_ROOT / "hia_panel" / "bridge_client.py"
 
 
 class _BoundSignal:
-    def __init__(self) -> None:
+    def __init__(self, owner: object | None = None) -> None:
+        self.owner = owner
         self.callbacks: list[Any] = []
         self.connect_count = 0
         self.emissions: list[tuple[Any, ...]] = []
+        self.emission_threads: list[int] = []
 
     def connect(self, callback: Any) -> None:
         self.connect_count += 1
@@ -26,8 +29,14 @@ class _BoundSignal:
 
     def emit(self, *arguments: Any) -> None:
         self.emissions.append(arguments)
-        for callback in tuple(self.callbacks):
-            callback(*arguments)
+        self.emission_threads.append(threading.get_ident())
+        previous_sender = _QObject._active_sender
+        _QObject._active_sender = self.owner
+        try:
+            for callback in tuple(self.callbacks):
+                callback(*arguments)
+        finally:
+            _QObject._active_sender = previous_sender
 
 
 class _SignalDescriptor:
@@ -42,135 +51,108 @@ class _SignalDescriptor:
             return self
         signal = instance.__dict__.get(self._name)
         if signal is None:
-            signal = _BoundSignal()
+            signal = _BoundSignal(instance)
             instance.__dict__[self._name] = signal
         return signal
 
 
 class _QObject:
+    _active_sender: object | None = None
+
     def __init__(self, parent: object | None = None) -> None:
         self.parent = parent
 
-
-class _QUrl:
-    def __init__(self, value: str) -> None:
-        self.value = value
+    def sender(self) -> object | None:
+        return self._active_sender
 
 
-class _Timer(_QObject):
-    def __init__(self, parent: object | None = None) -> None:
-        super().__init__(parent)
-        self.timeout = _BoundSignal()
-        self.stopped = False
-        self.started_with: int | None = None
+def _slot(*_types: object, **_options: object) -> Any:
+    del _types, _options
 
-    def setSingleShot(self, _single_shot: bool) -> None:
-        pass
+    def decorate(callback: Any) -> Any:
+        callback._is_test_qt_slot = True
+        return callback
 
-    def start(self, timeout_ms: int) -> None:
-        self.started_with = timeout_ms
-
-    def stop(self) -> None:
-        self.stopped = True
+    return decorate
 
 
-class _NetworkRequest:
-    HttpStatusCodeAttribute = "http_status"
-
-    class Attribute:
-        HttpStatusCodeAttribute = "http_status"
-
-    def __init__(self, url: _QUrl) -> None:
-        self.url = url
-        self.headers: dict[bytes, bytes] = {}
-        self.transfer_timeout: int | None = None
-
-    def setRawHeader(self, name: bytes, value: bytes) -> None:
-        self.headers[name] = value
-
-    def setTransferTimeout(self, timeout_ms: int) -> None:
-        self.transfer_timeout = timeout_ms
-
-
-class _Reply:
-    def __init__(self, body: bytes = b'{"ok":true}') -> None:
-        self.finished = _BoundSignal()
-        self._properties: dict[str, object] = {}
-        self._body = body
-        self.delete_later_count = 0
-        self.abort_count = 0
-
-    def setProperty(self, name: str, value: object) -> None:
-        self._properties[name] = value
-
-    def property(self, name: str) -> object | None:
-        return self._properties.get(name)
-
-    def abort(self) -> None:
-        self.abort_count += 1
-
-    def readAll(self) -> bytes:
-        return self._body
-
-    def error(self) -> int:
-        return 0
-
-    def errorString(self) -> str:
-        return ""
-
-    def attribute(self, name: str) -> int | None:
-        if name == "http_status":
-            return 200
-        return None
-
-    def deleteLater(self) -> None:
-        self.delete_later_count += 1
-
-
-class _NetworkAccessManager(_QObject):
-    instances: list["_NetworkAccessManager"] = []
+class _DrainTimer(_QObject):
+    instances: list["_DrainTimer"] = []
 
     def __init__(self, parent: object | None = None) -> None:
         super().__init__(parent)
-        self.finished = _BoundSignal()
-        self.replies: list[_Reply] = []
+        self.timeout = _BoundSignal(self)
+        self.interval: int | None = None
+        self.start_count = 0
+        self.stop_count = 0
         self.__class__.instances.append(self)
 
-    def get(self, _request: _NetworkRequest) -> _Reply:
-        reply = _Reply()
-        self.replies.append(reply)
-        return reply
+    def setInterval(self, interval_ms: int) -> None:
+        self.interval = interval_ms
 
-    def post(self, _request: _NetworkRequest, _body: bytes) -> _Reply:
-        reply = _Reply()
-        self.replies.append(reply)
-        return reply
+    def start(self) -> None:
+        self.start_count += 1
+
+    def stop(self) -> None:
+        self.stop_count += 1
 
 
-def _load_bridge_client() -> tuple[type, _NetworkAccessManager]:
+class _QueueOnlyTransport:
+    instances: list["_QueueOnlyTransport"] = []
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        result_queue: Any,
+        *,
+        fail_submit: bool = False,
+    ) -> None:
+        self.base_url = base_url
+        self.token = token
+        self.result_queue = result_queue
+        self.fail_submit = fail_submit
+        self.submissions: list[dict[str, Any]] = []
+        self.close_calls: list[float] = []
+        self.__class__.instances.append(self)
+
+    def submit(self, **request: Any) -> str:
+        self.submissions.append(dict(request))
+        if self.fail_submit:
+            raise RuntimeError("synthetic submit failure")
+        return str(request["request_id"])
+
+    def close(self, max_wait_seconds: float = 0.0) -> None:
+        self.close_calls.append(max_wait_seconds)
+
+
+def _load_transport_bridge_client(
+    *,
+    fail_submit: bool = False,
+) -> tuple[Any, _QueueOnlyTransport]:
     pyside = types.ModuleType("PySide6")
     qt_core = types.ModuleType("PySide6.QtCore")
-    qt_network = types.ModuleType("PySide6.QtNetwork")
     qt_core.QObject = _QObject
-    qt_core.QUrl = _QUrl
-    qt_core.QTimer = _Timer
+    qt_core.QTimer = _DrainTimer
     qt_core.Signal = _SignalDescriptor
-    qt_network.QNetworkAccessManager = _NetworkAccessManager
-    qt_network.QNetworkRequest = _NetworkRequest
-    qt_network.QNetworkReply = _Reply
+    qt_core.Slot = _slot
     pyside.QtCore = qt_core
-    pyside.QtNetwork = qt_network
 
     sys.path.insert(0, str(PANEL_LIB_ROOT))
-    replacements = {
-        "PySide6": pyside,
-        "PySide6.QtCore": qt_core,
-        "PySide6.QtNetwork": qt_network,
-    }
+    replacements = {"PySide6": pyside, "PySide6.QtCore": qt_core}
     missing = object()
     saved = {name: sys.modules.get(name, missing) for name in replacements}
-    module_name = "hia_panel._headless_bridge_client_reply"
+    module_name = "hia_panel._headless_bridge_client_transport"
     saved_module = sys.modules.get(module_name, missing)
+
+    def factory(base_url: str, token: str, result_queue: Any) -> _QueueOnlyTransport:
+        return _QueueOnlyTransport(
+            base_url,
+            token,
+            result_queue,
+            fail_submit=fail_submit,
+        )
+
     try:
         sys.modules.update(replacements)
         spec = importlib.util.spec_from_file_location(module_name, BRIDGE_CLIENT_PATH)
@@ -179,8 +161,12 @@ def _load_bridge_client() -> tuple[type, _NetworkAccessManager]:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-        client = module.BridgeClient("http://127.0.0.1:49152", "secret")
-        return module.BridgeClient, client
+        client = module.BridgeClient(
+            "http://127.0.0.1:49152",
+            "secret",
+            transport_factory=factory,
+        )
+        return client, client._transport
     finally:
         if saved_module is missing:
             sys.modules.pop(module_name, None)
@@ -193,38 +179,252 @@ def _load_bridge_client() -> tuple[type, _NetworkAccessManager]:
                 sys.modules[name] = original
 
 
-class BridgeClientReplyTests(unittest.TestCase):
+def _result_for(
+    submission: dict[str, Any],
+    *,
+    raw: bytes = b'{"ok":true}',
+    error_kind: str | None = None,
+    error_message: str = "",
+    http_status: int | None = 200,
+) -> dict[str, Any]:
+    return {
+        "request_id": submission["request_id"],
+        "generation": submission["generation"],
+        "context": submission["context"],
+        "method": submission["method"],
+        "path": submission["path"],
+        "raw": raw,
+        "http_status": http_status,
+        "error_kind": error_kind,
+        "error_message": error_message,
+        "elapsed_ms": 1,
+    }
+
+
+class BridgeClientQueueTests(unittest.TestCase):
     def setUp(self) -> None:
-        _NetworkAccessManager.instances.clear()
+        _DrainTimer.instances.clear()
+        _QueueOnlyTransport.instances.clear()
 
-    def test_manager_finished_is_connected_once(self) -> None:
-        _client_type, client = _load_bridge_client()
+    def test_houdini_package_has_no_qt_network_transport_symbols(self) -> None:
+        package_root = REPOSITORY_ROOT / "houdini_package"
+        forbidden = (
+            "QtNetwork",
+            "QNetworkAccessManager",
+            "QNetworkReply",
+            "reply.finished",
+        )
+        checked: list[Path] = []
+        for path in package_root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in {
+                ".json",
+                ".py",
+                ".pypanel",
+            }:
+                continue
+            checked.append(path)
+            source = path.read_text(encoding="utf-8")
+            for symbol in forbidden:
+                self.assertNotIn(symbol, source, str(path))
+        self.assertTrue(checked)
 
-        self.assertEqual(client._manager.finished.connect_count, 1)
+        bridge_source = BRIDGE_CLIENT_PATH.read_text(encoding="utf-8")
+        transport_source = (
+            PANEL_LIB_ROOT / "hia_panel" / "http_transport.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("from PySide6 import QtCore", bridge_source)
+        self.assertNotIn("PySide6", transport_source)
+        self.assertNotIn("QtCore", transport_source)
+        self.assertNotIn("Signal", transport_source)
+
+    def test_single_timer_drains_plain_dict_and_emits_on_calling_thread(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        self.assertEqual(1, len(_DrainTimer.instances))
+        timer = _DrainTimer.instances[0]
+        self.assertEqual(25, timer.interval)
+        self.assertEqual(1, timer.start_count)
+        self.assertEqual([client._drain_results], timer.timeout.callbacks)
+
+        request_id = client.get_health()
+        self.assertIsNotNone(request_id)
+        self.assertEqual([], client.healthReceived.emissions)
+        self.assertFalse(hasattr(transport, "healthReceived"))
+        self.assertFalse(hasattr(transport, "requestFailed"))
+
+        transport.result_queue.put(_result_for(transport.submissions[-1]))
+        calling_thread = threading.get_ident()
+        timer.timeout.emit()
+
+        self.assertEqual([({"ok": True},)], client.healthReceived.emissions)
+        self.assertEqual(
+            calling_thread,
+            client.healthReceived.emission_threads[-1],
+        )
+
+    def test_old_generation_unknown_request_and_old_same_context_are_dropped(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        first_id = client.get_health()
+        first = dict(transport.submissions[-1])
+        second_id = client.get_health()
+        second = dict(transport.submissions[-1])
+        self.assertNotEqual(first_id, second_id)
+
+        old_generation = _result_for(first)
+        old_generation["generation"] = first["generation"] - 1
+        unknown = _result_for(first)
+        unknown["request_id"] = "unknown-request"
+        client._result_queue.put(old_generation)
+        client._result_queue.put(unknown)
+        client._result_queue.put(_result_for(first))
+        client._drain_results()
+
+        self.assertEqual([], client.healthReceived.emissions)
+        self.assertIn(second_id, client._pending)
+
+        client._result_queue.put(_result_for(second))
+        client._drain_results()
+        self.assertEqual([({"ok": True},)], client.healthReceived.emissions)
+
+    def test_event_request_active_is_atomic_and_released_by_completion(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        barrier = threading.Barrier(9)
+        returned: list[str | None] = []
+        returned_lock = threading.Lock()
+
+        def poll() -> None:
+            barrier.wait()
+            value = client.poll_events(0)
+            with returned_lock:
+                returned.append(value)
+
+        threads = [threading.Thread(target=poll) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(1.0)
+            self.assertFalse(thread.is_alive())
+
+        accepted = [value for value in returned if value is not None]
+        event_submissions = [
+            request
+            for request in transport.submissions
+            if request["context"] == "events"
+        ]
+        self.assertEqual(1, len(accepted))
+        self.assertEqual(1, len(event_submissions))
+        self.assertTrue(client._event_request_active)
+
+        client._result_queue.put(_result_for(event_submissions[0]))
+        client._drain_results()
+        self.assertFalse(client._event_request_active)
+        self.assertEqual(1, len(client.eventsReceived.emissions))
+        self.assertIsNotNone(client.poll_events(0))
+
+    def test_event_deadline_recovers_polling_and_late_result_is_ignored(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        request_id = client.poll_events(0)
+        self.assertIsNotNone(request_id)
+        submission = dict(transport.submissions[-1])
+        client._pending[str(request_id)]["deadline"] = time.monotonic() - 1.0
+
+        client._drain_results()
+
+        self.assertFalse(client._event_request_active)
+        self.assertEqual(1, len(client.requestFailed.emissions))
+        context, payload = client.requestFailed.emissions[0]
+        self.assertEqual("events", context)
+        self.assertEqual(
+            "NETWORK_TIMEOUT",
+            payload["structured_error"]["code"],
+        )
+
+        client._result_queue.put(_result_for(submission))
+        client._drain_results()
+        self.assertEqual([], client.eventsReceived.emissions)
+        self.assertEqual(1, len(client.requestFailed.emissions))
+        self.assertIsNotNone(client.poll_events(0))
+
+    def test_submit_failure_is_emitted_only_by_timer_drain(self) -> None:
+        client, transport = _load_transport_bridge_client(fail_submit=True)
+        request_id = client.get_health()
+
+        self.assertIsNotNone(request_id)
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual([], client.requestFailed.emissions)
+
+        _DrainTimer.instances[0].timeout.emit()
+
+        self.assertEqual(1, len(client.requestFailed.emissions))
+        context, payload = client.requestFailed.emissions[0]
+        self.assertEqual("health", context)
+        self.assertEqual("NETWORK_ERROR", payload["structured_error"]["code"])
+
+    def test_dispose_is_idempotent_bounded_and_never_shuts_down_bridge(self) -> None:
+        client, transport = _load_transport_bridge_client()
         client.get_health()
-        client.get_session()
-        self.assertEqual(client._manager.finished.connect_count, 1)
+        health_submission = dict(transport.submissions[-1])
 
-    def test_same_reply_is_processed_and_deleted_exactly_once(self) -> None:
-        _client_type, client = _load_bridge_client()
-        client.get_health()
-        reply = client._manager.replies[-1]
+        client.dispose()
+        client.dispose()
 
-        client._manager.finished.emit(reply)
-        client._manager.finished.emit(reply)
+        self.assertEqual([0.0], transport.close_calls)
+        self.assertEqual(1, _DrainTimer.instances[0].stop_count)
+        self.assertTrue(client._closed)
+        self.assertEqual({}, client._pending)
+        self.assertIsNone(client.get_health())
+        self.assertNotIn(
+            "/v1/shutdown",
+            [submission["path"] for submission in transport.submissions],
+        )
 
-        self.assertEqual(reply.delete_later_count, 1)
-        self.assertEqual(len(client.healthReceived.emissions), 1)
-        self.assertEqual(client.healthReceived.emissions[0][0], {"ok": True})
-        self.assertEqual(reply.finished.connect_count, 1)
+        client._result_queue.put(_result_for(health_submission))
+        client._drain_results()
+        self.assertEqual([], client.healthReceived.emissions)
+        self.assertEqual([], client.requestFailed.emissions)
 
-    def test_source_has_no_per_reply_finished_lambda(self) -> None:
-        source = BRIDGE_CLIENT_PATH.read_text(encoding="utf-8")
+    def test_disposed_panel_a_does_not_affect_panel_b_health_or_events(self) -> None:
+        panel_a, transport_a = _load_transport_bridge_client()
+        panel_b, transport_b = _load_transport_bridge_client()
 
-        self.assertNotIn("reply.finished.connect(lambda", source)
-        self.assertNotIn("current=reply", source)
-        self.assertIn("self._manager.finished.connect(self._finished)", source)
-        self.assertNotIn("eventFilter", source)
+        panel_a.dispose()
+        health_id = panel_b.get_health()
+        events_id = panel_b.poll_events(0)
+
+        self.assertIsNotNone(health_id)
+        self.assertIsNotNone(events_id)
+        self.assertEqual([], transport_a.submissions)
+        self.assertEqual(
+            ["/v1/health", "/v1/events?after=0&timeout=15"],
+            [submission["path"] for submission in transport_b.submissions],
+        )
+        for submission in transport_b.submissions:
+            transport_b.result_queue.put(_result_for(submission))
+        panel_b._drain_results()
+        self.assertEqual([({"ok": True},)], panel_b.healthReceived.emissions)
+        self.assertEqual([({"ok": True},)], panel_b.eventsReceived.emissions)
+        self.assertNotIn(
+            "/v1/shutdown",
+            [
+                submission["path"]
+                for transport in (transport_a, transport_b)
+                for submission in transport.submissions
+            ],
+        )
+
+    def test_dispose_then_reopen_same_session_health_succeeds(self) -> None:
+        first_panel, first_transport = _load_transport_bridge_client()
+        first_panel.dispose()
+
+        reopened_panel, reopened_transport = _load_transport_bridge_client()
+        reopened_panel.get_health()
+        health_submission = dict(reopened_transport.submissions[-1])
+        reopened_transport.result_queue.put(_result_for(health_submission))
+        reopened_panel._drain_results()
+
+        self.assertEqual([], first_transport.submissions)
+        self.assertEqual([({"ok": True},)], reopened_panel.healthReceived.emissions)
+        self.assertEqual("/v1/health", health_submission["path"])
 
 
 if __name__ == "__main__":

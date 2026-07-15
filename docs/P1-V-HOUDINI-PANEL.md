@@ -11,7 +11,9 @@ Codex remains the only intelligent component. The Bridge forwards fixed protocol
 ## Process and trust boundary
 
 ```text
-Houdini Python Panel (PySide6 + QtNetwork)
+Houdini Python Panel (PySide6 UI + standard-library HTTP daemon workers)
+    -> thread-safe bounded result queue
+    -> main-thread QTimer drain
     -> Bearer-authenticated HTTP long polling
     -> 127.0.0.1:<random port> standard-library Bridge
     -> stdio JSONL
@@ -52,15 +54,19 @@ All endpoints are under `/v1` and require `Authorization: Bearer <session-token>
 | `GET /v1/events` | Bounded long polling; never blocks the Houdini UI thread |
 | `POST /v1/interrupt` | Interrupt the selected active Turn |
 | `POST /v1/approval` | Return one allow/deny decision for a pending approval |
-| `POST /v1/shutdown` | Gracefully stop the Bridge and its owned app-server |
+| `POST /v1/shutdown` | Launcher-only: gracefully stop the Bridge and its owned app-server after Houdini exits |
+
+The launcher owns the shared Bridge process. Closing or reopening a Python
+Panel only disposes that Panel's local polling, timer, pending requests, and
+HTTP workers; it never requests process-wide Bridge shutdown.
 
 The in-memory event ring is bounded and process-local. It is not a chat database and is discarded when the Bridge exits. Codex Thread history remains authoritative and is read through `thread/read` when a Thread is resumed.
 
-The Panel correlates every Turn start, interrupt, and recovery read with an immutable Turn-generation token. A `turn/start` acknowledgement never unlocks the controls; only a matching completion or authoritative Bridge state with `turn_active=false` does. Unmatched lifecycle events, late acknowledgements, event gaps, and terminal conflicts may trigger one `GET /v1/session` per reason and Turn generation. Each recovery read has a five-second absolute Qt deadline, does not retry itself, and disables session-selection actions while in flight. A stale response cannot unlock or re-lock a newer Turn.
+The Panel correlates every Turn start, interrupt, and recovery read with an immutable Turn-generation token. A `turn/start` acknowledgement never unlocks the controls; only a matching completion or authoritative Bridge state with `turn_active=false` does. Unmatched lifecycle events, late acknowledgements, event gaps, and terminal conflicts may trigger one `GET /v1/session` per reason and Turn generation. Each recovery read has a five-second absolute monotonic deadline, does not retry itself, and disables session-selection actions while in flight. A stale response cannot unlock or re-lock a newer Turn.
 
 The model selector is populated only from `model/list`; no model identifier is hard-coded in the Panel. Starting a new Thread forwards the chosen model through `thread/start.model`. The next Turn forwards the current model and reasoning effort through `turn/start.model` and `turn/start.effort`, so changing either selector on an existing Thread takes effect on the next Turn. Both selectors are locked while a Turn is active. If catalog loading fails, the Panel keeps a **Codex 默认** choice and chat remains available.
 
-The natural-language editor delegates composition entirely to Qt. It explicitly enables `WA_InputMethodEnabled`, uses `ImhNone` and `StrongFocus`, and installs no key handler, input-method handler, or event filter. Network callbacks update text and enabled state without moving focus to another widget. JSON transport remains UTF-8 and preserves Unicode without ASCII escaping.
+The natural-language editor is a stock `QTextEdit` with no IME or focus overrides, selected after an offline Houdini IME A/B check found stock `QPlainTextEdit` intermittently unreliable. It adds no `WA_InputMethodEnabled`, input-method-hint, focus-policy, event-filter, key-handler, input-method-handler, viewport, or automatic-focus override. The read-only conversation and approval displays remain `QPlainTextEdit`. Network callbacks update text and enabled state without moving focus to another widget. JSON transport remains UTF-8 and preserves Unicode without ASCII escaping.
 
 ## Launch and open the Panel
 
@@ -90,7 +96,7 @@ Headless unit tests prove exact Unicode string forwarding but cannot prove that 
 5. Verify the displayed `You:` text is byte-for-byte equivalent when encoded as UTF-8, the selected model/effort remain locked for the active Turn, and they unlock only after terminal state reconciliation.
 6. Repeat with a second Turn to confirm network events and button refreshes do not steal focus from an in-progress IME composition.
 
-Closing the Panel sends an asynchronous authenticated shutdown request. Closing Houdini through the launcher performs a deterministic shutdown and waits for the Bridge. If graceful shutdown fails, the launcher terminates only the exact Bridge and app-server process IDs it created; it never kills Houdini as part of Bridge cleanup.
+Closing the Panel performs only an idempotent local dispose and never requests global Bridge shutdown. After the launcher confirms that Houdini has exited, it sends the sole authenticated shutdown request and waits for the Bridge. If graceful shutdown fails, the launcher terminates only the exact Bridge and app-server process IDs it created; it never kills Houdini as part of Bridge cleanup.
 
 ## Verification boundary
 
