@@ -473,38 +473,62 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
                 self.assertEqual(1, client.turn_request_count)
 
 
-class BridgeSessionNativeToolContainmentTests(unittest.TestCase):
+class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
     def make_session(self) -> tuple[BridgeSession, _RecordingClient]:
         client = _RecordingClient()
         return BridgeSession(REPOSITORY_ROOT, client, EventBuffer()), client
 
-    def test_thread_start_is_fixed_read_only_without_approval_escalation(self) -> None:
+    def test_thread_start_enables_workspace_write_with_native_hython_instructions(
+        self,
+    ) -> None:
         session, client = self.make_session()
 
         session.start_thread()
 
         method, params = client.requests[0]
         self.assertEqual("thread/start", method)
-        self.assertEqual("read-only", params["sandbox"])
-        self.assertEqual("never", params["approvalPolicy"])
-        self.assertNotIn("developerInstructions", params)
+        self.assertEqual("workspace-write", params["sandbox"])
+        self.assertEqual("on-request", params["approvalPolicy"])
+        instructions = params["developerInstructions"]
+        self.assertLessEqual(len(instructions), 512)
+        for required_text in (
+            "默认作用于当前打开场景",
+            "FXHoudini MCP 与 HOM",
+            "优先调用 execute_python",
+            "实时 MCP 不可用时直接说明",
+            "不得改成离线 HIP",
+            "只有用户明确要求离线",
+            "PATH 中的 hython.exe",
+            "实时代码禁止 hou.hipFile.clear/load/save",
+            "生成新资产时放入唯一新根",
+            "不要调用 request_user_input",
+            "信息不足时自行采用合理默认值继续",
+            "只有无法执行时才直接报告原因",
+            "禁止屏幕接管",
+        ):
+            with self.subTest(required_text=required_text):
+                self.assertIn(required_text, instructions)
+        self.assertNotIn("不使用 fxhoudinimcp", instructions)
+        self.assertNotIn(".runtime/jobs", instructions)
+        for asset_specific_text in ("售货机", "桌子", "楼梯", "vending_machine"):
+            self.assertNotIn(asset_specific_text, instructions)
         self.assertNotIn("baseInstructions", params)
         self.assertNotIn("config", params)
 
-    def test_thread_resume_is_fixed_read_only_without_approval_escalation(self) -> None:
+    def test_thread_resume_enables_workspace_write_with_on_request_approval(self) -> None:
         session, client = self.make_session()
 
         session.resume_thread("thread-existing")
 
         method, params = client.requests[0]
         self.assertEqual("thread/resume", method)
-        self.assertEqual("read-only", params["sandbox"])
-        self.assertEqual("never", params["approvalPolicy"])
+        self.assertEqual("workspace-write", params["sandbox"])
+        self.assertEqual("on-request", params["approvalPolicy"])
         self.assertNotIn("developerInstructions", params)
         self.assertNotIn("baseInstructions", params)
         self.assertNotIn("config", params)
 
-    def test_turn_start_defensively_reasserts_read_only_and_never(self) -> None:
+    def test_turn_start_reasserts_workspace_write_and_on_request(self) -> None:
         session, client = self.make_session()
         session.start_thread()
         client.requests.clear()
@@ -513,9 +537,9 @@ class BridgeSessionNativeToolContainmentTests(unittest.TestCase):
 
         method, params = client.requests[0]
         self.assertEqual("turn/start", method)
-        self.assertEqual("never", params["approvalPolicy"])
+        self.assertEqual("on-request", params["approvalPolicy"])
         self.assertEqual(
-            {"type": "readOnly", "networkAccess": False},
+            {"type": "workspaceWrite", "networkAccess": False},
             params["sandboxPolicy"],
         )
         self.assertEqual("read Houdini state", params["input"][0]["text"])

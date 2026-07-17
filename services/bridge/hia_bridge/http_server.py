@@ -11,6 +11,8 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlsplit
 
 from hia_core.houdini_contract import ContractError, SchemaRegistry, strict_json_loads
@@ -53,6 +55,8 @@ class BridgeApplication:
         scene_queue: SceneQueue | None = None,
         scene_registry: SchemaRegistry | None = None,
         scene_executor_token: str | None = None,
+        houdini_mcp_port: int | None = None,
+        houdini_mcp_token: str | None = None,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Bearer token must contain at least 32 characters")
@@ -93,6 +97,22 @@ class BridgeApplication:
         ):
             raise ValueError("B2 read-only scene queue requires an independent executor token")
         self._expected_scene_executor_token = scene_executor_token
+        if (houdini_mcp_port is None) != (houdini_mcp_token is None):
+            raise ValueError("Houdini MCP port and token must be configured together")
+        if houdini_mcp_port is not None and (
+            isinstance(houdini_mcp_port, bool)
+            or not isinstance(houdini_mcp_port, int)
+            or not 1 <= houdini_mcp_port <= 65_535
+        ):
+            raise ValueError("Houdini MCP port is invalid")
+        if houdini_mcp_token is not None and (
+            len(houdini_mcp_token) < 32
+            or "\r" in houdini_mcp_token
+            or "\n" in houdini_mcp_token
+        ):
+            raise ValueError("Houdini MCP token is invalid")
+        self._houdini_mcp_port = houdini_mcp_port
+        self._houdini_mcp_token = houdini_mcp_token
 
     def authorized(self, value: str | None) -> bool:
         return value is not None and hmac.compare_digest(
@@ -118,6 +138,32 @@ class BridgeApplication:
         if http_method == "GET" and path == "/v1/scene/requests/next":
             return True
         return http_method == "POST" and _SCENE_RESULT_PATH.fullmatch(path) is not None
+
+    def houdini_mcp_status(self) -> dict[str, bool]:
+        port = self._houdini_mcp_port
+        token = self._houdini_mcp_token
+        if port is None or token is None:
+            return {"available": False}
+        body = urllib_parse.urlencode(
+            {"json": json.dumps(["mcp.health", [], {}])}
+        ).encode("utf-8")
+        request = urllib_request.Request(
+            f"http://127.0.0.1:{port}/api",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=0.75) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return {"available": False}
+        return {
+            "available": isinstance(payload, dict) and payload.get("status") == "ok"
+        }
 
 
 class LoopbackHTTPServer(ThreadingHTTPServer):
@@ -224,6 +270,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "status": "ok",
                 "session": application.session.snapshot(),
+                "houdini_mcp": application.houdini_mcp_status(),
             }, HTTPStatus.OK
         if path == "/v1/session":
             return {"ok": True, "session": application.session.snapshot()}, HTTPStatus.OK

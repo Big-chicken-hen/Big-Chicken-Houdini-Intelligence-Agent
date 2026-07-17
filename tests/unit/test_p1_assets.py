@@ -479,6 +479,31 @@ class P1AssetTests(unittest.TestCase):
         self.assertIsNone(re.search(r"(?m)^\s*'USERPROFILE'\s*=", source))
         self.assertIsNone(re.search(r"(?m)^\s*'HOME'\s*=", source))
 
+    def test_launcher_derives_sibling_hython_and_exposes_it_to_bridge(self) -> None:
+        launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+        source = launcher.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "$houdiniBinDirectory = [System.IO.Path]::GetDirectoryName($HoudiniExe)",
+            source,
+        )
+        self.assertIn(
+            "$HythonExe = Join-Path $houdiniBinDirectory 'hython.exe'",
+            source,
+        )
+        self.assertIn(
+            "Test-Path -LiteralPath $HythonExe -PathType Leaf",
+            source,
+        )
+        self.assertIn(
+            "Selected Houdini installation is missing sibling hython.exe",
+            source,
+        )
+        self.assertIn(
+            "'PATH' = \"$pythonDirectory;$houdiniBinDirectory;$($env:PATH)\"",
+            source,
+        )
+
     def test_launcher_bridge_tree_ownership_guard_is_fail_closed(self) -> None:
         launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
         escaped_launcher = str(launcher).replace("'", "''")

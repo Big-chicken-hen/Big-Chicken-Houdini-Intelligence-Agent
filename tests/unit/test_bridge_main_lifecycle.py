@@ -20,6 +20,8 @@ from hia_bridge import main as bridge_main  # noqa: E402
 
 BRIDGE_TOKEN = "bridge_" + "b" * 40
 EXECUTOR_TOKEN = "executor_" + "e" * 40
+HOUDINI_MCP_TOKEN = "houdini_" + "m" * 40
+HOUDINI_MCP_PORT = "58123"
 BRIDGE_URL = "http://127.0.0.1:54321"
 
 
@@ -83,6 +85,8 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                     "HIA_BRIDGE_URL": BRIDGE_URL,
                     "HIA_BRIDGE_TOKEN": BRIDGE_TOKEN,
                     "HIA_SCENE_EXECUTOR_TOKEN": EXECUTOR_TOKEN,
+                    "HIA_HOUDINI_MCP_PORT": HOUDINI_MCP_PORT,
+                    "FXHOUDINIMCP_TOKEN": HOUDINI_MCP_TOKEN,
                     "UNREVIEWED_API_KEY": "must_not_reach_codex_child",
                 },
                 clear=False,
@@ -188,8 +192,14 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertEqual(
             [
                 "mcp_servers.houdini_intelligence.command="
-                + bridge_main._toml_basic_string(str(Path(sys.executable).resolve())),
+                + bridge_main._toml_basic_string(
+                    str(
+                        REPOSITORY_ROOT
+                        / bridge_main.FXHOUDINI_MCP_PYTHON_RELATIVE_PATH
+                    )
+                ),
                 "mcp_servers.houdini_intelligence.required=true",
+                'mcp_servers.houdini_intelligence.default_tools_approval_mode="approve"',
                 'model_provider="hia_chatgpt_http"',
                 'model_providers.hia_chatgpt_http.name="HIA ChatGPT HTTP"',
                 "model_providers.hia_chatgpt_http.base_url="
@@ -202,11 +212,18 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
         self.assertNotIn(BRIDGE_TOKEN, repr(command))
         self.assertNotIn(EXECUTOR_TOKEN, repr(command))
+        self.assertNotIn(HOUDINI_MCP_TOKEN, repr(command))
         self.assertNotIn("HIA_BRIDGE_TOKEN", child_environment)
         self.assertNotIn("HIA_SCENE_EXECUTOR_TOKEN", child_environment)
         self.assertNotIn("HIA_BRIDGE_URL", child_environment)
         self.assertNotIn("UNREVIEWED_API_KEY", child_environment)
         self.assertNotIn("must_not_reach_codex_child", child_environment.values())
+        self.assertEqual("127.0.0.1", child_environment["HOUDINI_HOST"])
+        self.assertEqual(HOUDINI_MCP_PORT, child_environment["HOUDINI_PORT"])
+        self.assertEqual(
+            HOUDINI_MCP_TOKEN,
+            child_environment["FXHOUDINIMCP_TOKEN"],
+        )
         server_constructor.assert_called_once_with(
             ("127.0.0.1", 54321),
             mock.ANY,
@@ -218,7 +235,12 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertEqual(str(REPOSITORY_ROOT), child_environment["HIA_PROJECT_ROOT"])
         self.assertEqual("1", child_environment["PYTHONNOUSERSITE"])
         self.assertEqual(
-            str(Path(sys.executable).resolve().parent).casefold(),
+            str(
+                (
+                    REPOSITORY_ROOT
+                    / bridge_main.FXHOUDINI_MCP_PYTHON_RELATIVE_PATH
+                ).parent
+            ).casefold(),
             child_environment["PATH"].split(os.pathsep)[0].casefold(),
         )
         python_paths = {
@@ -233,6 +255,12 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
         self.assertIn(
             str(REPOSITORY_ROOT / "src").replace("/", "\\").casefold(),
+            python_paths,
+        )
+        self.assertIn(
+            str(REPOSITORY_ROOT / bridge_main.FXHOUDINI_MCP_SOURCE_RELATIVE_PATH)
+            .replace("/", "\\")
+            .casefold(),
             python_paths,
         )
 
@@ -263,7 +291,13 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             for index, value in enumerate(command[:-1])
             if value == "-c"
         ]
-        self.assertEqual(8, len(overrides))
+        self.assertEqual(9, len(overrides))
+        self.assertEqual(
+            1,
+            overrides.count(
+                'mcp_servers.houdini_intelligence.default_tools_approval_mode="approve"'
+            ),
+        )
         self.assertEqual(
             "mcp_servers.houdini_intelligence.command="
             + json.dumps(mcp_python, ensure_ascii=True),
@@ -272,6 +306,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertEqual(
             [
                 mcp_python,
+                "approve",
                 "hia_chatgpt_http",
                 "HIA ChatGPT HTTP",
                 "https://chatgpt.com/backend-api/codex",
@@ -279,7 +314,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             ],
             [call.args[0] for call in encoder.call_args_list],
         )
-        provider_overrides = overrides[2:]
+        provider_overrides = overrides[3:]
         self.assertEqual(6, len(provider_overrides))
         self.assertEqual(
             {

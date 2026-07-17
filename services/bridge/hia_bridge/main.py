@@ -30,6 +30,12 @@ PINNED_CODEX_RELATIVE_PATH = Path(
     ".runtime/toolchains/codex/0.144.3/codex.exe"
 )
 CODEX_HOME_RELATIVE_PATH = Path(".runtime/codex-home")
+FXHOUDINI_MCP_PYTHON_RELATIVE_PATH = Path(
+    ".runtime/fxhoudinimcp/1.3.0/venv/Scripts/python.exe"
+)
+FXHOUDINI_MCP_SOURCE_RELATIVE_PATH = Path(
+    ".runtime/fxhoudinimcp/1.3.0/source/python"
+)
 _HIA_CHATGPT_HTTP_PROVIDER_ID = "hia_chatgpt_http"
 _HIA_CHATGPT_HTTP_PROVIDER_NAME = "HIA ChatGPT HTTP"
 _HIA_CHATGPT_HTTP_BASE_URL = "https://chatgpt.com/backend-api/codex"
@@ -110,6 +116,22 @@ def _required_bridge_url() -> tuple[str, int]:
             "Bridge URL port is outside the valid range",
         )
     return value, port
+
+
+def _required_houdini_mcp_port() -> int:
+    value = os.environ.get("HIA_HOUDINI_MCP_PORT", "")
+    if not value.isascii() or not value.isdecimal():
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "Required Houdini MCP loopback port is missing or invalid",
+        )
+    port = int(value)
+    if not 1 <= port <= 65_535:
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "Houdini MCP loopback port is outside the valid range",
+        )
+    return port
 
 
 def _prepend_environment_path(
@@ -198,6 +220,9 @@ def _codex_app_server_command(codex_exe: Path, mcp_python: str) -> list[str]:
         "-c",
         "mcp_servers.houdini_intelligence.required=true",
         "-c",
+        "mcp_servers.houdini_intelligence.default_tools_approval_mode="
+        + _toml_basic_string("approve"),
+        "-c",
         "model_provider=" + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_ID),
         "-c",
         f"{provider}.name=" + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_NAME),
@@ -253,6 +278,19 @@ def run(argv: Sequence[str] | None = None) -> int:
     sensitive_values: list[str] = []
     try:
         project_root, codex_exe, codex_home, temp_directory = _validated_paths(args)
+        fx_mcp_python = validate_project_subpath(
+            project_root / FXHOUDINI_MCP_PYTHON_RELATIVE_PATH,
+            project_root=project_root,
+        )
+        fx_mcp_source = validate_project_subpath(
+            project_root / FXHOUDINI_MCP_SOURCE_RELATIVE_PATH,
+            project_root=project_root,
+        )
+        if not fx_mcp_python.is_file() or not fx_mcp_source.is_dir():
+            raise BridgeError(
+                "FXHOUDINIMCP_MISSING",
+                "Project-local fxhoudinimcp 1.3.0 runtime is incomplete",
+            )
         codex_home.mkdir(parents=True, exist_ok=True)
         temp_directory.mkdir(parents=True, exist_ok=True)
 
@@ -264,6 +302,9 @@ def run(argv: Sequence[str] | None = None) -> int:
         sensitive_values.append(scene_executor_token)
         requested_bridge_url, requested_bridge_port = _required_bridge_url()
         sensitive_values.append(requested_bridge_url)
+        houdini_mcp_token = _required_launch_secret("FXHOUDINIMCP_TOKEN")
+        sensitive_values.append(houdini_mcp_token)
+        houdini_mcp_port = _required_houdini_mcp_port()
         if hmac.compare_digest(token, scene_executor_token):
             raise BridgeError(
                 "INVALID_LAUNCH_ENVIRONMENT",
@@ -276,13 +317,14 @@ def run(argv: Sequence[str] | None = None) -> int:
         _prepend_environment_path(
             child_environment,
             "PATH",
-            (Path(resolved_python).parent,),
+            (fx_mcp_python.parent, Path(resolved_python).parent),
         )
         _prepend_environment_path(
             child_environment,
             "PYTHONPATH",
             (
                 project_root / "services" / "houdini_mcp",
+                fx_mcp_source,
                 project_root / "src",
             ),
         )
@@ -295,11 +337,14 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "PYTHONNOUSERSITE": "1",
                 "HIA_PROJECT_ROOT": str(project_root),
                 "HIA_EXPECTED_PYTHON_EXE": resolved_python,
+                "HOUDINI_HOST": "127.0.0.1",
+                "HOUDINI_PORT": str(houdini_mcp_port),
+                "FXHOUDINIMCP_TOKEN": houdini_mcp_token,
             }
         )
         events = EventBuffer()
         client = CodexStdioClient(
-            _codex_app_server_command(codex_exe, resolved_python),
+            _codex_app_server_command(codex_exe, str(fx_mcp_python)),
             cwd=project_root,
             environment=child_environment,
             policy=policy,
@@ -327,6 +372,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             scene_queue=scene_queue,
             scene_registry=scene_registry,
             scene_executor_token=scene_executor_token,
+            houdini_mcp_port=houdini_mcp_port,
+            houdini_mcp_token=houdini_mcp_token,
         )
         server = LoopbackHTTPServer(
             ("127.0.0.1", requested_bridge_port),

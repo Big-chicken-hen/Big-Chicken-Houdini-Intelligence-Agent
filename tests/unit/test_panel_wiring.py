@@ -263,6 +263,7 @@ class _CloseEvent:
 def _make_panel() -> Any:
     panel = object.__new__(HoudiniIntelligencePanel)
     panel._pane_tab = None
+    panel._hou_module = None
     panel._event_sequence = 0
     panel._polling_enabled = False
     panel._connected = True
@@ -378,6 +379,33 @@ class PanelWiringTests(unittest.TestCase):
         self.assertTrue(panel.resume_thread_button.isEnabled())
         self.assertTrue(panel.send_button.isEnabled())
         self.assertFalse(panel.stop_button.isEnabled())
+
+    def test_dirty_status_reads_current_houdini_session(self) -> None:
+        panel = _make_panel()
+        panel.houdini_scene_label = _Widget()
+        report = _available_houdini_report()
+
+        for dirty, expected in ((False, "Dirty：否"), (True, "Dirty：是")):
+            with self.subTest(dirty=dirty):
+                panel._hou_module = types.SimpleNamespace(
+                    hipFile=types.SimpleNamespace(
+                        hasUnsavedChanges=lambda value=dirty: value
+                    )
+                )
+                panel._update_houdini_status(report)
+                self.assertIn(expected, panel.houdini_scene_label.text())
+
+        panel._hou_module = None
+        panel._update_houdini_status(report)
+        self.assertIn("Dirty：不可用", panel.houdini_scene_label.text())
+
+        panel._hou_module = types.SimpleNamespace(
+            hipFile=types.SimpleNamespace(
+                hasUnsavedChanges=mock.Mock(side_effect=RuntimeError("unavailable"))
+            )
+        )
+        panel._update_houdini_status(report)
+        self.assertIn("Dirty：不可用", panel.houdini_scene_label.text())
 
     def test_close_event_only_disposes_local_client_and_is_repeat_safe(self) -> None:
         panel = _make_panel()

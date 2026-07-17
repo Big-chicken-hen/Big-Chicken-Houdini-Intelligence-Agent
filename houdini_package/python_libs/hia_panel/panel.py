@@ -38,7 +38,7 @@ _SCENE_IDLE_POLL_MS = 100
 
 
 class HoudiniIntelligencePanel(QtWidgets.QWidget):
-    """Conversation UI plus a bounded main-thread read-only Houdini slice."""
+    """Conversation UI with current-session Houdini and MCP status."""
 
     def __init__(
         self,
@@ -49,6 +49,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     ):
         super().__init__(parent)
         self._pane_tab = pane_tab
+        self._hou_module = hou_module
         self._event_sequence = 0
         self._polling_enabled = False
         self._connected = False
@@ -118,6 +119,23 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         status_row.addWidget(self.turn_status_label)
         root.addLayout(status_row)
 
+        runtime_row = QtWidgets.QHBoxLayout()
+        self.houdini_connection_label = QtWidgets.QLabel("Houdini：未连接")
+        self.houdini_mcp_label = QtWidgets.QLabel("实时 MCP：不可用")
+        hython_exe = os.environ.get("HIA_HYTHON_EXE", "")
+        self.native_hython_label = QtWidgets.QLabel(
+            "Native Hython：可用"
+            if hython_exe and os.path.isfile(hython_exe)
+            else "Native Hython：不可用"
+        )
+        self.houdini_scene_label = QtWidgets.QLabel("Revision：不可用 / Dirty：不可用")
+        runtime_row.addWidget(self.houdini_connection_label)
+        runtime_row.addWidget(self.houdini_mcp_label)
+        runtime_row.addWidget(self.native_hython_label)
+        runtime_row.addStretch(1)
+        runtime_row.addWidget(self.houdini_scene_label)
+        root.addLayout(runtime_row)
+
         self.houdini_status_group = QtWidgets.QGroupBox("Houdini 只读状态")
         houdini_status = QtWidgets.QGridLayout(self.houdini_status_group)
         self.houdini_build_label = QtWidgets.QLabel("Build：不可用")
@@ -134,6 +152,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         houdini_status.addWidget(self.houdini_catalog_label, 1, 0)
         houdini_status.addWidget(self.houdini_schema_label, 1, 1)
         houdini_status.addWidget(self.houdini_tools_label, 1, 2)
+        self.houdini_status_group.setVisible(False)
         root.addWidget(self.houdini_status_group)
 
         model_row = QtWidgets.QHBoxLayout()
@@ -182,7 +201,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         root.addWidget(self.approval_group)
 
         self.input_edit = QtWidgets.QTextEdit()
-        self.input_edit.setPlaceholderText("输入自然语言请求。本阶段只连接 Codex，不操作 Houdini 场景。")
+        self.input_edit.setPlaceholderText(
+            "输入自然语言请求；创建和修改默认直接作用于当前 Houdini 场景。"
+        )
         self.input_edit.setMaximumHeight(110)
         root.addWidget(self.input_edit)
 
@@ -207,6 +228,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         """Construct the live reader on the UI thread from launcher-only state."""
 
         if hou_module is None:
+            label = getattr(self, "houdini_connection_label", None)
+            if label is not None:
+                label.setText("Houdini：未连接")
             self.houdini_tools_label.setText(
                 "scene_info：不可用  node_type_info：不可用  类型：0/5"
             )
@@ -250,6 +274,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
             report = adapter.start()
         except (HoudiniReadAdapterError, TypeError, ValueError):
+            label = getattr(self, "houdini_connection_label", None)
+            if label is not None:
+                label.setText("Houdini：未连接")
             self.houdini_schema_label.setText("Schema：Houdini 观察不可用")
             return
         self._houdini_adapter = adapter
@@ -258,6 +285,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.houdini_schema_label.setText(
             f"Schema：{schema_version} / {schema_digest[:12]}…"
         )
+
+    def _read_dirty_state(self):
+        hou_module = getattr(self, "_hou_module", None)
+        if hou_module is None:
+            return None
+        try:
+            value = hou_module.hipFile.hasUnsavedChanges()
+        except Exception:
+            return None
+        return value if isinstance(value, bool) else None
 
     def _update_houdini_status(
         self,
@@ -271,6 +308,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         build = report.get("houdini_build")
         session_id = report.get("hip_session_id")
         revision = report.get("scene_revision")
+        dirty = self._read_dirty_state()
         catalog = report.get("catalog")
         available_types = 0
         total_types = 0
@@ -281,6 +319,20 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
         locally_available = self._houdini_report_is_locally_available(report)
         live_available = locally_available and attested
+        houdini_connection_label = getattr(self, "houdini_connection_label", None)
+        if houdini_connection_label is not None:
+            houdini_connection_label.setText("Houdini：已连接")
+        revision_text = (
+            str(revision)
+            if isinstance(revision, int) and not isinstance(revision, bool)
+            else "不可用"
+        )
+        dirty_text = "是" if dirty is True else ("否" if dirty is False else "不可用")
+        houdini_scene_label = getattr(self, "houdini_scene_label", None)
+        if houdini_scene_label is not None:
+            houdini_scene_label.setText(
+                f"Revision：{revision_text} / Dirty：{dirty_text}"
+            )
         self.houdini_build_label.setText(
             f"Build：{build}" if isinstance(build, str) and build else "Build：不可用"
         )
@@ -564,6 +616,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     @QtCore.Slot(dict)
     def _on_health(self, payload: dict[str, Any]) -> None:
         self._set_connection("已连接（stdio JSONL）", True)
+        houdini_mcp = payload.get("houdini_mcp")
+        houdini_mcp_label = getattr(self, "houdini_mcp_label", None)
+        if houdini_mcp_label is not None:
+            houdini_mcp_label.setText(
+                "实时 MCP：可用"
+                if isinstance(houdini_mcp, dict)
+                and houdini_mcp.get("available") is True
+                else "实时 MCP：不可用"
+            )
         self._apply_session(
             payload.get("session", {}),
             token=self._turn_state.capture_token(),

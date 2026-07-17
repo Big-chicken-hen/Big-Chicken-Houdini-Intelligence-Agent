@@ -21,8 +21,6 @@ CODEX_0_144_3_STDIO_SERVER_KEYS = frozenset(
         "startup_timeout_sec",
         "tool_timeout_sec",
         "env_vars",
-        "enabled_tools",
-        "disabled_tools",
     }
 )
 EXPECTED_ENV_VARS = [
@@ -34,17 +32,9 @@ EXPECTED_ENV_VARS = [
     "TMP",
     "HIA_PROJECT_ROOT",
     "HIA_EXPECTED_PYTHON_EXE",
-    "HIA_BRIDGE_URL",
-    "HIA_BRIDGE_TOKEN",
-]
-EXPECTED_ENABLED_TOOLS = [
-    "houdini_scene_info",
-    "houdini_node_type_info",
-]
-EXPECTED_DISABLED_TOOLS = [
-    "houdini_graph_validate",
-    "houdini_graph_apply",
-    "houdini_graph_verify",
+    "HOUDINI_HOST",
+    "HOUDINI_PORT",
+    "FXHOUDINIMCP_TOKEN",
 ]
 
 
@@ -120,18 +110,21 @@ class B2CCodexConfigTests(unittest.TestCase):
         self.assertEqual("0.144.3", PINNED_CODEX_VERSION)
         _, server = _load_config()
         self.assertEqual(CODEX_0_144_3_STDIO_SERVER_KEYS, set(server))
-        self.assertEqual(r"D:\Python_3.10\python.exe", server["command"])
-        self.assertEqual(["-B", "-m", "hia_houdini_mcp.stdio"], server["args"])
+        self.assertEqual(
+            r"E:\houdini-intelligence-agent\.runtime\fxhoudinimcp\1.3.0\venv\Scripts\python.exe",
+            server["command"],
+        )
+        self.assertEqual(["-B", "-m", "fxhoudinimcp"], server["args"])
         self.assertEqual(r"E:\houdini-intelligence-agent", server["cwd"])
         self.assertIs(server["enabled"], True)
-        self.assertIs(server["required"], False)
-        self.assertEqual(5, server["startup_timeout_sec"])
+        self.assertIs(server["required"], True)
+        self.assertEqual(15, server["startup_timeout_sec"])
         self.assertEqual(65, server["tool_timeout_sec"])
 
-    def test_plain_codex_project_session_does_not_require_houdini_mcp(self) -> None:
+    def test_panel_session_requires_the_real_time_houdini_mcp(self) -> None:
         _, server = _load_config()
         self.assertIs(server["enabled"], True)
-        self.assertIs(server["required"], False)
+        self.assertIs(server["required"], True)
 
     def test_environment_is_name_only_and_contains_no_executor_credential(self) -> None:
         source, server = _load_config()
@@ -144,36 +137,12 @@ class B2CCodexConfigTests(unittest.TestCase):
         self.assertNotIn("https://", lowered)
         self.assertNotIn("bearer ", lowered)
         self.assertNotRegex(source, r"(?i)(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}")
-        self.assertEqual(1, source.count("HIA_BRIDGE_TOKEN"))
+        self.assertEqual(1, source.count("FXHOUDINIMCP_TOKEN"))
 
-    def test_only_two_read_tools_are_enabled_and_graph_tools_are_disabled(self) -> None:
+    def test_upstream_tool_surface_is_not_filtered(self) -> None:
         _, server = _load_config()
-        self.assertEqual(EXPECTED_ENABLED_TOOLS, server["enabled_tools"])
-        self.assertEqual(EXPECTED_DISABLED_TOOLS, server["disabled_tools"])
-        self.assertTrue(
-            set(server["enabled_tools"]).isdisjoint(server["disabled_tools"])
-        )
-
-        configured_tools = server["enabled_tools"] + server["disabled_tools"]
-        forbidden_fragments = (
-            "python",
-            "hscript",
-            "shell",
-            "exec",
-            "eval",
-            "save",
-            "render",
-            "cache",
-            "hda",
-            "create_node",
-            "set_parm",
-            "set_input",
-            "destroy",
-        )
-        for tool_name in configured_tools:
-            self.assertRegex(tool_name, r"\Ahoudini_[a-z0-9_]+\Z")
-            for fragment in forbidden_fragments:
-                self.assertNotIn(fragment, tool_name)
+        self.assertNotIn("enabled_tools", server)
+        self.assertNotIn("disabled_tools", server)
 
     def test_no_network_or_open_world_server_keys_are_present(self) -> None:
         source, server = _load_config()

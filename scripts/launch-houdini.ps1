@@ -10,6 +10,7 @@ Set-StrictMode -Version Latest
 $ExpectedRoot = 'E:\houdini-intelligence-agent'
 $CodexExe = 'E:\houdini-intelligence-agent\.runtime\toolchains\codex\0.144.3\codex.exe'
 $CodexHome = 'E:\houdini-intelligence-agent\.runtime\codex-home'
+$FxHoudiniRoot = 'E:\houdini-intelligence-agent\.runtime\fxhoudinimcp\1.3.0'
 
 function Get-HoudiniCandidatePaths {
     param([string]$RequestedPath)
@@ -313,6 +314,11 @@ if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 $houdiniMetadata = Resolve-HoudiniExecutable -RequestedPath $HoudiniExe
 $HoudiniExe = [string]$houdiniMetadata.Path
+$houdiniBinDirectory = [System.IO.Path]::GetDirectoryName($HoudiniExe)
+$HythonExe = Join-Path $houdiniBinDirectory 'hython.exe'
+if (-not (Test-Path -LiteralPath $HythonExe -PathType Leaf)) {
+    throw "Selected Houdini installation is missing sibling hython.exe: $HythonExe"
+}
 $normalizedPython = [System.IO.Path]::GetFullPath($BridgePython)
 if (
     $normalizedPython -notmatch '^[A-Za-z]:\\' -or
@@ -346,6 +352,12 @@ $pythonDirectory = [System.IO.Path]::GetDirectoryName($normalizedPython)
 
 Assert-OrdinaryProjectPath -Path $CodexExe -Root $ResolvedRoot | Out-Null
 Assert-OrdinaryProjectPath -Path $CodexHome -Root $ResolvedRoot | Out-Null
+$fxMcpPython = Join-Path $FxHoudiniRoot 'venv\Scripts\python.exe'
+$fxMcpSourcePath = Join-Path $FxHoudiniRoot 'source\python'
+$fxHoudiniServerPath = Join-Path $FxHoudiniRoot 'source\houdini\scripts\python'
+Assert-OrdinaryProjectPath -Path $fxMcpPython -Root $ResolvedRoot | Out-Null
+Assert-OrdinaryProjectPath -Path $fxMcpSourcePath -Root $ResolvedRoot | Out-Null
+Assert-OrdinaryProjectPath -Path $fxHoudiniServerPath -Root $ResolvedRoot | Out-Null
 
 $sessionId = [Guid]::NewGuid().ToString('N')
 $sessionRoot = Assert-OrdinaryProjectPath `
@@ -372,7 +384,10 @@ $bridgeToken = New-CryptographicToken
 do {
     $sceneExecutorToken = New-CryptographicToken
 } while ([System.StringComparer]::Ordinal.Equals($bridgeToken, $sceneExecutorToken))
+$houdiniMcpToken = New-CryptographicToken
 $bridgeUrl = New-LoopbackBridgeUrl
+$houdiniMcpUrl = New-LoopbackBridgeUrl
+$houdiniMcpPort = ([System.Uri]$houdiniMcpUrl).Port
 
 $bridgeArguments = @(
     '-B',
@@ -400,7 +415,7 @@ $bridgeInfo.CreateNoWindow = $true
 $bridgeInfo.RedirectStandardOutput = $true
 $bridgeInfo.RedirectStandardError = $false
 Set-ChildEnvironment -StartInfo $bridgeInfo -Values @{
-    'PATH' = "$pythonDirectory;$($env:PATH)"
+    'PATH' = "$pythonDirectory;$houdiniBinDirectory;$($env:PATH)"
     'PYTHONPATH' = "$bridgePythonPath;$mcpPythonPath;$projectSourcePath"
     'PYTHONDONTWRITEBYTECODE' = '1'
     'PYTHONNOUSERSITE' = '1'
@@ -412,6 +427,8 @@ Set-ChildEnvironment -StartInfo $bridgeInfo -Values @{
     'HIA_BRIDGE_URL' = $bridgeUrl
     'HIA_BRIDGE_TOKEN' = $bridgeToken
     'HIA_SCENE_EXECUTOR_TOKEN' = $sceneExecutorToken
+    'HIA_HOUDINI_MCP_PORT' = [string]$houdiniMcpPort
+    'FXHOUDINIMCP_TOKEN' = $houdiniMcpToken
 }
 
 $bridgeProcess = [System.Diagnostics.Process]::new()
@@ -482,7 +499,7 @@ try {
         'HOUDINI_PACKAGE_DIR' = $packageDirectory
         'HOUDINI_TEMP_DIR' = $sessionTemp
         'HOUDINI_USER_PREF_DIR' = $houdiniPreferences
-        'PYTHONPATH' = "$panelPythonPath;$projectSourcePath"
+        'PYTHONPATH' = "$panelPythonPath;$fxHoudiniServerPath;$projectSourcePath"
         'PYTHONDONTWRITEBYTECODE' = '1'
         'TEMP' = $sessionTemp
         'TMP' = $sessionTemp
@@ -496,6 +513,10 @@ try {
         'HIA_SCENE_EXECUTOR_TOKEN' = $sceneExecutorToken
         'HIA_HOUDINI_SCHEMA_VERSION' = [string]$bootstrap.scene.schema_version
         'HIA_HOUDINI_SCHEMA_DIGEST' = [string]$bootstrap.scene.schema_digest
+        'HIA_HYTHON_EXE' = $HythonExe
+        'FXHOUDINIMCP_AUTOSTART' = '1'
+        'FXHOUDINIMCP_PORT' = [string]$houdiniMcpPort
+        'FXHOUDINIMCP_TOKEN' = $houdiniMcpToken
     }
     $houdiniProcess = [System.Diagnostics.Process]::new()
     $houdiniProcess.StartInfo = $houdiniInfo

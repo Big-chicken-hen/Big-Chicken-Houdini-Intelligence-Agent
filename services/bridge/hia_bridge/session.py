@@ -145,9 +145,18 @@ class BridgeSession:
             self._require_no_active_turn_locked()
         params: dict[str, Any] = {
             "cwd": str(self._project_root),
-            "approvalPolicy": "never",
-            "sandbox": "read-only",
+            "approvalPolicy": "on-request",
+            "sandbox": "workspace-write",
             "ephemeral": False,
+            "developerInstructions": (
+                "Houdini Panel 中的创建、修改、连接、材质和动画请求默认作用于当前打开场景，"
+                "使用已注册的 FXHoudini MCP 与 HOM；复杂建模优先调用 execute_python 执行 Codex 生成的 hou 代码。"
+                "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
+                "只有用户明确要求离线、新建独立 HIP、批处理或后台渲染时才使用 PATH 中的 hython.exe。"
+                "实时代码禁止 hou.hipFile.clear/load/save，禁止替换当前场景；生成新资产时放入唯一新根。"
+                "不要调用 request_user_input；信息不足时自行采用合理默认值继续，只有无法执行时才直接报告原因。"
+                "禁止屏幕接管。"
+            ),
         }
         if model is not None:
             params["model"] = model
@@ -168,8 +177,8 @@ class BridgeSession:
             {
                 "threadId": thread_id,
                 "cwd": str(self._project_root),
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
             },
         )
         resolved_id = self._extract_thread_id(resumed)
@@ -309,9 +318,9 @@ class BridgeSession:
                     }
                 ],
                 "cwd": str(self._project_root),
-                "approvalPolicy": "never",
+                "approvalPolicy": "on-request",
                 "sandboxPolicy": {
-                    "type": "readOnly",
+                    "type": "workspaceWrite",
                     "networkAccess": False,
                 },
             }
