@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
-from typing import Any, BinaryIO, TextIO
+from pathlib import Path
+from typing import Any, BinaryIO, Mapping, TextIO
 
 from hia_core.houdini_contract import SchemaRegistry, strict_json_loads
 
-from .adapter import BridgeTransport, HoudiniMCPAdapter
+from .adapter import BridgeTransport, BridgeTransportError, HoudiniMCPAdapter
+from .bridge_transport import LoopbackBridgeTransport
 
 
 MAX_JSONL_BYTES = 262_144
 MAX_JSON_DEPTH = 32
 MAX_CALL_WORKERS = 2
-SHUTDOWN_GRACE_SECONDS = 0.25
+SHUTDOWN_GRACE_SECONDS = 0.5
+PROJECT_ROOT_ENV = "HIA_PROJECT_ROOT"
+EXPECTED_PYTHON_ENV = "HIA_EXPECTED_PYTHON_EXE"
 
 
 class ProtocolSessionError(ValueError):
@@ -137,7 +142,7 @@ def run_stdio(
             worker = threading.Thread(
                 target=handle_call,
                 args=(message, request_id),
-                name=f"hia-mcp-call-{request_id}",
+                name="hia-mcp-call",
                 daemon=True,
             )
             workers[request_id] = worker
@@ -148,21 +153,14 @@ def run_stdio(
         closed.set()
         with worker_lock:
             active = list(workers.items())
-
-        def cancel_for_shutdown(request_id: int | str) -> None:
-            try:
-                adapter.cancel_request(request_id)
-            except Exception:
-                _write_diagnostic(diagnostics, "SHUTDOWN_CANCELLATION_FAILED")
-
-        for request_id, _ in active:
-            threading.Thread(
-                target=cancel_for_shutdown,
-                args=(request_id,),
-                name=f"hia-mcp-cancel-{request_id}",
-                daemon=True,
-            ).start()
+        shutdown_worker = threading.Thread(
+            target=adapter.shutdown,
+            name="hia-mcp-shutdown",
+            daemon=True,
+        )
+        shutdown_worker.start()
         deadline = time.monotonic() + SHUTDOWN_GRACE_SECONDS
+        shutdown_worker.join(max(0.0, deadline - time.monotonic()))
         for _, worker in active:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -223,9 +221,11 @@ def run_stdio(
                 message.get("jsonrpc") == "2.0"
                 and set(message) <= {"jsonrpc", "id", "method", "params"}
                 and isinstance(params, dict)
-                and set(params) == {"name", "arguments"}
+                and {"name", "arguments"} <= set(params)
+                and set(params) <= {"name", "arguments", "_meta"}
                 and params.get("name") in adapter.tool_names
                 and isinstance(params.get("arguments"), dict)
+                and ("_meta" not in params or isinstance(params.get("_meta"), dict))
             )
             if (
                 message.get("method") == "tools/call"
@@ -257,6 +257,7 @@ def run_stdio(
 def serve(
     transport: BridgeTransport,
     *,
+    registry: SchemaRegistry | None = None,
     input_stream: BinaryIO | None = None,
     output_stream: BinaryIO | None = None,
     diagnostic_stream: TextIO | None = None,
@@ -264,9 +265,10 @@ def serve(
     """Compose an injected transport with the strict runner."""
 
     diagnostics = diagnostic_stream or sys.stderr
+    selected_registry = registry or SchemaRegistry.b2_read_only()
     adapter = HoudiniMCPAdapter.b2_read_only(
         transport,
-        registry=SchemaRegistry.b2_read_only(),
+        registry=selected_registry,
         diagnostic_sink=lambda code: _write_diagnostic(diagnostics, code),
     )
     return run_stdio(
@@ -277,11 +279,59 @@ def serve(
     )
 
 
-def main() -> int:
-    """Refuse standalone startup until the B2 transport is separately approved."""
+def _runtime_identity_matches(environment: Mapping[str, str] | None = None) -> bool:
+    """Verify inherited project/Python identity without returning path details."""
 
-    _write_diagnostic(sys.stderr, "B2A_REAL_MCP_START_DISABLED")
-    return 2
+    source = os.environ if environment is None else environment
+    expected_root = source.get(PROJECT_ROOT_ENV)
+    expected_python = source.get(EXPECTED_PYTHON_ENV)
+    if not isinstance(expected_root, str) or not isinstance(expected_python, str):
+        return False
+
+    def canonical(value: str | os.PathLike[str]) -> str | None:
+        try:
+            return os.path.normcase(str(Path(value).resolve(strict=True)))
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+
+    module_root = canonical(Path(__file__).parents[3])
+    inherited_root = canonical(expected_root)
+    working_root = canonical(Path.cwd())
+    inherited_python = canonical(expected_python)
+    active_python = canonical(sys.executable)
+    return (
+        module_root is not None
+        and inherited_root == module_root
+        and working_root == module_root
+        and inherited_python is not None
+        and inherited_python == active_python
+    )
+
+
+def main() -> int:
+    """Run the approved B2C loopback transport from inherited environment."""
+
+    if not _runtime_identity_matches():
+        _write_diagnostic(sys.stderr, "B2C_RUNTIME_IDENTITY_INVALID")
+        return 2
+    try:
+        registry = SchemaRegistry.b2_read_only()
+    except Exception:
+        _write_diagnostic(sys.stderr, "B2C_FROZEN_SCHEMA_INVALID")
+        return 2
+    try:
+        transport = LoopbackBridgeTransport.from_environment(
+            manifest_digest=registry.manifest_digest
+        )
+    except BridgeTransportError as exc:
+        code = (
+            "B2C_BRIDGE_CONFIGURATION_MISSING"
+            if exc.code == "BRIDGE_CONFIGURATION_MISSING"
+            else "B2C_BRIDGE_CONFIGURATION_INVALID"
+        )
+        _write_diagnostic(sys.stderr, code)
+        return 2
+    return serve(transport, registry=registry)
 
 
 if __name__ == "__main__":

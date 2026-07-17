@@ -6,4 +6,4 @@ requires-python = ">=3.10"
 
 [tool.hia]
 project-root = "E:\\houdini-intelligence-agent"
-phase = "P2-V-B2-read-only-houdini-capability"
+phase = "P2-V-B2C-real-read-only-mcp-chain"

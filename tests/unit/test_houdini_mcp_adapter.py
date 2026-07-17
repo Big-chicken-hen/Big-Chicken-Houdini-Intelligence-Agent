@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import io
 import json
 import sys
@@ -20,6 +21,7 @@ from hia_core.houdini_contract import (  # noqa: E402
     EXPECTED_TOOLS,
     ContractError,
     SchemaRegistry,
+    canonical_json_sha256,
 )
 from hia_houdini_mcp.adapter import (  # noqa: E402
     B2_READ_ONLY_TOOL_NAMES,
@@ -46,6 +48,13 @@ TOOLS = (
     "houdini_graph_apply",
     "houdini_graph_verify",
 )
+NODE_TYPE_SELECTORS = [
+    {"context": "Object", "name": "geo"},
+    {"context": "Sop", "name": "box"},
+    {"context": "Sop", "name": "transform"},
+    {"context": "Sop", "name": "merge"},
+    {"context": "Sop", "name": "null"},
+]
 
 
 class RecordingRegistry:
@@ -133,6 +142,7 @@ class RecordingTransport:
         self.calls: list[tuple[str, dict[str, Any], int | str]] = []
         self.cancelled: list[int | str] = []
         self.error: BridgeTransportError | None = None
+        self.close_count = 0
 
     def call_tool(
         self,
@@ -156,6 +166,72 @@ class RecordingTransport:
 
     def cancel(self, rpc_request_id: int | str) -> None:
         self.cancelled.append(rpc_request_id)
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
+class PreparingB2Transport(RecordingTransport):
+    """Test double for the real transport's semantic/full-envelope split."""
+
+    def __init__(self, registry: SchemaRegistry) -> None:
+        super().__init__()
+        self.registry = registry
+        self.prepared: list[tuple[str, dict[str, Any], int | str]] = []
+        self.prepare_handoffs: list[CancellationHandoff] = []
+        self.call_handoffs: list[CancellationHandoff] = []
+
+    def prepare_arguments(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        rpc_request_id: int | str,
+        cancellation_handoff: CancellationHandoff,
+    ) -> Mapping[str, Any]:
+        self.prepare_handoffs.append(cancellation_handoff)
+        self.prepared.append((tool_name, dict(arguments), rpc_request_id))
+        full = scene_info_arguments()
+        if tool_name == "houdini_scene_info":
+            full["include_graph_summaries"] = arguments["include_graph_summaries"]
+        elif tool_name == "houdini_node_type_info":
+            full.pop("include_graph_summaries")
+            full["node_types"] = copy.deepcopy(arguments["node_types"])
+        else:
+            raise AssertionError(f"unexpected B2 tool: {tool_name}")
+        return full
+
+    def call_tool(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        rpc_request_id: int | str,
+        cancellation_handoff: CancellationHandoff,
+    ) -> Mapping[str, Any]:
+        self.call_handoffs.append(cancellation_handoff)
+        claimed = cancellation_handoff.claim_submission(
+            lambda: self.calls.append((tool_name, dict(arguments), rpc_request_id))
+        )
+        if not claimed:
+            raise BridgeTransportError("CANCELLED", "Cancelled before submission")
+        return {
+            "ok": False,
+            "request_id": arguments["request_id"],
+            "thread_id": arguments["thread_id"],
+            "turn_id": arguments["turn_id"],
+            "hip_session_id": arguments["hip_session_id"],
+            "base_scene_revision": arguments["base_scene_revision"],
+            "scene_revision": arguments["base_scene_revision"],
+            "idempotency_key": arguments["idempotency_key"],
+            "result": None,
+            "warnings": [],
+            "structured_error": {
+                "code": "HOUDINI_UNAVAILABLE",
+                "message": "The read capability is unavailable",
+                "details": [{"key": "retryable", "value": False}],
+            },
+        }
 
 
 class BlockingTransport(RecordingTransport):
@@ -446,11 +522,68 @@ class HoudiniMCPAdapterTests(unittest.TestCase):
                 RecordingTransport(), registry=SchemaRegistry()
             )
 
-    def test_initialize_nested_unknown_fields_fail_closed(self) -> None:
+    def test_initialize_accepts_bounded_ignored_capabilities_and_title(self) -> None:
+        adapter = HoudiniMCPAdapter(
+            RecordingTransport(), registry=RecordingRegistry()
+        )
+        response = adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"sampling": {}, "roots": {"listChanged": True}},
+                    "_meta": {"progressToken": "bounded-and-ignored"},
+                    "clientInfo": {
+                        "name": "offline-test",
+                        "version": "1",
+                        "title": "Offline Test Client",
+                    },
+                },
+            }
+        )
+        self.assertEqual(MCP_PROTOCOL_VERSION, response["result"]["protocolVersion"])
+
+    def test_tools_list_accepts_only_initial_null_cursor(self) -> None:
+        initialize(self.adapter)
+        accepted = self.adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {
+                    "cursor": None,
+                    "_meta": {"progressToken": "bounded"},
+                },
+            }
+        )
+        self.assertIn("tools", accepted["result"])
+        meta_only = self.adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/list",
+                "params": {"_meta": {}},
+            }
+        )
+        self.assertIn("tools", meta_only["result"])
+        for request_id, params in ((3, {"cursor": "next"}), (4, {"extra": None})):
+            rejected = self.adapter.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/list",
+                    "params": params,
+                }
+            )
+            self.assertEqual("INVALID_PARAMS", rejected["error"]["data"]["code"])
+
+    def test_initialize_unbounded_or_unknown_client_fields_fail_closed(self) -> None:
         invalid_params = (
             {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {"unknown": {}},
+                "capabilities": {"oversized": "x" * 20_000},
                 "clientInfo": {"name": "offline-test", "version": "1"},
             },
             {
@@ -478,6 +611,271 @@ class HoudiniMCPAdapterTests(unittest.TestCase):
                 )
                 self.assertEqual(-32602, response["error"]["code"])
                 self.assertFalse(adapter.initialized)
+
+    def test_real_transport_projects_semantic_schema_and_injects_full_envelope(self) -> None:
+        registry = SchemaRegistry.b2_read_only()
+        transport = PreparingB2Transport(registry)
+        adapter = HoudiniMCPAdapter.b2_read_only(transport, registry=registry)
+        initialize(adapter)
+        listed = adapter.handle_message(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+        )
+        descriptors = {
+            item["name"]: item["inputSchema"]
+            for item in listed["result"]["tools"]
+        }
+        self.assertEqual(
+            ["include_graph_summaries"],
+            descriptors["houdini_scene_info"]["required"],
+        )
+        self.assertEqual(
+            ["node_types"], descriptors["houdini_node_type_info"]["required"]
+        )
+        self.assertEqual(
+            {"include_graph_summaries"},
+            set(descriptors["houdini_scene_info"]["properties"]),
+        )
+
+        response = adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": "semantic-1",
+                "method": "tools/call",
+                "params": {
+                    "name": "houdini_scene_info",
+                    "arguments": {"include_graph_summaries": False},
+                    "_meta": {"progressToken": "ignored-but-bounded"},
+                },
+            }
+        )
+        self.assertTrue(response["result"]["isError"])
+        self.assertEqual(
+            json.loads(response["result"]["content"][0]["text"]),
+            response["result"]["structuredContent"],
+        )
+        self.assertIn(
+            "outputSchema",
+            next(
+                item
+                for item in listed["result"]["tools"]
+                if item["name"] == "houdini_scene_info"
+            ),
+        )
+        self.assertEqual(
+            [("houdini_scene_info", {"include_graph_summaries": False}, "semantic-1")],
+            transport.prepared,
+        )
+        self.assertEqual(1, len(transport.prepare_handoffs))
+        self.assertIs(transport.prepare_handoffs[0], transport.call_handoffs[0])
+        self.assertEqual("hip-session-1", transport.calls[0][1]["hip_session_id"])
+
+        injected = adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": "semantic-2",
+                "method": "tools/call",
+                "params": {
+                    "name": "houdini_scene_info",
+                    "arguments": {
+                        "include_graph_summaries": False,
+                        "hip_session_id": "model-forged",
+                    },
+                },
+            }
+        )
+        self.assertEqual("SCHEMA_INVALID", injected["error"]["data"]["code"])
+        self.assertEqual(1, len(transport.prepared))
+
+    def test_node_type_tools_list_schema_is_fully_inlined_for_the_model(self) -> None:
+        registry = SchemaRegistry.b2_read_only()
+        adapter = HoudiniMCPAdapter.b2_read_only(
+            PreparingB2Transport(registry), registry=registry
+        )
+        initialize(adapter)
+        listed = adapter.handle_message(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+        )
+        descriptor = next(
+            item
+            for item in listed["result"]["tools"]
+            if item["name"] == "houdini_node_type_info"
+        )
+        model_schema = descriptor["inputSchema"]
+        encoded_schema = json.dumps(model_schema, sort_keys=True)
+        self.assertNotIn('"$ref"', encoded_schema)
+        self.assertNotIn('"$defs"', encoded_schema)
+        self.assertEqual({"node_types"}, set(model_schema["properties"]))
+        self.assertEqual(["node_types"], model_schema["required"])
+        self.assertFalse(model_schema["additionalProperties"])
+        self.assertIn("context", model_schema["description"])
+        self.assertIn("name", model_schema["description"])
+        self.assertEqual(
+            [{"node_types": NODE_TYPE_SELECTORS}], model_schema["examples"]
+        )
+
+        frozen_schema = registry.get_input_schema("houdini_node_type_info")
+        inlined = model_schema["properties"]["node_types"]["items"]
+        self.assertEqual(frozen_schema["$defs"]["nodeType"], inlined)
+        self.assertIn(
+            "exactly context and name",
+            model_schema["properties"]["node_types"]["description"],
+        )
+        self.assertEqual(2, len(inlined["oneOf"]))
+        object_branch, sop_branch = inlined["oneOf"]
+        for branch in (object_branch, sop_branch):
+            self.assertEqual(["context", "name"], branch["required"])
+            self.assertFalse(branch["additionalProperties"])
+            self.assertEqual({"context", "name"}, set(branch["properties"]))
+        self.assertEqual("Object", object_branch["properties"]["context"]["const"])
+        self.assertEqual("geo", object_branch["properties"]["name"]["const"])
+        self.assertEqual("Sop", sop_branch["properties"]["context"]["const"])
+        self.assertEqual(
+            ["box", "transform", "merge", "null"],
+            sop_branch["properties"]["name"]["enum"],
+        )
+
+    def test_five_node_type_objects_pass_semantic_validation_and_prepare(self) -> None:
+        registry = SchemaRegistry.b2_read_only()
+        transport = PreparingB2Transport(registry)
+        adapter = HoudiniMCPAdapter.b2_read_only(transport, registry=registry)
+        initialize(adapter)
+        semantic_arguments = {"node_types": copy.deepcopy(NODE_TYPE_SELECTORS)}
+
+        response = adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": "node-types-valid",
+                "method": "tools/call",
+                "params": {
+                    "name": "houdini_node_type_info",
+                    "arguments": semantic_arguments,
+                },
+            }
+        )
+
+        self.assertNotIn("error", response)
+        self.assertTrue(response["result"]["isError"])
+        self.assertEqual(
+            [
+                (
+                    "houdini_node_type_info",
+                    semantic_arguments,
+                    "node-types-valid",
+                )
+            ],
+            transport.prepared,
+        )
+        self.assertEqual(1, len(transport.calls))
+        submitted_name, submitted, submitted_id = transport.calls[0]
+        self.assertEqual("houdini_node_type_info", submitted_name)
+        self.assertEqual("node-types-valid", submitted_id)
+        self.assertEqual(NODE_TYPE_SELECTORS, submitted["node_types"])
+        self.assertEqual("hip-session-1", submitted["hip_session_id"])
+        self.assertEqual(7, submitted["base_scene_revision"])
+        self.assertEqual("scene_read", submitted["permission_level"])
+        self.assertNotIn("include_graph_summaries", submitted)
+
+    def test_invalid_node_type_semantics_fail_before_prepare(self) -> None:
+        invalid_arguments = (
+            {"node_types": ["Sop/box"]},
+            {"node_types": [{"context": "Sop", "type": "box"}]},
+            {
+                "node_types": [
+                    {"context": "Sop", "name": "box", "unexpected": True}
+                ]
+            },
+            {"node_types": [{"context": "Object", "name": "box"}]},
+            {"node_types": [{"context": "Sop", "name": "geo"}]},
+            {"node_types": [{"context": "Sop", "name": "xform"}]},
+            {
+                "node_types": [{"context": "Sop", "name": "box"}],
+                "request_id": "model-forged",
+            },
+        )
+        registry = SchemaRegistry.b2_read_only()
+        transport = PreparingB2Transport(registry)
+        adapter = HoudiniMCPAdapter.b2_read_only(transport, registry=registry)
+        initialize(adapter)
+
+        for index, arguments in enumerate(invalid_arguments, start=1):
+            with self.subTest(index=index):
+                response = adapter.handle_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": f"node-types-invalid-{index}",
+                        "method": "tools/call",
+                        "params": {
+                            "name": "houdini_node_type_info",
+                            "arguments": arguments,
+                        },
+                    }
+                )
+                self.assertEqual(-32602, response["error"]["code"])
+                self.assertEqual(
+                    "SCHEMA_INVALID", response["error"]["data"]["code"]
+                )
+                self.assertEqual([], transport.prepared)
+                self.assertEqual([], transport.calls)
+
+    def test_prepared_node_type_envelope_still_requires_frozen_validation(self) -> None:
+        registry = SchemaRegistry.b2_read_only()
+
+        class InvalidPreparedEnvelopeTransport(PreparingB2Transport):
+            def prepare_arguments(
+                self,
+                tool_name: str,
+                arguments: Mapping[str, Any],
+                *,
+                rpc_request_id: int | str,
+                cancellation_handoff: CancellationHandoff,
+            ) -> Mapping[str, Any]:
+                full = dict(
+                    super().prepare_arguments(
+                        tool_name,
+                        arguments,
+                        rpc_request_id=rpc_request_id,
+                        cancellation_handoff=cancellation_handoff,
+                    )
+                )
+                full["permission_level"] = "scene_write"
+                return full
+
+        transport = InvalidPreparedEnvelopeTransport(registry)
+        adapter = HoudiniMCPAdapter.b2_read_only(transport, registry=registry)
+        initialize(adapter)
+        response = adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": "node-types-invalid-envelope",
+                "method": "tools/call",
+                "params": {
+                    "name": "houdini_node_type_info",
+                    "arguments": {"node_types": copy.deepcopy(NODE_TYPE_SELECTORS)},
+                },
+            }
+        )
+        self.assertEqual(-32602, response["error"]["code"])
+        self.assertEqual("SCHEMA_INVALID", response["error"]["data"]["code"])
+        self.assertEqual(1, len(transport.prepared))
+        self.assertEqual([], transport.calls)
+
+    def test_model_projection_does_not_mutate_frozen_b2_contract(self) -> None:
+        registry = SchemaRegistry.b2_read_only()
+        HoudiniMCPAdapter.b2_read_only(PreparingB2Transport(registry), registry=registry)
+        frozen_schema = registry.get_input_schema("houdini_node_type_info")
+        self.assertEqual(
+            "bb5ec5547c00534d7135973190a6781fb6a40934d480c8b99923c3af0d305628",
+            registry.manifest_digest,
+        )
+        self.assertEqual(
+            "d468c8f602a5b012daa76ba4dda62ec4819942abfeb064cb30425a6fa5828730",
+            canonical_json_sha256(frozen_schema),
+        )
+        self.assertEqual(
+            {"$ref": "#/$defs/nodeType"},
+            frozen_schema["properties"]["node_types"]["items"],
+        )
+        self.assertIn("nodeType", frozen_schema["$defs"])
 
     def test_real_schema_registry_produces_exact_five_mcp_descriptors(self) -> None:
         registry = SchemaRegistry()
@@ -699,11 +1097,43 @@ class HoudiniMCPAdapterTests(unittest.TestCase):
             {
                 "jsonrpc": "2.0",
                 "method": "notifications/cancelled",
-                "params": {"requestId": "rpc-7", "reason": "user stopped"},
+                "params": {
+                    "requestId": "rpc-7",
+                    "reason": "user stopped",
+                    "_meta": {"progressToken": 7},
+                },
             }
         )
         self.assertIsNone(response)
         self.assertEqual(["rpc-7"], self.transport.cancelled)
+
+    def test_initialized_notification_accepts_only_bounded_meta(self) -> None:
+        adapter = HoudiniMCPAdapter(
+            RecordingTransport(), registry=RecordingRegistry()
+        )
+        response = adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            }
+        )
+        self.assertIn("result", response)
+        self.assertIsNone(
+            adapter.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                    "params": {"_meta": {"progressToken": "ready"}},
+                }
+            )
+        )
+        self.assertTrue(adapter.initialized)
 
     def test_malformed_known_notification_is_ignored_without_crashing(self) -> None:
         response = self.adapter.handle_message(
@@ -727,6 +1157,8 @@ class HoudiniMCPAdapterTests(unittest.TestCase):
             with self.subTest(message=message):
                 response = self.adapter.handle_message(message)
                 self.assertEqual(-32600, response["error"]["code"])
+                if message.get("id") is True:
+                    self.assertIsNone(response["id"])
 
 
 class HoudiniMCPStdioTests(unittest.TestCase):
@@ -833,14 +1265,86 @@ class HoudiniMCPStdioTests(unittest.TestCase):
         self.assertIn("INVALID_JSONL_FRAME", stderr)
         self.assertNotIn("Traceback", stderr)
 
-    def test_standalone_main_remains_live_transport_disabled(self) -> None:
+    def test_standalone_main_fails_closed_with_fixed_missing_environment_diagnostic(self) -> None:
         stderr = io.StringIO()
-        with mock.patch.object(stdio_module, "serve") as serve_mock:
-            with mock.patch.object(stdio_module.sys, "stderr", stderr):
-                status = stdio_module.main()
+        registry = SchemaRegistry.b2_read_only()
+        with mock.patch.object(stdio_module, "_runtime_identity_matches", return_value=True):
+            with mock.patch.object(
+                stdio_module.SchemaRegistry,
+                "b2_read_only",
+                return_value=registry,
+            ):
+                with mock.patch.object(
+                    stdio_module.LoopbackBridgeTransport,
+                    "from_environment",
+                    side_effect=BridgeTransportError(
+                        "BRIDGE_CONFIGURATION_MISSING",
+                        "secret environment details must not be printed",
+                    ),
+                ) as factory:
+                    with mock.patch.object(stdio_module, "serve") as serve_mock:
+                        with mock.patch.object(stdio_module.sys, "stderr", stderr):
+                            status = stdio_module.main()
         self.assertEqual(2, status)
-        self.assertEqual("hia-houdini-mcp: B2A_REAL_MCP_START_DISABLED\n", stderr.getvalue())
+        self.assertEqual(
+            "hia-houdini-mcp: B2C_BRIDGE_CONFIGURATION_MISSING\n",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("secret", stderr.getvalue())
+        factory.assert_called_once_with(manifest_digest=registry.manifest_digest)
         serve_mock.assert_not_called()
+
+    def test_standalone_main_composes_environment_transport_with_stdio(self) -> None:
+        transport = RecordingTransport()
+        registry = SchemaRegistry.b2_read_only()
+        with mock.patch.object(stdio_module, "_runtime_identity_matches", return_value=True):
+            with mock.patch.object(
+                stdio_module.SchemaRegistry,
+                "b2_read_only",
+                return_value=registry,
+            ):
+                with mock.patch.object(
+                    stdio_module.LoopbackBridgeTransport,
+                    "from_environment",
+                    return_value=transport,
+                ) as factory:
+                    with mock.patch.object(
+                        stdio_module, "serve", return_value=0
+                    ) as serve_mock:
+                        status = stdio_module.main()
+        self.assertEqual(0, status)
+        factory.assert_called_once_with(manifest_digest=registry.manifest_digest)
+        serve_mock.assert_called_once_with(transport, registry=registry)
+
+    def test_standalone_main_rejects_runtime_identity_with_fixed_diagnostic(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(stdio_module, "_runtime_identity_matches", return_value=False):
+            with mock.patch.object(
+                stdio_module.LoopbackBridgeTransport, "from_environment"
+            ) as factory:
+                with mock.patch.object(stdio_module.sys, "stderr", stderr):
+                    status = stdio_module.main()
+        self.assertEqual(2, status)
+        self.assertEqual(
+            "hia-houdini-mcp: B2C_RUNTIME_IDENTITY_INVALID\n",
+            stderr.getvalue(),
+        )
+        factory.assert_not_called()
+
+    def test_runtime_identity_uses_project_root_and_active_python(self) -> None:
+        valid = {
+            stdio_module.PROJECT_ROOT_ENV: str(REPOSITORY_ROOT),
+            stdio_module.EXPECTED_PYTHON_ENV: sys.executable,
+        }
+        self.assertTrue(stdio_module._runtime_identity_matches(valid))
+        wrong_root = dict(valid)
+        wrong_root[stdio_module.PROJECT_ROOT_ENV] = str(REPOSITORY_ROOT / "tests")
+        self.assertFalse(stdio_module._runtime_identity_matches(wrong_root))
+        wrong_python = dict(valid)
+        wrong_python[stdio_module.EXPECTED_PYTHON_ENV] = str(
+            REPOSITORY_ROOT / "README.md"
+        )
+        self.assertFalse(stdio_module._runtime_identity_matches(wrong_python))
 
     def test_blocking_call_does_not_prevent_cancellation_notification(self) -> None:
         transport = BlockingTransport(release_on_cancel=True)
@@ -931,6 +1435,46 @@ class HoudiniMCPStdioTests(unittest.TestCase):
         response_ids = {response["id"] for response in responses}
         self.assertIn("call-a", response_ids)
         self.assertIn("call-b", response_ids)
+
+    def test_eof_shutdown_joins_normally_cancellable_call_worker(self) -> None:
+        transport = BlockingTransport(release_on_cancel=True)
+        adapter = HoudiniMCPAdapter(
+            transport,
+            registry=RecordingRegistry(),  # type: ignore[arg-type]
+        )
+        frames = [
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"},
+                    },
+                }
+            ).encode()
+            + b"\n",
+            b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n',
+            b'{"jsonrpc":"2.0","id":"closing","method":"tools/call",'
+            b'"params":{"name":"houdini_scene_info","arguments":{}}}\n',
+            b"",
+        ]
+        source = CoordinatedInput(frames, waits={3: transport.started})
+        status = run_stdio(
+            adapter,
+            input_stream=source,  # type: ignore[arg-type]
+            output_stream=io.BytesIO(),
+            diagnostic_stream=io.StringIO(),
+        )
+        self.assertEqual(0, status)
+        self.assertTrue(transport.finished.is_set())
+        self.assertIn("closing", transport.cancelled)
+        self.assertEqual(1, transport.close_count)
+
+        adapter.shutdown()
+        self.assertEqual(1, transport.close_count)
 
     def test_eof_shutdown_is_bounded_when_transport_ignores_cancel(self) -> None:
         transport = BlockingCancelTransport()

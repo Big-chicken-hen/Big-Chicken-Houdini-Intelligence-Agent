@@ -7,14 +7,15 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any, Callable
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 sys.path.insert(0, str(REPOSITORY_ROOT / "services" / "bridge"))
 
-from hia_bridge.codex_stdio import CodexStdioClient  # noqa: E402
-from hia_bridge.errors import ProtocolRejected  # noqa: E402
+from hia_bridge.codex_stdio import CodexStdioClient, _PendingResponse  # noqa: E402
+from hia_bridge.errors import BridgeError, ProtocolRejected  # noqa: E402
 from hia_bridge.protocol import ProtocolPolicy  # noqa: E402
 
 
@@ -203,6 +204,123 @@ class CodexStdioClientTests(unittest.TestCase):
         self.assertIsNotNone(process)
         self.client.close()
         self.assertIsNotNone(process.poll())
+
+    def test_environment_overlay_is_rejected_after_process_start(self) -> None:
+        with self.assertRaises(BridgeError) as captured:
+            self.client.set_environment_overlay(
+                {"HIA_BRIDGE_URL": "http://127.0.0.1:54321"}
+            )
+        self.assertEqual("CODEX_ENVIRONMENT_LOCKED", captured.exception.code)
+
+    def test_pre_start_environment_overlay_is_inherited_and_stderr_is_redacted(
+        self,
+    ) -> None:
+        secret = "bridge_" + "s" * 40
+        url = "http://127.0.0.1:54321"
+        code = (
+            "import os,sys;"
+            "sys.stderr.write('url=' + os.environ['HIA_BRIDGE_URL'] + "
+            "' token=' + os.environ['HIA_BRIDGE_TOKEN'] + '\\n');"
+            "sys.stderr.flush()"
+        )
+        environment = os.environ.copy()
+        client = CodexStdioClient(
+            [sys.executable, "-B", "-c", code],
+            cwd=REPOSITORY_ROOT,
+            environment=environment,
+            policy=self.policy,
+            event_sink=self._record_event,
+            request_timeout=1.0,
+        )
+        client.set_environment_overlay(
+            {
+                "HIA_BRIDGE_URL": url,
+                "HIA_BRIDGE_TOKEN": secret,
+            }
+        )
+        try:
+            client.start()
+            stderr = self.wait_for(
+                lambda event: event.get("type") == "codex_stderr"
+                and event.get("line", "").startswith("url=")
+            )
+        finally:
+            client.close()
+
+        self.assertNotIn(url, stderr["line"])
+        self.assertGreaterEqual(stderr["line"].count("[REDACTED]"), 2)
+        self.assertNotIn(secret, repr(self.events))
+
+    def test_start_error_redacts_sensitive_environment_values(self) -> None:
+        secret = "bridge_" + "z" * 40
+        client = CodexStdioClient(
+            [sys.executable, "-B", "-c", "pass"],
+            cwd=REPOSITORY_ROOT,
+            environment={
+                "HIA_BRIDGE_TOKEN": secret,
+                "HIA_BRIDGE_URL": "http://127.0.0.1:54321",
+            },
+            policy=self.policy,
+        )
+        with mock.patch(
+            "hia_bridge.codex_stdio.subprocess.Popen",
+            side_effect=OSError(
+                f"failed near {secret} http://127.0.0.1:54321"
+            ),
+        ), self.assertRaises(BridgeError) as captured:
+            client.start()
+
+        serialized = repr(captured.exception.to_dict())
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("http://127.0.0.1:54321", serialized)
+        self.assertIn("[REDACTED]", serialized)
+
+    def test_response_results_and_server_request_params_are_redacted_on_entry(
+        self,
+    ) -> None:
+        secret = "bridge_" + "q" * 40
+        url = "http://127.0.0.1:54321"
+        client = CodexStdioClient(
+            [sys.executable, "-B", "-c", "pass"],
+            cwd=REPOSITORY_ROOT,
+            environment={
+                "HIA_BRIDGE_TOKEN": secret,
+                "HIA_BRIDGE_URL": url,
+            },
+            policy=self.policy,
+            event_sink=self._record_event,
+        )
+        pending = _PendingResponse(method="account/read")
+        client._pending[77] = pending
+        client._handle_response(
+            {
+                "id": 77,
+                "result": {
+                    "echo": f"{url} {secret}",
+                    secret: {url: "nested"},
+                },
+            }
+        )
+        response_encoded = repr(pending.result)
+        self.assertNotIn(secret, response_encoded)
+        self.assertNotIn(url, response_encoded)
+        self.assertIn("[REDACTED]", response_encoded)
+
+        client._handle_server_request(
+            {
+                "id": "approval-secret-echo",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "reason": f"{secret} at {url}",
+                    secret: url,
+                },
+            }
+        )
+        request = client.pending_server_request("approval-secret-echo")
+        request_encoded = repr(request)
+        self.assertNotIn(secret, request_encoded)
+        self.assertNotIn(url, request_encoded)
+        self.assertIn("[REDACTED]", request_encoded)
 
 
 if __name__ == "__main__":

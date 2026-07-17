@@ -1,4 +1,4 @@
-"""Deny-by-default, fake-only Houdini MCP protocol adapter."""
+"""Deny-by-default Houdini MCP protocol adapter and loopback transport."""
 
 from .adapter import (
     CancellationHandoff,
@@ -9,6 +9,11 @@ from .adapter import (
     BridgeTransportError,
     HoudiniMCPAdapter,
 )
+from .bridge_transport import (
+    BRIDGE_TOKEN_ENV,
+    BRIDGE_URL_ENV,
+    LoopbackBridgeTransport,
+)
 
 __all__ = [
     "CancellationHandoff",
@@ -18,6 +23,9 @@ __all__ = [
     "BridgeTransport",
     "BridgeTransportError",
     "HoudiniMCPAdapter",
+    "BRIDGE_TOKEN_ENV",
+    "BRIDGE_URL_ENV",
+    "LoopbackBridgeTransport",
 ]
 
 __version__ = "0.1.0"

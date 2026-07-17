@@ -75,6 +75,18 @@ class _ScriptedModelClient(_ClientStub):
         return self.responses.pop(0)
 
 
+class _RecordingClient(_ClientStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.requests.append((method, dict(params)))
+        if method == "turn/start":
+            return {"turn": {"id": "turn-recorded", "status": "inProgress"}}
+        return super().request(method, params)
+
+
 def _model_entry(
     model: str,
     *,
@@ -459,6 +471,57 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
                     session.start_turn("must remain blocked")
                 self.assertEqual("TURN_ALREADY_ACTIVE", raised.exception.code)
                 self.assertEqual(1, client.turn_request_count)
+
+
+class BridgeSessionNativeToolContainmentTests(unittest.TestCase):
+    def make_session(self) -> tuple[BridgeSession, _RecordingClient]:
+        client = _RecordingClient()
+        return BridgeSession(REPOSITORY_ROOT, client, EventBuffer()), client
+
+    def test_thread_start_is_fixed_read_only_without_approval_escalation(self) -> None:
+        session, client = self.make_session()
+
+        session.start_thread()
+
+        method, params = client.requests[0]
+        self.assertEqual("thread/start", method)
+        self.assertEqual("read-only", params["sandbox"])
+        self.assertEqual("never", params["approvalPolicy"])
+        self.assertNotIn("developerInstructions", params)
+        self.assertNotIn("baseInstructions", params)
+        self.assertNotIn("config", params)
+
+    def test_thread_resume_is_fixed_read_only_without_approval_escalation(self) -> None:
+        session, client = self.make_session()
+
+        session.resume_thread("thread-existing")
+
+        method, params = client.requests[0]
+        self.assertEqual("thread/resume", method)
+        self.assertEqual("read-only", params["sandbox"])
+        self.assertEqual("never", params["approvalPolicy"])
+        self.assertNotIn("developerInstructions", params)
+        self.assertNotIn("baseInstructions", params)
+        self.assertNotIn("config", params)
+
+    def test_turn_start_defensively_reasserts_read_only_and_never(self) -> None:
+        session, client = self.make_session()
+        session.start_thread()
+        client.requests.clear()
+
+        session.start_turn("read Houdini state")
+
+        method, params = client.requests[0]
+        self.assertEqual("turn/start", method)
+        self.assertEqual("never", params["approvalPolicy"])
+        self.assertEqual(
+            {"type": "readOnly", "networkAccess": False},
+            params["sandboxPolicy"],
+        )
+        self.assertEqual("read Houdini state", params["input"][0]["text"])
+        self.assertNotIn("developerInstructions", params)
+        self.assertNotIn("baseInstructions", params)
+        self.assertNotIn("config", params)
 
 
 if __name__ == "__main__":

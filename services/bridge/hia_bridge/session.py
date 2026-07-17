@@ -145,8 +145,8 @@ class BridgeSession:
             self._require_no_active_turn_locked()
         params: dict[str, Any] = {
             "cwd": str(self._project_root),
-            "approvalPolicy": "on-request",
-            "sandbox": "workspace-write",
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
             "ephemeral": False,
         }
         if model is not None:
@@ -168,8 +168,8 @@ class BridgeSession:
             {
                 "threadId": thread_id,
                 "cwd": str(self._project_root),
-                "approvalPolicy": "on-request",
-                "sandbox": "workspace-write",
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
             },
         )
         resolved_id = self._extract_thread_id(resumed)
@@ -309,7 +309,11 @@ class BridgeSession:
                     }
                 ],
                 "cwd": str(self._project_root),
-                "approvalPolicy": "on-request",
+                "approvalPolicy": "never",
+                "sandboxPolicy": {
+                    "type": "readOnly",
+                    "networkAccess": False,
+                },
             }
             if model is not None:
                 params["model"] = model

@@ -18,6 +18,17 @@ EventSink = Callable[[dict[str, Any]], None]
 RequestId = int | str
 
 
+_SENSITIVE_ENVIRONMENT_MARKERS = (
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "API_KEY",
+    "AUTHORIZATION",
+    "PROXY",
+)
+_SENSITIVE_ENVIRONMENT_NAMES = frozenset({"HIA_BRIDGE_URL"})
+
+
 @dataclass
 class _PendingResponse:
     method: str
@@ -44,6 +55,7 @@ class CodexStdioClient:
         self._command = tuple(command)
         self._cwd = cwd
         self._environment = dict(environment)
+        self._sensitive_values = self._collect_sensitive_values(self._environment)
         self._policy = policy
         self._event_sink = event_sink
         self._request_timeout = request_timeout
@@ -62,6 +74,36 @@ class CodexStdioClient:
     def set_event_sink(self, event_sink: EventSink) -> None:
         with self._state_lock:
             self._event_sink = event_sink
+
+    def set_environment_overlay(self, values: Mapping[str, str]) -> None:
+        """Apply child-only environment values before process creation.
+
+        The Bridge binds its random loopback port after this client is
+        constructed.  This one-way pre-start gate lets it add only that
+        launch's URL and ordinary Bearer credential without placing either in
+        command-line arguments or persistent configuration.
+        """
+
+        if not isinstance(values, Mapping):
+            raise TypeError("values must be a mapping")
+        overlay: dict[str, str] = {}
+        for key, value in values.items():
+            if not isinstance(key, str) or not key or "=" in key or "\x00" in key:
+                raise ValueError("environment names must be non-empty safe strings")
+            if not isinstance(value, str) or "\x00" in value:
+                raise ValueError("environment values must be strings without NUL")
+            overlay[key] = value
+        with self._state_lock:
+            if self._process is not None:
+                raise BridgeError(
+                    "CODEX_ENVIRONMENT_LOCKED",
+                    "Codex child environment cannot change after process start",
+                    http_status=409,
+                )
+            self._environment.update(overlay)
+            self._sensitive_values = self._collect_sensitive_values(
+                self._environment
+            )
 
     @property
     def process_id(self) -> int | None:
@@ -103,7 +145,8 @@ class CodexStdioClient:
             except OSError as exc:
                 raise BridgeError(
                     "CODEX_START_FAILED",
-                    f"Unable to start Codex app-server: {exc}",
+                    "Unable to start Codex app-server: "
+                    f"{self._redact_text(str(exc))}",
                     http_status=502,
                 ) from exc
             self._process = process
@@ -181,7 +224,7 @@ class CodexStdioClient:
         if pending.error is not None:
             if isinstance(pending.error, BridgeError):
                 raise pending.error
-            raise CodexRPCError(method, pending.error)
+            raise CodexRPCError(method, self._redact_value(pending.error))
         return pending.result
 
     def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:
@@ -271,7 +314,8 @@ class CodexStdioClient:
             except (BrokenPipeError, OSError) as exc:
                 raise BridgeError(
                     "CODEX_STDIN_FAILED",
-                    f"Unable to write to Codex app-server: {exc}",
+                    "Unable to write to Codex app-server: "
+                    f"{self._redact_text(str(exc))}",
                     http_status=502,
                 ) from exc
 
@@ -321,7 +365,7 @@ class CodexStdioClient:
         for raw_line in process.stderr:
             line = raw_line.rstrip("\r\n")
             if line:
-                self._emit("codex_stderr", line=line)
+                self._emit("codex_stderr", line=self._redact_text(line))
 
     def _handle_message(self, message: dict[str, Any]) -> None:
         method = message.get("method")
@@ -353,9 +397,9 @@ class CodexStdioClient:
             )
             return
         if "error" in message:
-            pending.error = message["error"]
+            pending.error = self._redact_value(message["error"])
         else:
-            pending.result = message.get("result")
+            pending.result = self._redact_value(message.get("result"))
         pending.event.set()
 
     def _handle_server_request(self, message: dict[str, Any]) -> None:
@@ -384,7 +428,9 @@ class CodexStdioClient:
         params = message.get("params")
         request = {
             "method": method,
-            "params": params if isinstance(params, dict) else {},
+            "params": self._redact_value(
+                params if isinstance(params, dict) else {}
+            ),
         }
         with self._pending_lock:
             if request_id in self._server_requests:
@@ -433,7 +479,49 @@ class CodexStdioClient:
         if sink is None:
             return
         try:
-            sink({"type": event_type, **fields})
+            sink(self._redact_value({"type": event_type, **fields}))
         except Exception:
             # Event consumers must never terminate the stdout/stderr reader.
             pass
+
+    @staticmethod
+    def _collect_sensitive_values(environment: Mapping[str, str]) -> tuple[str, ...]:
+        values = {
+            value
+            for name, value in environment.items()
+            if isinstance(name, str)
+            and isinstance(value, str)
+            and len(value) >= 8
+            and (
+                name.upper() in _SENSITIVE_ENVIRONMENT_NAMES
+                or any(
+                    marker in name.upper()
+                    for marker in _SENSITIVE_ENVIRONMENT_MARKERS
+                )
+            )
+        }
+        return tuple(sorted(values, key=len, reverse=True))
+
+    def _redact_text(self, value: str) -> str:
+        redacted = value
+        for secret in self._sensitive_values:
+            redacted = redacted.replace(secret, "[REDACTED]")
+        return redacted
+
+    def _redact_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._redact_text(value)
+        if isinstance(value, dict):
+            return {
+                (
+                    self._redact_text(key)
+                    if isinstance(key, str)
+                    else key
+                ): self._redact_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._redact_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._redact_value(item) for item in value)
+        return value

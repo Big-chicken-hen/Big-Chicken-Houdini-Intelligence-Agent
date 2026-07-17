@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
+import re
 import secrets
 import signal
 import sys
 import threading
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from hia_core.houdini_contract import B2_SCHEMA_VERSION, SchemaRegistry
 from hia_core.path_policy import PROJECT_ROOT, PathPolicyError, validate_project_subpath
@@ -28,6 +30,30 @@ PINNED_CODEX_RELATIVE_PATH = Path(
     ".runtime/toolchains/codex/0.144.3/codex.exe"
 )
 CODEX_HOME_RELATIVE_PATH = Path(".runtime/codex-home")
+_LAUNCH_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
+_BRIDGE_URL_PATTERN = re.compile(
+    r"^http://127\.0\.0\.1:([1-9][0-9]{0,4})$"
+)
+_CODEX_CHILD_ENVIRONMENT_ALLOWLIST = (
+    "ALL_PROXY",
+    "COMSPEC",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "LANG",
+    "LC_ALL",
+    "NO_PROXY",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_ARCHITEW6432",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMROOT",
+    "TZ",
+    "WINDIR",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +74,110 @@ def _same_windows_path(left: Path, right: Path) -> bool:
     return str(left).replace("/", "\\").rstrip("\\").casefold() == str(
         right
     ).replace("/", "\\").rstrip("\\").casefold()
+
+
+def _required_launch_secret(name: str) -> str:
+    value = os.environ.get(name)
+    if not isinstance(value, str) or _LAUNCH_SECRET_PATTERN.fullmatch(value) is None:
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            f"Required launch credential is missing or invalid: {name}",
+        )
+    return value
+
+
+def _required_bridge_url() -> tuple[str, int]:
+    value = os.environ.get("HIA_BRIDGE_URL")
+    if not isinstance(value, str):
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "Required loopback Bridge URL is missing",
+        )
+    match = _BRIDGE_URL_PATTERN.fullmatch(value)
+    if match is None:
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "Bridge URL must be an exact credential-free IPv4 loopback origin",
+        )
+    port = int(match.group(1))
+    if not 1 <= port <= 65_535:
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "Bridge URL port is outside the valid range",
+        )
+    return value, port
+
+
+def _prepend_environment_path(
+    environment: dict[str, str],
+    name: str,
+    entries: Sequence[Path],
+) -> None:
+    existing = environment.get(name, "")
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw in [*(str(entry) for entry in entries), *existing.split(os.pathsep)]:
+        if not raw:
+            continue
+        key = raw.replace("/", "\\").rstrip("\\").casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(raw)
+    environment[name] = os.pathsep.join(ordered)
+
+
+def _allowlisted_child_environment(
+    source: Mapping[str, str],
+) -> dict[str, str]:
+    """Copy only reviewed OS/network values into the owned Codex child."""
+
+    by_casefold = {name.casefold(): value for name, value in source.items()}
+    environment: dict[str, str] = {}
+    for name in _CODEX_CHILD_ENVIRONMENT_ALLOWLIST:
+        value = by_casefold.get(name.casefold())
+        if isinstance(value, str) and "\x00" not in value:
+            environment[name] = value
+    return environment
+
+
+def _redact_value(value: object, sensitive_values: Sequence[str]) -> object:
+    if isinstance(value, str):
+        redacted = value
+        for sensitive in sorted(
+            (item for item in sensitive_values if item),
+            key=len,
+            reverse=True,
+        ):
+            redacted = redacted.replace(sensitive, "[REDACTED]")
+        return redacted
+    if isinstance(value, dict):
+        return {
+            (
+                _redact_value(key, sensitive_values)
+                if isinstance(key, str)
+                else key
+            ): _redact_value(item, sensitive_values)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_value(item, sensitive_values) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item, sensitive_values) for item in value)
+    return value
+
+
+def _toml_basic_string(value: str) -> str:
+    if not isinstance(value, str) or not value or any(
+        ord(character) < 0x20 for character in value
+    ):
+        raise BridgeError(
+            "INVALID_CODEX_EXECUTABLE",
+            "The MCP Python executable cannot be represented safely in TOML",
+        )
+    # JSON basic strings are a strict, safely escaped subset of TOML basic
+    # strings for an ordinary Windows executable path.
+    return json.dumps(value, ensure_ascii=True)
 
 
 def _validated_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
@@ -88,34 +218,71 @@ def run(argv: Sequence[str] | None = None) -> int:
     session: BridgeSession | None = None
     server: LoopbackHTTPServer | None = None
     scene_queue: SceneQueue | None = None
+    sensitive_values: list[str] = []
     try:
         project_root, codex_exe, codex_home, temp_directory = _validated_paths(args)
         codex_home.mkdir(parents=True, exist_ok=True)
         temp_directory.mkdir(parents=True, exist_ok=True)
 
+        token = _required_launch_secret("HIA_BRIDGE_TOKEN")
+        sensitive_values.append(token)
+        scene_executor_token = _required_launch_secret(
+            "HIA_SCENE_EXECUTOR_TOKEN"
+        )
+        sensitive_values.append(scene_executor_token)
+        requested_bridge_url, requested_bridge_port = _required_bridge_url()
+        sensitive_values.append(requested_bridge_url)
+        if hmac.compare_digest(token, scene_executor_token):
+            raise BridgeError(
+                "INVALID_LAUNCH_ENVIRONMENT",
+                "Bridge and scene executor credentials must be independent",
+            )
+
         policy = ProtocolPolicy.from_project_root(project_root)
-        child_environment = os.environ.copy()
+        child_environment = _allowlisted_child_environment(os.environ)
+        resolved_python = str(Path(sys.executable).resolve())
+        _prepend_environment_path(
+            child_environment,
+            "PATH",
+            (Path(resolved_python).parent,),
+        )
+        _prepend_environment_path(
+            child_environment,
+            "PYTHONPATH",
+            (
+                project_root / "services" / "houdini_mcp",
+                project_root / "src",
+            ),
+        )
         child_environment.update(
             {
                 "CODEX_HOME": str(codex_home),
                 "TEMP": str(temp_directory),
                 "TMP": str(temp_directory),
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
+                "HIA_PROJECT_ROOT": str(project_root),
+                "HIA_EXPECTED_PYTHON_EXE": resolved_python,
             }
         )
         events = EventBuffer()
         client = CodexStdioClient(
-            [str(codex_exe), "app-server"],
+            [
+                str(codex_exe),
+                "app-server",
+                "--strict-config",
+                "-c",
+                "mcp_servers.houdini_intelligence.command="
+                + _toml_basic_string(resolved_python),
+                "-c",
+                "mcp_servers.houdini_intelligence.required=true",
+            ],
             cwd=project_root,
             environment=child_environment,
             policy=policy,
             request_timeout=45.0,
         )
         session = BridgeSession(project_root, client, events)
-        session.start()
-
-        token = secrets.token_urlsafe(32)
-        scene_executor_token = secrets.token_urlsafe(32)
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
         houdini_process_nonce = f"houdini-{secrets.token_hex(16)}"
@@ -138,7 +305,25 @@ def run(argv: Sequence[str] | None = None) -> int:
             scene_registry=scene_registry,
             scene_executor_token=scene_executor_token,
         )
-        server = LoopbackHTTPServer(("127.0.0.1", 0), application)
+        server = LoopbackHTTPServer(
+            ("127.0.0.1", requested_bridge_port),
+            application,
+        )
+
+        host, port = server.server_address
+        bridge_url = f"http://{host}:{port}"
+        if bridge_url != requested_bridge_url:
+            raise BridgeError(
+                "BRIDGE_BIND_MISMATCH",
+                "Bridge did not bind the exact launch-scoped loopback origin",
+            )
+        client.set_environment_overlay(
+            {
+                "HIA_BRIDGE_URL": bridge_url,
+                "HIA_BRIDGE_TOKEN": token,
+            }
+        )
+        session.start()
 
         def request_shutdown(*_: object) -> None:
             threading.Thread(
@@ -152,11 +337,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             if signal_value is not None:
                 signal.signal(signal_value, request_shutdown)
 
-        host, port = server.server_address
         bootstrap = {
             "ok": True,
-            "url": f"http://{host}:{port}",
-            "token": token,
             "bridge_pid": os.getpid(),
             "codex_pid": client.process_id,
             "codex_version": policy.version,
@@ -166,7 +348,6 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "launch_id": scene_launch_id,
                 "generation": scene_generation,
                 "process_nonce": houdini_process_nonce,
-                "executor_token": scene_executor_token,
                 "schema_version": scene_registry.schema_version,
                 "schema_digest": scene_registry.manifest_digest,
             },
@@ -182,7 +363,14 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "ok": False,
                 "structured_error": {"code": "PATH_POLICY_ERROR", "message": str(exc)},
             }
-        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
+        print(
+            json.dumps(
+                _redact_value(payload, sensitive_values),
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
     except Exception as exc:
         payload = {
@@ -192,7 +380,14 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "message": f"{type(exc).__name__}: {exc}",
             },
         }
-        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
+        print(
+            json.dumps(
+                _redact_value(payload, sensitive_values),
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
     finally:
         try:

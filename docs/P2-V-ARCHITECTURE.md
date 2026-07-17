@@ -2,9 +2,9 @@
 
 ## Review status and authorization boundary
 
-This corrected Gate B0 design package is approved and frozen as a pre-release contract. That approval authorizes Gate B1 offline adaptation only; it does not authorize a live Houdini connection, creation or modification of Houdini nodes, startup of the Houdini GUI, project MCP configuration, registration or startup of a real MCP service, a live Panel executor, or any `hou` call.
+Gate B0 and Gate B1 are complete, and the Gate B2 read-only capability slice has passed its separately performed manual Houdini GUI acceptance. Gate B2C is now authorized only to connect the pinned Codex 0.144.3 app-server to the existing authenticated loopback Bridge and live Panel through one project-scoped stdio MCP sidecar. The active B2C profile exposes exactly `houdini_scene_info` and `houdini_node_type_info`.
 
-Gate B1 may adapt the preserved uncommitted drafts to this exact five-tool contract with pure-Python fakes and offline tests. A later, separately approved live-read or live-write sub-gate is required before any component may connect to Houdini or `houdini_graph_apply` may mutate a real HIP session.
+Gate B2C does not authorize Gate B3, a graph tool, a scene write, a cook, a render, a save, an HDA operation, or arbitrary code. `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify` remain disabled and unregistered in the active Codex profile.
 
 Schema version `0.1.0` is frozen pre-release. This five-tool contract is an in-place correction of a rejected, unapproved four-tool draft that was never published or enabled; Git history preserves that draft for audit. Any future breaking change requires a new schema version rather than reusing `0.1.0`.
 
@@ -22,6 +22,8 @@ The exact reviewed tools are:
 4. `houdini_graph_apply`
 5. `houdini_graph_verify`
 
+Those five names describe the frozen future graph contract. The active Gate B2C runtime surface is the strict two-tool subset `houdini_scene_info` and `houdini_node_type_info`; the other three names remain dormant until a later gate explicitly authorizes them.
+
 The current version enables only bounded OBJ/SOP creation beneath one new, validated `/obj/HIA_Graph_<id>` container. Context is a versioned field: later OBJ, SOP, DOP, LOP, VOP, MaterialX, COP, TOP, KineFX, or APEX adapters require a separately reviewed schema version rather than an open enum. P2-V does not provide arbitrary Python, HScript, expressions, callbacks, `eval`, shell execution, filesystem access, HIP save, rendering, caching, HDA creation or publishing, node deletion as a public tool, modification of an existing user node, or references outside the request-owned container.
 
 ## Trust and transport path
@@ -29,43 +31,45 @@ The current version enables only bounded OBJ/SOP creation beneath one new, valid
 ```text
 Codex app-server (pinned 0.144.3; reasoning and tool selection)
     -> project-local MCP subprocess over stdio
-Project-local Houdini MCP adapter (five deterministic tools only)
+Project-local Houdini MCP adapter (exactly two B2C read-only tools)
     -> authenticated HTTP to 127.0.0.1:<random-port>
 Existing Bearer-authenticated loopback Bridge (validation and bounded queue)
-    <- nonblocking authenticated polling / result posting
-Houdini Intelligence Panel main-thread executor (single live-HIP writer)
-    -> hou API on the Houdini UI thread only
+    <- nonblocking authenticated status/read dispatch
+Houdini Intelligence Panel main-thread read adapter
+    -> bounded hou API reads on the Houdini UI thread only
 Live Houdini session
 ```
 
 The app-server remains stdio-only and is never exposed on a network socket. The MCP adapter is a project-local stdio child process, not an HTTP server. The Bridge retains its random loopback port and random session Bearer token; neither the token nor the scene gateway is exposed to a LAN or the internet. The Panel does not block its UI thread while waiting for Bridge work.
 
-No component in this path uses Computer Use or screen takeover. The only scene mutation path is the reviewed declarative request reaching the main-thread `hou` executor.
+No component in this path uses Computer Use or screen takeover. B2C has no scene-mutation path: every graph tool and every write/cook/save/render/HDA operation remains disabled.
 
 ## Component responsibilities
 
 ### Codex app-server and Codex
 
-- Codex interprets the user's asset request and selects from the five tools.
-- Codex supplies a general declarative graph intent; it does not send executable code or object-specific hidden instructions.
+- Codex is the sole reasoning component. Within the HIA MCP namespace it may select only the two registered B2C read tools.
+- The exact two-tool claim is MCP-scoped: pinned Codex 0.144.3 has no locally proven stable native-tool allowlist that globally hides its own shell, patch, or filesystem tools. B2C fixes every Thread and Turn to a read-only, network-disabled, no-escalation policy instead of overstating that boundary.
+- The frozen general graph contract remains design input for a later gate; B2C sends neither executable code nor a graph mutation request.
 - The pinned Codex 0.144.3 capability and generated stable protocol baseline remain authoritative for this project.
 - Existing exclusions remain in force: no experimental Schema, `dynamicTools`, process API, `thread/shellCommand`, or app-server WebSocket.
 
 ### Project-local stdio MCP adapter
 
-- Publishes exactly the five P2-V tools with versioned JSON Schema.
+- Publishes exactly `houdini_scene_info` and `houdini_node_type_info` in B2C with versioned JSON Schema. The three graph tools remain denied even though their frozen `0.1.0` artifacts stay in the repository.
 - Denies every unregistered tool and rejects unknown fields where the versioned Schema requires a closed object.
 - Performs structural, size, count, string, enum, and deadline validation before forwarding a request.
 - Converts schema-admitted execution failures into structured MCP tool results without leaking tokens, tracebacks, or internal paths; cancellation, queue, and shutdown failures remain bounded adapter errors.
 - Does not import `hou`, inspect the filesystem, make planning decisions, rewrite prompts, or execute code.
 - Uses a bounded wait and cancellation path rather than keeping an unbounded tool call alive.
+- Reads the authenticated status facade only to obtain trusted current correlation values; it never trusts a caller-supplied attestation or technical session snapshot.
 
 ### Authenticated loopback Bridge
 
 - Authenticates every adapter and Panel request using the existing session Bearer token.
 - Maintains a bounded in-memory request queue and one result slot per request; it is not a second chat store.
 - Correlates `request_id`, Codex Thread/Turn, HIP session, revision, idempotency key, deadline, and result.
-- Allows only one queued or executing write against the live HIP at a time.
+- Exposes a bounded authenticated status facade for the current safe read correlation context and five-type availability summary; reading it does not renew the capability lease.
 - Rejects replay, expired requests, queue overflow, unknown tools, malformed results, and session mismatch with structured errors.
 - Does not call `hou`, approve a change, synthesize a graph, or broaden the declared scope.
 
@@ -74,26 +78,26 @@ No component in this path uses Computer Use or screen takeover. The only scene m
 - Reuses the P1 transport model: standard-library HTTP runs only in daemon workers, with one worker reserved for event polling and at most two control-request workers. Workers place plain Python dictionaries into a bounded thread-safe queue and never touch a widget or emit a Qt signal.
 - Uses one main-thread `QTimer` to drain that queue. Every request has a finite monotonic deadline and generation; stale or post-disposal results are discarded without blocking the Houdini UI.
 - Dispatches accepted work from that main-thread timer drain through an equivalent Houdini-supported main-thread scheduling mechanism; no worker emits a Qt signal carrying work.
-- Is the sole writer to the live HIP. Network callbacks and Bridge worker threads never call `hou`.
-- Revalidates session, revision, approval proof, idempotency, node types, names, parameters, connections, and scope immediately before execution.
+- Performs only bounded read dispatch in B2C. Network callbacks and Bridge worker threads never call `hou`.
+- Revalidates the trusted session, revision, catalog digest, Schema digest, requested allowlisted type, and deadline immediately before each read.
 - Posts a structured result to the Bridge and does not retain duplicate conversation history.
 
 ### Houdini runtime adapter
 
 - Discovers live capabilities from `hou` at runtime.
-- Applies only reviewed, declarative OBJ/SOP operations.
-- Wraps one approved graph application in one `hou.undos.group`.
-- Verifies the resulting graph using live node and parameter state rather than assuming a cook succeeded.
+- Exposes only bounded scene metadata and the reviewed live OBJ/SOP type metadata in B2C.
+- Contains no node creation, parameter mutation, connection, deletion, cook, save, render, HDA, or Undo operation in this gate.
+- Leaves the future graph transaction implementation and verification path disabled until Gate B3 or a later explicitly authorized gate.
 
 ## Runtime discovery and live authority
 
 No P2 component hard-codes a Houdini installation directory, Houdini version, Python version, or the existence and parameter layout of a node type.
 
-The launcher or process supervisor discovers candidate Houdini installations only within separately authorized, bounded locations. Once the Panel is loaded, a trusted internal capability attestation reports the live process nonce, build, platform, Python ABI, HIP identity, available contexts, node-type catalog digest, and the ten reviewed canonical-JSON schema hashes. Schema digests use sorted-key, whitespace-free UTF-8 JSON so Git line-ending conversion cannot change protocol identity. This attestation is transport state, not an untrusted tool argument or a public `houdini_scene_info` response. `houdini_node_type_info` returns only the bounded node metadata defined by its output schema.
+The launcher or process supervisor discovers candidate Houdini installations only within separately authorized, bounded locations. Once the Panel is loaded, a trusted internal capability attestation reports the live process nonce, build, platform, Python ABI, HIP identity, available contexts, node-type catalog digest, and reviewed read-profile Schema digest. Schema digests use sorted-key, whitespace-free UTF-8 JSON so Git line-ending conversion cannot change protocol identity. This attestation is transport state, not an untrusted tool argument or a public `houdini_scene_info` response. `houdini_node_type_info` returns only the bounded node metadata defined by its output schema.
 
 Static recipes may name reviewed logical types such as an OBJ geometry container, SOP box, SOP merge, and SOP output/null, but the live schema is authoritative. A missing or unattested live process returns `HOUDINI_UNAVAILABLE`. A build, catalog, schema-hash, type, parameter, tuple, or context mismatch returns `CAPABILITY_MISMATCH`. The executor does not guess a substitute or fall back to Python.
 
-The public schemas require an exact `hip_session_id` and `base_scene_revision`, including for `houdini_scene_info`. This is not satisfied with a `"current"` wildcard. The trusted Bridge session snapshot injects those exact values into Codex-visible connection state before a tool request is formed; if no current snapshot exists, dispatch fails with `HOUDINI_UNAVAILABLE`. A changed session or older revision still fails with `HIP_SESSION_MISMATCH` or `SCENE_CONFLICT`.
+The public schemas require an exact `hip_session_id` and `base_scene_revision`, including for `houdini_scene_info`. This is not satisfied with a `"current"` wildcard. In B2C the authenticated `GET /v1/scene/status` facade supplies the current safe correlation context, and the Bridge-owned parameter facade replaces technical session/revision fields from that trusted snapshot before dispatch. Caller-supplied attestation, session, revision, catalog, or Schema values never become authority. If no current snapshot exists, dispatch fails with `HOUDINI_UNAVAILABLE`; a changed session or older revision fails closed rather than being silently rebased.
 
 ## Tool surface
 
@@ -106,6 +110,8 @@ The public schemas require an exact `hip_session_id` and `base_scene_revision`, 
 | `houdini_graph_verify` | Read-only | Read and verify the created graph's nodes, typed parameters, connections, flags, cook state, scope, and canonical graph digest. | None |
 
 The read-only tools do not return arbitrary scene dumps, scripts, parameter expressions, secrets, environment variables, or filesystem paths. Requests and responses are bounded by explicit maximum counts and string sizes in the versioned Schemas.
+
+Only the first two rows are available in Gate B2C. The remaining graph rows document the frozen `0.1.0` contract and are not registered, callable, or implied by the presence of their repository schemas.
 
 ## Scene command envelope
 
@@ -157,20 +163,31 @@ JSON Schema closes and bounds each accepted value, but B1 must also run determin
 
 Any mismatch is rejected before it can complete another request. No validator evaluates strings, imports `hou`, or broadens an enum.
 
-## Request queue and execution sequence
+## Gate B2C read-only execution sequence
 
-1. Codex invokes one of the five MCP tools.
+1. Codex invokes either `houdini_scene_info` or `houdini_node_type_info` through the project-local stdio MCP child.
+2. The adapter accepts only the pinned MCP handshake and exact two-tool allowlist, then queries the authenticated status facade for a current trusted snapshot.
+3. The Bridge-owned parameter facade supplies the trusted HIP session and revision. For a node-type request, only the reviewed canonical type name remains caller intent; technical attestation fields cannot be forged through tool arguments.
+4. The Bridge validates the active read profile and enqueues a bounded read for the Panel. Missing or stale capability state fails with a structured `HOUDINI_UNAVAILABLE` or `CAPABILITY_MISMATCH` result.
+5. The Panel's main-thread timer executes only bounded `hou` reads and posts one correlated plain-dictionary result. Workers never call `hou` and no request changes scene state.
+6. Closing the Panel or losing the live capability causes a finite explicit failure. It does not hang, renew a stale lease, start a replacement service, or infer success.
+
+The launcher briefly asks Windows for an ephemeral IPv4 loopback port, releases the probe, and supplies the resulting Bridge URL only through the owned Bridge and Houdini child environments. The Bridge must bind that exact origin before app-server startup or fail closed; it does not retry on another port. The Bearer token is also passed only through owned child environments. Bootstrap contains neither URL nor credential, and neither may appear in configuration values, command arguments, logs, diagnostics, or documentation. The separate Panel executor credential is never inherited by Codex or the MCP child.
+
+### Future graph transaction sequence (inactive in B2C)
+
+The validate/approve/apply/verify sequence and transaction rules below remain the frozen design for a later gate. No part of that sequence is registered or executable in B2C. Disconnects never imply write success, and no dormant write may be replayed automatically.
+
+1. Codex invokes one of the five frozen graph-contract tools.
 2. The adapter validates the versioned Schema, attaches transport correlation, and submits the request to the authenticated Bridge.
 3. `houdini_graph_validate` resolves the live allowlist, normalizes the complete graph, computes its summary and digest, and returns without scene mutation.
 4. For `houdini_graph_apply`, the request remains non-executable until an exact approval proof binds that normalized graph and its correlation fields.
 5. The Panel obtains work through bounded, authenticated, nonblocking polling. At most one live-HIP write enters `starting` or `inProgress` state.
-6. The Panel main-thread executor repeats all precondition checks against current live state. It rejects a changed HIP session, stale revision, expired deadline, changed digest, reused idempotency key with different content, absent approval, unapproved type or parameter, existing target name, or out-of-scope reference before mutation.
-7. A read-only tool executes directly on the main thread. A write executes as the transaction described below.
+6. The Panel main-thread executor repeats every precondition check against current live state before mutation.
+7. A read-only tool executes directly on the main thread. A write executes only as the transaction described below.
 8. The executor performs mandatory internal verification and increments the scene revision only for a successful committed mutation.
 9. The Panel posts the structured result to the Bridge; the Bridge resolves the waiting adapter call once.
-10. Retries using the same idempotency key and identical canonical request return the recorded result without creating a second graph. Reuse with different content returns `IDEMPOTENCY_CONFLICT`.
-
-Disconnects never imply success. An uncertain write result is reconciled by `idempotency_key`, HIP session, revision, and the exact owned container before any retry is considered.
+10. Exact idempotent retries return the recorded result; changed reuse returns `IDEMPOTENCY_CONFLICT`.
 
 ## `houdini_graph_apply` transaction
 
@@ -235,20 +252,20 @@ A request based on an older revision returns `SCENE_CONFLICT` with the safe curr
 
 Idempotency state stores only technical correlation and a canonical request/result digest. It does not contain chat history or semantic memory. Retention is bounded to the current Bridge/HIP session for P2-V unless a reviewed persistence design is approved later.
 
-## Project-scoped Codex MCP configuration plan
+## Project-scoped Codex MCP configuration
 
-A later reviewed implementation will create project-scoped `.codex` configuration only if separately authorized. It will register one local stdio MCP server using an absolute project-local command, an explicit project `cwd`, and argument arrays. The server itself exposes exactly the five P2-V tools, and the Codex configuration additionally restricts it with `enabled_tools` to those same five names.
+Gate B2C adds one reviewed repository artifact, `.codex/config.toml`, with one server named `houdini_intelligence`. Its static reviewed default is a stdio command for `D:\Python_3.10\python.exe`, arguments `-B -m hia_houdini_mcp.stdio`, project `cwd` `E:\houdini-intelligence-agent`, `required = false`, a 5-second startup timeout, and a 65-second tool timeout. The non-required repository default lets ordinary Codex Desktop development sessions load without a live Houdini launcher environment. The Bridge uses per-process Codex `-c` overrides to replace the command with the already verified `sys.executable` and set `required=true` for the owned Houdini runtime; runtime code never rewrites the tracked TOML.
 
-Per-tool approval policy will set `houdini_graph_apply` to prompt for each invocation. Read-only tool approval policy will be selected explicitly during configuration review and will not broaden the write permission. The configuration will not contain API keys, login material, a shell command string, a network listener, or any additional MCP tool.
+The configuration enables exactly `houdini_scene_info` and `houdini_node_type_info` and explicitly disables `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify`. It forwards only the reviewed environment variable names needed by the owned child. It contains no literal Bridge URL, Bearer value, API key, login material, executor credential, shell command string, network listener, or additional MCP tool.
 
-The official Codex configuration reference documents stdio server `command`/`cwd`, `enabled_tools`, and per-tool `approval_mode`. That current documentation is design input only: the pinned Codex 0.144.3 executable, its generated stable Schema, and a finite project-local capability probe remain authoritative. Exact TOML keys and approval behavior must be proven against 0.144.3 before the project file is created. This review round creates no `.codex/config.toml` and does not start an MCP server.
+The dynamic `HIA_BRIDGE_URL` and `HIA_BRIDGE_TOKEN` exist only in short-lived owned child environments and never in bootstrap. `HIA_SCENE_EXECUTOR_TOKEN` is intentionally absent from the Codex and MCP child environment. A Python 3.10 standard-library closed-grammar source contract test validates the fixed repository syntax without a third-party parser. Separately, the pinned Codex 0.144.3 executable's finite read-only `mcp get --json` command provides authoritative syntax evidence without starting the server.
 
 ## Security invariants
 
 - Only `127.0.0.1` with a random port and random Bearer token is used for Bridge control traffic.
 - The token is never logged, returned in tool results, persisted in chat, or placed in command-line arguments.
 - The adapter has no arbitrary URL, command, environment, or path parameter.
-- The five-tool allowlist is enforced independently by Codex configuration, MCP registration, Bridge routing, and Panel dispatch.
+- The active two-tool read allowlist is enforced independently by Codex configuration, MCP registration, Bridge routing, and Panel dispatch; the frozen five-tool contract does not broaden B2C.
 - A read tool cannot be upgraded into a write by a request field.
 - All `hou` calls execute on the Houdini UI thread; the live HIP has one writer.
 - No request can create outside one new `/obj/HIA_Graph_*` container or refer to existing user nodes.
@@ -283,7 +300,7 @@ These conservative defaults are frozen for Gate B1. Changing one requires a vers
 1. Bridge routing is limited to `POST /v1/scene/requests`, `GET /v1/scene/requests/{request_id}/result`, `GET /v1/scene/requests/next`, `POST /v1/scene/requests/{request_id}/approval`, `POST /v1/scene/requests/{request_id}/result`, and `POST /v1/scene/requests/{request_id}/cancel`. `POST` accepts atomically and returns HTTP 202 with the request ID, canonical digest, and pending state, or HTTP 200 for an already terminal exact replay. The adapter obtains a terminal HTTP 200 result through result long-polls of at most 1,000 ms until the original absolute deadline; 202 remains pending and never means scene success. No unbounded HTTP request exists.
 2. The typed scene-approval route is independent of P1's app-server `/v1/approval` route and cannot answer one of its requests. Its closed body contains only `decision=allow|deny`, the exact `request_digest`, Bridge `launch_id`, and `generation`. The authenticated Bridge stamps receipt time and, only for an exact pending apply, creates an internal one-use proof expiring at the earlier of the absolute request deadline or 60 seconds. The proof is never returned to MCP arguments; digest/generation mismatch, duplicate decision, expiry, or disconnect denies execution.
 3. The queue holds at most 32 requests, an event/result poll waits at most 1,000 ms, and an HTTP JSON body is at most 262,144 bytes. The schema's 100–60,000 ms budget is converted once to an absolute monotonic deadline that no retry or poll can reset.
-4. The stdio adapter admits only JSON-RPC `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, and `notifications/cancelled`. It advertises only MCP protocol `2024-11-05` for the offline baseline. A UTF-8 JSONL line is at most 262,144 bytes with nesting at most 32. An unknown request receives JSON-RPC method-not-found; an unknown notification is safely recorded and ignored because notifications have no response; malformed, duplicate-key, non-finite, oversized, or over-deep input terminates that protocol session and never replays a write. Compatibility with pinned Codex 0.144.3 remains unverified until the separately approved finite registration probe.
+4. The stdio adapter admits only JSON-RPC `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, and `notifications/cancelled`. Its historical B1 baseline was MCP `2024-11-05`; B2C negotiates only the pinned stable protocol versions reviewed against Codex 0.144.3 and never enables an experimental transport. A UTF-8 JSONL line is at most 262,144 bytes with nesting at most 32. An unknown request receives JSON-RPC method-not-found; an unknown notification is safely recorded and ignored; malformed, duplicate-key, non-finite, oversized, or over-deep input terminates that protocol session without replay.
 5. Canonical bytes are UTF-8 JSON with recursively sorted object keys, no insignificant whitespace, preserved Unicode, rejected duplicate keys, and rejected NaN/infinity. SHA-256 binds contract version, tool name, request/Thread/Turn, HIP session/fingerprint, base revision, idempotency key, permission, trusted absolute monotonic deadline, and complete arguments.
 6. Identifiers, names, node/connection counts, typed values, flags, layout, and strings are exactly bounded by the versioned general graph schemas. The schema contains no asset role, fixed object topology, fixed dimensions, or hidden recipe. B1 adds no aliases.
 7. B1 accepts only a fixed fake capability attestation whose process/session/catalog/schema digests match its fixtures. The trusted session snapshot is bound to one Bridge launch identifier and monotonically increasing generation; Panel disconnect, Bridge restart, HIP replacement, or generation change invalidates it. Without a current attestation, all five tools fail with `HOUDINI_UNAVAILABLE`; a mismatch fails with `CAPABILITY_MISMATCH`. No live dispatch exists in B1.
@@ -292,7 +309,7 @@ These conservative defaults are frozen for Gate B1. Changing one requires a vers
 10. Idempotency records are in-memory, scoped to the current Bridge/HIP session, and capped at 256 terminal entries. Exact same-key/same-digest replays return the recorded result; changed digests return `IDEMPOTENCY_CONFLICT`. B1 never assumes success across a restart or automatically retries an indeterminate write.
 11. The public read summaries are exactly the bounded output-schema fields. Process/build/catalog data stays in the trusted attestation; no selection dump, arbitrary scene tree, environment, user filesystem path, or raw parameter data is returned.
 12. Apply must perform mandatory internal postcondition validation. A later Codex call to `houdini_graph_verify` is an additional read, not a substitute. B1 proves both only with fake state.
-13. Houdini callbacks, live type/parameter meanings, main-thread scheduling, Undo, cook, rollback, exact project MCP TOML, and runtime approval UI remain unresolved live questions. They fail closed and are deferred to separately approved B2–B4 gates; B1 must not simulate them as verified Houdini facts.
+13. B2C resolves only the exact project-local two-tool read-only MCP TOML and finite read chain. Write approval UI, Undo, cook, rollback, and every graph mutation behavior remain unresolved and fail closed until separately approved B3/B4 work.
 
 No unresolved live item may be filled by a permissive default.
 
@@ -308,7 +325,9 @@ After corrected B0 approval, implement the stdio MCP adapter, five-tool deny-by-
 
 ### B2 — Read-only Houdini capability slice
 
-After separate approval, load only the Panel-side read adapter in a manually started Houdini session. Before any dispatch, require an attestation bound to the current Houdini process nonce, build, HIP session/fingerprint, revision, catalog digest, and reviewed schema hashes. At most `houdini_scene_info` and `houdini_node_type_info` may then be enabled; `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify` remain disabled. Missing attestation returns `HOUDINI_UNAVAILABLE`; mismatch returns `CAPABILITY_MISMATCH`. Do not mutate the scene.
+Gate B2A implemented the Panel-side main-thread read adapter and offline fake-Houdini tests. Gate B2B was accepted manually in Houdini and established the bounded build/session/revision/catalog view without authorizing an automated write or treating screenshots as machine-generated evidence.
+
+Gate B2C connects that existing read adapter to the pinned Codex app-server through the project-local stdio MCP child and authenticated Bridge. Exactly `houdini_scene_info` and `houdini_node_type_info` are enabled. The Bridge-owned status parameter facade supplies trusted current correlation data; caller arguments cannot forge attestation. `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify` remain disabled. Missing capability returns `HOUDINI_UNAVAILABLE`, mismatch returns `CAPABILITY_MISMATCH`, and Panel loss returns a bounded explicit failure. Do not mutate the scene.
 
 ### B3 — Write-path simulation and approval acceptance
 

@@ -393,10 +393,31 @@ class P1AssetTests(unittest.TestCase):
 
         self.assertNotIn("setx", source.casefold())
         self.assertNotIn("--experimental", source)
+        self.assertIn("function New-CryptographicToken", source)
+        self.assertIn("function New-LoopbackBridgeUrl", source)
+        self.assertIn("[System.Net.Sockets.TcpListener]::new(", source)
+        self.assertIn("[System.Net.IPAddress]::Loopback", source)
+        self.assertIn("$listener.Start()", source)
+        self.assertIn("$listener.Stop()", source)
+        self.assertIn("$bridgeUrl = New-LoopbackBridgeUrl", source)
+        self.assertIn("RandomNumberGenerator]::Create()", source)
+        self.assertIn("$bridgeToken = New-CryptographicToken", source)
+        self.assertIn("$sceneExecutorToken = New-CryptographicToken", source)
+        self.assertIn("'HIA_BRIDGE_TOKEN' = $bridgeToken", source)
+        self.assertEqual(2, source.count("'HIA_BRIDGE_URL' = $bridgeUrl"))
         self.assertIn("HIA_SCENE_EXECUTOR_TOKEN", source)
+        self.assertIn("'HIA_SCENE_EXECUTOR_TOKEN' = $sceneExecutorToken", source)
+        self.assertIn("'HIA_EXPECTED_PYTHON_EXE' = $normalizedPython", source)
+        self.assertIn("$mcpPythonPath", source)
+        self.assertIn("$bootstrap.PSObject.Properties['token']", source)
+        self.assertIn("$bootstrap.PSObject.Properties['url']", source)
+        self.assertNotIn("$bootstrap.url", source)
+        self.assertNotIn("[string]$bootstrap.token", source)
+        self.assertNotIn("[string]$bootstrap.scene.executor_token", source)
         self.assertIn("HIA_HOUDINI_PROCESS_NONCE", source)
         self.assertIn("HIA_HOUDINI_SCHEMA_DIGEST", source)
         self.assertEqual(1, source.count("/v1/shutdown"))
+        self.assertIn('-Uri "$bridgeUrl/v1/shutdown"', source)
         self.assertLess(
             source.index("$houdiniProcess.WaitForExit()"),
             source.index("/v1/shutdown"),
@@ -412,20 +433,102 @@ class P1AssetTests(unittest.TestCase):
             source.index("/v1/shutdown"),
         )
         self.assertLess(shutdown_guard, source.index("/v1/shutdown"))
-        cleanup_call = source.rindex(
-            "$ownedCodexProcess = Get-ExactOwnedCodexProcess"
+        force_wait = source.index("$bridgeProcess.WaitForExit(7000)")
+        ownership_check = source.rindex(
+            "$ownedBridge = Get-ExactOwnedBridgeProcess"
         )
-        self.assertGreater(cleanup_call, source.index("$bridgeProcess.WaitForExit(7000)"))
-        self.assertIn('-Filter "ParentProcessId = $ParentProcessId"', source)
-        self.assertIn("-CodexExecutablePath $CodexExe", source)
-        self.assertIn("-ExpectedProcessId $expectedCodexPid", source)
-        self.assertNotIn("Get-Process -Id $ownedCodexPid", source)
-        self.assertNotIn(
-            "$null -eq $ownedCodexPid -and -not $bridgeProcess.HasExited",
+        taskkill_call = source.rindex("& $taskkillExe @taskkillArguments")
+        self.assertLess(force_wait, ownership_check)
+        self.assertLess(ownership_check, taskkill_call)
+        self.assertIn('-Filter "ProcessId = $ProcessId"', source)
+        self.assertIn("-LauncherProcessId $launcherProcessId", source)
+        self.assertIn("-BridgeExecutablePath $normalizedPython", source)
+        self.assertIn(
+            "$taskkillArguments = @('/PID', [string]$bridgePid, '/T', '/F')",
             source,
         )
+        self.assertIn("$bridgeProcess.HasExited", source)
+        self.assertNotIn("$bridgeProcess.Kill()", source)
+        self.assertNotIn("Stop-Process", source)
+        self.assertNotIn("$_.Exception.Message", source)
         self.assertIsNone(re.search(r"(?m)^\s*'USERPROFILE'\s*=", source))
         self.assertIsNone(re.search(r"(?m)^\s*'HOME'\s*=", source))
+
+    def test_launcher_bridge_tree_ownership_guard_is_fail_closed(self) -> None:
+        launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+        escaped_launcher = str(launcher).replace("'", "''")
+        ownership_command = f"""
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{escaped_launcher}', [ref]$tokens, [ref]$parseErrors
+)
+if ($parseErrors.Count -ne 0) {{ throw 'Generic launcher did not parse' }}
+$functions = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Get-ExactOwnedBridgeProcess'
+}}, $true))
+if ($functions.Count -ne 1) {{ throw 'Ownership guard was not uniquely defined' }}
+Invoke-Expression $functions[0].Extent.Text
+
+$script:Candidates = @()
+function Get-CimInstance {{
+    param($ClassName, $Filter, $ErrorAction)
+    if ($ClassName -ne 'Win32_Process' -or $Filter -ne 'ProcessId = 43210') {{
+        throw 'Ownership guard queried outside the exact PID'
+    }}
+    return @($script:Candidates)
+}}
+
+$expectedPath = 'D:\Python_3.10\python.exe'
+$script:Candidates = @([pscustomobject]@{{
+    ProcessId = 43210
+    ParentProcessId = 12345
+    ExecutablePath = $expectedPath
+}})
+$match = Get-ExactOwnedBridgeProcess `
+    -ProcessId 43210 `
+    -LauncherProcessId 12345 `
+    -BridgeExecutablePath $expectedPath
+if ($null -eq $match) {{ throw 'Exact owned Bridge was rejected' }}
+
+$script:Candidates[0].ParentProcessId = 99999
+if ($null -ne (Get-ExactOwnedBridgeProcess `
+    -ProcessId 43210 `
+    -LauncherProcessId 12345 `
+    -BridgeExecutablePath $expectedPath)) {{
+    throw 'Wrong-parent process was accepted'
+}}
+$script:Candidates[0].ParentProcessId = 12345
+$script:Candidates[0].ExecutablePath = 'D:\Python_3.10\other.exe'
+if ($null -ne (Get-ExactOwnedBridgeProcess `
+    -ProcessId 43210 `
+    -LauncherProcessId 12345 `
+    -BridgeExecutablePath $expectedPath)) {{
+    throw 'Wrong-executable process was accepted'
+}}
+$script:Candidates = @()
+if ($null -ne (Get-ExactOwnedBridgeProcess `
+    -ProcessId 43210 `
+    -LauncherProcessId 12345 `
+    -BridgeExecutablePath $expectedPath)) {{
+    throw 'Missing process was accepted'
+}}
+"""
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ownership_command],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
+        )
 
     def test_launcher_resolves_simulated_h21_and_h22_without_real_install(self) -> None:
         launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
@@ -632,11 +735,20 @@ foreach ($case in $cases) {{
 
         self.assertIn("SchemaRegistry.b2_read_only", bridge_main)
         self.assertIn("B2_READ_ONLY_PROFILE", bridge_main)
-        self.assertIn('"executor_token": scene_executor_token', bridge_main)
+        self.assertNotIn('"token": token', bridge_main)
+        self.assertNotIn('"executor_token": scene_executor_token', bridge_main)
+        self.assertIn('client.set_environment_overlay(', bridge_main)
+        self.assertIn('"--strict-config"', bridge_main)
+        self.assertIn('"mcp_servers.houdini_intelligence.command="', bridge_main)
+        self.assertIn(
+            '"mcp_servers.houdini_intelligence.required=true"',
+            bridge_main,
+        )
         self.assertNotIn("import hou", bridge_main)
         self.assertNotIn("from hou", bridge_main)
         self.assertIn("HoudiniMCPAdapter.b2_read_only", mcp_stdio)
-        self.assertIn("B2A_REAL_MCP_START_DISABLED", mcp_stdio)
+        self.assertNotIn("B2A_REAL_MCP_START_DISABLED", mcp_stdio)
+        self.assertIn("LoopbackBridgeTransport.from_environment(", mcp_stdio)
         self.assertIn('QtWidgets.QGroupBox("Houdini 只读状态")', panel_source)
         for forbidden_button in (
             'QPushButton("Apply")',

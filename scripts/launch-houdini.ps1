@@ -188,34 +188,38 @@ function Resolve-HoudiniExecutable {
     return $resolvedCandidates[0]
 }
 
-function Get-ExactOwnedCodexProcess {
+function Get-ExactOwnedBridgeProcess {
     param(
-        [Parameter(Mandatory = $true)][int]$ParentProcessId,
-        [Parameter(Mandatory = $true)][string]$CodexExecutablePath,
-        [int]$ExpectedProcessId = 0
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][int]$LauncherProcessId,
+        [Parameter(Mandatory = $true)][string]$BridgeExecutablePath
     )
 
+    if ($ProcessId -le 0 -or $LauncherProcessId -le 0) {
+        return $null
+    }
     $matches = @(
         Get-CimInstance `
             -ClassName Win32_Process `
-            -Filter "ParentProcessId = $ParentProcessId" `
-            -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.ExecutablePath -and
-            [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                [System.IO.Path]::GetFullPath([string]$_.ExecutablePath),
-                [System.IO.Path]::GetFullPath($CodexExecutablePath)
-            ) -and
-            ($ExpectedProcessId -le 0 -or [int]$_.ProcessId -eq $ExpectedProcessId)
-        }
+            -Filter "ProcessId = $ProcessId" `
+            -ErrorAction SilentlyContinue
     )
-    if ($matches.Count -gt 1) {
-        throw 'Refusing to select an ambiguous Codex child process.'
+    if ($matches.Count -ne 1) {
+        return $null
     }
-    if ($matches.Count -eq 1) {
-        return $matches[0]
+    $candidate = $matches[0]
+    if (
+        -not $candidate.ExecutablePath -or
+        [int]$candidate.ProcessId -ne $ProcessId -or
+        [int]$candidate.ParentProcessId -ne $LauncherProcessId -or
+        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            [System.IO.Path]::GetFullPath([string]$candidate.ExecutablePath),
+            [System.IO.Path]::GetFullPath($BridgeExecutablePath)
+        )
+    ) {
+        return $null
     }
-    return $null
+    return $candidate
 }
 
 function Assert-OrdinaryProjectPath {
@@ -269,6 +273,35 @@ function Set-ChildEnvironment {
     }
 }
 
+function New-CryptographicToken {
+    $bytes = New-Object byte[] 32
+    $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    } finally {
+        $generator.Dispose()
+    }
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function New-LoopbackBridgeUrl {
+    $listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        0
+    )
+    try {
+        $listener.Start()
+        $endpoint = [System.Net.IPEndPoint]$listener.LocalEndpoint
+        $port = [int]$endpoint.Port
+        if ($port -lt 1 -or $port -gt 65535) {
+            throw 'Windows returned an invalid loopback port.'
+        }
+    } finally {
+        $listener.Stop()
+    }
+    return "http://127.0.0.1:$port"
+}
+
 $ResolvedRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path.TrimEnd('\')
 if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($ResolvedRoot, $ExpectedRoot)) {
     throw "Launcher must run from $ExpectedRoot; resolved root was $ResolvedRoot"
@@ -309,6 +342,7 @@ while ($null -ne $pythonParent) {
     $pythonParent = $pythonParent.Parent
 }
 $normalizedPython = $resolvedPython
+$pythonDirectory = [System.IO.Path]::GetDirectoryName($normalizedPython)
 
 Assert-OrdinaryProjectPath -Path $CodexExe -Root $ResolvedRoot | Out-Null
 Assert-OrdinaryProjectPath -Path $CodexHome -Root $ResolvedRoot | Out-Null
@@ -330,9 +364,15 @@ $houdiniPreferences = Assert-OrdinaryProjectPath `
 [System.IO.Directory]::CreateDirectory($houdiniPreferences) | Out-Null
 
 $bridgePythonPath = Join-Path $ResolvedRoot 'services\bridge'
+$mcpPythonPath = Join-Path $ResolvedRoot 'services\houdini_mcp'
 $projectSourcePath = Join-Path $ResolvedRoot 'src'
 $panelPythonPath = Join-Path $ResolvedRoot 'houdini_package\python_libs'
 $packageDirectory = Join-Path $ResolvedRoot 'houdini_package\packages'
+$bridgeToken = New-CryptographicToken
+do {
+    $sceneExecutorToken = New-CryptographicToken
+} while ([System.StringComparer]::Ordinal.Equals($bridgeToken, $sceneExecutorToken))
+$bridgeUrl = New-LoopbackBridgeUrl
 
 $bridgeArguments = @(
     '-B',
@@ -360,13 +400,18 @@ $bridgeInfo.CreateNoWindow = $true
 $bridgeInfo.RedirectStandardOutput = $true
 $bridgeInfo.RedirectStandardError = $false
 Set-ChildEnvironment -StartInfo $bridgeInfo -Values @{
-    'PYTHONPATH' = "$bridgePythonPath;$projectSourcePath"
+    'PATH' = "$pythonDirectory;$($env:PATH)"
+    'PYTHONPATH' = "$bridgePythonPath;$mcpPythonPath;$projectSourcePath"
     'PYTHONDONTWRITEBYTECODE' = '1'
     'PYTHONNOUSERSITE' = '1'
     'TEMP' = $sessionTemp
     'TMP' = $sessionTemp
     'CODEX_HOME' = $CodexHome
     'HIA_PROJECT_ROOT' = $ResolvedRoot
+    'HIA_EXPECTED_PYTHON_EXE' = $normalizedPython
+    'HIA_BRIDGE_URL' = $bridgeUrl
+    'HIA_BRIDGE_TOKEN' = $bridgeToken
+    'HIA_SCENE_EXECUTOR_TOKEN' = $sceneExecutorToken
 }
 
 $bridgeProcess = [System.Diagnostics.Process]::new()
@@ -377,7 +422,11 @@ $houdiniProcess = $null
 $houdiniStarted = $false
 $houdiniExited = $false
 $houdiniExitCode = 0
-$ownedCodexPid = $null
+$launcherProcessId = [int]$PID
+$taskkillExe = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+if (-not (Test-Path -LiteralPath $taskkillExe -PathType Leaf)) {
+    throw 'Windows taskkill.exe is unavailable for bounded owned-tree cleanup.'
+}
 
 try {
     if (-not $bridgeProcess.Start()) {
@@ -396,11 +445,11 @@ try {
     if (-not $bootstrap.ok) {
         throw 'Bridge bootstrap reported failure'
     }
-    if ($bootstrap.url -notmatch '^http://127\.0\.0\.1:[0-9]+$') {
-        throw "Bridge returned a non-loopback URL: $($bootstrap.url)"
+    if ($null -ne $bootstrap.PSObject.Properties['url']) {
+        throw 'Bridge bootstrap must not expose the loopback URL'
     }
-    if (-not $bootstrap.token -or $bootstrap.token.Length -lt 32) {
-        throw 'Bridge returned an invalid session token'
+    if ($null -ne $bootstrap.PSObject.Properties['token']) {
+        throw 'Bridge bootstrap must not expose the session token'
     }
     if ($null -eq $bootstrap.scene -or $bootstrap.scene.profile -ne 'p2-v-b2-read-only') {
         throw 'Bridge did not publish the Gate B2 read-only scene profile'
@@ -415,8 +464,8 @@ try {
     if ($bootstrap.scene.process_nonce -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$') {
         throw 'Bridge returned an invalid Houdini process nonce'
     }
-    if (-not $bootstrap.scene.executor_token -or $bootstrap.scene.executor_token.Length -lt 32) {
-        throw 'Bridge returned an invalid scene executor token'
+    if ($null -ne $bootstrap.scene.PSObject.Properties['executor_token']) {
+        throw 'Bridge bootstrap must not expose the scene executor token'
     }
     if ($bootstrap.scene.schema_version -ne '0.2.0') {
         throw 'Bridge returned an unexpected Houdini read Schema version'
@@ -424,8 +473,6 @@ try {
     if ($bootstrap.scene.schema_digest -notmatch '^[A-Fa-f0-9]{64}$') {
         throw 'Bridge returned an invalid Houdini read Schema digest'
     }
-    $ownedCodexPid = [int]$bootstrap.codex_pid
-
     $houdiniInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $houdiniInfo.FileName = $HoudiniExe
     $houdiniInfo.WorkingDirectory = $ResolvedRoot
@@ -440,13 +487,13 @@ try {
         'TEMP' = $sessionTemp
         'TMP' = $sessionTemp
         'HIA_PROJECT_ROOT' = $ResolvedRoot
-        'HIA_BRIDGE_URL' = [string]$bootstrap.url
-        'HIA_BRIDGE_TOKEN' = [string]$bootstrap.token
+        'HIA_BRIDGE_URL' = $bridgeUrl
+        'HIA_BRIDGE_TOKEN' = $bridgeToken
         'HIA_SCENE_PROFILE' = [string]$bootstrap.scene.profile
         'HIA_BRIDGE_LAUNCH_ID' = [string]$bootstrap.scene.launch_id
         'HIA_BRIDGE_GENERATION' = [string]$sceneGeneration
         'HIA_HOUDINI_PROCESS_NONCE' = [string]$bootstrap.scene.process_nonce
-        'HIA_SCENE_EXECUTOR_TOKEN' = [string]$bootstrap.scene.executor_token
+        'HIA_SCENE_EXECUTOR_TOKEN' = $sceneExecutorToken
         'HIA_HOUDINI_SCHEMA_VERSION' = [string]$bootstrap.scene.schema_version
         'HIA_HOUDINI_SCHEMA_DIGEST' = [string]$bootstrap.scene.schema_digest
     }
@@ -470,38 +517,38 @@ try {
     }
     if ($bridgeCleanupAllowed -and $bridgeStarted -and $null -ne $bootstrap -and -not $bridgeProcess.HasExited) {
         try {
-            $headers = @{ Authorization = "Bearer $($bootstrap.token)" }
+            $headers = @{ Authorization = "Bearer $bridgeToken" }
             Invoke-RestMethod `
                 -Method Post `
-                -Uri "$($bootstrap.url)/v1/shutdown" `
+                -Uri "$bridgeUrl/v1/shutdown" `
                 -Headers $headers `
                 -ContentType 'application/json' `
                 -Body '{}' `
                 -TimeoutSec 5 | Out-Null
         } catch {
-            Write-Warning "Graceful Bridge shutdown failed: $($_.Exception.Message)"
+            Write-Warning 'Graceful Bridge shutdown request failed; bounded owned-tree cleanup will continue.'
         }
     }
     if ($bridgeCleanupAllowed -and $bridgeStarted -and -not $bridgeProcess.HasExited -and -not $bridgeProcess.WaitForExit(7000)) {
-        $bridgeProcess.Kill()
-        $bridgeProcess.WaitForExit()
-    }
-    if ($bridgeCleanupAllowed -and $bridgeStarted) {
         try {
-            $expectedCodexPid = 0
-            if ($null -ne $ownedCodexPid) {
-                $expectedCodexPid = [int]$ownedCodexPid
+            $bridgePid = [int]$bridgeProcess.Id
+            $ownedBridge = Get-ExactOwnedBridgeProcess `
+                -ProcessId $bridgePid `
+                -LauncherProcessId $launcherProcessId `
+                -BridgeExecutablePath $normalizedPython
+            if ($null -eq $ownedBridge -or $bridgeProcess.HasExited) {
+                throw 'Bridge ownership could not be proven for forced cleanup.'
             }
-            $ownedCodexProcess = Get-ExactOwnedCodexProcess `
-                -ParentProcessId $bridgeProcess.Id `
-                -CodexExecutablePath $CodexExe `
-                -ExpectedProcessId $expectedCodexPid
-            if ($null -ne $ownedCodexProcess) {
-                Write-Warning 'Codex app-server survived Bridge shutdown; terminating the exact parent/executable child.'
-                Stop-Process -Id ([int]$ownedCodexProcess.ProcessId) -Force
+            $taskkillArguments = @('/PID', [string]$bridgePid, '/T', '/F')
+            $taskkillOutput = & $taskkillExe @taskkillArguments 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Windows rejected the exact owned Bridge tree cleanup.'
+            }
+            if (-not $bridgeProcess.WaitForExit(5000)) {
+                throw 'The exact owned Bridge tree did not exit after taskkill.'
             }
         } catch {
-            Write-Warning "Exact Codex child cleanup could not be completed safely: $($_.Exception.Message)"
+            Write-Warning 'Forced cleanup was refused or failed; no unverified process was targeted.'
         }
     }
 }
