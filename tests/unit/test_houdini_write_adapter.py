@@ -40,6 +40,9 @@ from hia_panel.houdini_write_adapter import (  # noqa: E402
     HoudiniWriteAdapterError,
     WriteControlAbort,
     _ApprovedWriteBinding,
+    _contains_identity,
+    _identity_lookup,
+    _same_identity_members,
 )
 from hia_houdini_mcp.adapter import HoudiniMCPAdapter  # noqa: E402
 
@@ -62,6 +65,7 @@ class _WriteReadState:
         hip_session_id: str = "hip-session",
         hip_fingerprint: str = "a" * 64,
         scene_revision: int = 7,
+        strict_event_evidence: bool = False,
     ) -> None:
         self.hip_session_id = hip_session_id
         self.hip_fingerprint = hip_fingerprint
@@ -73,6 +77,32 @@ class _WriteReadState:
         self.refresh_calls = 0
         self.post_commit_refreshes = 0
         self._committed_needs_refresh = False
+        self.strict_event_evidence = bool(strict_event_evidence)
+        self._hou: FakeHouWrite | None = None
+        self._last_owned_evidence: dict[str, Any] | None = None
+
+    def bind_hou(self, fake: FakeHouWrite) -> None:
+        self._hou = fake
+        if self.strict_event_evidence:
+            obj = fake.node("/obj")
+            assert obj is not None
+            obj.addEventCallback(
+                tuple(vars(fake.nodeEventType).values()), self._on_node_event
+            )
+            self._assert_callback_registered(obj)
+
+    def _assert_callback_registered(self, node: Any) -> None:
+        assert self._hou is not None
+        expected = tuple(vars(self._hou.nodeEventType).values())
+        callbacks = node.eventCallbacks()
+        registered = [
+            event
+            for event_types, callback in callbacks
+            if callback == self._on_node_event
+            for event in event_types
+        ]
+        if not all(any(item == seen for seen in registered) for item in expected):
+            raise RuntimeError("strict fake observer readback failed")
 
     @staticmethod
     def _live_catalog(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -119,6 +149,11 @@ class _WriteReadState:
             "events": 0,
             "mutation_expectation": None,
             "invalidated": False,
+            "strict": self.strict_event_evidence,
+            "events": [],
+            "legacy_event_count": 0,
+            "mutations": [],
+            "observer_installations": [],
         }
         return token
 
@@ -126,13 +161,18 @@ class _WriteReadState:
         self,
         token: object,
         *,
-        expected_callback_source: object,
+        expected_callback_source: object | None = None,
+        operation: str | None = None,
+        event_source_rules: Mapping[str, tuple[object, ...]] | None = None,
+        allowed_child_subjects: tuple[object, ...] | None = None,
+        required_event_types: tuple[str, ...] | None = None,
+        allow_zero_events: bool = False,
     ) -> object:
         active = self._active
         if active is None or active["token"] is not token:
             raise RuntimeError("invalid owned write token")
         if (
-            expected_callback_source is None
+            (expected_callback_source is None and event_source_rules is None)
             or active["mutation_expectation"] is not None
             or active["invalidated"]
         ):
@@ -141,11 +181,25 @@ class _WriteReadState:
         active["mutation_expectation"] = {
             "token": marker,
             "callback_source": expected_callback_source,
+            "operation": operation,
+            "event_source_rules": event_source_rules,
+            "allowed_child_subjects": tuple(allowed_child_subjects or ()),
+            "required_event_types": tuple(required_event_types or ()),
+            "seen_event_types": set(),
+            "seen_child_subjects": [],
+            "event_count": 0,
+            "allow_zero_events": bool(allow_zero_events),
         }
         return marker
 
     def finish_owned_mutation(
-        self, token: object, expectation_token: object
+        self,
+        token: object,
+        expectation_token: object,
+        *,
+        expected_child_subjects: tuple[object, ...] | None = None,
+        require_all_child_subjects: bool = False,
+        exact_readback_proven: bool = False,
     ) -> int:
         active = self._active
         if (
@@ -155,10 +209,88 @@ class _WriteReadState:
             or active["mutation_expectation"]["token"] is not expectation_token
         ):
             raise RuntimeError("invalid owned mutation expectation")
+        expectation = active["mutation_expectation"]
         active["mutation_expectation"] = None
+        if active["strict"]:
+            expected = tuple(expected_child_subjects or ())
+            seen_subjects = tuple(expectation["seen_child_subjects"])
+            allow_zero_events = expectation["allow_zero_events"] is True
+            if (
+                (expectation["event_count"] < 1 and not allow_zero_events)
+                or (allow_zero_events and exact_readback_proven is not True)
+                or (
+                    expectation["required_event_types"]
+                    and not any(
+                        item in expectation["seen_event_types"]
+                        for item in expectation["required_event_types"]
+                    )
+                )
+                or (
+                    expected
+                    and any(
+                        not any(value is subject for value in expected)
+                        for subject in seen_subjects
+                    )
+                )
+                or (
+                    require_all_child_subjects
+                    and any(
+                        not any(value is subject for value in seen_subjects)
+                        for subject in expected
+                    )
+                )
+            ):
+                active["invalidated"] = True
+            mutation_record = {
+                "operation": expectation["operation"],
+                "event_count": expectation["event_count"],
+                "event_types": sorted(expectation["seen_event_types"]),
+                "no_op": False,
+            }
+            if allow_zero_events:
+                mutation_record["exact_readback_proven"] = exact_readback_proven
+            active["mutations"].append(mutation_record)
         if active["invalidated"]:
             raise RuntimeError("owned mutation callback source mismatch")
-        return 0
+        return expectation["event_count"]
+
+    def install_owned_node_observer(
+        self, token: object, node: object
+    ) -> dict[str, Any]:
+        active = self._active
+        if (
+            active is None
+            or active["token"] is not token
+            or not active["strict"]
+            or active["mutation_expectation"] is not None
+        ):
+            raise RuntimeError("strict observer installation is invalid")
+        assert self._hou is not None
+        node.addEventCallback(
+            tuple(vars(self._hou.nodeEventType).values()), self._on_node_event
+        )
+        self._assert_callback_registered(node)
+        record = {"path": node.path(), "session_id": node.sessionId()}
+        active["observer_installations"].append(record)
+        return copy.deepcopy(record)
+
+    def record_owned_noop(self, token: object, *, operation: str) -> None:
+        active = self._active
+        if (
+            active is None
+            or active["token"] is not token
+            or not active["strict"]
+            or active["mutation_expectation"] is not None
+        ):
+            raise RuntimeError("strict no-op is invalid")
+        active["mutations"].append(
+            {
+                "operation": operation,
+                "event_count": 0,
+                "event_types": [],
+                "no_op": True,
+            }
+        )
 
     def finish_owned_write(self, token: object, *, outcome: str) -> dict[str, Any]:
         active = self._active
@@ -179,8 +311,59 @@ class _WriteReadState:
             )
             if outcome == "committed":
                 self._committed_needs_refresh = True
+        if active["strict"]:
+            self._last_owned_evidence = {
+                "outcome": outcome,
+                "events": copy.deepcopy(active["events"]),
+                "mutations": copy.deepcopy(active["mutations"]),
+                "observer_installations": copy.deepcopy(
+                    active["observer_installations"]
+                ),
+            }
         self._active = None
         return self.capability_report()
+
+    def last_owned_evidence(self) -> dict[str, Any] | None:
+        return copy.deepcopy(self._last_owned_evidence)
+
+    def _on_node_event(self, **kwargs: Any) -> None:
+        active = self._active
+        if active is None:
+            return
+        expectation = active["mutation_expectation"]
+        source = kwargs.get("node")
+        event = kwargs.get("event_type")
+        event_name = getattr(event, "name", None)
+        subject = kwargs.get("child_node")
+        rules = {} if expectation is None else expectation["event_source_rules"] or {}
+        sources = rules.get(event_name, ())
+        matched = bool(
+            expectation is not None
+            and any(item is source for item in sources)
+        )
+        allowed_subjects = (
+            () if expectation is None else expectation["allowed_child_subjects"]
+        )
+        if matched and event_name in {"ChildCreated", "ChildDeleted", "ChildSwitched"}:
+            matched = subject is not None
+            if matched and allowed_subjects:
+                matched = any(item is subject for item in allowed_subjects)
+        active["events"].append(
+            {
+                "operation": None if expectation is None else expectation["operation"],
+                "event_type": event_name,
+                "source_path": source.path(),
+                "child_path": None if subject is None else subject.path(),
+                "matched": matched,
+            }
+        )
+        if not matched:
+            active["invalidated"] = True
+            return
+        expectation["event_count"] += 1
+        expectation["seen_event_types"].add(event_name)
+        if subject is not None:
+            expectation["seen_child_subjects"].append(subject)
 
     def on_mutation(self, mutation: Any) -> None:
         if self._active is not None:
@@ -191,7 +374,7 @@ class _WriteReadState:
             ):
                 self._active["invalidated"] = True
             else:
-                self._active["events"] += 1
+                self._active["legacy_event_count"] += 1
                 self.callback_sources_verified += 1
         else:
             self.scene_revision += 1
@@ -286,20 +469,28 @@ class HoudiniWriteAdapterTests(unittest.TestCase):
         read: _WriteReadState | None = None,
         guard: _Guard | None = None,
         root_conflict: bool = False,
+        strict_event_evidence: bool = False,
     ) -> dict[str, Any]:
         catalog = certified_write_catalog() if catalog is None else copy.deepcopy(catalog)
         if fake is None:
-            holder: dict[str, _WriteReadState] = {}
-
-            def callback(mutation: Any) -> None:
-                holder["read"].on_mutation(mutation)
-
-            fake = FakeHouWrite(catalog=catalog, mutation_callback=callback)
-            read = _WriteReadState(catalog) if read is None else read
-            holder["read"] = read
+            fake = FakeHouWrite(catalog=catalog)
+            read = (
+                _WriteReadState(
+                    catalog, strict_event_evidence=strict_event_evidence
+                )
+                if read is None
+                else read
+            )
+            read.bind_hou(fake)
+            if not strict_event_evidence:
+                fake._mutation_callback = read.on_mutation
         elif read is None:
-            read = _WriteReadState(catalog)
-            fake._mutation_callback = read.on_mutation
+            read = _WriteReadState(
+                catalog, strict_event_evidence=strict_event_evidence
+            )
+            read.bind_hou(fake)
+            if not strict_event_evidence:
+                fake._mutation_callback = read.on_mutation
         assert read is not None
 
         graph = self._fixture(fixture)
@@ -377,6 +568,7 @@ class HoudiniWriteAdapterTests(unittest.TestCase):
             schema_registry=self.registry,
             control_guard=guard or _Guard(),
             claim_authority=claim_authority,
+            strict_event_evidence=strict_event_evidence,
         )
         return {
             "adapter": adapter,
@@ -1084,11 +1276,183 @@ class HoudiniWriteAdapterTests(unittest.TestCase):
                     all(mutation.detail[1] is False for mutation in create_mutations),
                     "root and every child must disable Houdini init scripts",
                 )
+                self.assertTrue(
+                    all(mutation.detail[2] is True for mutation in create_mutations),
+                    "root and every child must request the exact catalog-resolved type",
+                )
                 self.assertEqual(
                     len(state["fake"].mutation_log),
                     state["read"].callback_sources_verified,
                     "every adapter mutator must arm the exact callback-source identity",
                 )
+
+    def test_strict_stairs_apply_records_live_shaped_event_evidence(self) -> None:
+        state = self._build(
+            "stairs_graph.json", strict_event_evidence=True
+        )
+
+        result = state["adapter"].apply_prevalidated(state["binding"])
+        evidence = state["read"].last_owned_evidence()
+
+        self.assertTrue(result["ok"])
+        assert evidence is not None
+        self.assertEqual("committed", evidence["outcome"])
+        self.assertEqual(6, len(evidence["observer_installations"]))
+        operations = {item["operation"]: item for item in evidence["mutations"]}
+        for required in (
+            "create_root:root",
+            "set_user_data:hia_ownership",
+            "set_user_data:hia_transaction_id",
+            "set_user_data:hia_graph_digest",
+            "set_parameter:step_source:size",
+            "connect:output:0",
+            "set_flag:output:display",
+            "set_flag:output:render",
+        ):
+            self.assertGreater(operations[required]["event_count"], 0)
+        self.assertTrue(operations["set_flag:combine:display"]["no_op"])
+        output_flag_events = {
+            event["event_type"]
+            for event in evidence["events"]
+            if event["operation"] == "set_flag:output:display"
+        }
+        self.assertEqual(
+            {"FlagChanged", "ChildSwitched"}, output_flag_events
+        )
+        self.assertTrue(all(event["matched"] for event in evidence["events"]))
+
+    def test_strict_flag_evidence_accepts_owned_houdini_sibling_switch_cluster(
+        self,
+    ) -> None:
+        fake = FakeHouWrite(
+            catalog=certified_write_catalog(),
+            coupled_display_flag_events=True,
+        )
+        state = self._build(
+            "stairs_graph.json",
+            fake=fake,
+            strict_event_evidence=True,
+        )
+
+        result = state["adapter"].apply_prevalidated(state["binding"])
+        evidence = state["read"].last_owned_evidence()
+
+        self.assertTrue(result["ok"])
+        assert evidence is not None
+        events = [
+            event
+            for event in evidence["events"]
+            if event["operation"] == "set_flag:combine:display"
+        ]
+        self.assertEqual(
+            {"ChildSwitched", "FlagChanged"},
+            {event["event_type"] for event in events},
+        )
+        self.assertIn(
+            "/obj/HIA_Graph_stairs_demo/step_source",
+            {event["child_path"] for event in events},
+        )
+        self.assertEqual(
+            {
+                "/obj/HIA_Graph_stairs_demo",
+                "/obj/HIA_Graph_stairs_demo/combine_stairs",
+                "/obj/HIA_Graph_stairs_demo/step_source",
+            },
+            {event["source_path"] for event in events},
+        )
+        self.assertTrue(all(event["matched"] for event in evidence["events"]))
+
+    def test_strict_flag_evidence_requires_target_flag_event_and_readback(self) -> None:
+        fake = FakeHouWrite(
+            catalog=certified_write_catalog(),
+            coupled_display_flag_events=True,
+        )
+        fake.suppressed_event_operations.add("FlagChanged")
+        state = self._build(
+            "stairs_graph.json",
+            fake=fake,
+            strict_event_evidence=True,
+        )
+
+        result = state["adapter"].apply_prevalidated(state["binding"])
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            "SCENE_STATE_INDETERMINATE", result["structured_error"]["code"]
+        )
+
+    def test_strict_zero_wrong_late_event_and_new_observer_failure_fail_closed(
+        self,
+    ) -> None:
+        cases = ("zero", "wrong_source", "late", "observer")
+        for case in cases:
+            with self.subTest(case=case):
+                fake = FakeHouWrite(catalog=certified_write_catalog())
+                if case == "zero":
+                    fake.suppressed_event_operations.add("ParmTupleChanged")
+                elif case == "wrong_source":
+                    fake.event_source_overrides["CustomDataChanged"] = fake.sentinel
+                elif case == "late":
+                    fake.deferred_event_operations.add("ParmTupleChanged")
+                else:
+                    fake.reject_observer_paths.add(
+                        "/obj/HIA_Graph_stairs_demo"
+                    )
+                state = self._build(
+                    "stairs_graph.json",
+                    fake=fake,
+                    strict_event_evidence=True,
+                )
+
+                result = state["adapter"].apply_prevalidated(state["binding"])
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(
+                    "SCENE_STATE_INDETERMINATE",
+                    result["structured_error"]["code"],
+                )
+                self.assertTrue(state["adapter"].frozen)
+                self.assertIsNotNone(fake.node("/obj/HIA_Graph_stairs_demo"))
+                self.assertEqual([], fake.destroy_attempts)
+                if case == "late":
+                    fake.flush_deferred_events()
+
+    def test_strict_rollback_destroy_proves_all_child_deleted_subjects(self) -> None:
+        fake = FakeHouWrite(
+            catalog=certified_write_catalog(), failure_phase="postcondition"
+        )
+        state = self._build(
+            "stairs_graph.json",
+            fake=fake,
+            strict_event_evidence=True,
+        )
+        state["adapter"]._phase_hook = fake.phase_hook
+
+        result = state["adapter"].apply_prevalidated(state["binding"])
+        evidence = state["read"].last_owned_evidence()
+
+        self.assertFalse(result["ok"])
+        self.assertIsNone(fake.node("/obj/HIA_Graph_stairs_demo"))
+        self.assertEqual(1, len(fake.destroy_attempts))
+        assert evidence is not None
+        deletion_events = [
+            event
+            for event in evidence["events"]
+            if event["operation"] == "rollback_destroy:root"
+            and event["event_type"] == "ChildDeleted"
+        ]
+        self.assertEqual(6, len(deletion_events))
+        self.assertEqual(
+            {
+                "/obj/HIA_Graph_stairs_demo",
+                "/obj/HIA_Graph_stairs_demo/combine_stairs",
+                "/obj/HIA_Graph_stairs_demo/landing",
+                "/obj/HIA_Graph_stairs_demo/OUT_STAIRS",
+                "/obj/HIA_Graph_stairs_demo/step_offset",
+                "/obj/HIA_Graph_stairs_demo/step_source",
+            },
+            {event["child_path"] for event in deletion_events},
+        )
 
     def test_resolved_type_parameters_connections_flags_and_scope_match_declaration(self) -> None:
         state = self._build("stairs_graph.json")
@@ -1134,6 +1498,22 @@ class HoudiniWriteAdapterTests(unittest.TestCase):
             if mutation.operation == "createNode"
         ]
         self.assertIn("xform", create_types)
+
+    def test_connections_are_applied_in_destination_input_order(self) -> None:
+        state = self._build("stairs_graph.json")
+
+        result = state["adapter"].apply_prevalidated(state["binding"])
+
+        self.assertTrue(result["ok"])
+        inputs_by_destination: dict[str, list[int]] = {}
+        for mutation in state["fake"].mutation_log:
+            if mutation.operation == "setInput":
+                inputs_by_destination.setdefault(mutation.path, []).append(
+                    mutation.detail[0]
+                )
+        self.assertTrue(inputs_by_destination)
+        for input_indices in inputs_by_destination.values():
+            self.assertEqual(sorted(input_indices), input_indices)
 
     def test_observed_state_tampering_fails_and_rolls_back_exact_root(self) -> None:
         for tamper in (
@@ -1212,6 +1592,48 @@ class HoudiniWriteAdapterTests(unittest.TestCase):
         self._assert_error(result, "SCENE_STATE_INDETERMINATE")
         self.assertTrue(state["adapter"].frozen)
         self.assertEqual([], fake.destroy_attempts)
+
+    def test_distinct_wrappers_for_one_hom_node_pass_scope_identity(self) -> None:
+        fake = FakeHouWrite(path_equality=True)
+        canonical = fake.sentinel
+        duplicate = fake.duplicate_node_wrapper(canonical.path())
+
+        self.assertIsNot(canonical, duplicate)
+        self.assertEqual(canonical, duplicate)
+        self.assertEqual(canonical.sessionId(), duplicate.sessionId())
+        self.assertTrue(_same_identity_members((duplicate,), (canonical,)))
+        self.assertEqual(
+            "sentinel",
+            _identity_lookup(((canonical, "sentinel"),), duplicate),
+        )
+        self.assertTrue(_contains_identity((canonical,), duplicate))
+
+        wrong_session = fake.duplicate_node_wrapper(canonical.path())
+        wrong_session._session_id += 1
+        self.assertFalse(_same_identity_members((wrong_session,), (canonical,)))
+        self.assertIsNone(
+            _identity_lookup(((canonical, "sentinel"),), wrong_session)
+        )
+        self.assertFalse(_contains_identity((canonical,), wrong_session))
+
+    def test_full_apply_accepts_fresh_lookup_wrappers(self) -> None:
+        fake = FakeHouWrite(path_equality=True)
+        canonical_lookup = fake.node
+
+        def lookup_with_fresh_wrapper(path: str) -> Any:
+            canonical = canonical_lookup(path)
+            if canonical is None:
+                return None
+            return fake.duplicate_node_wrapper(path)
+
+        fake.node = lookup_with_fresh_wrapper  # type: ignore[method-assign]
+        state = self._build(fake=fake)
+
+        result = state["adapter"].apply_prevalidated(state["binding"])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, fake.undo_group_commits)
+        self.assertFalse(state["adapter"].frozen)
 
     def test_detached_root_cannot_pass_observed_scope_or_be_blindly_destroyed(self) -> None:
         state = self._build()

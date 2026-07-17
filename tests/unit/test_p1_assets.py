@@ -170,7 +170,7 @@ class P1AssetTests(unittest.TestCase):
                     offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
         self.assertEqual([], offenders)
 
-    def test_b4a_only_dormant_adapter_contains_bounded_scene_write_calls(self) -> None:
+    def test_only_b4b_local_acceptance_imports_the_bounded_scene_writer(self) -> None:
         package_root = REPOSITORY_ROOT / "houdini_package"
         forbidden_attributes = {
             "createNode",
@@ -194,6 +194,12 @@ class P1AssetTests(unittest.TestCase):
             / "hia_panel"
             / "houdini_write_adapter.py"
         )
+        local_acceptance = (
+            package_root
+            / "python_libs"
+            / "hia_panel"
+            / "b4b_acceptance.py"
+        )
         found: dict[Path, set[str]] = {}
         for path in sorted(package_root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -208,13 +214,18 @@ class P1AssetTests(unittest.TestCase):
         self.assertEqual({"createNode", "setInput", "destroy"}, found[dormant])
 
         for path in sorted(package_root.rglob("*.py")):
-            if path == dormant:
+            if path in {dormant, local_acceptance}:
                 continue
             self.assertNotIn(
                 "houdini_write_adapter",
                 path.read_text(encoding="utf-8"),
                 str(path.relative_to(REPOSITORY_ROOT)),
             )
+
+        acceptance_source = local_acceptance.read_text(encoding="utf-8")
+        self.assertIn("from .houdini_write_adapter import", acceptance_source)
+        self.assertNotIn("b4b_acceptance", (package_root / "python_libs" / "hia_panel" / "panel.py").read_text(encoding="utf-8"))
+        self.assertNotIn("b4b_acceptance", (package_root / "python_panels" / "houdini_intelligence.pypanel").read_text(encoding="utf-8"))
 
     def test_panel_displays_ignored_notification_method(self) -> None:
         panel_path = (

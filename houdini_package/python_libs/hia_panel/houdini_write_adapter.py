@@ -31,6 +31,8 @@ from hia_core.houdini_contract import (
     validate_graph_relations,
 )
 
+from .houdini_read_adapter import _same_houdini_node
+
 
 _WRITE_TOOL = "houdini_graph_apply"
 _UNDO_LABEL = "HIA: Apply Graph"
@@ -38,6 +40,10 @@ _OWNERSHIP_KEY = "hia_ownership"
 _TRANSACTION_KEY = "hia_transaction_id"
 _GRAPH_DIGEST_KEY = "hia_graph_digest"
 _OWNERSHIP_VALUE = "hia_owned"
+_SILENT_READBACK_OPERATIONS = frozenset(
+    f"set_user_data:{key}"
+    for key in (_OWNERSHIP_KEY, _TRANSACTION_KEY, _GRAPH_DIGEST_KEY)
+)
 _SAFE_RISK_LEVEL = "ordinary_graph_write"
 _MAX_OBJ_CHILDREN = 4096
 _PHASES = (
@@ -280,6 +286,7 @@ class HoudiniWriteAdapter:
         schema_registry: SchemaRegistry | None = None,
         control_guard: Any | None = None,
         claim_authority: object,
+        strict_event_evidence: bool = False,
     ) -> None:
         self._hou = hou_module
         self._read_adapter = read_adapter
@@ -306,6 +313,18 @@ class HoudiniWriteAdapter:
                 "APPROVAL_REQUIRED", "An internal claim authority is required"
             )
         self._claim_authority = claim_authority
+        self._strict_event_evidence = bool(strict_event_evidence)
+        if self._strict_event_evidence and (
+            getattr(read_adapter, "strict_event_evidence", False) is not True
+            or not callable(
+                getattr(read_adapter, "install_owned_node_observer", None)
+            )
+            or not callable(getattr(read_adapter, "record_owned_noop", None))
+        ):
+            raise HoudiniWriteAdapterError(
+                "HOUDINI_UNAVAILABLE",
+                "Strict event evidence requires a strict live read adapter",
+            )
         self._writer_lock = threading.Lock()
         self._frozen = False
         self._phase_hook: Callable[[str], None] | None = None
@@ -587,7 +606,15 @@ class HoudiniWriteAdapter:
                     root_spec.resolved_name,
                     node_name=graph["target"]["name_hint"],
                     run_init_scripts=False,
+                    exact_type_name=True,
                 ),
+                operation="create_root:root",
+                event_source_rules={
+                    "ChildCreated": (obj,),
+                    "ChildSwitched": (obj,),
+                },
+                required_event_types=("ChildCreated",),
+                created_subject=True,
             )
             approved_root_name = graph["target"]["name_hint"]
             approved_root_path = f"/obj/{approved_root_name}"
@@ -614,23 +641,27 @@ class HoudiniWriteAdapter:
                 obj_fingerprint_before=binding.obj_fingerprint,
                 parent_children_before=parent_children_before,
             )
-            self._guarded_mutation(
+            self._install_strict_observer(read_token, root)
+            self._set_user_data_with_evidence(
                 "create_root",
                 read_token,
                 root,
-                lambda: root.setUserData(_OWNERSHIP_KEY, _OWNERSHIP_VALUE),
+                key=_OWNERSHIP_KEY,
+                value=_OWNERSHIP_VALUE,
             )
-            self._guarded_mutation(
+            self._set_user_data_with_evidence(
                 "create_root",
                 read_token,
                 root,
-                lambda: root.setUserData(_TRANSACTION_KEY, transaction_id),
+                key=_TRANSACTION_KEY,
+                value=transaction_id,
             )
-            self._guarded_mutation(
+            self._set_user_data_with_evidence(
                 "create_root",
                 read_token,
                 root,
-                lambda: root.setUserData(_GRAPH_DIGEST_KEY, digest),
+                key=_GRAPH_DIGEST_KEY,
+                value=digest,
             )
             self._after_phase("create_root")
 
@@ -645,7 +676,15 @@ class HoudiniWriteAdapter:
                         specification.resolved_name,
                         node_name=node["name_hint"],
                         run_init_scripts=False,
+                        exact_type_name=True,
                     ),
+                    operation=f"create_node:{node['id']}",
+                    event_source_rules={
+                        "ChildCreated": (root,),
+                        "ChildSwitched": (root,),
+                    },
+                    required_event_types=("ChildCreated",),
+                    created_subject=True,
                 )
                 try:
                     node_session_id = self._prove_exact_new_child(
@@ -670,6 +709,7 @@ class HoudiniWriteAdapter:
                         resolved_type=specification.resolved_name,
                     )
                 )
+                self._install_strict_observer(read_token, live_node)
             self._after_phase("create_nodes")
 
             for node in graph["nodes"]:
@@ -685,10 +725,31 @@ class HoudiniWriteAdapter:
                             assignment,
                             parameter_catalog[assignment["name"]],
                         ),
+                        operation=(
+                            f"set_parameter:{node['id']}:{assignment['name']}"
+                        ),
+                        event_source_rules={
+                            "ParmTupleChanged": (nodes[node["id"]],),
+                            "ParmTupleAnimated": (nodes[node["id"]],),
+                            "ParmTupleChannelChanged": (nodes[node["id"]],),
+                        },
                     )
             self._after_phase("set_parameters")
 
-            for connection in graph["connections"]:
+            # Canonical graph order is source-first for stable hashing.  HOM
+            # mutation order is different: unordered inputs such as Merge
+            # cannot contain gaps, so populate each destination from its
+            # lowest input index upward without changing the approved graph.
+            connections_to_apply = sorted(
+                graph["connections"],
+                key=lambda item: (
+                    item["destination"]["node"],
+                    item["destination"]["input"],
+                    item["source"]["node"],
+                    item["source"]["output"],
+                ),
+            )
+            for connection in connections_to_apply:
                 source = connection["source"]
                 destination = connection["destination"]
                 self._guarded_mutation(
@@ -702,26 +763,35 @@ class HoudiniWriteAdapter:
                         nodes[source["node"]],
                         source["output"],
                     ),
+                    operation=(
+                        f"connect:{destination['node']}:{destination['input']}"
+                    ),
+                    event_source_rules={
+                        "InputRewired": (nodes[destination["node"]],),
+                    },
                 )
             self._after_phase("connect_nodes")
 
+            owned_flag_nodes = tuple(nodes.values())
             for node in graph["nodes"]:
                 live_node = nodes[node["id"]]
-                self._guarded_mutation(
-                    "set_flags_layout",
+                self._set_flag_with_evidence(
                     read_token,
+                    root,
                     live_node,
-                    lambda live_node=live_node, node=node: live_node.setDisplayFlag(
-                        node["flags"]["display"]
-                    ),
+                    owned_nodes=owned_flag_nodes,
+                    node_id=node["id"],
+                    flag_name="display",
+                    desired=node["flags"]["display"],
                 )
-                self._guarded_mutation(
-                    "set_flags_layout",
+                self._set_flag_with_evidence(
                     read_token,
+                    root,
                     live_node,
-                    lambda live_node=live_node, node=node: live_node.setRenderFlag(
-                        node["flags"]["render"]
-                    ),
+                    owned_nodes=owned_flag_nodes,
+                    node_id=node["id"],
+                    flag_name="render",
+                    desired=node["flags"]["render"],
                 )
             # The frozen layout declaration is validation-only in B4A.  No HOM
             # layout mutation or request-derived observed layout is fabricated.
@@ -1234,13 +1304,13 @@ class HoudiniWriteAdapter:
         approved_root_name = graph["target"]["name_hint"]
         approved_root_path = f"/obj/{approved_root_name}"
         if (
-            root is not proof.root
+            not _same_houdini_node(root, proof.root)
             or root.sessionId() != proof.root_session_id
-            or root.parent() is not proof.parent
-            or self._hou.node("/obj") is not proof.parent
+            or not _same_houdini_node(root.parent(), proof.parent)
+            or not _same_houdini_node(self._hou.node("/obj"), proof.parent)
             or root.path() != proof.root_path
             or root.path() != approved_root_path
-            or self._hou.node(proof.root_path) is not root
+            or not _same_houdini_node(self._hou.node(proof.root_path), root)
             or root.name() != proof.root_name
             or root.name() != approved_root_name
             or root.type().name()
@@ -1286,9 +1356,9 @@ class HoudiniWriteAdapter:
             specification = catalog[(declaration["type"]["context"], declaration["type"]["name"])]
             if (
                 live.sessionId() != node_session_ids.get(local_id)
-                or live.parent() is not root
+                or not _same_houdini_node(live.parent(), root)
                 or live.path() != expected_path
-                or self._hou.node(expected_path) is not live
+                or not _same_houdini_node(self._hou.node(expected_path), live)
                 or live.name() != declaration["name_hint"]
                 or live.type().name() != specification.resolved_name
                 or live.isDisplayFlagSet() is not declaration["flags"]["display"]
@@ -1334,7 +1404,7 @@ class HoudiniWriteAdapter:
                 if (
                     source_id is None
                     or destination_id is None
-                    or destination is not live
+                    or not _same_houdini_node(destination, live)
                 ):
                     raise _ObservedStateMismatch("connection endpoint escaped transaction scope")
                 observed_connections.add((
@@ -1352,7 +1422,7 @@ class HoudiniWriteAdapter:
                 if (
                     source_id is None
                     or destination_id is None
-                    or source is not live
+                    or not _same_houdini_node(source, live)
                 ):
                     raise _ObservedStateMismatch(
                         "outgoing connection escaped transaction scope"
@@ -1383,19 +1453,21 @@ class HoudiniWriteAdapter:
     ) -> Any:
         """Prove a createNode return before it can receive another mutation."""
 
-        if child is None or any(child is item for item in children_before):
+        if child is None or any(
+            _same_houdini_node(child, item) for item in children_before
+        ):
             raise _ObservedStateMismatch("createNode returned a pre-existing identity")
         session_id = child.sessionId()
         if (
             isinstance(session_id, bool)
             or not isinstance(session_id, int)
             or session_id < 0
-            or child.parent() is not parent
+            or not _same_houdini_node(child.parent(), parent)
             or child.name() != expected_name
             or child.path() != expected_path
             or child.type().name() != expected_resolved_type
-            or self._hou.node(expected_path) is not child
-            or self._hou.node(parent.path()) is not parent
+            or not _same_houdini_node(self._hou.node(expected_path), child)
+            or not _same_houdini_node(self._hou.node(parent.path()), parent)
             or not _same_identity_members(
                 tuple(parent.children()), children_before + (child,)
             )
@@ -1416,11 +1488,13 @@ class HoudiniWriteAdapter:
             )
             owned_identities = (proof.root,) + retained_children
             if (
-                self._hou.node("/obj") is not proof.parent
+                not _same_houdini_node(self._hou.node("/obj"), proof.parent)
                 or proof.root.sessionId() != proof.root_session_id
-                or proof.root.parent() is not proof.parent
+                or not _same_houdini_node(proof.root.parent(), proof.parent)
                 or proof.root.path() != proof.root_path
-                or self._hou.node(proof.root_path) is not proof.root
+                or not _same_houdini_node(
+                    self._hou.node(proof.root_path), proof.root
+                )
                 or proof.root.name() != proof.root_name
                 or proof.root.userData(_OWNERSHIP_KEY) != _OWNERSHIP_VALUE
                 or proof.root.userData(_TRANSACTION_KEY) != proof.transaction_id
@@ -1436,15 +1510,17 @@ class HoudiniWriteAdapter:
                 or not _same_identity_members(root_children, retained_children)
                 or any(
                     child.node.sessionId() != child.session_id
-                    or child.node.parent() is not proof.root
+                    or not _same_houdini_node(child.node.parent(), proof.root)
                     or child.node.path() != child.path
                     or child.node.name() != child.name
                     or child.node.type().name() != child.resolved_type
-                    or self._hou.node(child.path) is not child.node
+                    or not _same_houdini_node(
+                        self._hou.node(child.path), child.node
+                    )
                     for child in proof.created_children
                 )
                 or any(
-                    connection.outputNode() is not node
+                    not _same_houdini_node(connection.outputNode(), node)
                     or not _contains_identity(
                         owned_identities, connection.inputNode()
                     )
@@ -1455,7 +1531,7 @@ class HoudiniWriteAdapter:
                     for connection in node.inputConnections()
                 )
                 or any(
-                    connection.inputNode() is not node
+                    not _same_houdini_node(connection.inputNode(), node)
                     or not _contains_identity(
                         owned_identities, connection.inputNode()
                     )
@@ -1469,15 +1545,32 @@ class HoudiniWriteAdapter:
                 return _RollbackOutcome(False)
             expectation: Any | None = None
             try:
-                expectation = self._read_adapter.begin_owned_mutation(
-                    read_token,
-                    # Houdini ChildDeleted is registered on and reports the
-                    # subnet/parent node; the deleted child is separate event
-                    # detail.  /obj was already observed before this root was
-                    # created, so the exact rollback source is the retained
-                    # parent identity, not the new root.
-                    expected_callback_source=proof.parent,
-                )
+                if self._strict_event_evidence:
+                    owned_subjects = (
+                        proof.root,
+                        *(child.node for child in proof.created_children),
+                    )
+                    expectation = self._read_adapter.begin_owned_mutation(
+                        read_token,
+                        operation="rollback_destroy:root",
+                        event_source_rules={
+                            "BeingDeleted": owned_subjects,
+                            "ChildDeleted": (proof.parent, proof.root),
+                            "ChildSwitched": (proof.root,),
+                        },
+                        allowed_child_subjects=owned_subjects,
+                        required_event_types=("ChildDeleted",),
+                    )
+                else:
+                    expectation = self._read_adapter.begin_owned_mutation(
+                        read_token,
+                        # Houdini ChildDeleted is registered on and reports the
+                        # subnet/parent node; the deleted child is separate event
+                        # detail.  /obj was already observed before this root was
+                        # created, so the exact rollback source is the retained
+                        # parent identity, not the new root.
+                        expected_callback_source=proof.parent,
+                    )
             except BaseException as exc:
                 return _RollbackOutcome(
                     False, exc if not isinstance(exc, Exception) else None
@@ -1493,8 +1586,16 @@ class HoudiniWriteAdapter:
             finally:
                 if expectation is not None:
                     try:
+                        finish_arguments: dict[str, Any] = {}
+                        if self._strict_event_evidence:
+                            finish_arguments = {
+                                "expected_child_subjects": owned_subjects,
+                                "require_all_child_subjects": True,
+                            }
                         self._read_adapter.finish_owned_mutation(
-                            read_token, expectation
+                            read_token,
+                            expectation,
+                            **finish_arguments,
                         )
                     except BaseException as exc:
                         observation_ok = False
@@ -1517,7 +1618,7 @@ class HoudiniWriteAdapter:
         if proof is None:
             return False
         return bool(
-            self._hou.node("/obj") is proof.parent
+            _same_houdini_node(self._hou.node("/obj"), proof.parent)
             and _same_identity_members(
                 tuple(proof.parent.children()),
                 proof.parent_children_before,
@@ -1805,25 +1906,158 @@ class HoudiniWriteAdapter:
         phase: str,
         read_token: Any,
         callback_source: Any,
-        operation: Callable[[], Any],
+        mutation: Callable[[], Any],
+        *,
+        operation: str | None = None,
+        event_source_rules: Mapping[str, tuple[Any, ...]] | None = None,
+        required_event_types: tuple[str, ...] | None = None,
+        allowed_child_subjects: tuple[Any, ...] | None = None,
+        created_subject: bool = False,
     ) -> Any:
         if phase not in _PHASES:
             raise RuntimeError("unknown graph transaction phase")
+        allow_zero_events = operation in _SILENT_READBACK_OPERATIONS
 
         def checked_operation() -> Any:
             self._check_deadline()
-            expectation = self._read_adapter.begin_owned_mutation(
-                read_token,
-                expected_callback_source=callback_source,
-            )
+            if self._strict_event_evidence:
+                expectation = self._read_adapter.begin_owned_mutation(
+                    read_token,
+                    operation=operation,
+                    event_source_rules=event_source_rules,
+                    allowed_child_subjects=allowed_child_subjects,
+                    required_event_types=required_event_types,
+                    allow_zero_events=allow_zero_events,
+                )
+            else:
+                expectation = self._read_adapter.begin_owned_mutation(
+                    read_token,
+                    expected_callback_source=callback_source,
+                )
+            result: Any = None
+            returned = False
             try:
-                return operation()
+                result = mutation()
+                returned = True
+                return result
             finally:
+                finish_arguments: dict[str, Any] = {}
+                if self._strict_event_evidence and created_subject and returned:
+                    finish_arguments = {
+                        "expected_child_subjects": (result,),
+                        "require_all_child_subjects": True,
+                    }
+                if self._strict_event_evidence and allow_zero_events:
+                    finish_arguments["exact_readback_proven"] = bool(
+                        returned and result is True
+                    )
                 self._read_adapter.finish_owned_mutation(
-                    read_token, expectation
+                    read_token,
+                    expectation,
+                    **finish_arguments,
                 )
 
         return self._mutate_once(phase, checked_operation)
+
+    def _set_user_data_with_evidence(
+        self,
+        phase: str,
+        read_token: Any,
+        root: Any,
+        *,
+        key: str,
+        value: str,
+    ) -> None:
+        admitted_keys = (_OWNERSHIP_KEY, _TRANSACTION_KEY, _GRAPH_DIGEST_KEY)
+        if key not in admitted_keys or not isinstance(value, str) or not value:
+            raise RuntimeError("invalid owned metadata mutation")
+        if root.userData(key) is not None:
+            raise _ObservedStateMismatch("owned metadata already exists")
+
+        def set_and_read_back() -> bool:
+            root.setUserData(key, value)
+            return root.userData(key) == value
+
+        result = self._guarded_mutation(
+            phase,
+            read_token,
+            root,
+            set_and_read_back,
+            operation=f"set_user_data:{key}",
+            event_source_rules={
+                "CustomDataChanged": (root,),
+                "AppearanceChanged": (root,),
+            },
+            required_event_types=(),
+        )
+        if result is not True:
+            raise _ObservedStateMismatch("owned metadata readback failed")
+
+    def _install_strict_observer(self, read_token: Any, node: Any) -> None:
+        if not self._strict_event_evidence:
+            return
+        self._contain_once(
+            lambda: self._read_adapter.install_owned_node_observer(
+                read_token, node
+            )
+        )
+
+    def _set_flag_with_evidence(
+        self,
+        read_token: Any,
+        parent: Any,
+        live_node: Any,
+        *,
+        owned_nodes: tuple[Any, ...],
+        node_id: str,
+        flag_name: str,
+        desired: bool,
+    ) -> None:
+        if flag_name == "display":
+            getter = live_node.isDisplayFlagSet
+            setter = live_node.setDisplayFlag
+        elif flag_name == "render":
+            getter = live_node.isRenderFlagSet
+            setter = live_node.setRenderFlag
+        else:
+            raise RuntimeError("unknown graph flag")
+        operation = f"set_flag:{node_id}:{flag_name}"
+        if self._strict_event_evidence:
+            observed = self._contain_once(getter)
+            if type(observed) is not bool:
+                raise HoudiniWriteAdapterError(
+                    "CAPABILITY_MISMATCH",
+                    "The live Houdini flag state is invalid",
+                )
+            if observed is desired:
+                self._contain_once(
+                    lambda: self._read_adapter.record_owned_noop(
+                        read_token, operation=operation
+                    )
+                )
+                return
+        def set_and_read_back() -> bool:
+            setter(desired)
+            observed = getter()
+            if type(observed) is not bool:
+                raise _ObservedStateMismatch("flag readback is invalid")
+            return observed is desired
+
+        changed = self._guarded_mutation(
+            "set_flags_layout",
+            read_token,
+            live_node,
+            set_and_read_back,
+            operation=operation,
+            event_source_rules={
+                "FlagChanged": owned_nodes,
+                "ChildSwitched": (parent,),
+            },
+            required_event_types=("FlagChanged",),
+            allowed_child_subjects=owned_nodes,
+        )
+        if changed is not True:
+            raise _ObservedStateMismatch("flag readback did not match")
 
     def _after_phase(self, phase: str) -> None:
         hook = self._phase_hook
@@ -2023,19 +2257,27 @@ def _same_identity_members(
     observed: tuple[Any, ...], expected: tuple[Any, ...]
 ) -> bool:
     return len(observed) == len(expected) and all(
-        sum(candidate is item for candidate in observed) == 1 for item in expected
+        sum(
+            _same_houdini_node(candidate, item) for candidate in observed
+        )
+        == 1
+        for item in expected
     )
 
 
 def _identity_lookup(
     pairs: tuple[tuple[Any, str], ...], observed: Any
 ) -> str | None:
-    matches = [local_id for candidate, local_id in pairs if candidate is observed]
+    matches = [
+        local_id
+        for candidate, local_id in pairs
+        if _same_houdini_node(candidate, observed)
+    ]
     return matches[0] if len(matches) == 1 else None
 
 
 def _contains_identity(items: tuple[Any, ...], observed: Any) -> bool:
-    return any(candidate is observed for candidate in items)
+    return any(_same_houdini_node(candidate, observed) for candidate in items)
 
 
 def _typed_observed_value_is_valid(

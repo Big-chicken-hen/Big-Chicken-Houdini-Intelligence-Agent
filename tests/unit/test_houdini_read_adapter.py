@@ -22,6 +22,7 @@ from hia_core.houdini_contract import SchemaRegistry  # noqa: E402
 from hia_panel.houdini_read_adapter import (  # noqa: E402
     HoudiniReadAdapter,
     HoudiniReadAdapterError,
+    _same_houdini_node,
 )
 
 
@@ -30,13 +31,16 @@ class HoudiniReadAdapterTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.registry = SchemaRegistry.b2_read_only()
 
-    def _adapter(self, fake: FakeHou) -> HoudiniReadAdapter:
+    def _adapter(
+        self, fake: FakeHou, *, strict_event_evidence: bool = False
+    ) -> HoudiniReadAdapter:
         return HoudiniReadAdapter(
             fake,
             publisher_id="panel-publisher-1",
             python_version="3.11.9",
             pyside_version="6.5.3",
             fingerprint_key=b"fixed-test-fingerprint-key-32b",
+            strict_event_evidence=strict_event_evidence,
         )
 
     @staticmethod
@@ -317,6 +321,307 @@ class HoudiniReadAdapterTests(unittest.TestCase):
                     before["hip_fingerprint"] == after["hip_fingerprint"],
                 )
 
+    def test_strict_observer_preflight_requires_event_callbacks_readback(self) -> None:
+        fake = FakeHou(hide_node_event_callbacks=True)
+        adapter = self._adapter(fake, strict_event_evidence=True)
+
+        report = adapter.start()
+
+        self.assertFalse(report["available"])
+        self.assertFalse(report["revision_observer_reliable"])
+        self.assertGreater(fake.obj.callback_count, 0)
+
+    def test_strict_owned_mutation_requires_typed_event_and_exact_subject(self) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake, strict_event_evidence=True)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+        expectation = adapter.begin_owned_mutation(
+            token,
+            operation="create_root:fixture",
+            event_source_rules={"ChildCreated": (fake.obj,)},
+            required_event_types=("ChildCreated",),
+        )
+
+        graph = fake.add_hia_graph("HIA_Graph_fixture", "a" * 64)
+        count = adapter.finish_owned_mutation(
+            token,
+            expectation,
+            expected_child_subjects=(graph,),
+            require_all_child_subjects=True,
+        )
+        registration = adapter.install_owned_node_observer(token, graph)
+        after = adapter.finish_owned_write(token, outcome="committed")
+        evidence = adapter.last_owned_evidence()
+
+        self.assertEqual(1, count)
+        self.assertEqual(graph.path(), registration["path"])
+        self.assertEqual(before["scene_revision"] + 1, after["scene_revision"])
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual("committed", evidence["outcome"])
+        self.assertEqual("ChildCreated", evidence["events"][0]["event_type"])
+        self.assertEqual(graph.path(), evidence["events"][0]["child_path"])
+
+        boundary = len(adapter.event_journal_snapshot())
+        graph.emit(fake.nodeEventType.BeingDeleted)
+        fake.obj.emit(fake.nodeEventType.ChildDeleted, child_node=graph)
+        undo_events = adapter.event_journal_snapshot()[boundary:]
+        self.assertEqual(["BeingDeleted", "ChildDeleted"], [
+            item["event_type"] for item in undo_events
+        ])
+        self.assertEqual("/obj", undo_events[-1]["source_path"])
+        self.assertEqual(graph.path(), undo_events[-1]["child_path"])
+        self.assertFalse(undo_events[-1]["matched"])
+        self.assertEqual("committed", adapter.last_owned_evidence()["outcome"])
+
+    def test_strict_events_and_observers_accept_equivalent_fresh_hom_wrappers(
+        self,
+    ) -> None:
+        fake = FakeHou(return_fresh_node_wrappers=True)
+        adapter = self._adapter(fake, strict_event_evidence=True)
+        before = adapter.start()
+
+        self.assertTrue(before["available"])
+        self.assertTrue(adapter.refresh()["revision_observer_reliable"])
+        token = self._begin_owned_write(adapter, before)
+        expectation = adapter.begin_owned_mutation(
+            token,
+            operation="create_root:fresh_wrapper",
+            event_source_rules={"ChildCreated": (fake.obj,)},
+            required_event_types=("ChildCreated",),
+        )
+        graph = fake.add_hia_graph(
+            "HIA_Graph_fresh_wrapper",
+            "b" * 64,
+            notify=False,
+        )
+        source_wrapper = fake.node_wrapper("/obj")
+        subject_wrapper = fake.node_wrapper(graph.path())
+
+        self.assertIsNot(source_wrapper, fake.obj)
+        self.assertIsNot(subject_wrapper, graph)
+        self.assertTrue(_same_houdini_node(source_wrapper, fake.obj))
+        self.assertTrue(_same_houdini_node(subject_wrapper, graph))
+        fake.obj.emit(
+            fake.nodeEventType.ChildCreated,
+            callback_source=source_wrapper,
+            child_node=subject_wrapper,
+        )
+
+        self.assertEqual(
+            1,
+            adapter.finish_owned_mutation(
+                token,
+                expectation,
+                expected_child_subjects=(graph,),
+                require_all_child_subjects=True,
+            ),
+        )
+        registration = adapter.install_owned_node_observer(token, graph)
+        result = adapter.finish_owned_write(token, outcome="committed")
+
+        self.assertEqual(graph.path(), registration["path"])
+        self.assertTrue(result["available"])
+        self.assertTrue(result["revision_observer_reliable"])
+
+    def test_same_path_and_session_wrapper_is_rejected_without_strict_equality(
+        self,
+    ) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake, strict_event_evidence=True)
+        before = adapter.start()
+        unequal_wrapper = fake.node_wrapper("/obj", equivalent=False)
+
+        self.assertEqual(fake.obj.path(), unequal_wrapper.path())
+        self.assertEqual(fake.obj.sessionId(), unequal_wrapper.sessionId())
+        self.assertFalse(fake.obj == unequal_wrapper)
+        self.assertFalse(_same_houdini_node(fake.obj, unequal_wrapper))
+
+        token = self._begin_owned_write(adapter, before)
+        expectation = adapter.begin_owned_mutation(
+            token,
+            operation="set_parameter:unequal_wrapper",
+            event_source_rules={"ParmTupleChanged": (fake.obj,)},
+            required_event_types=("ParmTupleChanged",),
+        )
+        fake.obj.emit(
+            fake.nodeEventType.ParmTupleChanged,
+            callback_source=unequal_wrapper,
+        )
+
+        with self.assertRaises(HoudiniReadAdapterError) as raised:
+            adapter.finish_owned_mutation(token, expectation)
+        self.assertEqual("SCENE_CONFLICT", raised.exception.code)
+        with self.assertRaises(HoudiniReadAdapterError):
+            adapter.finish_owned_write(token, outcome="indeterminate")
+
+        fresh = FakeHou()
+        fresh_adapter = self._adapter(fresh, strict_event_evidence=True)
+        self.assertTrue(fresh_adapter.start()["revision_observer_reliable"])
+        fresh.return_fresh_node_wrappers = True
+        fresh.node_wrappers_equivalent = False
+        self.assertFalse(fresh_adapter.refresh()["revision_observer_reliable"])
+
+    def test_houdini_node_equivalence_fails_closed_when_comparison_raises(
+        self,
+    ) -> None:
+        class ExplodingEquality:
+            def __eq__(self, _other: object) -> bool:
+                raise RuntimeError("comparison unavailable")
+
+        self.assertFalse(_same_houdini_node(FakeHou().obj, ExplodingEquality()))
+
+    def test_strict_owned_mutation_rejects_zero_wrong_and_off_main_events(self) -> None:
+        cases = ("zero", "wrong", "off_main")
+        for case in cases:
+            with self.subTest(case=case):
+                fake = FakeHou()
+                adapter = self._adapter(fake, strict_event_evidence=True)
+                before = adapter.start()
+                token = self._begin_owned_write(adapter, before)
+                expectation = adapter.begin_owned_mutation(
+                    token,
+                    operation=f"set_parameter:{case}",
+                    event_source_rules={"ParmTupleChanged": (fake.obj,)},
+                    required_event_types=("ParmTupleChanged",),
+                )
+                if case == "wrong":
+                    fake.obj.emit(fake.nodeEventType.FlagChanged)
+                elif case == "off_main":
+                    worker = threading.Thread(
+                        target=lambda: fake.obj.emit(
+                            fake.nodeEventType.ParmTupleChanged
+                        )
+                    )
+                    worker.start()
+                    worker.join(2)
+                    self.assertFalse(worker.is_alive())
+                with self.assertRaises(HoudiniReadAdapterError):
+                    adapter.finish_owned_mutation(token, expectation)
+                with self.assertRaises(HoudiniReadAdapterError):
+                    adapter.finish_owned_write(token, outcome="indeterminate")
+
+    def test_fixed_user_data_mutation_allows_zero_events_only_with_exact_readback(
+        self,
+    ) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake, strict_event_evidence=True)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+        expectation = adapter.begin_owned_mutation(
+            token,
+            operation="set_user_data:hia_ownership",
+            event_source_rules={
+                "CustomDataChanged": (fake.obj,),
+                "AppearanceChanged": (fake.obj,),
+            },
+            required_event_types=(),
+            allow_zero_events=True,
+        )
+
+        self.assertEqual(
+            0,
+            adapter.finish_owned_mutation(
+                token,
+                expectation,
+                exact_readback_proven=True,
+            ),
+        )
+        adapter.finish_owned_write(token, outcome="rolled_back")
+        evidence = adapter.last_owned_evidence()
+
+        assert evidence is not None
+        self.assertEqual(
+            [
+                {
+                    "operation": "set_user_data:hia_ownership",
+                    "event_count": 0,
+                    "event_types": [],
+                    "no_op": False,
+                    "exact_readback_proven": True,
+                }
+            ],
+            evidence["mutations"],
+        )
+
+        unauthorized_hou = FakeHou()
+        unauthorized = self._adapter(
+            unauthorized_hou, strict_event_evidence=True
+        )
+        unauthorized_report = unauthorized.start()
+        unauthorized_token = self._begin_owned_write(
+            unauthorized, unauthorized_report
+        )
+        with self.assertRaises(HoudiniReadAdapterError) as raised:
+            unauthorized.begin_owned_mutation(
+                unauthorized_token,
+                operation="set_parameter:unsafe_silent_policy",
+                event_source_rules={"ParmTupleChanged": (unauthorized_hou.obj,)},
+                allow_zero_events=True,
+            )
+        self.assertEqual("INVALID_ARGUMENT", raised.exception.code)
+
+        missing_hou = FakeHou()
+        missing = self._adapter(missing_hou, strict_event_evidence=True)
+        missing_report = missing.start()
+        missing_token = self._begin_owned_write(missing, missing_report)
+        missing_expectation = missing.begin_owned_mutation(
+            missing_token,
+            operation="set_user_data:hia_graph_digest",
+            event_source_rules={
+                "CustomDataChanged": (missing_hou.obj,),
+                "AppearanceChanged": (missing_hou.obj,),
+            },
+            required_event_types=(),
+            allow_zero_events=True,
+        )
+        with self.assertRaises(HoudiniReadAdapterError) as missing_error:
+            missing.finish_owned_mutation(missing_token, missing_expectation)
+        self.assertEqual("SCENE_CONFLICT", missing_error.exception.code)
+
+    def test_strict_noop_is_recorded_without_fabricating_event(self) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake, strict_event_evidence=True)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+
+        adapter.record_owned_noop(token, operation="set_flag:node:display")
+        adapter.finish_owned_write(token, outcome="rolled_back")
+        evidence = adapter.last_owned_evidence()
+
+        assert evidence is not None
+        self.assertEqual(0, evidence["event_count"])
+        self.assertEqual(
+            [{
+                "operation": "set_flag:node:display",
+                "event_count": 0,
+                "event_types": [],
+                "no_op": True,
+            }],
+            evidence["mutations"],
+        )
+
+    def test_strict_event_journal_is_bounded_and_overflow_fails_closed(self) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake, strict_event_evidence=True)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+        expectation = adapter.begin_owned_mutation(
+            token,
+            operation="set_parameter:bounded",
+            event_source_rules={"ParmTupleChanged": (fake.obj,)},
+            required_event_types=("ParmTupleChanged",),
+        )
+
+        for _index in range(513):
+            fake.obj.emit(fake.nodeEventType.ParmTupleChanged)
+
+        with self.assertRaises(HoudiniReadAdapterError):
+            adapter.finish_owned_mutation(token, expectation)
+        self.assertEqual(512, len(adapter.event_journal_snapshot()))
+        self.assertFalse(adapter.capability_report()["revision_observer_reliable"])
+
     def test_owned_write_unmarked_existing_node_event_is_external(self) -> None:
         fake = FakeHou()
         adapter = self._adapter(fake)
@@ -338,7 +643,7 @@ class HoudiniReadAdapterTests(unittest.TestCase):
         self.assertTrue(after["available"])
         self.assertEqual(observed["scene_revision"], after["scene_revision"])
 
-    def test_owned_mutation_only_coalesces_the_exact_callback_identity(self) -> None:
+    def test_owned_mutation_only_coalesces_the_same_underlying_callback_node(self) -> None:
         fake = FakeHou()
         other = fake.add_hia_graph(
             "HIA_Graph_existing",

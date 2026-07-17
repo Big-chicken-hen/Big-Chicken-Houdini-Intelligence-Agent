@@ -6,4 +6,4 @@ requires-python = ">=3.10"
 
 [tool.hia]
 project-root = "E:\\houdini-intelligence-agent"
-phase = "P2-V-B4A-dormant-fake-HOM-write-adapter"
+phase = "P2-V-B4B-one-shot-local-live-acceptance"
