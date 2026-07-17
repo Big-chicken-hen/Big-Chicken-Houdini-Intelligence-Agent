@@ -2,13 +2,13 @@
 
 ## Status and authorization boundary
 
-Gate B0 and Gate B1 are complete, and Gate B2A/B2B established the bounded read-only Houdini capability slice with offline tests and a separate user-performed GUI acceptance. Gate B2C is authorized only to test the real pinned-Codex-to-stdio-MCP-to-authenticated-Bridge-to-Panel read chain for `houdini_scene_info` and `houdini_node_type_info`.
+Gate B0, Gate B1, and Gate B2 are complete. Gate B2C closed the real pinned-Codex-to-stdio-MCP-to-authenticated-Bridge-to-Panel read chain at commit `edf7f3a`; the direct HTTPS transport hotfix closed at commit `3213625`. Gate B3 is authorized only for pure-Python fake scene transaction and approval testing.
 
-Gate B3 and every scene write remain unauthorized. Automated verification must not start Houdini GUI, and no B2C test may register or call `houdini_graph_validate`, `houdini_graph_apply`, or `houdini_graph_verify`.
+Gate B3 may invoke the three graph tools only through an explicitly constructed offline fake profile. Production registration remains limited to `houdini_scene_info` and `houdini_node_type_info`. B4, every real scene write, `hou`, Houdini GUI, hython, and the live MCP/Bridge/app-server chain remain unauthorized.
 
 ## Acceptance claim
 
-Full P2-V eventually succeeds only when Codex can use the same five-tool general graph contract to validate and create multiple editable OBJ/SOP networks under new `/obj/HIA_Graph_<id>` containers. B2C makes no such claim: its acceptance is limited to two real bounded reads that leave revision, nodes, parameters, connections, selection, dirty state, and HIP persistence unchanged. A table and a structurally different stairs fixture remain future write-gate fixtures, not B2C capabilities.
+Full P2-V eventually succeeds only when Codex can use the same five-tool general graph contract to validate and create multiple editable OBJ/SOP networks under new `/obj/HIA_Graph_<id>` containers. B3 proves only the deterministic fake transaction, approval, rollback, verification, idempotency, conflict, and simulated Undo model using table and structurally different stairs fixtures. It does not prove live node creation, cook, rollback, main-thread scheduling, or `hou.undos.group`.
 
 Passing Schema tests alone does not prove live Houdini behavior. Evidence is accumulated in five layers and the separately approved live acceptance layer is mandatory before any live claim.
 
@@ -67,7 +67,7 @@ These tests run with Python `-B` and require no third-party package.
 
 ## Layer 2: pure deterministic components
 
-These tests are written before any `hou` implementation and use fakes.
+These tests are written before any `hou` implementation and use fakes. Gate B3 extends this layer into a complete validate -> scene approval -> transactional apply -> mandatory internal postcondition -> verify -> optional test-only simulated Undo chain.
 
 ### Validation and canonicalization
 
@@ -106,9 +106,25 @@ These tests are written before any `hou` implementation and use fakes.
 - The same key with a different graph, session, or approval digest returns `IDEMPOTENCY_CONFLICT`.
 - B1 does not assume success across a simulated Bridge restart and does not auto-replay an indeterminate write. Later live reconciliation of a request-owned tagged container remains unverified until its separately approved gate.
 
+### Gate B3 fake transaction state and rollback
+
+- Declared graphs are never stored as observed scene truth. The simulator maintains independent observed node identity, type, typed parameters, connections, flags, layout, and ownership records, and verify reconstructs canonical graph data from those records.
+- A non-HIA sentinel is present before every transaction. Success, every injected failure, rollback, and simulated Undo preserve its complete observed state.
+- Root creation, child creation, typed parameter assignment, connection creation, flags/layout, internal postcondition verification, and commit are fixed deterministic phases with one failure injection point at every mutation boundary.
+- Deterministic unexpected `RuntimeError` injection covers root publication, every mutation phase, postcondition, commit, result construction, and audit construction. `KeyboardInterrupt` and `SystemExit` injection proves best-effort containment followed by re-raise, with no traceback or exception text in results or audit.
+- Claim-after cancel, deadline, and shutdown tests pause after mutation boundaries and between two boundaries. The guard check and next mutation share one arbiter, while final commit competes under the same authority; tests prove both cancel-wins and commit-wins outcomes without a late write or contradictory terminal result.
+- One re-entrant scene/snapshot lock covers apply and simulated Undo. Concurrent scene-info, verify, and capability-snapshot readers at every boundary observe only the complete pre-transaction or post-transaction state, or a bounded `WRITE_IN_PROGRESS` result.
+- A failed transaction rolls back only the exact root object identity created and owned by that request. Rollback never searches by name or prefix and never touches a pre-existing collision.
+- Rollback-proof tampering independently covers the mapping key, root path, target parent/name, Python object identity, recorded identity, transaction ID, and ownership. Every mismatch becomes indeterminate and freezes fake writes without deleting the ambiguous object.
+- Rollback failure returns `ROLLBACK_FAILED` or `SCENE_STATE_INDETERMINATE`, marks fake scene state indeterminate, and blocks later writes without an automatic retry.
+- Mandatory internal postcondition verification runs before commit. Tampering with independent observed state makes apply fail with `POSTCONDITION_FAILED` or makes external verify fail with `VERIFY_FAILED` or an equivalent frozen structured result.
+- External verify tests independently tamper parameters, connections, flags, ownership, transaction anchors, mapping keys, object identities, and cook state. Missing or schema-invalid cook markers return a schema-valid `VERIFY_FAILED`; all ten checks and overall validity remain derived from observed state.
+- A successful apply advances revision exactly once and produces exactly one simulated Undo record. One test-only Undo restores the full pre-transaction observed state and leaves the sentinel unchanged.
+- Both fixtures traverse the identical implementation path. No branch may use table/stairs labels, fixed node counts, asset roles, or name-derived semantics.
+
 ## Layer 3: fake MCP, Bridge, and Panel integration
 
-This layer records the completed Gate B1 five-tool offline harness. It is retained as frozen contract evidence and does not describe the active B2C registration, which is independently restricted to the two read tools in Layer 4.
+This layer records the completed Gate B1 five-tool offline harness and the Gate B3 fake-only extension. It does not describe the production registration, which remains independently restricted to the two read tools in Layer 4.
 
 - Initialize a standard stdio MCP session and verify `tools/list` exposes exactly five schemas. JSON-RPC alone is written to stdout; diagnostics use stderr.
 - Admit only `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`, and `notifications/cancelled` for the frozen offline MCP `2024-11-05` baseline. Unknown requests receive method-not-found, unknown notifications are safely ignored, and malformed, duplicate-key, non-finite, over-262,144-byte, or over-depth-32 lines terminate the fake protocol session without replay.
@@ -161,7 +177,7 @@ The user performs this finite test after the complete offline suite passes:
 
 The screenshots and observations from this manual run are user evidence. They must not be described as an automated Houdini test.
 
-## Layer 5: live Houdini write acceptance
+## Future Gate B4: live Houdini write acceptance (not authorized)
 
 This is not authorized by approval of this design document. Before running it, show the exact disposable HIP state, graph request, node names, parameters, connections, and rollback scope, then obtain a separate approval.
 
@@ -225,12 +241,12 @@ The later implementation acceptance report must contain:
 
 Screenshots are optional supporting evidence and never substitute for `hou`-derived verification.
 
-## Design-review exit criteria
+## Gate B3 exit criteria
 
-Frozen B0 evidence:
-
-- The five-tool inventory, ten schemas, fixtures, architecture, threat model, and this plan agree exactly.
-- All JSON files parse, references resolve, forbidden capabilities are absent, and offline contract tests pass.
-- Existing P0/P1 tests remain green.
-- The frozen `schemas/houdini-mcp/0.1.0` directory remains unchanged. The project-local B2C configuration registers only the two read tools and explicitly disables all three graph tools.
-- The working tree remains uncommitted until the user completes the B2C manual GUI acceptance and explicitly authorizes closure. Passing B2C does not authorize B3 or any write.
+- The five-tool inventory, frozen `0.1.0` graph schemas, frozen `0.2.0` read schemas, fixtures, architecture, threat model, and this plan agree exactly; start/end SHA-256 inventories are identical.
+- Table and stairs complete the same fake validate/approve/apply/internal-postcondition/verify/Undo path, and every mutation boundary, approval outcome, stale state, idempotency outcome, rollback outcome, cancellation, deadline, and shutdown case is deterministic and tested.
+- Every error is JSON-serializable, schema-valid, secret-free, and contains no fabricated created/changed path. Observed-state tampering cannot be hidden by a saved request graph.
+- Existing tests and the complete offline suite remain green; `git diff --check` passes.
+- Production `.codex/config.toml`, launcher, app-server lifecycle, `stdio.main()`, Bridge, Panel, and live read adapter remain unchanged. Production `tools/list` contains exactly the two read tools and rejects all three graph tools before transport.
+- B3 source does not import `hou` or expose create/set/connect/destroy/save/cook/render/cache/HDA/arbitrary-code product capabilities. No real service or Houdini process is started.
+- The staging area remains empty and all B3 changes remain uncommitted until the user explicitly approves a commit. Passing B3 does not authorize B4 or any live write.

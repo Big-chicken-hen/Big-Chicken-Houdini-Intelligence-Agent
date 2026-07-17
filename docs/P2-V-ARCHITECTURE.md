@@ -2,11 +2,11 @@
 
 ## Review status and authorization boundary
 
-Gate B0 and Gate B1 are complete, and the Gate B2 read-only capability slice has passed its separately performed manual Houdini GUI acceptance. Gate B2C is now authorized only to connect the pinned Codex 0.144.3 app-server to the existing authenticated loopback Bridge and live Panel through one project-scoped stdio MCP sidecar. The active B2C profile exposes exactly `houdini_scene_info` and `houdini_node_type_info`.
+Gate B0, Gate B1, and Gate B2 are complete. The Gate B2C real read-only MCP chain completed at commit `edf7f3a`, and its direct HTTPS transport hotfix completed at commit `3213625`. The production profile continues to expose exactly `houdini_scene_info` and `houdini_node_type_info` through the pinned Codex 0.144.3 app-server, project-scoped stdio MCP sidecar, authenticated loopback Bridge, and live Panel.
 
-Gate B2C does not authorize Gate B3, a graph tool, a scene write, a cook, a render, a save, an HDA operation, or arbitrary code. `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify` remain disabled and unregistered in the active Codex profile.
+Gate B3 is now authorized only as a pure-Python, headless, offline transaction simulator. It does not authorize B4, live `hou`, a real scene write, cook, render, save, HDA operation, or arbitrary code. `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify` remain disabled and unregistered in the production Codex profile.
 
-Schema version `0.1.0` is frozen pre-release. This five-tool contract is an in-place correction of a rejected, unapproved four-tool draft that was never published or enabled; Git history preserves that draft for audit. Any future breaking change requires a new schema version rather than reusing `0.1.0`.
+Schema versions `0.1.0` and `0.2.0` are frozen pre-release. The former is the five-tool graph contract and the latter is the production two-tool read-only contract. Neither directory may be edited in place; any future breaking change requires a new schema version.
 
 Codex remains the sole intelligent agent, planner, dialogue owner, and memory source. The MCP adapter, Bridge, Panel executor, and Houdini runtime perform only deterministic validation, transport, execution, and verification. They do not add an Agent, LLM, planner, RAG system, semantic memory, prompt rewriting, or screen control.
 
@@ -22,16 +22,16 @@ The exact reviewed tools are:
 4. `houdini_graph_apply`
 5. `houdini_graph_verify`
 
-Those five names describe the frozen future graph contract. The active Gate B2C runtime surface is the strict two-tool subset `houdini_scene_info` and `houdini_node_type_info`; the other three names remain dormant until a later gate explicitly authorizes them.
+Those five names describe the frozen graph contract. Gate B3 may exercise all five only inside an explicitly constructed offline fake harness. The production runtime surface remains the strict two-tool subset `houdini_scene_info` and `houdini_node_type_info`; the other three names remain dormant in production until a later gate explicitly authorizes them.
 
-The current version enables only bounded OBJ/SOP creation beneath one new, validated `/obj/HIA_Graph_<id>` container. Context is a versioned field: later OBJ, SOP, DOP, LOP, VOP, MaterialX, COP, TOP, KineFX, or APEX adapters require a separately reviewed schema version rather than an open enum. P2-V does not provide arbitrary Python, HScript, expressions, callbacks, `eval`, shell execution, filesystem access, HIP save, rendering, caching, HDA creation or publishing, node deletion as a public tool, modification of an existing user node, or references outside the request-owned container.
+The frozen graph contract expresses only bounded OBJ/SOP creation beneath one new, validated `/obj/HIA_Graph_<id>` container. Gate B3 simulates that contract without Houdini; it does not enable creation in a production runtime. Context is versioned: later OBJ, SOP, DOP, LOP, VOP, MaterialX, COP, TOP, KineFX, or APEX adapters require a separately reviewed schema version rather than an open enum. P2-V does not provide arbitrary Python, HScript, expressions, callbacks, `eval`, shell execution, filesystem access, HIP save, rendering, caching, HDA creation or publishing, node deletion as a public tool, modification of an existing user node, or references outside the request-owned container.
 
 ## Trust and transport path
 
 ```text
 Codex app-server (pinned 0.144.3; reasoning and tool selection)
     -> project-local MCP subprocess over stdio
-Project-local Houdini MCP adapter (exactly two B2C read-only tools)
+Project-local Houdini MCP adapter (exactly two production read-only tools)
     -> authenticated HTTP to 127.0.0.1:<random-port>
 Existing Bearer-authenticated loopback Bridge (validation and bounded queue)
     <- nonblocking authenticated status/read dispatch
@@ -42,7 +42,7 @@ Live Houdini session
 
 The app-server remains stdio-only and is never exposed on a network socket. The MCP adapter is a project-local stdio child process, not an HTTP server. The Bridge retains its random loopback port and random session Bearer token; neither the token nor the scene gateway is exposed to a LAN or the internet. The Panel does not block its UI thread while waiting for Bridge work.
 
-No component in this path uses Computer Use or screen takeover. B2C has no scene-mutation path: every graph tool and every write/cook/save/render/HDA operation remains disabled.
+No component in this path uses Computer Use or screen takeover. Gate B3 does not modify this production path: every graph tool and every write/cook/save/render/HDA operation remains disabled there.
 
 ## Component responsibilities
 
@@ -163,7 +163,7 @@ JSON Schema closes and bounds each accepted value, but B1 must also run determin
 
 Any mismatch is rejected before it can complete another request. No validator evaluates strings, imports `hou`, or broadens an enum.
 
-## Gate B2C read-only execution sequence
+## Completed Gate B2C production read-only execution sequence
 
 1. Codex invokes either `houdini_scene_info` or `houdini_node_type_info` through the project-local stdio MCP child.
 2. The adapter accepts only the pinned MCP handshake and exact two-tool allowlist, then queries the authenticated status facade for a current trusted snapshot.
@@ -174,22 +174,20 @@ Any mismatch is rejected before it can complete another request. No validator ev
 
 The launcher briefly asks Windows for an ephemeral IPv4 loopback port, releases the probe, and supplies the resulting Bridge URL only through the owned Bridge and Houdini child environments. The Bridge must bind that exact origin before app-server startup or fail closed; it does not retry on another port. The Bearer token is also passed only through owned child environments. Bootstrap contains neither URL nor credential, and neither may appear in configuration values, command arguments, logs, diagnostics, or documentation. The separate Panel executor credential is never inherited by Codex or the MCP child.
 
-### Future graph transaction sequence (inactive in B2C)
+### Gate B3 pure-Python transaction sequence
 
-The validate/approve/apply/verify sequence and transaction rules below remain the frozen design for a later gate. No part of that sequence is registered or executable in B2C. Disconnects never imply write success, and no dormant write may be replayed automatically.
+Gate B3 reuses the frozen schemas, `SchemaRegistry`, normalization/digest functions, typed scene approval, `SceneQueue`, and both fixtures. It does not start the real MCP, Bridge, app-server, Panel, Houdini, or hython, and it does not add a production handler. The simulation profile is available only to tests or an explicitly named headless offline harness.
 
-1. Codex invokes one of the five frozen graph-contract tools.
-2. The adapter validates the versioned Schema, attaches transport correlation, and submits the request to the authenticated Bridge.
-3. `houdini_graph_validate` resolves the live allowlist, normalizes the complete graph, computes its summary and digest, and returns without scene mutation.
-4. For `houdini_graph_apply`, the request remains non-executable until an exact approval proof binds that normalized graph and its correlation fields.
-5. The Panel obtains work through bounded, authenticated, nonblocking polling. At most one live-HIP write enters `starting` or `inProgress` state.
-6. The Panel main-thread executor repeats every precondition check against current live state before mutation.
-7. A read-only tool executes directly on the main thread. A write executes only as the transaction described below.
-8. The executor performs mandatory internal verification and increments the scene revision only for a successful committed mutation.
-9. The Panel posts the structured result to the Bridge; the Bridge resolves the waiting adapter call once.
-10. Exact idempotent retries return the recorded result; changed reuse returns `IDEMPOTENCY_CONFLICT`.
+1. Validate the request through the frozen contract and normalize the complete graph without changing observed fake scene state.
+2. Bind one explicit approval to the full normalized graph, graph and approval digests, target, nodes, parameters, connections, flags, layout, Thread/Turn, HIP session/fingerprint/revision, idempotency key, permission, and deadline.
+3. Atomically reserve the single fake writer and re-check session, fingerprint, revision, deadline, approval, idempotency, and ownership preconditions.
+4. Under one re-entrant scene/snapshot lock, create a new fake HIA-owned root object, declared child objects, typed parameters, owned-node connections, flags, and optional layout through fixed, individually fault-injectable mutation phases. A content-blind control arbiter makes the check for cancel, deadline, or shutdown and each following mutation one atomic authority step.
+5. Re-read independent observed fake state, reconstruct the canonical graph, and run mandatory internal postcondition verification before commit.
+6. Commit exactly once at the final control authority point, atomically publish committed state, revision, fingerprint, dirty state, Undo, and audit, and record one test-only simulated Undo transaction.
+7. On every ordinary failure after mutation begins, roll back only the current request's proven root mapping key and object identity. `KeyboardInterrupt` and `SystemExit` attempt the same containment before being re-raised. An exception or uncertainty during rollback freezes later fake writes.
+8. External verify independently reconstructs observed state and derives session, revision, target, ownership, nodes, parameters, connections, flags, cook, and graph-digest checks from that state. An observed value outside the frozen output schema produces a structured `VERIFY_FAILED`, not an uncontrolled validation exception. Exact idempotent replay returns the original result without a second execution; changed reuse returns `IDEMPOTENCY_CONFLICT`.
 
-## `houdini_graph_apply` transaction
+## `houdini_graph_apply` transaction contract and B3 simulation
 
 ### Exact approval
 
@@ -210,7 +208,7 @@ The approval UI must show a bounded exact summary of the new HIA-owned graph and
 
 ### Allowed mutation
 
-The executor creates one new OBJ geometry container and only the normalized SOP nodes declared inside it. It cannot traverse to or reference an existing user node, alter the current selection as a required side effect, or modify `/obj` children outside the new container.
+The B3 executor creates one new observed fake OBJ geometry container and only the normalized fake SOP nodes declared inside it. It cannot traverse to or reference the pre-existing sentinel or any object outside the new request-owned container. This is simulated state, not a Houdini node operation.
 
 The normalized graph contains:
 
@@ -224,11 +222,11 @@ The normalized graph contains:
 
 The initial safe type allowlist may remain deliberately small (`Object/geo`, `Sop/box`, `Sop/transform`, `Sop/merge`, and `Sop/null`), but it is a capability allowlist rather than an asset recipe. Node types and parameter names are resolved against the live catalog before mutation. The same schema must accept fixtures with different node counts, names, parameter values, and topology.
 
-The entire creation executes inside one `hou.undos.group`, so one user Undo removes the complete request-owned graph. The tool never invokes Undo on the user's behalf after a successful commit.
+Gate B3 records one pure-Python simulated Undo transaction so a test-only Undo removes the complete request-owned fake graph and restores the pre-transaction observed state. A future B4 implementation must separately prove that the entire live creation executes inside one `hou.undos.group`; B3 provides no evidence for that claim.
 
 ### Failure containment
 
-The executor records the newly created container object as request-owned before creating children. If a later operation fails, rollback may destroy only that exact container created by the current request, while still inside the controlled transaction. It must first prove object identity, parent `/obj`, expected HIA name, current request ownership, and absence before this request. It never searches for similarly named nodes and never deletes or repairs pre-existing content.
+The simulator records the newly created root object's identity as request-owned before creating children. If a later phase fails, rollback may remove only that exact object created by the current request. It must prove object identity, fake parent `/obj`, expected HIA name, current request ownership, and absence before this request. It never searches for similarly named objects and never deletes or repairs the sentinel or other pre-existing content.
 
 If those proofs are unavailable, the executor stops and returns a high-severity structured error rather than guessing. No public delete tool is exposed.
 
@@ -309,7 +307,7 @@ These conservative defaults are frozen for Gate B1. Changing one requires a vers
 10. Idempotency records are in-memory, scoped to the current Bridge/HIP session, and capped at 256 terminal entries. Exact same-key/same-digest replays return the recorded result; changed digests return `IDEMPOTENCY_CONFLICT`. B1 never assumes success across a restart or automatically retries an indeterminate write.
 11. The public read summaries are exactly the bounded output-schema fields. Process/build/catalog data stays in the trusted attestation; no selection dump, arbitrary scene tree, environment, user filesystem path, or raw parameter data is returned.
 12. Apply must perform mandatory internal postcondition validation. A later Codex call to `houdini_graph_verify` is an additional read, not a substitute. B1 proves both only with fake state.
-13. B2C resolves only the exact project-local two-tool read-only MCP TOML and finite read chain. Write approval UI, Undo, cook, rollback, and every graph mutation behavior remain unresolved and fail closed until separately approved B3/B4 work.
+13. B2C resolves only the exact project-local two-tool read-only MCP TOML and finite read chain. B3 may now prove pure-Python approval, transaction, rollback, postcondition, and simulated Undo behavior, but write approval UI, live cook, live rollback, `hou.undos.group`, and every real graph mutation remain unresolved and fail closed until separately approved B4 work.
 
 No unresolved live item may be filled by a permissive default.
 

@@ -25,6 +25,7 @@ from hia_bridge.scene_queue import (  # noqa: E402
     SceneRequest,
 )
 from hia_bridge.http_server import BridgeApplication, BridgeRequestHandler  # noqa: E402
+from fake_b3_harness import GateB3OfflineHarness  # noqa: E402
 from fake_scene_executor import FAKE_CATALOG_DIGEST, FakeSceneExecutor  # noqa: E402
 from hia_core.houdini_contract import SchemaRegistry, graph_digest  # noqa: E402
 
@@ -928,6 +929,10 @@ class FakeGeneralGraphExecutorTests(unittest.TestCase):
             hip_session_id="fixture-session",
             hip_fingerprint="ab" * 32,
         )
+        self.harness = GateB3OfflineHarness(
+            self.executor,
+            registry=self.registry,
+        )
 
     @staticmethod
     def _fixture(name: str) -> dict[str, object]:
@@ -973,6 +978,11 @@ class FakeGeneralGraphExecutorTests(unittest.TestCase):
     def _execute_checked(
         self, tool_name: str, arguments: dict[str, object]
     ) -> dict[str, object]:
+        if tool_name == "houdini_graph_apply":
+            _, _, presentation = self.harness.present_apply(arguments)
+            snapshot = self.harness.allow_and_execute(presentation)
+            assert snapshot.result is not None
+            return snapshot.result
         output = self.executor.execute(tool_name, arguments)
         return self.registry.validate_output(tool_name, arguments, output)
 
@@ -1133,9 +1143,12 @@ class FakeGeneralGraphExecutorTests(unittest.TestCase):
         verified = self._execute_checked("houdini_graph_verify", verify_request)
         self.assertTrue(verified["result"]["valid"])
 
-        stored_nodes = self.executor.graphs[root_path]["graph"]["nodes"]
-        landing = next(node for node in stored_nodes if node["id"] == "landing")
-        landing["parameters"][0]["value"]["value"][0] = 9.0
+        self.executor.tamper_observed_parameter(
+            root_path,
+            "landing",
+            "size",
+            {"type": "tuple", "items_type": "float", "value": [9.0, 1.0, 1.0]},
+        )
         tampered_request = self._request(
             "houdini_graph_verify",
             suffix="tampered-verify",
@@ -1152,33 +1165,18 @@ class FakeGeneralGraphExecutorTests(unittest.TestCase):
         )
 
     def test_queue_requires_explicit_trusted_attestation_advance_after_apply(self) -> None:
-        attestation = FakeCapabilityAttestation(
-            launch_id="fake-launch",
-            generation=1,
-            process_nonce="fake-process",
-            hip_session_id=self.executor.hip_session_id,
-            hip_fingerprint=self.executor.hip_fingerprint,
-            scene_revision=self.executor.scene_revision,
-            catalog_digest=FAKE_CATALOG_DIGEST,
-            schema_digest=self.registry.manifest_digest,
-        )
-        queue = SceneQueue(
-            "fake-launch",
-            1,
-            expected_schema_digest=self.registry.manifest_digest,
-            expected_catalog_digest=FAKE_CATALOG_DIGEST,
-        )
-        original_attestation_digest = queue.install_attestation(attestation)
+        queue = self.harness.queue
         graph = self._fixture("stairs_graph.json")
 
         validate_arguments = self._request(
             "houdini_graph_validate", suffix="queue-validate", graph=graph
         )
-        validate_request = queue.build_request(
-            "houdini_graph_validate", validate_arguments, time.monotonic() + 10
+        validate_request, _ = self.harness.submit(
+            "houdini_graph_validate",
+            validate_arguments,
+            absolute_deadline=time.monotonic() + 10,
         )
-        queue.submit(validate_request)
-        validate_work = queue.poll_next()
+        validate_work = self.harness.poll()
         assert validate_work is not None and validate_work.executor_token is not None
         validate_output = self._execute_checked(
             "houdini_graph_validate", validate_work.arguments
@@ -1194,24 +1192,23 @@ class FakeGeneralGraphExecutorTests(unittest.TestCase):
             graph=validate_output["result"]["normalized_graph"],
             digest=digest,
         )
-        apply_request = queue.build_request(
-            "houdini_graph_apply", apply_arguments, time.monotonic() + 10
+        apply_request, _ = self.harness.submit(
+            "houdini_graph_apply",
+            apply_arguments,
+            absolute_deadline=time.monotonic() + 10,
         )
-        queue.submit(apply_request)
-        presentation = queue.poll_next()
+        presentation = self.harness.poll()
         assert presentation is not None
         self.assertEqual("approval_required", presentation.kind)
-        queue.decide_approval(
-            presentation.request_id,
-            "allow",
-            presentation.request_digest,
-            "fake-launch",
-            1,
-        )
-        apply_work = queue.poll_next()
+        self.harness.decide(presentation, "allow")
+        apply_work = self.harness.poll()
         assert apply_work is not None and apply_work.executor_token is not None
-        apply_output = self._execute_checked("houdini_graph_apply", apply_work.arguments)
-        queue.complete(apply_work.request_id, apply_work.executor_token, apply_output)
+        completed_apply = self.harness.execute_work(
+            apply_work,
+            refresh_attestation=False,
+        )
+        assert completed_apply.result is not None
+        apply_output = completed_apply.result
 
         verify_arguments = self._request(
             "houdini_graph_verify",
@@ -1219,29 +1216,21 @@ class FakeGeneralGraphExecutorTests(unittest.TestCase):
             root_path=apply_output["result"]["root_path"],
             digest=digest,
         )
-        stale_request = queue.build_request(
-            "houdini_graph_verify", verify_arguments, time.monotonic() + 10
-        )
         with self.assertRaises(SceneQueueError) as caught:
-            queue.submit(stale_request)
+            self.harness.submit(
+                "houdini_graph_verify",
+                verify_arguments,
+                absolute_deadline=time.monotonic() + 10,
+            )
         self.assertEqual("SCENE_CONFLICT", caught.exception.code)
 
-        advanced = FakeCapabilityAttestation(
-            launch_id="fake-launch",
-            generation=1,
-            process_nonce="fake-process",
-            hip_session_id=self.executor.hip_session_id,
-            hip_fingerprint=self.executor.hip_fingerprint,
-            scene_revision=self.executor.scene_revision,
-            catalog_digest=FAKE_CATALOG_DIGEST,
-            schema_digest=self.registry.manifest_digest,
+        self.harness.refresh_attestation()
+        verify_request, _ = self.harness.submit(
+            "houdini_graph_verify",
+            verify_arguments,
+            absolute_deadline=time.monotonic() + 10,
         )
-        queue.replace_attestation(advanced, original_attestation_digest)
-        verify_request = queue.build_request(
-            "houdini_graph_verify", verify_arguments, time.monotonic() + 10
-        )
-        queue.submit(verify_request)
-        verify_work = queue.poll_next()
+        verify_work = self.harness.poll()
         assert verify_work is not None and verify_work.executor_token is not None
         verify_output = self._execute_checked("houdini_graph_verify", verify_work.arguments)
         completed = queue.complete(

@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-The Gate B0 five-tool security contract remains frozen pre-release at `0.1.0`. Gate B1 is complete, and Gate B2A/B2B established the bounded read-only Houdini adapter through offline tests and a separate manual GUI acceptance. Gate B2C is authorized only to connect the pinned Codex 0.144.3 app-server to that read adapter through one project-local stdio MCP child and the authenticated loopback Bridge.
+The five-tool security contract at `0.1.0` and two-tool read-only contract at `0.2.0` remain frozen pre-release. Gate B2C completed the pinned Codex 0.144.3 read chain at commit `edf7f3a`, and its HTTPS transport hotfix completed at `3213625`. Gate B3 is authorized only for a pure-Python, headless, offline transaction simulator.
 
 The schema of the active, runtime-discovered Houdini build, its main-thread behavior, cooking behavior, rollback behavior, and one-step Undo behavior are **not yet verified with real `hou`**. Static node and parameter names in fixtures are only offline candidates and must be intersected with runtime introspection before writes are enabled. A live-schema conflict fails closed; static documentation never overrides the running Houdini build.
 
@@ -16,7 +16,7 @@ The frozen future P2-V contract contains:
 4. `houdini_graph_apply`
 5. `houdini_graph_verify`
 
-The active B2C MCP registration admits only `houdini_scene_info` and `houdini_node_type_info`. `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify` are explicitly disabled and unregistered; their frozen schemas do not grant runtime capability. All other tool names and all unknown fields fail closed. Gate B3 and every write remain unauthorized.
+The production MCP registration admits only `houdini_scene_info` and `houdini_node_type_info`. `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify` are explicitly disabled and unregistered there; their use by an explicit offline B3 harness grants no runtime capability. All other tool names and all unknown fields fail closed. Gate B4, live `hou`, and every real write remain unauthorized.
 
 ## Security invariants
 
@@ -128,13 +128,15 @@ This phase does not claim protection from an administrator, kernel compromise, a
 
 ## Capability attestation and staged live enablement
 
-B1's capability fixture was explicitly fake. B2A/B2B added and manually accepted the Panel-side read adapter, while B2C connects only that existing read slice to the real MCP chain. Each active read fails with `HOUDINI_UNAVAILABLE` if a current trusted capability attestation is absent and with `CAPABILITY_MISMATCH` if its process nonce, build, HIP session/fingerprint, revision, catalog digest, or Schema digest differs.
+B1's capability fixture was explicitly fake. B2A/B2B added and manually accepted the Panel-side read adapter, and B2C connected only that read slice to the real MCP chain. B3 does not change or start that production chain. Each active production read still fails with `HOUDINI_UNAVAILABLE` if a current trusted capability attestation is absent and with `CAPABILITY_MISMATCH` if its process nonce, build, HIP session/fingerprint, revision, catalog digest, or Schema digest differs.
 
 The attestation is issued by the trusted Panel side and bound to one current Houdini process and HIP session. It is never accepted from untrusted MCP arguments, and a value from a prior process or HIP cannot be refreshed by changing a request field. The authenticated status facade exposes only safe current correlation fields and a five-type availability summary; it does not expose process nonce, publisher/observer identity, executor credential, or a full parameter catalog, and reading it does not renew the lease. The Bridge-owned parameter facade supplies exact session and revision values with no `"current"` wildcard.
 
-In B2C, exactly `houdini_scene_info` and `houdini_node_type_info` may be live-enabled after attestation. `houdini_graph_validate`, `houdini_graph_verify`, and `houdini_graph_apply` remain disabled at configuration, registration, Bridge routing, and Panel dispatch layers. A live write cannot be enabled before a separately approved later gate, regardless of schema validity, fake-test success, or model request.
+Exactly `houdini_scene_info` and `houdini_node_type_info` may be live-enabled after attestation. `houdini_graph_validate`, `houdini_graph_verify`, and `houdini_graph_apply` remain disabled at configuration, registration, Bridge routing, and Panel dispatch layers. A live write cannot be enabled before a separately approved B4 gate, regardless of B3 fake-test success, schema validity, or model request.
 
 ## Write transaction and fail-closed order
+
+Gate B3 models the deterministic validation, approval, single-writer, mutation, postcondition, rollback, idempotency, and Undo state transitions below entirely in Python. It substitutes independent observed fake objects for Houdini nodes and never executes the network, Panel, or `hou` steps. Passing B3 is evidence about the state machine only; each live step remains unverified until B4.
 
 `houdini_graph_apply` must follow this order; a later step may not compensate for skipping an earlier one:
 
@@ -149,7 +151,9 @@ In B2C, exactly `houdini_scene_info` and `houdini_node_type_info` may be live-en
 9. Verify exact type, parent, name, typed parameters, connections, flags, cook state, canonical graph digest, ownership set, and absence of changes outside the new graph.
 10. Record the terminal idempotency result, advance scene revision exactly once, release writer state, emit the structured response, and append the secret-free audit record.
 
-Any failure before step 8 produces no scene mutation. A failure during or after step 8 rolls back only the proven new ownership root. If rollback or post-state certainty fails, the executor returns an indeterminate error, disables further writes for that HIP session, and asks the user to inspect or Undo manually. It does not auto-save, auto-retry, reload the HIP, or kill Houdini.
+Any failure before the mutation phase produces no observed fake scene mutation. A B3 failure during or after mutation rolls back only the proven new root object identity and verifies the sentinel remains unchanged. If rollback or post-state certainty fails, the simulator returns `ROLLBACK_FAILED` or `SCENE_STATE_INDETERMINATE`, disables further fake writes for that session, and does not auto-retry or assume success. The equivalent live-Houdini containment remains a B4 requirement.
+
+The B3 simulator closes the claim-after control race with a fake-only arbiter: cancel, deadline, shutdown, each next mutation, and final commit compete for one authority lock, and every mutation performs its control check while that lock remains held. One re-entrant scene/snapshot lock keeps apply and simulated Undo exclusive and prevents reads from observing staging or rollback state. All exceptions after publication enter exact-object confined rollback; interruption exceptions are re-raised only after best-effort rollback or write freeze. The proof includes exact mapping key, path, Python object identity, recorded identity, transaction, ownership, target parent/name, and Undo/audit identity. Verification reconstructs all ten checks from observed fake state and converts values outside the frozen schema to a bounded structured failure.
 
 ## Structured error contract
 
@@ -207,13 +211,13 @@ Do not record the Bearer token, approval nonce/capability, credentials, process 
 
 ## Verification gates
 
-Before B2C can close, offline tests must prove the project configuration is closed to one stdio server, forwards only reviewed environment variable names, enables exactly two read tools, disables all three graph tools, embeds no URL/token/credential, and matches the pinned Codex 0.144.3 syntax contract. Fake integration must prove exact `tools/list`, trusted status-parameter injection, rejection of forged technical fields, token redaction, executor-credential isolation, bounded timeout/disconnect/shutdown, and no graph dispatch.
+The completed B2C evidence proves the project configuration is closed to one stdio server, forwards only reviewed environment variable names, enables exactly two read tools, disables all three graph tools, embeds no URL/token/credential, and matches the pinned Codex 0.144.3 syntax contract. B3 must preserve that evidence unchanged.
 
-A user-performed real GUI acceptance must then call both read tools through Codex, confirm the live build/session/revision and `Sop/transform` type/parameter data, prove scene revision/nodes/parameters/connections/selection/dirty state remain unchanged, and prove Panel loss terminates the request explicitly rather than hanging. This evidence is manual and must not be described as an automated Houdini run.
+Gate B3 offline tests must additionally prove independent declared/observed state, a preserved sentinel, exact approval binding and one-use semantics, per-HIP single writer, stale session/fingerprint/revision rejection, exact replay and changed-content conflict, deterministic failure injection at every mutation boundary, identity-scoped rollback, rollback-failure write freeze, mandatory internal postconditions, observed-state tamper detection, exactly one revision advance, exactly one simulated Undo transaction, and full restoration by one test-only Undo.
 
-Before real scene writes are enabled, offline tests must prove schema closure, the exact five-tool/type/parameter allowlists, path/name bounds, typed-value and finite-number checks, request size limits, unknown-field rejection, deterministic normalization/digest, complete-graph approval binding, stale revision/session rejection, per-Thread and per-HIP serialization, idempotent replay, changed-key conflict, loopback/Bearer rejection, structured errors, log redaction, and rollback ownership logic. At least one asset fixture structurally different from the first table fixture must pass the same graph contract. Protocol files must fail a source-contract test if they encode table roles or a fixed structure.
+Both table and structurally different stairs fixtures must traverse that identical path without an asset-role field, fixed structure, or name-derived semantics. Every result and audit record must exclude tokens, cookies, Authorization values, environment data, raw chat, tracebacks, and user paths. Frozen Schema hashes and the exact production two-tool `tools/list` must remain unchanged.
 
-Real Houdini acceptance must then prove, on a disposable unsaved test HIP:
+Future B4 real Houdini acceptance, which is not authorized by B3, must separately prove on a disposable unsaved test HIP:
 
 1. All `hou` reads and writes execute on the UI main thread.
 2. The live build reports the expected canonical `Object/geo`, `Sop/box`, `Sop/transform`, `Sop/merge`, and `Sop/null` types and admitted typed parameters.
@@ -223,7 +227,7 @@ Real Houdini acceptance must then prove, on a disposable unsaved test HIP:
 6. Injected failure after each mutation boundary either removes only the current new container or returns `SCENE_STATE_INDETERMINATE` and blocks later writes without touching user nodes.
 7. No test saves the HIP, writes an artifact, renders, publishes an HDA, or opens another network listener.
 
-At the time of this document, none of these real-`hou` claims has been executed. They remain explicitly unverified.
+At the time of this document, none of these real-`hou` write, cook, rollback, or Undo claims has been executed. B3 fake evidence does not change that status.
 
 ## Residual risks
 
