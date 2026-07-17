@@ -1,0 +1,428 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hia:houdini-mcp:0.2.0:houdini_node_type_info:output",
+  "title": "houdini_node_type_info output",
+  "description": "Bounded sanitized live Houdini node-type metadata for the Gate B2 read-only capability slice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "request_id",
+    "thread_id",
+    "turn_id",
+    "hip_session_id",
+    "base_scene_revision",
+    "idempotency_key",
+    "scene_revision",
+    "result",
+    "warnings",
+    "structured_error"
+  ],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "request_id": { "$ref": "#/$defs/identifier" },
+    "thread_id": { "$ref": "#/$defs/identifier" },
+    "turn_id": { "$ref": "#/$defs/identifier" },
+    "hip_session_id": { "$ref": "#/$defs/identifier" },
+    "base_scene_revision": { "$ref": "#/$defs/sceneRevision" },
+    "idempotency_key": { "$ref": "#/$defs/idempotencyKey" },
+    "scene_revision": { "$ref": "#/$defs/sceneRevision" },
+    "result": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/nodeTypeResult" }
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/message" }
+    },
+    "structured_error": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/error" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["ok"],
+        "properties": { "ok": { "const": true } }
+      },
+      "then": {
+        "properties": {
+          "result": { "$ref": "#/$defs/nodeTypeResult" },
+          "structured_error": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": { "type": "null" },
+          "structured_error": { "$ref": "#/$defs/error" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$"
+    },
+    "sceneRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+    },
+    "nodeTypeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_types"],
+      "properties": {
+        "node_types": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "$ref": "#/$defs/nodeTypeInfo" }
+        }
+      }
+    },
+    "nodeTypeInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context",
+        "requested_name",
+        "resolved_name",
+        "available",
+        "creatable",
+        "schema_source",
+        "parameters",
+        "input_count",
+        "output_count"
+      ],
+      "properties": {
+        "context": {
+          "type": "string",
+          "enum": ["Object", "Sop"]
+        },
+        "requested_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+        },
+        "resolved_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,255}$"
+        },
+        "available": { "const": true },
+        "creatable": { "const": false },
+        "schema_source": { "const": "live_houdini_instance" },
+        "parameters": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "$ref": "#/$defs/parameterInfo" }
+        },
+        "input_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "output_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        }
+      }
+    },
+    "parameterInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "label",
+        "value_type",
+        "tuple_size",
+        "writable",
+        "allows_expression",
+        "default_value",
+        "numeric_range"
+      ],
+      "properties": {
+        "name": { "$ref": "#/$defs/parameterName" },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+        },
+        "value_type": {
+          "type": "string",
+          "enum": ["float", "int", "bool", "string", "tuple"]
+        },
+        "tuple_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "writable": { "const": false },
+        "allows_expression": { "const": false },
+        "default_value": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/typedValue" }
+          ]
+        },
+        "numeric_range": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/numericRange" }
+          ]
+        }
+      }
+    },
+    "numericRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_value",
+        "max_value",
+        "min_is_strict",
+        "max_is_strict"
+      ],
+      "properties": {
+        "min_value": {
+          "type": "number",
+          "minimum": -1e100,
+          "maximum": 1e100
+        },
+        "max_value": {
+          "type": "number",
+          "minimum": -1e100,
+          "maximum": 1e100
+        },
+        "min_is_strict": { "type": "boolean" },
+        "max_is_strict": { "type": "boolean" }
+      }
+    },
+    "parameterName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+    },
+    "typedValue": {
+      "oneOf": [
+        { "$ref": "#/$defs/floatValue" },
+        { "$ref": "#/$defs/intValue" },
+        { "$ref": "#/$defs/boolValue" },
+        { "$ref": "#/$defs/stringValue" },
+        { "$ref": "#/$defs/floatTuple" },
+        { "$ref": "#/$defs/intTuple" },
+        { "$ref": "#/$defs/boolTuple" },
+        { "$ref": "#/$defs/stringTuple" }
+      ]
+    },
+    "floatValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "float" },
+        "value": {
+          "type": "number",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        }
+      }
+    },
+    "intValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "int" },
+        "value": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "boolValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "bool" },
+        "value": { "type": "boolean" }
+      }
+    },
+    "stringValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "string" },
+        "value": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+        }
+      }
+    },
+    "floatTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items_type", "value"],
+      "properties": {
+        "type": { "const": "tuple" },
+        "items_type": { "const": "float" },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "number",
+            "minimum": -1000000000,
+            "maximum": 1000000000
+          }
+        }
+      }
+    },
+    "intTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items_type", "value"],
+      "properties": {
+        "type": { "const": "tuple" },
+        "items_type": { "const": "int" },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          }
+        }
+      }
+    },
+    "boolTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items_type", "value"],
+      "properties": {
+        "type": { "const": "tuple" },
+        "items_type": { "const": "bool" },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "type": "boolean" }
+        }
+      }
+    },
+    "stringTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "items_type", "value"],
+      "properties": {
+        "type": { "const": "tuple" },
+        "items_type": { "const": "string" },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+          }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "$ref": "#/$defs/message" },
+        "details": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/detailEntry" }
+        }
+      }
+    },
+    "errorCode": {
+      "type": "string",
+      "enum": [
+        "INVALID_ARGUMENT",
+        "SCHEMA_INVALID",
+        "NODE_TYPE_NOT_ALLOWED",
+        "NODE_TYPE_UNAVAILABLE",
+        "PARAMETER_NOT_ALLOWED",
+        "PARAMETER_TYPE_MISMATCH",
+        "DEADLINE_EXCEEDED",
+        "HIP_SESSION_MISMATCH",
+        "SCENE_CONFLICT",
+        "IDEMPOTENCY_CONFLICT",
+        "MAIN_THREAD_REQUIRED",
+        "CAPABILITY_MISMATCH",
+        "HOUDINI_UNAVAILABLE",
+        "BRIDGE_DISCONNECTED",
+        "INTERNAL_ERROR"
+      ]
+    },
+    "detailEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+            },
+            {
+              "type": "number",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            { "type": "boolean" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

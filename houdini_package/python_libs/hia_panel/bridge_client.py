@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from PySide6 import QtCore
@@ -21,6 +22,9 @@ _DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 _RESULT_DRAIN_INTERVAL_MS = 25
 _MAX_RESULTS_PER_TICK = 128
 _RESULT_QUEUE_LIMIT = 256
+_SCENE_CONTROL_TIMEOUT_MS = 5_000
+_SCENE_POLL_TIMEOUT_MS = 3_000
+_SCENE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class BridgeClient(QtCore.QObject):
@@ -37,6 +41,7 @@ class BridgeClient(QtCore.QObject):
         parent: QtCore.QObject | None = None,
         *,
         transport_factory: Callable[..., HttpTransport] = HttpTransport,
+        scene_executor_token: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._result_queue: queue.Queue[dict[str, Any]] = queue.Queue(
@@ -47,8 +52,19 @@ class BridgeClient(QtCore.QObject):
         self._closed = False
         self._event_request_active = False
         self._active_event_request_id: str | None = None
+        self._scene_request_active = False
+        self._active_scene_request_id: str | None = None
         self._pending: dict[str, dict[str, Any]] = {}
         self._latest_request_by_context: dict[str, str] = {}
+        if scene_executor_token is not None and (
+            not isinstance(scene_executor_token, str)
+            or not scene_executor_token
+            or len(scene_executor_token) > 512
+            or "\r" in scene_executor_token
+            or "\n" in scene_executor_token
+        ):
+            raise ValueError("Scene executor token is invalid")
+        self._scene_executor_token = scene_executor_token
         self._transport = transport_factory(base_url, token, self._result_queue)
 
         # This is the only UI-thread timer used by the transport.  Workers put
@@ -133,6 +149,85 @@ class BridgeClient(QtCore.QObject):
             self._event_request_active = True
         return self._request("GET", path, context="events", event_request=True)
 
+    def publish_houdini_capabilities(
+        self,
+        report: Mapping[str, Any],
+    ) -> str | None:
+        """Publish one main-thread Houdini report on the executor trust path."""
+
+        headers = self._scene_headers()
+        if headers is None or not isinstance(report, Mapping):
+            return None
+        return self._request(
+            "POST",
+            "/v1/scene/capabilities",
+            {"report": dict(report)},
+            context="scene_capabilities",
+            secret_headers=headers,
+        )
+
+    def poll_scene_work(self, wait_ms: int = 250) -> str | None:
+        """Claim at most one bounded live-read work poll at a time."""
+
+        headers = self._scene_headers()
+        if headers is None:
+            return None
+        wait_value = int(wait_ms)
+        if not 0 <= wait_value <= 1_000:
+            raise ValueError("scene wait_ms must be between 0 and 1000")
+        with self._state_lock:
+            if self._closed or self._scene_request_active:
+                return None
+            self._scene_request_active = True
+        request_id = self._request(
+            "GET",
+            f"/v1/scene/requests/next?wait_ms={wait_value}",
+            context="scene_work",
+            scene_request=True,
+            secret_headers=headers,
+        )
+        if request_id is None:
+            with self._state_lock:
+                self._scene_request_active = False
+                self._active_scene_request_id = None
+        return request_id
+
+    def complete_scene_work(
+        self,
+        request_id: str,
+        executor_token: str,
+        result: Mapping[str, Any],
+    ) -> str | None:
+        """Return one read result without exposing either executor credential."""
+
+        headers = self._scene_headers()
+        if (
+            headers is None
+            or not isinstance(request_id, str)
+            or _SCENE_REQUEST_ID.fullmatch(request_id) is None
+            or not isinstance(executor_token, str)
+            or not executor_token
+            or len(executor_token) > 512
+            or "\r" in executor_token
+            or "\n" in executor_token
+            or not isinstance(result, Mapping)
+        ):
+            return None
+        return self._request(
+            "POST",
+            f"/v1/scene/requests/{request_id}/result",
+            {"executor_token": executor_token, "result": dict(result)},
+            context=f"scene_result:{request_id}",
+            secret_headers=headers,
+            sensitive_values=(executor_token,),
+        )
+
+    def _scene_headers(self) -> dict[str, str] | None:
+        token = self._scene_executor_token
+        if not isinstance(token, str) or not token:
+            return None
+        return {"X-HIA-Executor-Token": token}
+
     def dispose(self) -> None:
         """Idempotently release only this Panel's local client resources.
 
@@ -150,6 +245,9 @@ class BridgeClient(QtCore.QObject):
             self._latest_request_by_context.clear()
             self._event_request_active = False
             self._active_event_request_id = None
+            self._scene_request_active = False
+            self._active_scene_request_id = None
+            self._scene_executor_token = None
         self._drain_timer.stop()
         self._transport.close(max_wait_seconds=0.0)
 
@@ -161,11 +259,18 @@ class BridgeClient(QtCore.QObject):
         *,
         context: str,
         event_request: bool = False,
+        scene_request: bool = False,
+        secret_headers: Mapping[str, str] | None = None,
+        sensitive_values: Iterable[str] | None = None,
     ) -> str | None:
         if context.startswith("session_reconcile:"):
             timeout_ms = _RECONCILIATION_TIMEOUT_MS
         elif context == "events":
             timeout_ms = _EVENT_POLL_TIMEOUT_MS
+        elif context == "scene_work":
+            timeout_ms = _SCENE_POLL_TIMEOUT_MS
+        elif context == "scene_capabilities" or context.startswith("scene_result:"):
+            timeout_ms = _SCENE_CONTROL_TIMEOUT_MS
         else:
             timeout_ms = _DEFAULT_REQUEST_TIMEOUT_MS
 
@@ -175,6 +280,8 @@ class BridgeClient(QtCore.QObject):
             if self._closed:
                 if event_request:
                     self._event_request_active = False
+                if scene_request:
+                    self._scene_request_active = False
                 return None
             generation = self._generation
             self._pending[request_id] = {
@@ -187,6 +294,8 @@ class BridgeClient(QtCore.QObject):
             self._latest_request_by_context[context] = request_id
             if event_request:
                 self._active_event_request_id = request_id
+            if scene_request:
+                self._active_scene_request_id = request_id
         try:
             self._transport.submit(
                 method=method,
@@ -198,6 +307,8 @@ class BridgeClient(QtCore.QObject):
                 timeout_ms=timeout_ms,
                 deadline_monotonic=deadline,
                 event_request=event_request,
+                secret_headers=secret_headers,
+                sensitive_values=sensitive_values,
             )
         except Exception:
             # Keep the same result path even for a local submission failure so
@@ -278,6 +389,9 @@ class BridgeClient(QtCore.QObject):
             if self._active_event_request_id == request_id:
                 self._active_event_request_id = None
                 self._event_request_active = False
+            if self._active_scene_request_id == request_id:
+                self._active_scene_request_id = None
+                self._scene_request_active = False
             if self._closed or generation != self._generation or not is_latest:
                 return
 

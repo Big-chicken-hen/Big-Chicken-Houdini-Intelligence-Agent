@@ -17,13 +17,21 @@ from hia_core.houdini_contract import ContractError, SchemaRegistry, strict_json
 
 from .errors import BridgeError
 from .events import EventBuffer
-from .scene_queue import RequestSnapshot, SceneQueue, SceneQueueError
+from .scene_queue import (
+    B2_READ_ONLY_PROFILE,
+    RequestSnapshot,
+    SceneQueue,
+    SceneQueueError,
+)
 from .session import BridgeSession
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_SCENE_REQUEST_BYTES = 262_144
 MAX_SCENE_POLL_MS = 1_000
+SCENE_EXECUTOR_HEADER = "X-HIA-Executor-Token"
+_SCENE_CAPABILITY_PATH = "/v1/scene/capabilities"
+_SCENE_STATUS_PATH = "/v1/scene/status"
 _SCENE_RESULT_PATH = re.compile(
     r"^/v1/scene/requests/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/result$"
 )
@@ -44,6 +52,7 @@ class BridgeApplication:
         *,
         scene_queue: SceneQueue | None = None,
         scene_registry: SchemaRegistry | None = None,
+        scene_executor_token: str | None = None,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Bearer token must contain at least 32 characters")
@@ -65,12 +74,50 @@ class BridgeApplication:
                 "Scene queue schema digest does not match the frozen registry"
             )
         self._expected_authorization = f"Bearer {token}"
+        if scene_executor_token is not None and (
+            not isinstance(scene_executor_token, str)
+            or len(scene_executor_token) < 32
+            or "\r" in scene_executor_token
+            or "\n" in scene_executor_token
+        ):
+            raise ValueError("Scene executor token must contain at least 32 safe characters")
+        if (
+            scene_executor_token is not None
+            and hmac.compare_digest(scene_executor_token, token)
+        ):
+            raise ValueError("Scene executor token must be independent from the Bridge token")
+        if (
+            self.scene_queue is not None
+            and self.scene_queue.profile == B2_READ_ONLY_PROFILE
+            and scene_executor_token is None
+        ):
+            raise ValueError("B2 read-only scene queue requires an independent executor token")
+        self._expected_scene_executor_token = scene_executor_token
 
     def authorized(self, value: str | None) -> bool:
         return value is not None and hmac.compare_digest(
             value,
             self._expected_authorization,
         )
+
+    def scene_executor_authorized(self, value: str | None) -> bool:
+        expected = self._expected_scene_executor_token
+        if expected is None:
+            return self.scene_queue is None or self.scene_queue.profile != B2_READ_ONLY_PROFILE
+        return value is not None and hmac.compare_digest(value, expected)
+
+    def requires_scene_executor_authorization(
+        self,
+        http_method: str,
+        path: str,
+    ) -> bool:
+        if self.scene_queue is None or self.scene_queue.profile != B2_READ_ONLY_PROFILE:
+            return False
+        if http_method == "POST" and path == _SCENE_CAPABILITY_PATH:
+            return True
+        if http_method == "GET" and path == "/v1/scene/requests/next":
+            return True
+        return http_method == "POST" and _SCENE_RESULT_PATH.fullmatch(path) is not None
 
 
 class LoopbackHTTPServer(ThreadingHTTPServer):
@@ -116,6 +163,17 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     http_status=HTTPStatus.UNAUTHORIZED,
                 )
             parsed = urlsplit(self.path)
+            if self.server.application.requires_scene_executor_authorization(
+                http_method,
+                parsed.path,
+            ) and not self.server.application.scene_executor_authorized(
+                self.headers.get(SCENE_EXECUTOR_HEADER)
+            ):
+                raise BridgeError(
+                    "SCENE_EXECUTOR_UNAUTHORIZED",
+                    "A valid independent scene executor credential is required",
+                    http_status=HTTPStatus.FORBIDDEN,
+                )
             if http_method == "GET":
                 payload, status = self._handle_get(parsed.path, parsed.query)
             else:
@@ -178,6 +236,12 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             timeout = float(values.get("timeout", ["15"])[0])
             polled = application.events.poll(after, timeout=timeout)
             return {"ok": True, **polled}, HTTPStatus.OK
+        if path == _SCENE_STATUS_PATH:
+            queue, _ = self._scene_components()
+            return {
+                "ok": True,
+                "scene": queue.live_capability_status(),
+            }, HTTPStatus.OK
         if path == "/v1/scene/requests/next":
             queue, _ = self._scene_components()
             wait_ms = self._scene_wait_ms(query)
@@ -202,6 +266,31 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         body: dict[str, Any],
     ) -> tuple[dict[str, Any], int]:
         application = self.server.application
+        if path == _SCENE_CAPABILITY_PATH:
+            self._require_exact_fields(body, {"report"})
+            report = body.get("report")
+            if not isinstance(report, dict):
+                raise BridgeError(
+                    "INVALID_REQUEST",
+                    "Capability report must be a JSON object",
+                    HTTPStatus.BAD_REQUEST,
+                )
+            queue, _ = self._scene_components()
+            attestation = queue.publish_live_capability(report)
+            return {
+                "ok": True,
+                "available": attestation is not None,
+                "attestation_digest": (
+                    None if attestation is None else attestation.digest
+                ),
+                "catalog_digest": (
+                    None if attestation is None else attestation.catalog_digest
+                ),
+                "observer_sequence": report["observer_sequence"],
+                "lease_duration_ms": int(
+                    queue.live_capability_lease_seconds * 1000
+                ),
+            }, HTTPStatus.OK
         if path == "/v1/session":
             action = body.get("action")
             if action == "start":
@@ -238,6 +327,15 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             return self._submit_scene_request(body)
         matched = _SCENE_APPROVAL_PATH.fullmatch(path)
         if matched is not None:
+            if (
+                application.scene_queue is not None
+                and application.scene_queue.profile == B2_READ_ONLY_PROFILE
+            ):
+                raise SceneQueueError(
+                    "TOOL_NOT_ALLOWED",
+                    403,
+                    "Scene approvals are disabled in the B2 read-only profile",
+                )
             self._require_exact_fields(
                 body,
                 {"decision", "request_digest", "launch_id", "generation"},
@@ -285,7 +383,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if application.scene_queue is None or application.scene_registry is None:
             raise BridgeError(
                 "SCENE_GATEWAY_DISABLED",
-                "The offline scene gateway is not enabled for this Bridge instance",
+                "The scene gateway is not enabled for this Bridge instance",
                 HTTPStatus.NOT_FOUND,
             )
         return application.scene_queue, application.scene_registry
@@ -327,6 +425,16 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         tool_name = body["tool_name"]
         arguments = body["arguments"]
         queue, registry = self._scene_components()
+        if (
+            queue.profile == B2_READ_ONLY_PROFILE
+            and not queue.tool_enabled(tool_name)
+        ):
+            raise SceneQueueError(
+                "TOOL_NOT_ALLOWED",
+                403,
+                "Tool is outside the active P2-V capability profile",
+                {"tool_name": tool_name, "profile": queue.profile},
+            )
         try:
             validated = registry.validate_input(tool_name, arguments)
             absolute_deadline = time.monotonic() + validated["deadline_ms"] / 1000.0

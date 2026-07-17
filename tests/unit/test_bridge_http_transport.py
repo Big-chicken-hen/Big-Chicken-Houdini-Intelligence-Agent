@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 import urllib.error
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,8 @@ def _submit(
     event_request: bool = False,
     timeout_ms: int = 1_000,
     deadline_monotonic: float | None = None,
+    secret_headers: dict[str, str] | None = None,
+    sensitive_values: Iterable[str] | None = None,
 ) -> str:
     return transport.submit(
         method=method,
@@ -69,10 +72,79 @@ def _submit(
         timeout_ms=timeout_ms,
         deadline_monotonic=deadline_monotonic,
         event_request=event_request,
+        secret_headers=secret_headers,
+        sensitive_values=sensitive_values,
     )
 
 
 class HttpTransportTests(unittest.TestCase):
+    def test_executor_header_is_allowlisted_forwarded_and_always_redacted(self) -> None:
+        results: queue.Queue[dict[str, Any]] = queue.Queue()
+        observed: dict[str, Any] = {}
+        executor_secret = "executor-secret-value"
+
+        def urlopen(request: Any, *, timeout: float) -> _Response:
+            del timeout
+            observed["executor"] = request.get_header("X-hia-executor-token")
+            return _Response(
+                json.dumps(
+                    {"ok": False, "echo": executor_secret},
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+
+        transport = HttpTransport(
+            "http://127.0.0.1:49152",
+            "bearer-secret",
+            results,
+            urlopen=urlopen,
+        )
+        self.addCleanup(transport.close)
+        _submit(
+            transport,
+            request_id="executor-header",
+            secret_headers={"X-HIA-Executor-Token": executor_secret},
+        )
+
+        result = results.get(timeout=2.0)
+        self.assertEqual(executor_secret, observed["executor"])
+        self.assertNotIn(executor_secret.encode("utf-8"), result["raw"])
+        self.assertIn(b"<redacted>", result["raw"])
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            _submit(
+                transport,
+                request_id="bad-secret-header",
+                secret_headers={"X-Other-Secret": "not-allowed"},
+            )
+
+    def test_per_request_claim_token_is_redacted_without_becoming_a_header(self) -> None:
+        results: queue.Queue[dict[str, Any]] = queue.Queue()
+        observed_headers: dict[str, str] = {}
+        claim = "opaque-one-request-claim"
+
+        def urlopen(request: Any, *, timeout: float) -> _Response:
+            del timeout
+            observed_headers.update(dict(request.header_items()))
+            return _Response(claim.encode("utf-8"))
+
+        transport = HttpTransport(
+            "http://127.0.0.1:49152",
+            "bearer-secret",
+            results,
+            urlopen=urlopen,
+        )
+        self.addCleanup(transport.close)
+        _submit(
+            transport,
+            request_id="claim-redaction",
+            sensitive_values=(claim,),
+        )
+
+        result = results.get(timeout=2.0)
+        self.assertNotIn(claim, observed_headers.values())
+        self.assertEqual(b"<redacted>", result["raw"])
+        self.assertNotIn(claim, transport._secret_values)
+
     def test_success_uses_loopback_bearer_and_returns_plain_dict(self) -> None:
         results: queue.Queue[dict[str, Any]] = queue.Queue()
         observed: dict[str, Any] = {}

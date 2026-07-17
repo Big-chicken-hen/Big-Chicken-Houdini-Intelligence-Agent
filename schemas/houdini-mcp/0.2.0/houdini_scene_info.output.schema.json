@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hia:houdini-mcp:0.2.0:houdini_scene_info:output",
+  "title": "houdini_scene_info output",
+  "description": "Bounded read-only Houdini build and scene state without user paths, environment, scripts, or arbitrary scene data.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "request_id",
+    "thread_id",
+    "turn_id",
+    "hip_session_id",
+    "base_scene_revision",
+    "idempotency_key",
+    "scene_revision",
+    "result",
+    "warnings",
+    "structured_error"
+  ],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "request_id": { "$ref": "#/$defs/identifier" },
+    "thread_id": { "$ref": "#/$defs/identifier" },
+    "turn_id": { "$ref": "#/$defs/identifier" },
+    "hip_session_id": { "$ref": "#/$defs/identifier" },
+    "base_scene_revision": { "$ref": "#/$defs/sceneRevision" },
+    "idempotency_key": { "$ref": "#/$defs/idempotencyKey" },
+    "scene_revision": { "$ref": "#/$defs/sceneRevision" },
+    "result": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sceneResult" }
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/message" }
+    },
+    "structured_error": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/error" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["ok"],
+        "properties": { "ok": { "const": true } }
+      },
+      "then": {
+        "properties": {
+          "result": { "$ref": "#/$defs/sceneResult" },
+          "structured_error": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": { "type": "null" },
+          "structured_error": { "$ref": "#/$defs/error" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$"
+    },
+    "sceneRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+    },
+    "houdiniBuild": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$"
+    },
+    "graphPath": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 160,
+      "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}$"
+    },
+    "sceneResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "houdini_build",
+        "hip_fingerprint",
+        "current_frame",
+        "fps",
+        "dirty",
+        "enabled_contexts",
+        "hia_graphs",
+        "graph_summaries_truncated"
+      ],
+      "properties": {
+        "houdini_build": { "$ref": "#/$defs/houdiniBuild" },
+        "hip_fingerprint": { "$ref": "#/$defs/digest" },
+        "current_frame": {
+          "type": "number",
+          "minimum": -1000000,
+          "maximum": 1000000
+        },
+        "fps": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000
+        },
+        "dirty": { "type": "boolean" },
+        "enabled_contexts": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["Object", "Sop"]
+          }
+        },
+        "hia_graphs": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/graphSummary" }
+        },
+        "graph_summaries_truncated": { "type": "boolean" }
+      }
+    },
+    "graphSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_path",
+        "context",
+        "ownership",
+        "graph_digest",
+        "node_count",
+        "connection_count",
+        "cook_state"
+      ],
+      "properties": {
+        "root_path": { "$ref": "#/$defs/graphPath" },
+        "context": { "const": "Object" },
+        "ownership": { "const": "hia_owned" },
+        "graph_digest": { "$ref": "#/$defs/digest" },
+        "node_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "connection_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "cook_state": {
+          "type": "string",
+          "enum": ["unknown", "not_cooked", "clean", "warning", "error"]
+        }
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "$ref": "#/$defs/errorCode" },
+        "message": { "$ref": "#/$defs/message" },
+        "details": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/detailEntry" }
+        }
+      }
+    },
+    "errorCode": {
+      "type": "string",
+      "enum": [
+        "INVALID_ARGUMENT",
+        "SCHEMA_INVALID",
+        "NODE_TYPE_NOT_ALLOWED",
+        "NODE_TYPE_UNAVAILABLE",
+        "PARAMETER_NOT_ALLOWED",
+        "PARAMETER_TYPE_MISMATCH",
+        "DEADLINE_EXCEEDED",
+        "HIP_SESSION_MISMATCH",
+        "SCENE_CONFLICT",
+        "IDEMPOTENCY_CONFLICT",
+        "MAIN_THREAD_REQUIRED",
+        "CAPABILITY_MISMATCH",
+        "HOUDINI_UNAVAILABLE",
+        "BRIDGE_DISCONNECTED",
+        "INTERNAL_ERROR"
+      ]
+    },
+    "detailEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+            },
+            {
+              "type": "number",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            { "type": "boolean" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

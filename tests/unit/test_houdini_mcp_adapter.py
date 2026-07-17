@@ -16,11 +16,14 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 sys.path.insert(0, str(REPOSITORY_ROOT / "services" / "houdini_mcp"))
 
 from hia_core.houdini_contract import (  # noqa: E402
+    B2_READ_ONLY_TOOLS,
     EXPECTED_TOOLS,
     ContractError,
     SchemaRegistry,
 )
 from hia_houdini_mcp.adapter import (  # noqa: E402
+    B2_READ_ONLY_TOOL_NAMES,
+    B2_READ_ONLY_TOOL_PERMISSIONS,
     CancellationHandoff,
     FROZEN_TOOL_NAMES,
     FROZEN_TOOL_PERMISSIONS,
@@ -95,6 +98,33 @@ class RecordingRegistry:
             raise ContractError("CONTRACT_MISMATCH", "Output contract mismatch")
         self.outputs.append((name, request, result))
         return result
+
+
+class B2RecordingRegistry(RecordingRegistry):
+    tool_names = B2_READ_ONLY_TOOLS
+
+    @staticmethod
+    def permission_level(name: str) -> str:
+        return B2_READ_ONLY_TOOL_PERMISSIONS[name]
+
+    def tool_descriptors(self) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            {
+                "name": name,
+                "description": f"Read-only {name}",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                },
+                "annotations": {
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+            }
+            for name in self.tool_names
+        )
 
 
 class RecordingTransport:
@@ -308,10 +338,113 @@ class HoudiniMCPAdapterTests(unittest.TestCase):
             {"tools": {"listChanged": False}},
             response["result"]["capabilities"],
         )
+        self.assertEqual("0.1.0", response["result"]["serverInfo"]["version"])
         listed = self.adapter.handle_message(
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
         )
         self.assertEqual(TOOLS, tuple(tool["name"] for tool in listed["result"]["tools"]))
+
+    def test_explicit_b2_profile_lists_and_dispatches_only_two_read_tools(self) -> None:
+        transport = RecordingTransport()
+        registry = B2RecordingRegistry()
+        adapter = HoudiniMCPAdapter.b2_read_only(
+            transport,
+            registry=registry,  # type: ignore[arg-type]
+        )
+        initialized = initialize(adapter)
+        self.assertEqual("0.2.0", initialized["result"]["serverInfo"]["version"])
+        listed = adapter.handle_message(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+        self.assertEqual(
+            B2_READ_ONLY_TOOL_NAMES,
+            tuple(item["name"] for item in listed["result"]["tools"]),
+        )
+        self.assertTrue(
+            all(
+                item["annotations"]["readOnlyHint"]
+                for item in listed["result"]["tools"]
+            )
+        )
+
+        response = adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "houdini_scene_info",
+                    "arguments": {"request_id": "b2-read"},
+                },
+            }
+        )
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual(
+            [("houdini_scene_info", {"request_id": "b2-read"}, 3)],
+            transport.calls,
+        )
+
+    def test_b2_graph_tools_are_rejected_before_transport(self) -> None:
+        transport = RecordingTransport()
+        adapter = HoudiniMCPAdapter.b2_read_only(
+            transport,
+            registry=B2RecordingRegistry(),  # type: ignore[arg-type]
+        )
+        initialize(adapter)
+        for request_id, name in enumerate(
+            (
+                "houdini_graph_validate",
+                "houdini_graph_apply",
+                "houdini_graph_verify",
+            ),
+            start=20,
+        ):
+            with self.subTest(tool=name):
+                response = adapter.handle_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "tools/call",
+                        "params": {"name": name, "arguments": {}},
+                    }
+                )
+                self.assertEqual(
+                    "TOOL_NOT_ALLOWED", response["error"]["data"]["code"]
+                )
+        self.assertEqual([], transport.calls)
+
+    def test_real_b2_registry_produces_exact_two_closed_descriptors(self) -> None:
+        registry = SchemaRegistry.b2_read_only()
+        adapter = HoudiniMCPAdapter.b2_read_only(
+            RecordingTransport(), registry=registry
+        )
+        initialize(adapter)
+        response = adapter.handle_message(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+        )
+        descriptors = response["result"]["tools"]
+        self.assertEqual(
+            B2_READ_ONLY_TOOLS,
+            tuple(item["name"] for item in descriptors),
+        )
+        for descriptor in descriptors:
+            self.assertEqual("object", descriptor["inputSchema"]["type"])
+            self.assertFalse(descriptor["inputSchema"]["additionalProperties"])
+            self.assertEqual(
+                {
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                descriptor["annotations"],
+            )
+
+    def test_b2_constructor_rejects_the_b1_registry(self) -> None:
+        with self.assertRaises(ValueError):
+            HoudiniMCPAdapter.b2_read_only(
+                RecordingTransport(), registry=SchemaRegistry()
+            )
 
     def test_initialize_nested_unknown_fields_fail_closed(self) -> None:
         invalid_params = (
@@ -706,7 +839,7 @@ class HoudiniMCPStdioTests(unittest.TestCase):
             with mock.patch.object(stdio_module.sys, "stderr", stderr):
                 status = stdio_module.main()
         self.assertEqual(2, status)
-        self.assertEqual("hia-houdini-mcp: B1_LIVE_TRANSPORT_DISABLED\n", stderr.getvalue())
+        self.assertEqual("hia-houdini-mcp: B2A_REAL_MCP_START_DISABLED\n", stderr.getvalue())
         serve_mock.assert_not_called()
 
     def test_blocking_call_does_not_prevent_cancellation_notification(self) -> None:

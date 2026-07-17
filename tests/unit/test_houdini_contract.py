@@ -12,6 +12,8 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from hia_core.houdini_contract import (  # noqa: E402
+    B2_READ_ONLY_TOOLS,
+    B2_SCHEMA_VERSION,
     ContractError,
     EXPECTED_TOOLS,
     MAX_JSON_BYTES,
@@ -108,6 +110,79 @@ def node_type_pair() -> tuple[dict, dict]:
                 "input_count": 0,
                 "output_count": 1,
             }
+        ]
+    }
+    return request, result
+
+
+def b2_scene_info_pair() -> tuple[dict, dict]:
+    request = common_input("scene_read", suffix="b2scene")
+    request["include_graph_summaries"] = True
+    result = common_output(request)
+    result["result"] = {
+        "houdini_build": "21.0.440",
+        "hip_fingerprint": FINGERPRINT,
+        "current_frame": 1.0,
+        "fps": 24.0,
+        "dirty": False,
+        "enabled_contexts": ["Object", "Sop"],
+        "hia_graphs": [],
+        "graph_summaries_truncated": False,
+    }
+    return request, result
+
+
+def b2_node_type_pair() -> tuple[dict, dict]:
+    request = common_input("scene_read", suffix="b2types")
+    request["node_types"] = [
+        {"context": "Sop", "name": "box"},
+        {"context": "Sop", "name": "merge"},
+    ]
+    result = common_output(request)
+    result["result"] = {
+        "node_types": [
+            {
+                "context": "Sop",
+                "requested_name": "box",
+                "resolved_name": "box",
+                "available": True,
+                "creatable": False,
+                "schema_source": "live_houdini_instance",
+                "parameters": [
+                    {
+                        "name": "size",
+                        "label": "Size",
+                        "value_type": "tuple",
+                        "tuple_size": 3,
+                        "writable": False,
+                        "allows_expression": False,
+                        "default_value": {
+                            "type": "tuple",
+                            "items_type": "float",
+                            "value": [1.0, 1.0, 1.0],
+                        },
+                        "numeric_range": {
+                            "min_value": 0.0,
+                            "max_value": 1000000.0,
+                            "min_is_strict": False,
+                            "max_is_strict": False,
+                        },
+                    }
+                ],
+                "input_count": 0,
+                "output_count": 1,
+            },
+            {
+                "context": "Sop",
+                "requested_name": "merge",
+                "resolved_name": "merge",
+                "available": True,
+                "creatable": False,
+                "schema_source": "live_houdini_instance",
+                "parameters": [],
+                "input_count": 9999,
+                "output_count": 1,
+            },
         ]
     }
     return request, result
@@ -388,6 +463,131 @@ class SchemaRegistryTests(unittest.TestCase):
         payload = raised.exception.to_dict()
         self.assertEqual({"code", "message", "details"}, set(payload))
         self.assertNotIn("contains a private value", str(payload))
+
+
+class B2ReadOnlySchemaRegistryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.registry = SchemaRegistry.b2_read_only()
+
+    def test_profile_is_explicit_versioned_and_exactly_two_read_only_tools(self) -> None:
+        self.assertEqual(B2_SCHEMA_VERSION, self.registry.schema_version)
+        self.assertEqual(B2_READ_ONLY_TOOLS, self.registry.tool_names)
+        self.assertRegex(self.registry.manifest_digest, r"^[a-f0-9]{64}$")
+        descriptors = self.registry.tool_descriptors()
+        self.assertEqual(
+            B2_READ_ONLY_TOOLS,
+            tuple(item["name"] for item in descriptors),
+        )
+        for name, descriptor in zip(B2_READ_ONLY_TOOLS, descriptors):
+            with self.subTest(tool=name):
+                self.assertEqual("scene_read", self.registry.permission_level(name))
+                self.assertTrue(descriptor["annotations"]["readOnlyHint"])
+                self.assertFalse(descriptor["annotations"]["destructiveHint"])
+                self.assertFalse(descriptor["annotations"]["openWorldHint"])
+
+    def test_default_registry_remains_the_frozen_b1_five_tool_profile(self) -> None:
+        default = SchemaRegistry()
+        self.assertEqual("0.1.0", default.schema_version)
+        self.assertEqual(EXPECTED_TOOLS, default.tool_names)
+
+    def test_scene_info_requires_bounded_houdini_build(self) -> None:
+        request, result = b2_scene_info_pair()
+        self.registry.validate_input("houdini_scene_info", request)
+        self.registry.validate_output("houdini_scene_info", request, result)
+
+        missing = copy.deepcopy(result)
+        del missing["result"]["houdini_build"]
+        with self.assertRaises(ContractError) as raised:
+            self.registry.validate_output("houdini_scene_info", request, missing)
+        self.assertEqual("SCHEMA_INVALID", raised.exception.code)
+
+        unsafe = copy.deepcopy(result)
+        unsafe["result"]["houdini_build"] = "21.0.440/C:/Users"
+        with self.assertRaises(ContractError):
+            self.registry.validate_output("houdini_scene_info", request, unsafe)
+
+    def test_node_types_are_read_only_and_merge_input_limit_is_faithful(self) -> None:
+        request, result = b2_node_type_pair()
+        self.registry.validate_input("houdini_node_type_info", request)
+        self.registry.validate_output("houdini_node_type_info", request, result)
+
+        writable = copy.deepcopy(result)
+        writable["result"]["node_types"][0]["parameters"][0]["writable"] = True
+        with self.assertRaises(ContractError) as raised:
+            self.registry.validate_output("houdini_node_type_info", request, writable)
+        self.assertEqual("SCHEMA_INVALID", raised.exception.code)
+
+        creatable = copy.deepcopy(result)
+        creatable["result"]["node_types"][0]["creatable"] = True
+        with self.assertRaises(ContractError):
+            self.registry.validate_output("houdini_node_type_info", request, creatable)
+
+        unavailable = copy.deepcopy(result)
+        unavailable["result"]["node_types"][0]["available"] = False
+        unavailable["result"]["node_types"][0]["resolved_name"] = None
+        with self.assertRaises(ContractError):
+            self.registry.validate_output(
+                "houdini_node_type_info", request, unavailable
+            )
+
+        too_many_inputs = copy.deepcopy(result)
+        too_many_inputs["result"]["node_types"][1]["input_count"] = 65536
+        with self.assertRaises(ContractError):
+            self.registry.validate_output(
+                "houdini_node_type_info", request, too_many_inputs
+            )
+
+    def test_numeric_range_is_closed_bounded_and_relationally_validated(self) -> None:
+        request, result = b2_node_type_pair()
+        parameter = result["result"]["node_types"][0]["parameters"][0]
+
+        missing = copy.deepcopy(result)
+        del missing["result"]["node_types"][0]["parameters"][0]["numeric_range"]
+        with self.assertRaises(ContractError):
+            self.registry.validate_output("houdini_node_type_info", request, missing)
+
+        extra = copy.deepcopy(result)
+        extra["result"]["node_types"][0]["parameters"][0]["numeric_range"][
+            "help"
+        ] = "not admitted"
+        with self.assertRaises(ContractError):
+            self.registry.validate_output("houdini_node_type_info", request, extra)
+
+        inverted = copy.deepcopy(result)
+        inverted_range = inverted["result"]["node_types"][0]["parameters"][0][
+            "numeric_range"
+        ]
+        inverted_range["min_value"] = parameter["numeric_range"]["max_value"]
+        inverted_range["max_value"] = parameter["numeric_range"]["min_value"]
+        with self.assertRaises(ContractError) as raised:
+            self.registry.validate_output("houdini_node_type_info", request, inverted)
+        self.assertEqual("CONTRACT_MISMATCH", raised.exception.code)
+
+    def test_graph_tools_and_attestation_fields_are_rejected_before_dispatch(self) -> None:
+        for name in (
+            "houdini_graph_validate",
+            "houdini_graph_apply",
+            "houdini_graph_verify",
+        ):
+            with self.subTest(tool=name), self.assertRaises(ContractError) as raised:
+                self.registry.validate_input(name, {})
+            self.assertEqual("TOOL_NOT_ALLOWED", raised.exception.code)
+
+        request, _ = b2_scene_info_pair()
+        for field in (
+            "attestation_digest",
+            "launch_id",
+            "generation",
+            "process_nonce",
+            "catalog_digest",
+            "schema_digest",
+        ):
+            forged = copy.deepcopy(request)
+            forged[field] = "a" * 64
+            with self.subTest(field=field), self.assertRaises(ContractError) as raised:
+                self.registry.validate_input("houdini_scene_info", forged)
+            self.assertEqual("SCHEMA_INVALID", raised.exception.code)
 
 
 class CrossFieldContractTests(unittest.TestCase):

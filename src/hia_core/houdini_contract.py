@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = "0.1.0"
+B2_SCHEMA_VERSION = "0.2.0"
 SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 MAX_JSON_BYTES = 262_144
 MAX_JSON_DEPTH = 32
@@ -35,6 +36,16 @@ _EXPECTED_PERMISSIONS = {
     "houdini_graph_apply": "scene_write",
     "houdini_graph_verify": "scene_read",
 }
+B2_READ_ONLY_TOOLS = (
+    "houdini_scene_info",
+    "houdini_node_type_info",
+)
+_B2_READ_ONLY_PERMISSIONS = {
+    "houdini_scene_info": "scene_read",
+    "houdini_node_type_info": "scene_read",
+}
+_B1_FROZEN_PROFILE = "b1_frozen"
+_B2_READ_ONLY_PROFILE = "b2_read_only"
 _ALLOWED_GRAPH_NODE_TYPES = frozenset(
     {
         ("Sop", "box"),
@@ -851,12 +862,37 @@ def _audit_schema(schema: Any, document: Mapping[str, Any], path: str = "$") -> 
 
 
 class SchemaRegistry:
-    """Load and enforce the exact five-tool P2-V 0.1.0 contract."""
+    """Load one internally selected, frozen P2-V contract profile.
 
-    def __init__(self, schema_root: Path | None = None):
+    The default remains the Gate B1 five-tool ``0.1.0`` contract.  Callers may
+    explicitly select :meth:`b2_read_only` for the Gate B2 two-tool ``0.2.0``
+    capability slice.  A network request can never choose the profile.
+    """
+
+    def __init__(
+        self,
+        schema_root: Path | None = None,
+        *,
+        profile: str = _B1_FROZEN_PROFILE,
+    ):
+        if profile == _B1_FROZEN_PROFILE:
+            schema_version = SCHEMA_VERSION
+            expected_tools = EXPECTED_TOOLS
+            expected_permissions = _EXPECTED_PERMISSIONS
+        elif profile == _B2_READ_ONLY_PROFILE:
+            schema_version = B2_SCHEMA_VERSION
+            expected_tools = B2_READ_ONLY_TOOLS
+            expected_permissions = _B2_READ_ONLY_PERMISSIONS
+        else:
+            raise ValueError("Unknown internal Houdini contract profile")
+
         repository_root = Path(__file__).resolve().parents[2]
+        self.profile = profile
+        self.schema_version = schema_version
+        self._expected_tools = expected_tools
+        self._expected_permissions = expected_permissions
         self.schema_root = Path(schema_root) if schema_root is not None else (
-            repository_root / "schemas" / "houdini-mcp" / SCHEMA_VERSION
+            repository_root / "schemas" / "houdini-mcp" / schema_version
         )
         manifest_path = self.schema_root / "manifest.json"
         try:
@@ -871,14 +907,19 @@ class SchemaRegistry:
         self._input_schemas: dict[str, dict[str, Any]] = {}
         self._output_schemas: dict[str, dict[str, Any]] = {}
         self._load_manifest()
-        self.tool_names = EXPECTED_TOOLS
-        self.schema_version = SCHEMA_VERSION
+        self.tool_names = expected_tools
         self.manifest_digest = canonical_json_sha256(self._manifest)
+
+    @classmethod
+    def b2_read_only(cls, schema_root: Path | None = None) -> "SchemaRegistry":
+        """Return the explicit, deny-by-default Gate B2 read-only profile."""
+
+        return cls(schema_root, profile=_B2_READ_ONLY_PROFILE)
 
     def _load_manifest(self) -> None:
         if self._manifest.get("manifestVersion") != "1.0":
             _error("CONTRACT_INVALID", "Unexpected manifest version")
-        if self._manifest.get("schemaVersion") != SCHEMA_VERSION:
+        if self._manifest.get("schemaVersion") != self.schema_version:
             _error("CONTRACT_INVALID", "Unexpected Houdini schema version")
         if self._manifest.get("schemaDialect") != SCHEMA_DIALECT:
             _error("CONTRACT_INVALID", "Unexpected Houdini schema dialect")
@@ -891,12 +932,18 @@ class SchemaRegistry:
         if self._manifest.get("activeContexts") != ["Object", "Sop"]:
             _error("CONTRACT_INVALID", "Unexpected active Houdini contexts")
         tools = self._manifest.get("tools")
-        if not isinstance(tools, list) or tuple(tool.get("name") for tool in tools if isinstance(tool, dict)) != EXPECTED_TOOLS:
-            _error("CONTRACT_INVALID", "Manifest must contain the exact ordered five-tool allowlist")
+        if not isinstance(tools, list) or tuple(
+            tool.get("name") for tool in tools if isinstance(tool, dict)
+        ) != self._expected_tools:
+            _error(
+                "CONTRACT_INVALID",
+                "Manifest must contain the exact ordered profile tool allowlist",
+                profile=self.profile,
+            )
         referenced: set[str] = set()
         for tool in tools:
             name = tool["name"]
-            if tool.get("permissionLevel") != _EXPECTED_PERMISSIONS[name]:
+            if tool.get("permissionLevel") != self._expected_permissions[name]:
                 _error("CONTRACT_INVALID", "Tool permission does not match the frozen policy", tool=name)
             for direction in ("input", "output"):
                 file_name = tool.get(f"{direction}Schema")
@@ -918,7 +965,9 @@ class SchemaRegistry:
                     _error("SCHEMA_HASH_MISMATCH", "Frozen tool schema hash does not match the manifest", tool=name, direction=direction)
                 if schema.get("$schema") != SCHEMA_DIALECT:
                     _error("CONTRACT_INVALID", "Tool schema dialect does not match", tool=name, direction=direction)
-                expected_id = f"urn:hia:houdini-mcp:{SCHEMA_VERSION}:{name}:{direction}"
+                expected_id = (
+                    f"urn:hia:houdini-mcp:{self.schema_version}:{name}:{direction}"
+                )
                 if schema.get("$id") != expected_id:
                     _error("CONTRACT_INVALID", "Tool schema identifier does not match", tool=name, direction=direction)
                 _audit_schema(schema, schema)
@@ -1125,15 +1174,66 @@ class SchemaRegistry:
                 self._mismatch("Live parameter names must be unique", f"{path}.parameters")
             for parameter_index, parameter in enumerate(node_type["parameters"]):
                 default = parameter["default_value"]
-                if default is None:
-                    continue
                 parameter_path = f"{path}.parameters[{parameter_index}]"
                 value_type = parameter["value_type"]
-                if value_type == "tuple":
-                    if default["type"] != "tuple" or len(default["value"]) != parameter["tuple_size"]:
-                        self._mismatch("Tuple default contradicts live tuple metadata", parameter_path)
-                elif default["type"] != value_type or parameter["tuple_size"] != 1:
-                    self._mismatch("Scalar default contradicts live parameter metadata", parameter_path)
+                if default is not None:
+                    if value_type == "tuple":
+                        if (
+                            default["type"] != "tuple"
+                            or len(default["value"]) != parameter["tuple_size"]
+                        ):
+                            self._mismatch(
+                                "Tuple default contradicts live tuple metadata",
+                                parameter_path,
+                            )
+                    elif default["type"] != value_type or parameter["tuple_size"] != 1:
+                        self._mismatch(
+                            "Scalar default contradicts live parameter metadata",
+                            parameter_path,
+                        )
+                if self.profile == _B2_READ_ONLY_PROFILE:
+                    if node_type["creatable"] is not False or parameter["writable"] is not False:
+                        self._mismatch(
+                            "Gate B2 node metadata cannot advertise write capability",
+                            parameter_path,
+                        )
+                    numeric_range = parameter["numeric_range"]
+                    numeric_type = value_type in {"float", "int"}
+                    if value_type == "tuple" and default is not None:
+                        numeric_type = default.get("items_type") in {"float", "int"}
+                    if numeric_type and numeric_range is None:
+                        self._mismatch(
+                            "Numeric parameter metadata requires a bounded live range",
+                            f"{parameter_path}.numeric_range",
+                        )
+                    if not numeric_type and numeric_range is not None:
+                        self._mismatch(
+                            "Non-numeric parameter metadata cannot advertise a numeric range",
+                            f"{parameter_path}.numeric_range",
+                        )
+                    if numeric_range is not None:
+                        minimum = numeric_range["min_value"]
+                        maximum = numeric_range["max_value"]
+                        if minimum > maximum:
+                            self._mismatch(
+                                "Numeric parameter range is inverted",
+                                f"{parameter_path}.numeric_range",
+                            )
+                        integer_items = value_type == "int" or (
+                            value_type == "tuple"
+                            and default is not None
+                            and default.get("items_type") == "int"
+                        )
+                        if integer_items and (
+                            isinstance(minimum, bool)
+                            or isinstance(maximum, bool)
+                            or not isinstance(minimum, int)
+                            or not isinstance(maximum, int)
+                        ):
+                            self._mismatch(
+                                "Integer parameter ranges must use integer bounds",
+                                f"{parameter_path}.numeric_range",
+                            )
 
     @staticmethod
     def _graph_summary(graph: Mapping[str, Any]) -> dict[str, Any]:
@@ -1368,6 +1468,8 @@ class SchemaRegistry:
 
 
 __all__ = [
+    "B2_READ_ONLY_TOOLS",
+    "B2_SCHEMA_VERSION",
     "ContractError",
     "EXPECTED_TOOLS",
     "MAX_JSON_BYTES",

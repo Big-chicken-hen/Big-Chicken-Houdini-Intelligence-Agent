@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Any, BinaryIO, TextIO
 
-from hia_core.houdini_contract import strict_json_loads
+from hia_core.houdini_contract import SchemaRegistry, strict_json_loads
 
 from .adapter import BridgeTransport, HoudiniMCPAdapter
 
@@ -264,8 +264,9 @@ def serve(
     """Compose an injected transport with the strict runner."""
 
     diagnostics = diagnostic_stream or sys.stderr
-    adapter = HoudiniMCPAdapter(
+    adapter = HoudiniMCPAdapter.b2_read_only(
         transport,
+        registry=SchemaRegistry.b2_read_only(),
         diagnostic_sink=lambda code: _write_diagnostic(diagnostics, code),
     )
     return run_stdio(
@@ -277,9 +278,9 @@ def serve(
 
 
 def main() -> int:
-    """Refuse standalone startup while B1 has no approved live transport."""
+    """Refuse standalone startup until the B2 transport is separately approved."""
 
-    _write_diagnostic(sys.stderr, "B1_LIVE_TRANSPORT_DISABLED")
+    _write_diagnostic(sys.stderr, "B2A_REAL_MCP_START_DISABLED")
     return 2
 
 

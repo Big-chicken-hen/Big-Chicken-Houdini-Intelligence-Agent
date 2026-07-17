@@ -1,0 +1,44 @@
+{
+  "manifestVersion": "1.0",
+  "schemaVersion": "0.2.0",
+  "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "schemaDigestEncoding": "canonical-json-utf8-v1",
+  "contractStatus": "frozen_pre_release",
+  "protocolPolicy": "deny_by_default",
+  "activeContexts": [
+    "Object",
+    "Sop"
+  ],
+  "tools": [
+    {
+      "name": "houdini_scene_info",
+      "description": "Read the bounded attested Houdini build, session, revision, enabled contexts, and HIA-owned graph summaries without modifying the scene.",
+      "permissionLevel": "scene_read",
+      "inputSchema": "houdini_scene_info.input.schema.json",
+      "outputSchema": "houdini_scene_info.output.schema.json",
+      "inputSha256": "53de1829c6a913ba0a20d5de6c6e4eb5107842e1487b382a8c08ad558b6b16d8",
+      "outputSha256": "bbaaf498b7ae68f543276a31374cc39792a050af32daec69443b87a38eb58567",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "houdini_node_type_info",
+      "description": "Read bounded sanitized live parameter metadata for the five approved Object and SOP node types without enabling creation or parameter writes.",
+      "permissionLevel": "scene_read",
+      "inputSchema": "houdini_node_type_info.input.schema.json",
+      "outputSchema": "houdini_node_type_info.output.schema.json",
+      "inputSha256": "d468c8f602a5b012daa76ba4dda62ec4819942abfeb064cb30425a6fa5828730",
+      "outputSha256": "fece3a3b00cdb3b9c5f1451d6cc3a144f0fe286af33929d28241c429ae0f7f1a",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    }
+  ]
+}

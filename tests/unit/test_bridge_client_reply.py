@@ -129,6 +129,7 @@ class _QueueOnlyTransport:
 def _load_transport_bridge_client(
     *,
     fail_submit: bool = False,
+    scene_executor_token: str | None = None,
 ) -> tuple[Any, _QueueOnlyTransport]:
     pyside = types.ModuleType("PySide6")
     qt_core = types.ModuleType("PySide6.QtCore")
@@ -165,6 +166,7 @@ def _load_transport_bridge_client(
             "http://127.0.0.1:49152",
             "secret",
             transport_factory=factory,
+            scene_executor_token=scene_executor_token,
         )
         return client, client._transport
     finally:
@@ -320,6 +322,77 @@ class BridgeClientQueueTests(unittest.TestCase):
         self.assertFalse(client._event_request_active)
         self.assertEqual(1, len(client.eventsReceived.emissions))
         self.assertIsNotNone(client.poll_events(0))
+
+    def test_scene_poll_is_atomic_and_uses_separate_secret_header(self) -> None:
+        client, transport = _load_transport_bridge_client(
+            scene_executor_token="executor-secret",
+        )
+        barrier = threading.Barrier(9)
+        returned: list[str | None] = []
+        returned_lock = threading.Lock()
+
+        def poll() -> None:
+            barrier.wait()
+            value = client.poll_scene_work(250)
+            with returned_lock:
+                returned.append(value)
+
+        threads = [threading.Thread(target=poll) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(1.0)
+            self.assertFalse(thread.is_alive())
+
+        accepted = [value for value in returned if value is not None]
+        submissions = [
+            request
+            for request in transport.submissions
+            if request["context"] == "scene_work"
+        ]
+        self.assertEqual(1, len(accepted))
+        self.assertEqual(1, len(submissions))
+        self.assertEqual(
+            {"X-HIA-Executor-Token": "executor-secret"},
+            submissions[0]["secret_headers"],
+        )
+        self.assertTrue(client._scene_request_active)
+
+        transport.result_queue.put(
+            _result_for(submissions[0], raw=b'{"ok":true,"work":null}')
+        )
+        client._drain_results()
+        self.assertFalse(client._scene_request_active)
+        self.assertIsNotNone(client.poll_scene_work(0))
+
+    def test_capability_and_result_requests_keep_executor_secrets_out_of_context(self) -> None:
+        client, transport = _load_transport_bridge_client(
+            scene_executor_token="executor-secret",
+        )
+        capability_id = client.publish_houdini_capabilities(
+            {"available": False, "reason": "observer unavailable"}
+        )
+        result_id = client.complete_scene_work(
+            "scene-request-1",
+            "one-request-claim",
+            {"ok": False},
+        )
+
+        self.assertIsNotNone(capability_id)
+        self.assertIsNotNone(result_id)
+        capability, result = transport.submissions[-2:]
+        self.assertEqual("/v1/scene/capabilities", capability["path"])
+        self.assertEqual({"report": {"available": False, "reason": "observer unavailable"}}, capability["payload"])
+        self.assertEqual("scene_result:scene-request-1", result["context"])
+        self.assertEqual(("one-request-claim",), result["sensitive_values"])
+        for submission in (capability, result):
+            self.assertNotIn("executor-secret", submission["path"])
+            self.assertNotIn("executor-secret", submission["context"])
+
+        client.dispose()
+        self.assertIsNone(client._scene_executor_token)
+        self.assertIsNone(client.poll_scene_work())
 
     def test_event_deadline_recovers_polling_and_late_result_is_ignored(self) -> None:
         client, transport = _load_transport_bridge_client()

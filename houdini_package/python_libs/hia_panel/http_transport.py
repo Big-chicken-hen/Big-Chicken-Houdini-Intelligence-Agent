@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 
@@ -28,6 +28,7 @@ _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _QUERY_SECRET_PATTERN = re.compile(
     r"(?i)([?&](?:access_)?token|[?&]authorization)=([^&\s]*)"
 )
+_ALLOWED_SECRET_HEADERS = frozenset({"X-HIA-Executor-Token"})
 
 
 class HttpTransport:
@@ -57,7 +58,8 @@ class HttpTransport:
 
         self._base_url = _validate_loopback_base_url(base_url)
         self._token = token
-        self._token_bytes = token.encode("utf-8")
+        self._secret_lock = threading.Lock()
+        self._secret_values: set[str] = {token}
         self._result_queue = result_queue
         # Redirects are disabled so an authenticated loopback request can never
         # carry its Authorization header to a second origin.
@@ -111,6 +113,8 @@ class HttpTransport:
         timeout_ms: int,
         deadline_monotonic: float | None = None,
         event_request: bool = False,
+        secret_headers: Mapping[str, str] | None = None,
+        sensitive_values: Iterable[str] | None = None,
     ) -> str:
         """Queue one request and return its opaque correlation identifier."""
 
@@ -132,6 +136,31 @@ class HttpTransport:
         )
         if not math.isfinite(deadline):
             raise ValueError("deadline_monotonic must be finite")
+        normalized_secret_headers: dict[str, str] = {}
+        for name, value in (secret_headers or {}).items():
+            if name not in _ALLOWED_SECRET_HEADERS:
+                raise ValueError("Secret header is outside the fixed allowlist")
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 512
+                or "\r" in value
+                or "\n" in value
+            ):
+                raise ValueError("Secret header value is invalid")
+            normalized_secret_headers[name] = value
+        normalized_sensitive_values = tuple(sensitive_values or ())
+        if len(normalized_sensitive_values) > 4:
+            raise ValueError("Too many per-request sensitive values")
+        for value in normalized_sensitive_values:
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 512
+                or "\r" in value
+                or "\n" in value
+            ):
+                raise ValueError("Per-request sensitive value is invalid")
 
         record: dict[str, Any] = {
             "request_id": identifier,
@@ -142,7 +171,13 @@ class HttpTransport:
             "payload": dict(payload) if payload is not None else None,
             "timeout_ms": int(timeout_ms),
             "deadline_monotonic": deadline,
+            "secret_headers": normalized_secret_headers,
+            "sensitive_values": normalized_sensitive_values,
         }
+        with self._secret_lock:
+            if len(self._secret_values | set(normalized_secret_headers.values())) > 8:
+                raise ValueError("Too many transport-level secret values")
+            self._secret_values.update(normalized_secret_headers.values())
         with self._state_lock:
             if not self._accepting:
                 raise RuntimeError("HTTP transport is closed")
@@ -228,6 +263,7 @@ class HttpTransport:
         http_status: int | None = None
         error_kind: str | None = None
         error_message = ""
+        sensitive_values = tuple(record.get("sensitive_values") or ())
 
         try:
             body = None
@@ -236,6 +272,7 @@ class HttpTransport:
                 "Accept": "application/json",
                 "Cache-Control": "no-store",
             }
+            headers.update(record.get("secret_headers") or {})
             if record["method"] == "POST":
                 headers["Content-Type"] = "application/json"
                 body = json.dumps(
@@ -276,7 +313,7 @@ class HttpTransport:
                 error_message = "Bridge request timed out"
             else:
                 error_kind = "url_error"
-                error_message = self._safe_error_text(reason)
+                error_message = self._safe_error_text(reason, sensitive_values)
         except (TimeoutError, socket.timeout):
             error_kind = "timeout"
             error_message = "Bridge request timed out"
@@ -285,7 +322,7 @@ class HttpTransport:
             error_message = str(exc)
         except Exception as exc:  # Worker boundary: return data, never a traceback.
             error_kind = "transport_error"
-            error_message = self._safe_error_text(exc)
+            error_message = self._safe_error_text(exc, sensitive_values)
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         if (
@@ -295,17 +332,17 @@ class HttpTransport:
             raw = b""
             error_kind = "timeout"
             error_message = "Bridge request timed out"
-        raw = self._redact_body(raw)
+        raw = self._redact_body(raw, sensitive_values)
         return {
             "request_id": record["request_id"],
             "generation": record["generation"],
-            "context": self._safe_error_text(record["context"]),
+            "context": self._safe_error_text(record["context"], sensitive_values),
             "method": record["method"],
-            "path": self._safe_error_text(record["path"]),
+            "path": self._safe_error_text(record["path"], sensitive_values),
             "raw": raw,
             "http_status": http_status,
             "error_kind": error_kind,
-            "error_message": self._safe_error_text(error_message),
+            "error_message": self._safe_error_text(error_message, sensitive_values),
             "elapsed_ms": elapsed_ms,
         }
 
@@ -316,16 +353,17 @@ class HttpTransport:
         error_kind: str,
         error_message: str,
     ) -> dict[str, Any]:
+        sensitive_values = tuple(record.get("sensitive_values") or ())
         return {
             "request_id": record["request_id"],
             "generation": record["generation"],
-            "context": self._safe_error_text(record["context"]),
+            "context": self._safe_error_text(record["context"], sensitive_values),
             "method": record["method"],
-            "path": self._safe_error_text(record["path"]),
+            "path": self._safe_error_text(record["path"], sensitive_values),
             "raw": b"",
             "http_status": None,
             "error_kind": error_kind,
-            "error_message": self._safe_error_text(error_message),
+            "error_message": self._safe_error_text(error_message, sensitive_values),
             "elapsed_ms": 0,
         }
 
@@ -346,15 +384,29 @@ class HttpTransport:
             raise ResponseTooLargeError("Bridge response exceeded the size limit")
         return raw
 
-    def _redact_body(self, raw: bytes) -> bytes:
-        if self._token_bytes:
-            raw = raw.replace(self._token_bytes, b"<redacted>")
+    def _redact_body(
+        self,
+        raw: bytes,
+        sensitive_values: tuple[str, ...] = (),
+    ) -> bytes:
+        with self._secret_lock:
+            secrets = tuple(self._secret_values) + sensitive_values
+        for secret in secrets:
+            secret_bytes = secret.encode("utf-8")
+            if secret_bytes:
+                raw = raw.replace(secret_bytes, b"<redacted>")
         return raw
 
-    def _safe_error_text(self, value: object) -> str:
+    def _safe_error_text(
+        self,
+        value: object,
+        sensitive_values: tuple[str, ...] = (),
+    ) -> str:
         text = str(value)
-        if self._token:
-            text = text.replace(self._token, "<redacted>")
+        with self._secret_lock:
+            secrets = tuple(self._secret_values) + sensitive_values
+        for secret in secrets:
+            text = text.replace(secret, "<redacted>")
         text = _BEARER_PATTERN.sub("Bearer <redacted>", text)
         text = _QUERY_SECRET_PATTERN.sub(r"\1=<redacted>", text)
         return " ".join(text.splitlines()).strip()[:1000]

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import uuid
 from collections import deque
 from typing import Any
 
+import PySide6
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .bridge_client import BridgeClient
+from .houdini_read_adapter import HoudiniReadAdapter, HoudiniReadAdapterError
 from .network_response import format_bridge_error
 from .turn_state import PanelTurnState, TurnStateToken
 
@@ -26,12 +30,23 @@ _INTERRUPT_CONTEXT_PREFIX = "interrupt:"
 _SESSION_RECONCILE_CONTEXT_PREFIX = "session_reconcile:"
 _MODELS_CONTEXT = "models"
 _CODEX_DEFAULT_LABEL = "Codex 默认"
+_SCENE_CAPABILITY_CONTEXT = "scene_capabilities"
+_SCENE_WORK_CONTEXT = "scene_work"
+_SCENE_RESULT_CONTEXT_PREFIX = "scene_result:"
+_SCENE_HEARTBEAT_MS = 1_000
+_SCENE_IDLE_POLL_MS = 100
 
 
 class HoudiniIntelligencePanel(QtWidgets.QWidget):
-    """Conversation UI only; this class never calls hou or modifies a scene."""
+    """Conversation UI plus a bounded main-thread read-only Houdini slice."""
 
-    def __init__(self, pane_tab: Any = None, parent: QtWidgets.QWidget | None = None):
+    def __init__(
+        self,
+        pane_tab: Any = None,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        hou_module: Any | None = None,
+    ):
         super().__init__(parent)
         self._pane_tab = pane_tab
         self._event_sequence = 0
@@ -51,7 +66,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._models_requested = False
         self._pending_approvals: deque[dict[str, Any]] = deque()
         self._current_approval: dict[str, Any] | None = None
+        self._houdini_adapter: HoudiniReadAdapter | None = None
+        self._houdini_polling_enabled = False
+        self._scene_capability_pending = False
+        self._scene_work_pending = False
+        self._scene_attestation_digest: str | None = None
+        self._scene_catalog_digest: str | None = None
+        self._last_houdini_report: dict[str, Any] | None = None
+        self._attested_houdini_report_identity: str | None = None
+        self._pending_houdini_report_identity: str | None = None
+        self._scene_executor_token = os.environ.get("HIA_SCENE_EXECUTOR_TOKEN", "")
         self._build_ui()
+        self._initialize_houdini_read_adapter(hou_module)
 
         base_url = os.environ.get("HIA_BRIDGE_URL", "")
         token = os.environ.get("HIA_BRIDGE_TOKEN", "")
@@ -61,7 +87,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._client = None
             return
 
-        self._client = BridgeClient(base_url, token, self)
+        self._client = BridgeClient(
+            base_url,
+            token,
+            self,
+            scene_executor_token=self._scene_executor_token or None,
+        )
         self._client.healthReceived.connect(self._on_health)
         self._client.sessionReceived.connect(self._on_session)
         self._client.eventsReceived.connect(self._on_events)
@@ -86,6 +117,24 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         status_row.addWidget(self.thread_status_label)
         status_row.addWidget(self.turn_status_label)
         root.addLayout(status_row)
+
+        self.houdini_status_group = QtWidgets.QGroupBox("Houdini 只读状态")
+        houdini_status = QtWidgets.QGridLayout(self.houdini_status_group)
+        self.houdini_build_label = QtWidgets.QLabel("Build：不可用")
+        self.houdini_session_label = QtWidgets.QLabel("HIP Session：不可用")
+        self.houdini_revision_label = QtWidgets.QLabel("Revision：不可用")
+        self.houdini_catalog_label = QtWidgets.QLabel("Catalog：未验证")
+        self.houdini_schema_label = QtWidgets.QLabel("Schema：未验证")
+        self.houdini_tools_label = QtWidgets.QLabel(
+            "scene_info：不可用  node_type_info：不可用  类型：0/5"
+        )
+        houdini_status.addWidget(self.houdini_build_label, 0, 0)
+        houdini_status.addWidget(self.houdini_session_label, 0, 1)
+        houdini_status.addWidget(self.houdini_revision_label, 0, 2)
+        houdini_status.addWidget(self.houdini_catalog_label, 1, 0)
+        houdini_status.addWidget(self.houdini_schema_label, 1, 1)
+        houdini_status.addWidget(self.houdini_tools_label, 1, 2)
+        root.addWidget(self.houdini_status_group)
 
         model_row = QtWidgets.QHBoxLayout()
         model_row.addWidget(QtWidgets.QLabel("模型"))
@@ -154,6 +203,333 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self._refresh_controls()
 
+    def _initialize_houdini_read_adapter(self, hou_module: Any | None) -> None:
+        """Construct the live reader on the UI thread from launcher-only state."""
+
+        if hou_module is None:
+            self.houdini_tools_label.setText(
+                "scene_info：不可用  node_type_info：不可用  类型：0/5"
+            )
+            return
+        profile = os.environ.get("HIA_SCENE_PROFILE", "")
+        launch_id = os.environ.get("HIA_BRIDGE_LAUNCH_ID", "")
+        generation = os.environ.get("HIA_BRIDGE_GENERATION", "")
+        process_nonce = os.environ.get("HIA_HOUDINI_PROCESS_NONCE", "")
+        schema_version = os.environ.get("HIA_HOUDINI_SCHEMA_VERSION", "")
+        schema_digest = os.environ.get("HIA_HOUDINI_SCHEMA_DIGEST", "")
+        digest_valid = len(schema_digest) == 64 and all(
+            character in "0123456789abcdefABCDEF" for character in schema_digest
+        )
+        try:
+            generation_valid = int(generation) >= 0
+        except (TypeError, ValueError):
+            generation_valid = False
+        if not (
+            profile == "p2-v-b2-read-only"
+            and launch_id
+            and generation_valid
+            and len(process_nonce) >= 16
+            and self._scene_executor_token
+            and schema_version == "0.2.0"
+            and digest_valid
+        ):
+            self.houdini_schema_label.setText("Schema：B2 启动配置缺失")
+            return
+
+        publisher_hash = hashlib.sha256(process_nonce.encode("utf-8")).hexdigest()
+        publisher_id = f"panel-{publisher_hash[:16]}-{uuid.uuid4().hex[:16]}"
+        fingerprint_key = hashlib.sha256(
+            b"hia-b2-fingerprint\0" + process_nonce.encode("utf-8")
+        ).digest()
+        try:
+            adapter = HoudiniReadAdapter(
+                hou_module,
+                publisher_id=publisher_id,
+                pyside_version=str(getattr(PySide6, "__version__", "unknown")),
+                fingerprint_key=fingerprint_key,
+            )
+            report = adapter.start()
+        except (HoudiniReadAdapterError, TypeError, ValueError):
+            self.houdini_schema_label.setText("Schema：Houdini 观察不可用")
+            return
+        self._houdini_adapter = adapter
+        self._last_houdini_report = dict(report) if isinstance(report, dict) else None
+        self._update_houdini_status(report, attested=False, pending=True)
+        self.houdini_schema_label.setText(
+            f"Schema：{schema_version} / {schema_digest[:12]}…"
+        )
+
+    def _update_houdini_status(
+        self,
+        report: Any,
+        *,
+        attested: bool = False,
+        pending: bool = False,
+    ) -> None:
+        if not isinstance(report, dict):
+            return
+        build = report.get("houdini_build")
+        session_id = report.get("hip_session_id")
+        revision = report.get("scene_revision")
+        catalog = report.get("catalog")
+        available_types = 0
+        total_types = 0
+        if isinstance(catalog, list):
+            total_types = min(len(catalog), 5)
+            available_types = sum(
+                1 for item in catalog[:5] if isinstance(item, dict) and item.get("available") is True
+            )
+        locally_available = self._houdini_report_is_locally_available(report)
+        live_available = locally_available and attested
+        self.houdini_build_label.setText(
+            f"Build：{build}" if isinstance(build, str) and build else "Build：不可用"
+        )
+        self.houdini_session_label.setText(
+            f"HIP Session：{session_id[:12]}…"
+            if isinstance(session_id, str) and session_id
+            else "HIP Session：不可用"
+        )
+        self.houdini_revision_label.setText(
+            f"Revision：{revision}"
+            if isinstance(revision, int) and not isinstance(revision, bool)
+            else "Revision：不可用"
+        )
+        availability = (
+            "可用"
+            if live_available
+            else ("待认证" if locally_available and pending else "不可用")
+        )
+        self.houdini_tools_label.setText(
+            f"scene_info：{availability}  node_type_info：{availability}  "
+            f"类型：{available_types}/{total_types or 5}"
+        )
+        if not live_available:
+            self.houdini_catalog_label.setText(
+                "Catalog：待 Bridge 认证"
+                if locally_available and pending
+                else "Catalog：不可用"
+            )
+
+    def _fail_closed_houdini_status(self, catalog_status: str) -> None:
+        """Invalidate the UI-visible live capability until a fresh Bridge ACK."""
+
+        self._scene_attestation_digest = None
+        self._scene_catalog_digest = None
+        self._attested_houdini_report_identity = None
+        self._update_houdini_status(
+            self._last_houdini_report,
+            attested=False,
+            pending=False,
+        )
+        self.houdini_catalog_label.setText(catalog_status)
+
+    @staticmethod
+    def _houdini_report_identity(report: Any) -> str | None:
+        if not isinstance(report, dict):
+            return None
+        try:
+            canonical = json.dumps(
+                report,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _houdini_report_is_locally_available(report: Any) -> bool:
+        if not isinstance(report, dict) or report.get("available") is not True:
+            return False
+        catalog = report.get("catalog")
+        return bool(
+            isinstance(catalog, list)
+            and len(catalog) == 5
+            and all(
+                isinstance(item, dict) and item.get("available") is True
+                for item in catalog
+            )
+        )
+
+    def _start_houdini_read_loop(self) -> None:
+        if (
+            self._houdini_polling_enabled
+            or self._houdini_adapter is None
+            or self._client is None
+        ):
+            return
+        self._houdini_polling_enabled = True
+        self._schedule_houdini_heartbeat(0)
+
+    def _schedule_houdini_heartbeat(self, delay_ms: int) -> None:
+        if not self._houdini_polling_enabled:
+            return
+        QtCore.QTimer.singleShot(delay_ms, self._houdini_heartbeat)
+
+    @QtCore.Slot()
+    def _houdini_heartbeat(self) -> None:
+        if (
+            not self._houdini_polling_enabled
+            or self._client is None
+            or self._houdini_adapter is None
+        ):
+            return
+        if not self._scene_capability_pending:
+            try:
+                report = self._houdini_adapter.refresh()
+            except HoudiniReadAdapterError:
+                self._fail_closed_houdini_status("Catalog：观察失败")
+            else:
+                self._last_houdini_report = (
+                    dict(report) if isinstance(report, dict) else None
+                )
+                report_identity = self._houdini_report_identity(report)
+                renewing_current_report = (
+                    report_identity is not None
+                    and report_identity == self._attested_houdini_report_identity
+                    and self._scene_attestation_digest is not None
+                )
+                if not renewing_current_report:
+                    self._fail_closed_houdini_status("Catalog：待 Bridge 认证")
+                request_id = self._client.publish_houdini_capabilities(report)
+                self._scene_capability_pending = request_id is not None
+                self._pending_houdini_report_identity = (
+                    report_identity if self._scene_capability_pending else None
+                )
+                if request_id is None:
+                    self._fail_closed_houdini_status("Catalog：同步失败")
+                elif not renewing_current_report:
+                    self._update_houdini_status(
+                        report,
+                        attested=False,
+                        pending=True,
+                    )
+        self._schedule_houdini_heartbeat(_SCENE_HEARTBEAT_MS)
+
+    def _schedule_scene_work_poll(self, delay_ms: int) -> None:
+        if (
+            not self._houdini_polling_enabled
+            or self._scene_attestation_digest is None
+        ):
+            return
+        QtCore.QTimer.singleShot(delay_ms, self._poll_scene_work)
+
+    @QtCore.Slot()
+    def _poll_scene_work(self) -> None:
+        if (
+            not self._houdini_polling_enabled
+            or self._client is None
+            or self._scene_attestation_digest is None
+            or self._scene_work_pending
+        ):
+            return
+        request_id = self._client.poll_scene_work(250)
+        self._scene_work_pending = request_id is not None
+
+    def _handle_scene_action(self, context: str, payload: dict[str, Any]) -> bool:
+        if context == _SCENE_CAPABILITY_CONTEXT:
+            self._scene_capability_pending = False
+            pending_identity = self._pending_houdini_report_identity
+            self._pending_houdini_report_identity = None
+            digest = payload.get("attestation_digest")
+            catalog_digest = payload.get("catalog_digest")
+            report = self._last_houdini_report
+            report_identity = self._houdini_report_identity(report)
+            observer_sequence = payload.get("observer_sequence")
+            digest_valid = (
+                isinstance(digest, str)
+                and len(digest) == 64
+                and all(character in "0123456789abcdef" for character in digest)
+            )
+            catalog_digest_valid = (
+                isinstance(catalog_digest, str)
+                and len(catalog_digest) == 64
+                and all(
+                    character in "0123456789abcdef"
+                    for character in catalog_digest
+                )
+            )
+            if (
+                payload.get("available") is True
+                and digest_valid
+                and catalog_digest_valid
+                and isinstance(report, dict)
+                and self._houdini_report_is_locally_available(report)
+                and report_identity is not None
+                and pending_identity == report_identity
+                and isinstance(observer_sequence, int)
+                and not isinstance(observer_sequence, bool)
+                and observer_sequence == report.get("observer_sequence")
+                and (
+                    self._attested_houdini_report_identity != report_identity
+                    or self._scene_attestation_digest is None
+                    or digest == self._scene_attestation_digest
+                )
+            ):
+                self._scene_attestation_digest = digest
+                self._scene_catalog_digest = catalog_digest
+                self._attested_houdini_report_identity = report_identity
+                self._update_houdini_status(report, attested=True)
+                suffix = f" / {self._scene_catalog_digest[:12]}…"
+                self.houdini_catalog_label.setText(f"Catalog：匹配{suffix}")
+                self._schedule_scene_work_poll(0)
+            else:
+                self._fail_closed_houdini_status("Catalog：不可用")
+            return True
+
+        if context == _SCENE_WORK_CONTEXT:
+            self._scene_work_pending = False
+            work = payload.get("work")
+            if work is None:
+                self._schedule_scene_work_poll(_SCENE_IDLE_POLL_MS)
+                return True
+            if not isinstance(work, dict) or work.get("kind") != "execute":
+                self._fail_closed_houdini_status("Catalog：拒绝异常工作项")
+                return True
+            request_id = work.get("request_id")
+            executor_token = work.get("executor_token")
+            attestation_digest = work.get("attestation_digest")
+            tool_name = work.get("tool_name")
+            arguments = work.get("arguments")
+            deadline = work.get("absolute_deadline")
+            if attestation_digest != self._scene_attestation_digest:
+                self._fail_closed_houdini_status("Catalog：能力快照已变化")
+                return True
+            if (
+                self._client is None
+                or self._houdini_adapter is None
+                or not isinstance(request_id, str)
+                or not isinstance(executor_token, str)
+                or not isinstance(tool_name, str)
+                or not isinstance(arguments, dict)
+            ):
+                self._fail_closed_houdini_status("Catalog：工作项字段无效")
+                return True
+            try:
+                result = self._houdini_adapter.execute(
+                    tool_name,
+                    arguments,
+                    absolute_deadline=deadline,
+                )
+            except (HoudiniReadAdapterError, TypeError, ValueError):
+                self._fail_closed_houdini_status("Catalog：只读执行失败")
+                return True
+            submitted = self._client.complete_scene_work(
+                request_id,
+                executor_token,
+                result,
+            )
+            if submitted is None:
+                self._fail_closed_houdini_status("Catalog：结果提交失败")
+            return True
+
+        if context.startswith(_SCENE_RESULT_CONTEXT_PREFIX):
+            self._schedule_scene_work_poll(0)
+            return True
+        return False
+
     def _set_connection(self, text: str, connected: bool) -> None:
         self._connected = connected
         self.connection_label.setText(f"Codex：{text}")
@@ -198,6 +574,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if not self._models_requested and self._client is not None:
             self._models_requested = True
             self._client.get_models()
+        self._start_houdini_read_loop()
 
     @QtCore.Slot(dict)
     def _on_session(self, payload: dict[str, Any]) -> None:
@@ -358,6 +735,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(str, dict)
     def _on_action_completed(self, context: str, payload: dict[str, Any]) -> None:
+        if self._handle_scene_action(context, payload):
+            return
         if context == _MODELS_CONTEXT:
             self._apply_models(payload.get("models"))
             self._refresh_controls()
@@ -586,6 +965,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(str, dict)
     def _on_request_failed(self, context: str, payload: dict[str, Any]) -> None:
+        if context == _SCENE_CAPABILITY_CONTEXT:
+            self._scene_capability_pending = False
+            self._pending_houdini_report_identity = None
+            error = payload.get("structured_error")
+            code = error.get("code") if isinstance(error, dict) else None
+            self._fail_closed_houdini_status(
+                f"Catalog：{code}" if isinstance(code, str) else "Catalog：同步失败"
+            )
+            return
+        if context == _SCENE_WORK_CONTEXT:
+            self._scene_work_pending = False
+            self._fail_closed_houdini_status("Catalog：工作请求失败")
+            return
+        if context.startswith(_SCENE_RESULT_CONTEXT_PREFIX):
+            self._fail_closed_houdini_status("Catalog：结果提交失败")
+            return
         if context == _MODELS_CONTEXT:
             self._apply_models([])
             self._append_system("模型列表暂不可用，继续使用 Codex 默认。")
@@ -837,6 +1232,21 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._polling_enabled = False
+        self._houdini_polling_enabled = False
+        self._scene_capability_pending = False
+        self._scene_work_pending = False
+        self._scene_attestation_digest = None
+        self._scene_catalog_digest = None
+        self._last_houdini_report = None
+        self._attested_houdini_report_identity = None
+        self._pending_houdini_report_identity = None
+        adapter = getattr(self, "_houdini_adapter", None)
+        self._houdini_adapter = None
+        if adapter is not None:
+            try:
+                adapter.dispose()
+            except HoudiniReadAdapterError:
+                pass
         client = self._client
         self._client = None
         if client is not None:

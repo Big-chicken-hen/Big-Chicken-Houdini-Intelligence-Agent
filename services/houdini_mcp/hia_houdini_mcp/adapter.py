@@ -1,4 +1,4 @@
-"""Offline JSON-RPC/MCP adapter for the five frozen Houdini graph tools.
+"""Offline JSON-RPC/MCP adapter for internally selected frozen Houdini tools.
 
 This module contains no network client, no Houdini integration, and no live
 dispatcher.  A caller must inject a deterministic :class:`BridgeTransport`.
@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, TypeAlias, runtime_checkable
 
-from hia_core.houdini_contract import ContractError, SchemaRegistry
+from hia_core.houdini_contract import (
+    B2_READ_ONLY_TOOLS,
+    ContractError,
+    SchemaRegistry,
+)
 
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -41,6 +45,11 @@ FROZEN_TOOL_PERMISSIONS: Mapping[str, str] = MappingProxyType({
     "houdini_graph_validate": "scene_read",
     "houdini_graph_apply": "scene_write",
     "houdini_graph_verify": "scene_read",
+})
+B2_READ_ONLY_TOOL_NAMES = B2_READ_ONLY_TOOLS
+B2_READ_ONLY_TOOL_PERMISSIONS: Mapping[str, str] = MappingProxyType({
+    "houdini_scene_info": "scene_read",
+    "houdini_node_type_info": "scene_read",
 })
 _FROZEN_ANNOTATION_KEYS = frozenset(
     {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
@@ -139,22 +148,28 @@ class HoudiniMCPAdapter:
         self._active_calls: dict[RequestId, CancellationHandoff] = {}
         self._cancelled_calls: OrderedDict[RequestId, None] = OrderedDict()
         tool_names = tuple(self._registry.tool_names)
-        if tool_names != FROZEN_TOOL_NAMES:
+        if tool_names == FROZEN_TOOL_NAMES:
+            expected_permissions = FROZEN_TOOL_PERMISSIONS
+            self._server_version = SERVER_VERSION
+        elif tool_names == B2_READ_ONLY_TOOL_NAMES:
+            expected_permissions = B2_READ_ONLY_TOOL_PERMISSIONS
+            self._server_version = "0.2.0"
+        else:
             raise ValueError(
-                "Schema registry must expose the exact ordered five-tool allowlist"
+                "Schema registry must expose one exact internally supported tool profile"
             )
         permission_level = getattr(self._registry, "permission_level", None)
         if not callable(permission_level):
             raise ValueError("Schema registry must expose frozen tool permissions")
-        for name, expected in FROZEN_TOOL_PERMISSIONS.items():
+        for name, expected in expected_permissions.items():
             if permission_level(name) != expected:
                 raise ValueError("Schema registry tool permissions violate policy")
 
         descriptors = tuple(self._registry.tool_descriptors())
         if any(not isinstance(item, Mapping) for item in descriptors):
             raise ValueError("Schema descriptors must be JSON objects")
-        if tuple(item.get("name") for item in descriptors) != FROZEN_TOOL_NAMES:
-            raise ValueError("Schema descriptors differ from the frozen allowlist")
+        if tuple(item.get("name") for item in descriptors) != tool_names:
+            raise ValueError("Schema descriptors differ from the selected allowlist")
         for descriptor in descriptors:
             name = descriptor["name"]
             annotations = descriptor.get("annotations")
@@ -162,7 +177,7 @@ class HoudiniMCPAdapter:
                 raise ValueError("Schema descriptor annotations are required")
             if set(annotations) != _FROZEN_ANNOTATION_KEYS:
                 raise ValueError("Schema descriptor annotations must use exact keys")
-            expected_read_only = name != "houdini_graph_apply"
+            expected_read_only = expected_permissions[name] == "scene_read"
             if annotations.get("readOnlyHint") is not expected_read_only:
                 raise ValueError("Schema descriptor read-only policy is invalid")
             if annotations.get("destructiveHint") is not False:
@@ -174,6 +189,25 @@ class HoudiniMCPAdapter:
 
         self._tool_descriptors = copy.deepcopy(descriptors)
         self._tool_names = frozenset(tool_names)
+
+    @classmethod
+    def b2_read_only(
+        cls,
+        transport: BridgeTransport,
+        *,
+        registry: SchemaRegistry | None = None,
+        diagnostic_sink: DiagnosticSink | None = None,
+    ) -> "HoudiniMCPAdapter":
+        """Construct the explicit two-tool Gate B2 read-only MCP profile."""
+
+        selected_registry = registry or SchemaRegistry.b2_read_only()
+        if tuple(selected_registry.tool_names) != B2_READ_ONLY_TOOL_NAMES:
+            raise ValueError("Gate B2 requires the exact read-only schema profile")
+        return cls(
+            transport,
+            registry=selected_registry,
+            diagnostic_sink=diagnostic_sink,
+        )
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -348,7 +382,7 @@ class HoudiniMCPAdapter:
         return {
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "serverInfo": {"name": SERVER_NAME, "version": self._server_version},
         }
 
     def _handle_notification(
@@ -398,7 +432,7 @@ class HoudiniMCPAdapter:
         if not isinstance(name, str) or name not in self._tool_names:
             raise ContractError(
                 "TOOL_NOT_ALLOWED",
-                "The requested tool is not in the frozen five-tool allowlist",
+                "The requested tool is not in the active frozen allowlist",
                 {"allowed_tools": sorted(self._tool_names)},
             )
         if not isinstance(arguments, Mapping):

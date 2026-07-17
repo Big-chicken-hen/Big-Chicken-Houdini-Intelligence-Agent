@@ -60,7 +60,16 @@ class P1AssetTests(unittest.TestCase):
         self.assertIsNotNone(interface)
         self.assertEqual("houdini_intelligence", interface.attrib["name"])
         self.assertEqual("Houdini Intelligence", interface.attrib["label"])
-        ast.parse(interface.find("script").text)
+        embedded = interface.find("script").text
+        tree = ast.parse(embedded)
+        hou_imports = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            and any(alias.name == "hou" for alias in node.names)
+        ]
+        self.assertEqual(1, len(hou_imports))
+        self.assertIn("hou_module=hou", embedded)
 
     def test_offline_ime_diagnostic_panel_is_stock_and_content_blind(self) -> None:
         source_path = (
@@ -146,6 +155,52 @@ class P1AssetTests(unittest.TestCase):
         self.assertNotIn("import hou", source)
         self.assertNotIn("hou.", source)
         self.assertIn("PySide6", source)
+
+    def test_b2_hou_import_is_confined_to_python_panel_entrypoint(self) -> None:
+        package_root = REPOSITORY_ROOT / "houdini_package"
+        offenders: list[str] = []
+        for path in sorted(package_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import) and any(
+                    alias.name == "hou" for alias in node.names
+                ):
+                    offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
+                if isinstance(node, ast.ImportFrom) and node.module == "hou":
+                    offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
+        self.assertEqual([], offenders)
+
+    def test_b2_houdini_package_contains_no_scene_write_or_cook_calls(self) -> None:
+        package_root = REPOSITORY_ROOT / "houdini_package"
+        forbidden_attributes = {
+            "createNode",
+            "setInput",
+            "setParms",
+            "setParm",
+            "destroy",
+            "save",
+            "saveAndIncrementFileName",
+            "cook",
+            "render",
+            "createDigitalAsset",
+            "definition",
+            "installFile",
+            "uninstallFile",
+            "reloadAllFiles",
+        }
+        found: list[str] = []
+        for path in sorted(package_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in forbidden_attributes
+                ):
+                    found.append(
+                        f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}:{node.func.attr}"
+                    )
+        self.assertEqual([], found)
 
     def test_panel_displays_ignored_notification_method(self) -> None:
         panel_path = (
@@ -258,6 +313,7 @@ class P1AssetTests(unittest.TestCase):
         self.assertIn("self._latest_request_by_context", client_source)
         self.assertIn("self._generation", client_source)
         self.assertIn("self._event_request_active", client_source)
+        self.assertIn("self._scene_request_active", client_source)
         self.assertIn("_RECONCILIATION_TIMEOUT_MS = 5_000", client_source)
         self.assertIn("_EVENT_POLL_TIMEOUT_MS = 20_000", client_source)
         self.assertIn("_DEFAULT_REQUEST_TIMEOUT_MS = 15_000", client_source)
@@ -274,6 +330,7 @@ class P1AssetTests(unittest.TestCase):
         self.assertIn("self._result_queue.put_nowait(result)", transport_source)
         self.assertIn("Bearer ", transport_source)
         self.assertIn("http://127.0.0.1:<port>", transport_source)
+        self.assertIn("X-HIA-Executor-Token", transport_source)
         self.assertNotIn("from PySide6", transport_source)
         self.assertNotIn("print(", transport_source)
         self.assertNotIn("logging", transport_source)
@@ -283,15 +340,62 @@ class P1AssetTests(unittest.TestCase):
         self.assertIn("generation", response_source)
         self.assertNotIn("qt_error", response_source)
 
-    def test_launcher_is_syntactically_valid_and_nonpersistent(self) -> None:
-        launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini-21.0.440.ps1"
+    def test_generic_launcher_is_version_neutral_and_preserves_discovery(self) -> None:
+        launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+        self.assertTrue(launcher.is_file())
         source = launcher.read_text(encoding="utf-8")
+
+        self.assertIsNone(re.search(r"\b(?:21|22)(?:\.\d+)*\b", source))
+        self.assertNotIn(r"C:\Program Files\Side Effects Software", source)
+        self.assertIn("[string]$BridgePython =", source)
+        self.assertIn("[string]$HoudiniExe = ''", source)
+        self.assertIn("function Resolve-HoudiniExecutable", source)
+        self.assertIn("if ($RequestedPath)", source)
+        self.assertIn("$env:HFS", source)
+        self.assertIn("Get-Command -Name 'houdini.exe' -All", source)
+        self.assertIn("App Paths\\houdini.exe", source)
+        self.assertIn("CurrentVersion\\Uninstall", source)
         self.assertIn(
-            r"C:\Program Files\Side Effects Software\Houdini 21.0.440\bin\houdini.exe",
+            "$installProperty = $properties.PSObject.Properties['InstallLocation']",
             source,
         )
+        self.assertIn(
+            "Multiple Houdini executables were discovered. Pass -HoudiniExe",
+            source,
+        )
+
+    def test_generic_launcher_preserves_executable_and_lifecycle_guards(self) -> None:
+        launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+        source = launcher.read_text(encoding="utf-8")
+
+        self.assertIn("ordinary absolute drive path", source)
+        self.assertIn("$rawCandidatePath.Substring(2).Contains(':')", source)
+        self.assertIn("Test-Path -LiteralPath $candidatePath -PathType Leaf", source)
+        self.assertIn("Resolve-Path -LiteralPath $candidatePath", source)
+        self.assertIn("$item.Name, 'houdini.exe'", source)
+        self.assertIn("$item.VersionInfo.ProductVersion", source)
+        self.assertIn("$item.VersionInfo.FileVersion", source)
+        self.assertIn("if (-not $build)", source)
+        self.assertIn("$productName = [string]$item.VersionInfo.ProductName", source)
+        self.assertIn("$description = [string]$item.VersionInfo.FileDescription", source)
+        self.assertIn("$companyName = [string]$item.VersionInfo.CompanyName", source)
+        self.assertIn("function Test-HoudiniExecutableMetadata", source)
+        self.assertIn("Test-HoudiniExecutableMetadata", source)
+        self.assertIn("Side Effects Software(?: Inc\\.)?", source)
+        self.assertIn("Houdini executable is a reparse point", source)
+        self.assertIn("Houdini path traverses a reparse point", source)
+        self.assertIn("$houdiniMetadata = Resolve-HoudiniExecutable", source)
+        leaf_reparse_guard = source.index(
+            'throw "Houdini executable is a reparse point: $resolvedPath"'
+        )
+        parent_walk = source.index("$current = $item.Directory")
+        self.assertLess(leaf_reparse_guard, parent_walk)
+
         self.assertNotIn("setx", source.casefold())
         self.assertNotIn("--experimental", source)
+        self.assertIn("HIA_SCENE_EXECUTOR_TOKEN", source)
+        self.assertIn("HIA_HOUDINI_PROCESS_NONCE", source)
+        self.assertIn("HIA_HOUDINI_SCHEMA_DIGEST", source)
         self.assertEqual(1, source.count("/v1/shutdown"))
         self.assertLess(
             source.index("$houdiniProcess.WaitForExit()"),
@@ -308,16 +412,157 @@ class P1AssetTests(unittest.TestCase):
             source.index("/v1/shutdown"),
         )
         self.assertLess(shutdown_guard, source.index("/v1/shutdown"))
+        cleanup_call = source.rindex(
+            "$ownedCodexProcess = Get-ExactOwnedCodexProcess"
+        )
+        self.assertGreater(cleanup_call, source.index("$bridgeProcess.WaitForExit(7000)"))
+        self.assertIn('-Filter "ParentProcessId = $ParentProcessId"', source)
+        self.assertIn("-CodexExecutablePath $CodexExe", source)
+        self.assertIn("-ExpectedProcessId $expectedCodexPid", source)
+        self.assertNotIn("Get-Process -Id $ownedCodexPid", source)
+        self.assertNotIn(
+            "$null -eq $ownedCodexPid -and -not $bridgeProcess.HasExited",
+            source,
+        )
         self.assertIsNone(re.search(r"(?m)^\s*'USERPROFILE'\s*=", source))
         self.assertIsNone(re.search(r"(?m)^\s*'HOME'\s*=", source))
+
+    def test_launcher_resolves_simulated_h21_and_h22_without_real_install(self) -> None:
+        launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
         escaped_launcher = str(launcher).replace("'", "''")
-        parse_command = (
-            "[void][scriptblock]::Create([IO.File]::ReadAllText("
-            f"'{escaped_launcher}'))"
-        )
-        command = ["powershell", "-NoProfile", "-Command", parse_command]
+        metadata_command = f"""
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{escaped_launcher}', [ref]$tokens, [ref]$parseErrors
+)
+if ($parseErrors.Count -ne 0) {{ throw 'Generic launcher did not parse' }}
+$functionNames = @(
+    'Get-HoudiniCandidatePaths',
+    'Test-HoudiniExecutableMetadata',
+    'Resolve-HoudiniExecutable'
+)
+foreach ($functionName in $functionNames) {{
+    $functions = @($ast.FindAll({{
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $functionName
+    }}, $true))
+    if ($functions.Count -ne 1) {{
+        throw "Launcher function was not uniquely defined: $functionName"
+    }}
+    Invoke-Expression $functions[0].Extent.Text
+}}
+
+$script:SimulatedVersionInfo = $null
+function Test-Path {{
+    param([string]$LiteralPath, [string]$PathType)
+    return $true
+}}
+function Resolve-Path {{
+    param([string]$LiteralPath)
+    return [pscustomobject]@{{
+        Path = [System.IO.Path]::GetFullPath($LiteralPath)
+    }}
+}}
+function Get-Item {{
+    param([string]$LiteralPath, [switch]$Force)
+    return [pscustomobject]@{{
+        Name = [System.IO.Path]::GetFileName($LiteralPath)
+        Attributes = [System.IO.FileAttributes]::Archive
+        Directory = $null
+        VersionInfo = $script:SimulatedVersionInfo
+    }}
+}}
+
+$cases = @(
+    [pscustomobject]@{{
+        Label = 'H21 official company-only metadata'
+        ProductName = ''
+        FileDescription = ''
+        CompanyName = 'Side Effects Software Inc.'
+        ProductVersion = ''
+        FileVersion = '21, 0, 0, 440'
+        ExpectedPass = $true
+        ExpectedBuild = '21, 0, 0, 440'
+    }},
+    [pscustomobject]@{{
+        Label = 'H22 official company-only metadata'
+        ProductName = ' '
+        FileDescription = "`t"
+        CompanyName = 'Side Effects Software Inc.'
+        ProductVersion = '22, 0, 0, 100'
+        FileVersion = ''
+        ExpectedPass = $true
+        ExpectedBuild = '22, 0, 0, 100'
+    }},
+    [pscustomobject]@{{
+        Label = 'wrong company'
+        ProductName = 'Houdini 22.0'
+        FileDescription = 'Houdini'
+        CompanyName = 'Example Software Inc.'
+        ProductVersion = '22, 0, 0, 100'
+        FileVersion = ''
+        ExpectedPass = $false
+        ExpectedBuild = $null
+    }},
+    [pscustomobject]@{{
+        Label = 'description compatibility'
+        ProductName = 'SideFX Application'
+        FileDescription = 'Houdini'
+        CompanyName = 'Side Effects Software Inc.'
+        ProductVersion = '22.0.100'
+        FileVersion = ''
+        ExpectedPass = $true
+        ExpectedBuild = '22.0.100'
+    }},
+    [pscustomobject]@{{
+        Label = 'conflicting identity'
+        ProductName = 'SideFX Application'
+        FileDescription = '3D Software'
+        CompanyName = 'Side Effects Software Inc.'
+        ProductVersion = '22.0.100'
+        FileVersion = ''
+        ExpectedPass = $false
+        ExpectedBuild = $null
+    }},
+    [pscustomobject]@{{
+        Label = 'missing build'
+        ProductName = ''
+        FileDescription = ''
+        CompanyName = 'Side Effects Software Inc.'
+        ProductVersion = ''
+        FileVersion = ''
+        ExpectedPass = $false
+        ExpectedBuild = $null
+    }}
+)
+foreach ($case in $cases) {{
+    $script:SimulatedVersionInfo = [pscustomobject]@{{
+        ProductName = $case.ProductName
+        FileDescription = $case.FileDescription
+        CompanyName = $case.CompanyName
+        ProductVersion = $case.ProductVersion
+        FileVersion = $case.FileVersion
+    }}
+    $resolved = $null
+    $passed = $true
+    try {{
+        $resolved = Resolve-HoudiniExecutable `
+            -RequestedPath 'E:\simulated\houdini.exe'
+    }} catch {{
+        $passed = $false
+    }}
+    if ($passed -ne [bool]$case.ExpectedPass) {{
+        throw "Unexpected resolver result for $($case.Label): $passed"
+    }}
+    if ($passed -and $resolved.Build -ne $case.ExpectedBuild) {{
+        throw "Unexpected build for $($case.Label): $($resolved.Build)"
+    }}
+}}
+"""
         completed = subprocess.run(
-            command,
+            ["powershell", "-NoProfile", "-Command", metadata_command],
             cwd=REPOSITORY_ROOT,
             capture_output=True,
             text=True,
@@ -325,6 +570,81 @@ class P1AssetTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_legacy_launcher_is_a_two_parameter_forwarding_wrapper(self) -> None:
+        generic = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+        legacy = REPOSITORY_ROOT / "scripts" / "launch-houdini-21.0.440.ps1"
+        self.assertTrue(generic.is_file())
+        self.assertTrue(legacy.is_file())
+        source = legacy.read_text(encoding="utf-8")
+        self.assertLessEqual(len(source.splitlines()), 12)
+        self.assertIn("[string]$BridgePython =", source)
+        self.assertIn("[string]$HoudiniExe = ''", source)
+        self.assertEqual(1, source.count("launch-houdini.ps1"))
+        self.assertEqual(1, source.count("-BridgePython $BridgePython"))
+        self.assertEqual(1, source.count("-HoudiniExe $HoudiniExe"))
+        for duplicated_logic in (
+            "function Resolve-HoudiniExecutable",
+            "Get-Command -Name 'houdini.exe'",
+            "ProcessStartInfo",
+            "HIA_BRIDGE_URL",
+            "/v1/shutdown",
+        ):
+            self.assertNotIn(duplicated_logic, source)
+
+        for launcher in (generic, legacy):
+            escaped_launcher = str(launcher).replace("'", "''")
+            parse_command = (
+                "[void][scriptblock]::Create([IO.File]::ReadAllText("
+                f"'{escaped_launcher}'))"
+            )
+            completed = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", parse_command],
+                cwd=REPOSITORY_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_b2_runtime_wiring_is_read_only_and_live_start_remains_manual(self) -> None:
+        bridge_main = (
+            REPOSITORY_ROOT / "services" / "bridge" / "hia_bridge" / "main.py"
+        ).read_text(encoding="utf-8")
+        mcp_stdio = (
+            REPOSITORY_ROOT
+            / "services"
+            / "houdini_mcp"
+            / "hia_houdini_mcp"
+            / "stdio.py"
+        ).read_text(encoding="utf-8")
+        panel_source = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_panel"
+            / "panel.py"
+        ).read_text(encoding="utf-8")
+        ast.parse(bridge_main)
+        ast.parse(mcp_stdio)
+        ast.parse(panel_source)
+
+        self.assertIn("SchemaRegistry.b2_read_only", bridge_main)
+        self.assertIn("B2_READ_ONLY_PROFILE", bridge_main)
+        self.assertIn('"executor_token": scene_executor_token', bridge_main)
+        self.assertNotIn("import hou", bridge_main)
+        self.assertNotIn("from hou", bridge_main)
+        self.assertIn("HoudiniMCPAdapter.b2_read_only", mcp_stdio)
+        self.assertIn("B2A_REAL_MCP_START_DISABLED", mcp_stdio)
+        self.assertIn('QtWidgets.QGroupBox("Houdini 只读状态")', panel_source)
+        for forbidden_button in (
+            'QPushButton("Apply")',
+            'QPushButton("应用")',
+            'QPushButton("创建节点")',
+            'QPushButton("执行图")',
+        ):
+            self.assertNotIn(forbidden_button, panel_source)
 
     def test_panel_close_has_only_local_lifecycle_ownership(self) -> None:
         panel_source = (

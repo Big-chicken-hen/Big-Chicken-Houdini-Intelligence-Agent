@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import os
+import re
 import sys
 import types
 import unittest
 from collections import deque
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -174,6 +178,9 @@ class _BridgeClientShim:
         self.session_contexts: list[str] = []
         self.model_requests = 0
         self.dispose_calls = 0
+        self.capability_reports: list[dict[str, Any]] = []
+        self.scene_polls: list[int] = []
+        self.scene_results: list[tuple[str, str, dict[str, Any]]] = []
 
     def start_thread(self, *, model: str | None) -> None:
         self.thread_requests.append(model)
@@ -196,6 +203,53 @@ class _BridgeClientShim:
 
     def get_session(self, *, context: str) -> None:
         self.session_contexts.append(context)
+
+    def dispose(self) -> None:
+        self.dispose_calls += 1
+
+    def publish_houdini_capabilities(self, report: dict[str, Any]) -> str:
+        self.capability_reports.append(dict(report))
+        return "capability-request"
+
+    def poll_scene_work(self, wait_ms: int) -> str:
+        self.scene_polls.append(wait_ms)
+        return "work-poll"
+
+    def complete_scene_work(
+        self,
+        request_id: str,
+        executor_token: str,
+        result: dict[str, Any],
+    ) -> str:
+        self.scene_results.append((request_id, executor_token, dict(result)))
+        return "result-request"
+
+
+class _ReadAdapterShim:
+    def __init__(self) -> None:
+        self.dispose_calls = 0
+        self.execute_threads: list[int] = []
+        self.refresh_report: dict[str, Any] | None = None
+
+    def refresh(self) -> dict[str, Any]:
+        if self.refresh_report is None:
+            raise AssertionError("refresh_report was not configured")
+        return dict(self.refresh_report)
+
+    def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        absolute_deadline: float | None,
+    ) -> dict[str, Any]:
+        self.execute_threads.append(__import__("threading").get_ident())
+        return {
+            "ok": True,
+            "tool": tool_name,
+            "request_id": arguments["request_id"],
+            "deadline": absolute_deadline,
+        }
 
     def dispose(self) -> None:
         self.dispose_calls += 1
@@ -226,12 +280,28 @@ def _make_panel() -> Any:
     panel._models_requested = False
     panel._pending_approvals = deque()
     panel._current_approval = None
+    panel._houdini_adapter = None
+    panel._houdini_polling_enabled = False
+    panel._scene_capability_pending = False
+    panel._scene_work_pending = False
+    panel._scene_attestation_digest = None
+    panel._scene_catalog_digest = None
+    panel._last_houdini_report = None
+    panel._attested_houdini_report_identity = None
+    panel._pending_houdini_report_identity = None
+    panel._scene_executor_token = "executor-secret"
     panel._client = _BridgeClientShim()
 
     panel.connection_label = _Widget()
     panel.auth_label = _Widget()
     panel.thread_status_label = _Widget("Thread：thread-1")
     panel.turn_status_label = _Widget("Turn：空闲")
+    panel.houdini_build_label = _Widget("Build：不可用")
+    panel.houdini_session_label = _Widget("HIP Session：不可用")
+    panel.houdini_revision_label = _Widget("Revision：不可用")
+    panel.houdini_catalog_label = _Widget("Catalog：未验证")
+    panel.houdini_schema_label = _Widget("Schema：未验证")
+    panel.houdini_tools_label = _Widget()
     panel.thread_id_edit = _Widget("thread-1")
     panel.new_thread_button = _Widget()
     panel.resume_thread_button = _Widget()
@@ -281,6 +351,26 @@ def _completed_notification(turn_id: str, *, sequence: int = 1) -> dict[str, Any
     }
 
 
+def _available_houdini_report() -> dict[str, Any]:
+    return {
+        "available": True,
+        "houdini_build": "21.0.440",
+        "hip_session_id": "hip-session-1234567890",
+        "scene_revision": 7,
+        "observer_sequence": 1,
+        "catalog": [
+            {"canonical_type_name": type_name, "available": True}
+            for type_name in (
+                "Object/geo",
+                "Sop/box",
+                "Sop/transform",
+                "Sop/merge",
+                "Sop/null",
+            )
+        ],
+    }
+
+
 class PanelWiringTests(unittest.TestCase):
     def assert_idle_controls(self, panel: Any) -> None:
         self.assertEqual(TurnPhase.IDLE, panel._turn_state.phase)
@@ -303,6 +393,280 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual(1, client.dispose_calls)
         self.assertEqual(2, event.base_close_calls)
         self.assertFalse(hasattr(client, "shutdown"))
+
+    def test_b2_capability_status_and_work_stay_on_panel_thread(self) -> None:
+        panel = _make_panel()
+        adapter = _ReadAdapterShim()
+        panel._houdini_adapter = adapter
+        panel._houdini_polling_enabled = True
+        panel._last_houdini_report = _available_houdini_report()
+        panel._pending_houdini_report_identity = panel._houdini_report_identity(
+            panel._last_houdini_report
+        )
+        scheduled: list[int] = []
+        panel._schedule_scene_work_poll = scheduled.append
+
+        panel._on_action_completed(
+            "scene_capabilities",
+            {
+                "ok": True,
+                "available": True,
+                "attestation_digest": "a" * 64,
+                "catalog_digest": "b" * 64,
+                "observer_sequence": 1,
+            },
+        )
+        self.assertEqual("a" * 64, panel._scene_attestation_digest)
+        self.assertIn("匹配", panel.houdini_catalog_label.text())
+        self.assertIn("scene_info：可用", panel.houdini_tools_label.text())
+        self.assertEqual([0], scheduled)
+
+        panel._on_action_completed(
+            "scene_work",
+            {
+                "ok": True,
+                "work": {
+                    "kind": "execute",
+                    "request_id": "read-request-1",
+                    "executor_token": "one-request-token",
+                    "attestation_digest": "a" * 64,
+                    "tool_name": "houdini_scene_info",
+                    "arguments": {"request_id": "read-request-1"},
+                    "absolute_deadline": 123.0,
+                },
+            },
+        )
+        self.assertEqual(1, len(panel._client.scene_results))
+        request_id, executor_token, result = panel._client.scene_results[0]
+        self.assertEqual("read-request-1", request_id)
+        self.assertEqual("one-request-token", executor_token)
+        self.assertTrue(result["ok"])
+        self.assertEqual([__import__("threading").get_ident()], adapter.execute_threads)
+
+    def test_b2_stale_work_is_not_executed_and_close_is_local(self) -> None:
+        panel = _make_panel()
+        adapter = _ReadAdapterShim()
+        panel._houdini_adapter = adapter
+        panel._houdini_polling_enabled = True
+        panel._scene_attestation_digest = "c" * 64
+        panel._last_houdini_report = _available_houdini_report()
+        panel._schedule_scene_work_poll = lambda _delay: None
+
+        panel._on_action_completed(
+            "scene_work",
+            {
+                "ok": True,
+                "work": {
+                    "kind": "execute",
+                    "request_id": "stale-read",
+                    "executor_token": "one-request-token",
+                    "attestation_digest": "d" * 64,
+                    "tool_name": "houdini_scene_info",
+                    "arguments": {"request_id": "stale-read"},
+                    "absolute_deadline": 123.0,
+                },
+            },
+        )
+        self.assertEqual([], adapter.execute_threads)
+        self.assertEqual([], panel._client.scene_results)
+        self.assertIsNone(panel._scene_attestation_digest)
+        self.assertIn("scene_info：不可用", panel.houdini_tools_label.text())
+
+        client = panel._client
+        event = _CloseEvent()
+        panel.closeEvent(event)
+        panel.closeEvent(event)
+        self.assertEqual(1, adapter.dispose_calls)
+        self.assertEqual(1, client.dispose_calls)
+        self.assertFalse(hasattr(client, "shutdown"))
+
+    def test_b2_local_report_is_pending_until_bridge_ack_and_failures_close(self) -> None:
+        panel = _make_panel()
+        report = _available_houdini_report()
+        panel._last_houdini_report = report
+
+        panel._update_houdini_status(report, attested=False, pending=True)
+        self.assertIn("scene_info：待认证", panel.houdini_tools_label.text())
+        self.assertNotIn("scene_info：可用", panel.houdini_tools_label.text())
+
+        for context in (
+            "scene_capabilities",
+            "scene_work",
+            "scene_result:read-request-1",
+        ):
+            panel._pending_houdini_report_identity = panel._houdini_report_identity(
+                report
+            )
+            panel._on_action_completed(
+                "scene_capabilities",
+                {
+                    "available": True,
+                    "attestation_digest": "a" * 64,
+                    "catalog_digest": "b" * 64,
+                    "observer_sequence": 1,
+                },
+            )
+            self.assertIn("scene_info：可用", panel.houdini_tools_label.text())
+            panel._on_request_failed(
+                context,
+                {
+                    "structured_error": {
+                        "code": "CAPABILITY_MISMATCH",
+                        "message": "read capability changed",
+                    }
+                },
+            )
+            self.assertIsNone(panel._scene_attestation_digest)
+            self.assertIn("scene_info：不可用", panel.houdini_tools_label.text())
+
+    def test_b2_renewal_and_work_response_interleave_does_not_drop_claim(self) -> None:
+        panel = _make_panel()
+        adapter = _ReadAdapterShim()
+        report = _available_houdini_report()
+        adapter.refresh_report = report
+        panel._houdini_adapter = adapter
+        panel._houdini_polling_enabled = True
+        panel._last_houdini_report = report
+        panel._scene_attestation_digest = "a" * 64
+        panel._scene_catalog_digest = "b" * 64
+        panel._attested_houdini_report_identity = panel._houdini_report_identity(report)
+        panel._scene_work_pending = True
+        panel._update_houdini_status(report, attested=True)
+        scheduled: list[int] = []
+        panel._schedule_houdini_heartbeat = scheduled.append
+
+        panel._houdini_heartbeat()
+
+        self.assertEqual("a" * 64, panel._scene_attestation_digest)
+        self.assertTrue(panel._scene_capability_pending)
+        self.assertTrue(panel._scene_work_pending)
+        self.assertEqual([report], panel._client.capability_reports)
+        self.assertIn("scene_info：可用", panel.houdini_tools_label.text())
+        self.assertEqual([1_000], scheduled)
+
+        panel._on_action_completed(
+            "scene_work",
+            {
+                "work": {
+                    "kind": "execute",
+                    "request_id": "renewal-interleave-read",
+                    "executor_token": "one-request-token",
+                    "attestation_digest": "a" * 64,
+                    "tool_name": "houdini_scene_info",
+                    "arguments": {"request_id": "renewal-interleave-read"},
+                    "absolute_deadline": 123.0,
+                }
+            },
+        )
+        self.assertEqual(1, len(adapter.execute_threads))
+        self.assertEqual(1, len(panel._client.scene_results))
+
+    def test_b2_changed_report_revokes_old_ui_attestation_until_ack(self) -> None:
+        panel = _make_panel()
+        adapter = _ReadAdapterShim()
+        attested_report = _available_houdini_report()
+        changed_report = _available_houdini_report()
+        changed_report["scene_revision"] = 8
+        changed_report["observer_sequence"] = 2
+        adapter.refresh_report = changed_report
+        panel._houdini_adapter = adapter
+        panel._houdini_polling_enabled = True
+        panel._last_houdini_report = attested_report
+        panel._scene_attestation_digest = "a" * 64
+        panel._scene_catalog_digest = "b" * 64
+        panel._attested_houdini_report_identity = panel._houdini_report_identity(
+            attested_report
+        )
+        panel._update_houdini_status(attested_report, attested=True)
+        panel._schedule_houdini_heartbeat = lambda _delay: None
+
+        panel._houdini_heartbeat()
+
+        self.assertIsNone(panel._scene_attestation_digest)
+        self.assertTrue(panel._scene_capability_pending)
+        self.assertEqual([changed_report], panel._client.capability_reports)
+        self.assertIn("scene_info：待认证", panel.houdini_tools_label.text())
+
+    def test_b2_capability_ack_must_match_pending_report_and_full_catalog(self) -> None:
+        panel = _make_panel()
+        report = _available_houdini_report()
+        panel._last_houdini_report = report
+        panel._pending_houdini_report_identity = panel._houdini_report_identity(report)
+
+        panel._on_action_completed(
+            "scene_capabilities",
+            {
+                "available": True,
+                "attestation_digest": "a" * 64,
+                "catalog_digest": "b" * 64,
+                "observer_sequence": 2,
+            },
+        )
+        self.assertIsNone(panel._scene_attestation_digest)
+        self.assertIn("scene_info：不可用", panel.houdini_tools_label.text())
+
+        incomplete_report = _available_houdini_report()
+        incomplete_report["catalog"] = incomplete_report["catalog"][:-1]
+        panel._last_houdini_report = incomplete_report
+        panel._pending_houdini_report_identity = panel._houdini_report_identity(
+            incomplete_report
+        )
+        panel._on_action_completed(
+            "scene_capabilities",
+            {
+                "available": True,
+                "attestation_digest": "a" * 64,
+                "catalog_digest": "b" * 64,
+                "observer_sequence": 1,
+            },
+        )
+        self.assertIsNone(panel._scene_attestation_digest)
+        self.assertIn("scene_info：不可用", panel.houdini_tools_label.text())
+
+    def test_b2_panel_publisher_is_nonce_bound_and_unique_per_instance(self) -> None:
+        nonce = "process-nonce-0123456789abcdef"
+        prefix = hashlib.sha256(nonce.encode("utf-8")).hexdigest()[:16]
+        publisher_ids: list[str] = []
+
+        class _CapturingAdapter:
+            def __init__(
+                self,
+                _hou_module: Any,
+                *,
+                publisher_id: str,
+                pyside_version: str,
+                fingerprint_key: bytes,
+            ) -> None:
+                del pyside_version, fingerprint_key
+                publisher_ids.append(publisher_id)
+
+            def start(self) -> dict[str, Any]:
+                return _available_houdini_report()
+
+        method_globals = HoudiniIntelligencePanel._initialize_houdini_read_adapter.__globals__
+        original_adapter = method_globals["HoudiniReadAdapter"]
+        environment = {
+            "HIA_SCENE_PROFILE": "p2-v-b2-read-only",
+            "HIA_BRIDGE_LAUNCH_ID": "bridge-launch-1",
+            "HIA_BRIDGE_GENERATION": "1",
+            "HIA_HOUDINI_PROCESS_NONCE": nonce,
+            "HIA_HOUDINI_SCHEMA_VERSION": "0.2.0",
+            "HIA_HOUDINI_SCHEMA_DIGEST": "c" * 64,
+        }
+        try:
+            method_globals["HoudiniReadAdapter"] = _CapturingAdapter
+            with mock.patch.dict(os.environ, environment, clear=False):
+                first = _make_panel()
+                second = _make_panel()
+                first._initialize_houdini_read_adapter(object())
+                second._initialize_houdini_read_adapter(object())
+        finally:
+            method_globals["HoudiniReadAdapter"] = original_adapter
+
+        self.assertEqual(2, len(publisher_ids))
+        self.assertNotEqual(publisher_ids[0], publisher_ids[1])
+        pattern = re.compile(rf"^panel-{prefix}-[0-9a-f]{{16}}$")
+        self.assertTrue(all(pattern.fullmatch(value) for value in publisher_ids))
 
     def test_no_active_interrupt_is_authoritative_after_final_delta(self) -> None:
         panel = _make_panel()
