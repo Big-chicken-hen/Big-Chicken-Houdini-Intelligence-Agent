@@ -61,6 +61,20 @@ class HoudiniReadAdapterTests(unittest.TestCase):
             arguments["node_types"] = node_types
         return arguments
 
+    @staticmethod
+    def _begin_owned_write(
+        adapter: HoudiniReadAdapter,
+        report: dict[str, Any],
+        *,
+        transaction_id: str = "transaction-1",
+    ) -> object:
+        return adapter.begin_owned_write(
+            transaction_id,
+            expected_hip_session_id=report["hip_session_id"],
+            expected_scene_revision=report["scene_revision"],
+            expected_hip_fingerprint=report["hip_fingerprint"],
+        )
+
     def test_module_has_no_top_level_houdini_import_or_forbidden_calls(self) -> None:
         path = (
             REPOSITORY_ROOT
@@ -252,6 +266,303 @@ class HoudiniReadAdapterTests(unittest.TestCase):
         self.assertEqual(before["scene_revision"] + 1, after["scene_revision"])
         self.assertGreater(after["observer_sequence"], before["observer_sequence"])
         self.assertNotEqual(before["hip_fingerprint"], after["hip_fingerprint"])
+
+    def test_owned_write_coalesces_commit_rollback_and_indeterminate(self) -> None:
+        cases = (
+            ("committed", 1, False),
+            ("rolled_back", 0, True),
+            ("indeterminate", 1, False),
+        )
+        for outcome, expected_delta, fingerprint_restored in cases:
+            with self.subTest(outcome=outcome):
+                fake = FakeHou()
+                adapter = self._adapter(fake)
+                before = adapter.start()
+                token = self._begin_owned_write(adapter, before)
+
+                during = adapter.capability_report()
+                self.assertFalse(during["available"])
+                self.assertEqual(before["scene_revision"], during["scene_revision"])
+
+                expectation = adapter.begin_owned_mutation(
+                    token,
+                    expected_callback_source=fake.obj,
+                )
+                fake.trigger_manual_change()
+                fake.trigger_manual_change()
+                self.assertEqual(
+                    2,
+                    adapter.finish_owned_mutation(token, expectation),
+                )
+                coalesced = adapter.capability_report()
+                self.assertEqual(
+                    before["scene_revision"], coalesced["scene_revision"]
+                )
+                self.assertEqual(
+                    before["observer_sequence"], coalesced["observer_sequence"]
+                )
+
+                after = adapter.finish_owned_write(token, outcome=outcome)
+                self.assertTrue(after["available"])
+                self.assertEqual(
+                    before["scene_revision"] + expected_delta,
+                    after["scene_revision"],
+                )
+                self.assertEqual(
+                    before["observer_sequence"] + 1,
+                    after["observer_sequence"],
+                )
+                self.assertEqual(
+                    fingerprint_restored,
+                    before["hip_fingerprint"] == after["hip_fingerprint"],
+                )
+
+    def test_owned_write_unmarked_existing_node_event_is_external(self) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+
+        fake.trigger_manual_change()
+        observed = adapter.capability_report()
+
+        self.assertEqual(before["scene_revision"] + 1, observed["scene_revision"])
+        self.assertEqual(
+            before["observer_sequence"] + 1,
+            observed["observer_sequence"],
+        )
+        with self.assertRaises(HoudiniReadAdapterError) as raised:
+            adapter.finish_owned_write(token, outcome="indeterminate")
+        self.assertEqual("SCENE_CONFLICT", raised.exception.code)
+        after = adapter.capability_report()
+        self.assertTrue(after["available"])
+        self.assertEqual(observed["scene_revision"], after["scene_revision"])
+
+    def test_owned_mutation_only_coalesces_the_exact_callback_identity(self) -> None:
+        fake = FakeHou()
+        other = fake.add_hia_graph(
+            "HIA_Graph_existing",
+            "a" * 64,
+            notify=False,
+        )
+        adapter = self._adapter(fake)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+        expectation = adapter.begin_owned_mutation(
+            token,
+            expected_callback_source=fake.obj,
+        )
+
+        fake.trigger_manual_change(other.path())
+        observed = adapter.capability_report()
+
+        self.assertEqual(before["scene_revision"] + 1, observed["scene_revision"])
+        with self.assertRaises(HoudiniReadAdapterError) as raised:
+            adapter.finish_owned_mutation(token, expectation)
+        self.assertEqual("SCENE_CONFLICT", raised.exception.code)
+        with self.assertRaises(HoudiniReadAdapterError) as finish_failure:
+            adapter.finish_owned_write(token, outcome="indeterminate")
+        self.assertEqual("SCENE_CONFLICT", finish_failure.exception.code)
+
+    def test_owned_mutation_missing_callback_source_is_external(self) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+        expectation = adapter.begin_owned_mutation(
+            token,
+            expected_callback_source=fake.obj,
+        )
+
+        adapter._on_node_event(event_type=fake.nodeEventType.ParmTupleChanged)
+
+        with self.assertRaises(HoudiniReadAdapterError) as raised:
+            adapter.finish_owned_mutation(token, expectation)
+        self.assertEqual("SCENE_CONFLICT", raised.exception.code)
+        with self.assertRaises(HoudiniReadAdapterError):
+            adapter.finish_owned_write(token, outcome="indeterminate")
+
+    def test_owned_mutation_expectations_are_opaque_serial_and_main_thread_only(
+        self,
+    ) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake)
+        before = adapter.start()
+
+        with self.assertRaises(HoudiniReadAdapterError) as inactive:
+            adapter.begin_owned_mutation(
+                object(),
+                expected_callback_source=fake.obj,
+            )
+        self.assertEqual("INVALID_ARGUMENT", inactive.exception.code)
+
+        token = self._begin_owned_write(adapter, before)
+        expectation = adapter.begin_owned_mutation(
+            token,
+            expected_callback_source=fake.obj,
+        )
+        self.assertIs(type(expectation), object)
+        with self.assertRaises(HoudiniReadAdapterError) as nested:
+            adapter.begin_owned_mutation(
+                token,
+                expected_callback_source=fake.obj,
+            )
+        self.assertEqual("SCENE_CONFLICT", nested.exception.code)
+        with self.assertRaises(HoudiniReadAdapterError) as forged:
+            adapter.finish_owned_mutation(token, object())
+        self.assertEqual("INVALID_ARGUMENT", forged.exception.code)
+
+        failures: list[HoudiniReadAdapterError] = []
+
+        def worker_finish() -> None:
+            try:
+                adapter.finish_owned_mutation(token, expectation)
+            except HoudiniReadAdapterError as exc:
+                failures.append(exc)
+
+        worker = threading.Thread(target=worker_finish)
+        worker.start()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("MAIN_THREAD_REQUIRED", failures[0].code)
+
+        self.assertEqual(0, adapter.finish_owned_mutation(token, expectation))
+        with self.assertRaises(HoudiniReadAdapterError) as replayed:
+            adapter.finish_owned_mutation(token, expectation)
+        self.assertEqual("INVALID_ARGUMENT", replayed.exception.code)
+        adapter.finish_owned_write(token, outcome="rolled_back")
+
+    def test_owned_write_snapshot_and_opaque_token_fail_closed(self) -> None:
+        adapter = self._adapter(FakeHou())
+        before = adapter.start()
+
+        stale_cases = (
+            ({"expected_hip_session_id": "stale-session"}, "HIP_SESSION_MISMATCH"),
+            (
+                {"expected_scene_revision": before["scene_revision"] + 1},
+                "SCENE_CONFLICT",
+            ),
+            ({"expected_hip_fingerprint": "f" * 64}, "SCENE_CONFLICT"),
+        )
+        for replacement, expected_code in stale_cases:
+            with self.subTest(replacement=replacement):
+                arguments = {
+                    "expected_hip_session_id": before["hip_session_id"],
+                    "expected_scene_revision": before["scene_revision"],
+                    "expected_hip_fingerprint": before["hip_fingerprint"],
+                    **replacement,
+                }
+                with self.assertRaises(HoudiniReadAdapterError) as raised:
+                    adapter.begin_owned_write("transaction-stale", **arguments)
+                self.assertEqual(expected_code, raised.exception.code)
+                self.assertEqual(before, adapter.capability_report())
+
+        token = self._begin_owned_write(adapter, before)
+        self.assertIs(type(token), object)
+        with self.assertRaises(HoudiniReadAdapterError) as forged:
+            adapter.finish_owned_write(object(), outcome="committed")
+        self.assertEqual("INVALID_ARGUMENT", forged.exception.code)
+        with self.assertRaises(HoudiniReadAdapterError) as nested:
+            self._begin_owned_write(
+                adapter,
+                before,
+                transaction_id="transaction-nested",
+            )
+        self.assertEqual("SCENE_CONFLICT", nested.exception.code)
+
+        restored = adapter.finish_owned_write(token, outcome="rolled_back")
+        self.assertEqual(before, restored)
+        with self.assertRaises(HoudiniReadAdapterError) as replayed:
+            adapter.finish_owned_write(token, outcome="rolled_back")
+        self.assertEqual("INVALID_ARGUMENT", replayed.exception.code)
+
+    def test_owned_write_begin_and_finish_require_the_main_thread(self) -> None:
+        adapter = self._adapter(FakeHou())
+        before = adapter.start()
+        begin_failures: list[HoudiniReadAdapterError] = []
+
+        def begin_worker() -> None:
+            try:
+                self._begin_owned_write(adapter, before)
+            except HoudiniReadAdapterError as exc:
+                begin_failures.append(exc)
+
+        worker = threading.Thread(target=begin_worker)
+        worker.start()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("MAIN_THREAD_REQUIRED", begin_failures[0].code)
+        self.assertEqual(before, adapter.capability_report())
+
+        token = self._begin_owned_write(adapter, before)
+        finish_failures: list[HoudiniReadAdapterError] = []
+
+        def finish_worker() -> None:
+            try:
+                adapter.finish_owned_write(token, outcome="rolled_back")
+            except HoudiniReadAdapterError as exc:
+                finish_failures.append(exc)
+
+        worker = threading.Thread(target=finish_worker)
+        worker.start()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("MAIN_THREAD_REQUIRED", finish_failures[0].code)
+        self.assertEqual(
+            before,
+            adapter.finish_owned_write(token, outcome="rolled_back"),
+        )
+
+    def test_owned_write_hip_events_invalidate_without_rewriting_observation(self) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+
+        fake.trigger_save()
+        observed_save = adapter.capability_report()
+        with self.assertRaises(HoudiniReadAdapterError) as save_failure:
+            adapter.finish_owned_write(token, outcome="rolled_back")
+        self.assertEqual("SCENE_CONFLICT", save_failure.exception.code)
+        after_save = adapter.capability_report()
+        expected_after_save = dict(observed_save)
+        expected_after_save["available"] = True
+        self.assertEqual(expected_after_save, after_save)
+        self.assertEqual(before["scene_revision"] + 1, after_save["scene_revision"])
+
+        fake = FakeHou()
+        adapter = self._adapter(fake)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+        fake.trigger_load()
+        changed_session = adapter.capability_report()
+        with self.assertRaises(HoudiniReadAdapterError) as load_failure:
+            adapter.finish_owned_write(token, outcome="rolled_back")
+        self.assertEqual("HIP_SESSION_MISMATCH", load_failure.exception.code)
+        self.assertEqual(changed_session, adapter.capability_report())
+        self.assertNotEqual(
+            before["hip_session_id"], changed_session["hip_session_id"]
+        )
+        self.assertEqual(0, changed_session["scene_revision"])
+
+    def test_owned_write_off_main_callback_invalidates_sticky_fail_closed(self) -> None:
+        fake = FakeHou()
+        adapter = self._adapter(fake)
+        before = adapter.start()
+        token = self._begin_owned_write(adapter, before)
+
+        worker = threading.Thread(target=fake.trigger_manual_change)
+        worker.start()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+
+        failed = adapter.capability_report()
+        self.assertFalse(failed["available"])
+        self.assertFalse(failed["revision_observer_reliable"])
+        with self.assertRaises(HoudiniReadAdapterError) as raised:
+            adapter.finish_owned_write(token, outcome="indeterminate")
+        self.assertEqual("HOUDINI_UNAVAILABLE", raised.exception.code)
+        self.assertFalse(adapter.capability_report()["available"])
 
     def test_save_advances_snapshot_without_replacing_session_or_leaking_path(self) -> None:
         fake = FakeHou()

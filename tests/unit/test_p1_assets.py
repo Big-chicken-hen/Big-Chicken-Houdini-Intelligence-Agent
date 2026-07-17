@@ -170,7 +170,7 @@ class P1AssetTests(unittest.TestCase):
                     offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
         self.assertEqual([], offenders)
 
-    def test_b2_houdini_package_contains_no_scene_write_or_cook_calls(self) -> None:
+    def test_b4a_only_dormant_adapter_contains_bounded_scene_write_calls(self) -> None:
         package_root = REPOSITORY_ROOT / "houdini_package"
         forbidden_attributes = {
             "createNode",
@@ -188,7 +188,13 @@ class P1AssetTests(unittest.TestCase):
             "uninstallFile",
             "reloadAllFiles",
         }
-        found: list[str] = []
+        dormant = (
+            package_root
+            / "python_libs"
+            / "hia_panel"
+            / "houdini_write_adapter.py"
+        )
+        found: dict[Path, set[str]] = {}
         for path in sorted(package_root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -197,10 +203,18 @@ class P1AssetTests(unittest.TestCase):
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr in forbidden_attributes
                 ):
-                    found.append(
-                        f"{path.relative_to(REPOSITORY_ROOT)}:{node.lineno}:{node.func.attr}"
-                    )
-        self.assertEqual([], found)
+                    found.setdefault(path, set()).add(node.func.attr)
+        self.assertEqual({dormant}, set(found))
+        self.assertEqual({"createNode", "setInput", "destroy"}, found[dormant])
+
+        for path in sorted(package_root.rglob("*.py")):
+            if path == dormant:
+                continue
+            self.assertNotIn(
+                "houdini_write_adapter",
+                path.read_text(encoding="utf-8"),
+                str(path.relative_to(REPOSITORY_ROOT)),
+            )
 
     def test_panel_displays_ignored_notification_method(self) -> None:
         panel_path = (

@@ -165,6 +165,10 @@ class HoudiniReadAdapter:
         self._node_event_types: tuple[Any, ...] = ()
         self._observed_nodes: dict[str, tuple[int, Any]] = {}
         self._last_refresh = 0.0
+        # Gate B4A may explicitly arm this dormant revision coordinator around
+        # one already-authorized owned write.  No production path constructs or
+        # calls it, and its opaque token is deliberately absent from reports.
+        self._owned_write: dict[str, Any] | None = None
 
     @property
     def main_thread_id(self) -> int:
@@ -173,6 +177,244 @@ class HoudiniReadAdapter:
     @property
     def publisher_id(self) -> str:
         return self._publisher_id
+
+    def begin_owned_write(
+        self,
+        transaction_id: str,
+        *,
+        expected_hip_session_id: str,
+        expected_scene_revision: int,
+        expected_hip_fingerprint: str,
+    ) -> object:
+        """Arm callback coalescing for one internal, already-authorized write.
+
+        This method grants no write authority and performs no HOM mutation.  A
+        caller must retain the returned object and present that exact object to
+        :meth:`finish_owned_write`; request data can never recreate the token.
+        """
+
+        self._assert_main_thread()
+        if not isinstance(transaction_id, str) or _IDENTIFIER.fullmatch(
+            transaction_id
+        ) is None:
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT",
+                "The owned write transaction ID is invalid",
+            )
+        if (
+            not isinstance(expected_hip_session_id, str)
+            or _IDENTIFIER.fullmatch(expected_hip_session_id) is None
+            or not isinstance(expected_hip_fingerprint, str)
+            or _DIGEST.fullmatch(expected_hip_fingerprint) is None
+            or isinstance(expected_scene_revision, bool)
+            or not isinstance(expected_scene_revision, int)
+            or not 0 <= expected_scene_revision < _MAX_SESSION_ID
+        ):
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT",
+                "The expected owned write snapshot is invalid",
+            )
+
+        with self._state_lock:
+            if self._owned_write is not None:
+                raise HoudiniReadAdapterError(
+                    "SCENE_CONFLICT",
+                    "Another owned write revision transaction is active",
+                )
+            if (
+                not self._started
+                or self._disposed
+                or self._observer_violation
+                or not self._session_observer_reliable
+                or not self._revision_observer_reliable
+                or not self._build_valid
+                or not self._catalog_valid
+            ):
+                raise HoudiniReadAdapterError(
+                    "HOUDINI_UNAVAILABLE",
+                    "Reliable Houdini observation is unavailable for an owned write",
+                )
+            if expected_hip_session_id != self._hip_session_id:
+                raise HoudiniReadAdapterError(
+                    "HIP_SESSION_MISMATCH",
+                    "The expected HIP session is no longer current",
+                )
+            if expected_scene_revision != self._scene_revision:
+                raise HoudiniReadAdapterError(
+                    "SCENE_CONFLICT",
+                    "The expected scene revision is no longer current",
+                )
+            if not hmac.compare_digest(
+                expected_hip_fingerprint, self._hip_fingerprint()
+            ):
+                raise HoudiniReadAdapterError(
+                    "SCENE_CONFLICT",
+                    "The expected HIP fingerprint is no longer current",
+                )
+
+            token = object()
+            self._owned_write = {
+                "token": token,
+                "transaction_id": transaction_id,
+                "hip_session_id": self._hip_session_id,
+                "base_scene_revision": self._scene_revision,
+                "base_observer_sequence": self._observer_sequence,
+                "pending_node_events": 0,
+                "mutation_expectation": None,
+                "invalidated": False,
+            }
+            return token
+
+    def begin_owned_mutation(
+        self,
+        token: object,
+        *,
+        expected_callback_source: object,
+    ) -> object:
+        """Expect callbacks from exactly one internal HOM mutator source.
+
+        The expectation is deliberately identity based: only a callback whose
+        ``node`` object *is* ``expected_callback_source`` may be coalesced into
+        the active owned write.  A missing, different, late, or otherwise
+        unmarked callback remains an external scene observation and invalidates
+        the write.  This method grants no mutation or approval authority.
+        """
+
+        self._assert_main_thread()
+        if expected_callback_source is None:
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT",
+                "The owned mutation callback source is invalid",
+            )
+
+        with self._state_lock:
+            transaction = self._owned_write
+            if transaction is None or token is not transaction["token"]:
+                raise HoudiniReadAdapterError(
+                    "INVALID_ARGUMENT",
+                    "The owned write token is invalid",
+                )
+            if transaction["invalidated"]:
+                raise HoudiniReadAdapterError(
+                    "SCENE_CONFLICT",
+                    "The owned write was invalidated by an external scene change",
+                )
+            if transaction["mutation_expectation"] is not None:
+                raise HoudiniReadAdapterError(
+                    "SCENE_CONFLICT",
+                    "Another owned mutation callback expectation is active",
+                )
+
+            expectation_token = object()
+            transaction["mutation_expectation"] = {
+                "token": expectation_token,
+                "callback_source": expected_callback_source,
+                "event_count": 0,
+            }
+            return expectation_token
+
+    def finish_owned_mutation(
+        self,
+        token: object,
+        expectation_token: object,
+    ) -> int:
+        """Close one exact callback expectation and return its event count."""
+
+        self._assert_main_thread()
+        failure: tuple[str, str] | None = None
+        with self._state_lock:
+            transaction = self._owned_write
+            if transaction is None or token is not transaction["token"]:
+                raise HoudiniReadAdapterError(
+                    "INVALID_ARGUMENT",
+                    "The owned write token is invalid",
+                )
+            expectation = transaction["mutation_expectation"]
+            if expectation is None or expectation_token is not expectation["token"]:
+                raise HoudiniReadAdapterError(
+                    "INVALID_ARGUMENT",
+                    "The owned mutation expectation token is invalid",
+                )
+
+            event_count = expectation["event_count"]
+            transaction["mutation_expectation"] = None
+            if transaction["invalidated"]:
+                failure = (
+                    "SCENE_CONFLICT",
+                    "The owned mutation observed an external scene change",
+                )
+
+        if failure is not None:
+            raise HoudiniReadAdapterError(*failure)
+        return event_count
+
+    def finish_owned_write(
+        self,
+        token: object,
+        *,
+        outcome: str,
+    ) -> dict[str, Any]:
+        """Finish one owned write and publish its single revision outcome."""
+
+        self._assert_main_thread()
+        if outcome not in {"committed", "rolled_back", "indeterminate"}:
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT",
+                "The owned write outcome is invalid",
+            )
+
+        failure: tuple[str, str] | None = None
+        with self._state_lock:
+            transaction = self._owned_write
+            if transaction is None or token is not transaction["token"]:
+                raise HoudiniReadAdapterError(
+                    "INVALID_ARGUMENT",
+                    "The owned write token is invalid",
+                )
+
+            base_session = transaction["hip_session_id"]
+            base_revision = transaction["base_scene_revision"]
+            base_sequence = transaction["base_observer_sequence"]
+            if self._disposed or self._observer_violation:
+                failure = (
+                    "HOUDINI_UNAVAILABLE",
+                    "Reliable Houdini observation was lost during the owned write",
+                )
+            elif self._hip_session_id != base_session:
+                failure = (
+                    "HIP_SESSION_MISMATCH",
+                    "The HIP session changed during the owned write",
+                )
+            elif (
+                transaction["invalidated"]
+                or transaction["mutation_expectation"] is not None
+                or self._scene_revision != base_revision
+                or self._observer_sequence != base_sequence
+                or not self._session_observer_reliable
+                or not self._revision_observer_reliable
+            ):
+                failure = (
+                    "SCENE_CONFLICT",
+                    "The observed scene changed outside the owned write boundary",
+                )
+            else:
+                pending_events = transaction["pending_node_events"]
+                if outcome == "rolled_back":
+                    self._scene_revision = base_revision
+                    if pending_events:
+                        self._observer_sequence += 1
+                else:
+                    self._scene_revision = base_revision + 1
+                    self._observer_sequence += 1
+
+            # A token is single-use even when observation was invalidated.  In
+            # that case the existing callback state remains authoritative; do
+            # not overwrite it with the transaction's former base snapshot.
+            self._owned_write = None
+
+        if failure is not None:
+            raise HoudiniReadAdapterError(*failure)
+        return self.capability_report()
 
     def start(self) -> dict[str, Any]:
         """Install read observers and return the first immutable publication."""
@@ -260,6 +502,7 @@ class HoudiniReadAdapter:
             available = bool(
                 self._started
                 and not self._disposed
+                and self._owned_write is None
                 and self._session_observer_reliable
                 and self._revision_observer_reliable
                 and self._build_valid
@@ -367,6 +610,9 @@ class HoudiniReadAdapter:
         self._assert_main_thread()
         if self._disposed:
             return
+        with self._state_lock:
+            if self._owned_write is not None:
+                self._owned_write["invalidated"] = True
         self._remove_node_observers()
         if self._hip_callback_installed:
             try:
@@ -510,6 +756,8 @@ class HoudiniReadAdapter:
             return
         if threading.get_ident() != self._main_thread_id:
             with self._state_lock:
+                if self._owned_write is not None:
+                    self._owned_write["invalidated"] = True
                 changed = (
                     self._session_observer_reliable
                     or self._revision_observer_reliable
@@ -527,6 +775,8 @@ class HoudiniReadAdapter:
             # Never use remove-all APIs, which could remove user callbacks.
             self._remove_node_observers()
             with self._state_lock:
+                if self._owned_write is not None:
+                    self._owned_write["invalidated"] = True
                 self._hip_session_id = f"hip-{uuid.uuid4().hex}"
                 self._scene_revision = 0
                 self._revision_observer_reliable = False
@@ -536,15 +786,20 @@ class HoudiniReadAdapter:
             # observable dirty or scene state.  Advance the read snapshot
             # without ever retaining the old/new file paths passed by HOM.
             with self._state_lock:
+                if self._owned_write is not None:
+                    self._owned_write["invalidated"] = True
                 self._scene_revision += 1
                 self._observer_sequence += 1
 
     def _on_node_event(self, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
+        del args
+        callback_source = kwargs.get("node")
         if self._disposed:
             return
         if threading.get_ident() != self._main_thread_id:
             with self._state_lock:
+                if self._owned_write is not None:
+                    self._owned_write["invalidated"] = True
                 changed = (
                     self._revision_observer_reliable
                     or not self._observer_violation
@@ -555,6 +810,17 @@ class HoudiniReadAdapter:
                     self._observer_sequence += 1
             return
         with self._state_lock:
+            transaction = self._owned_write
+            if transaction is not None and not transaction["invalidated"]:
+                expectation = transaction["mutation_expectation"]
+                if (
+                    expectation is not None
+                    and callback_source is expectation["callback_source"]
+                ):
+                    expectation["event_count"] += 1
+                    transaction["pending_node_events"] += 1
+                    return
+                transaction["invalidated"] = True
             self._scene_revision += 1
             self._observer_sequence += 1
 
