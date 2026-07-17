@@ -185,15 +185,20 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             for index, value in enumerate(command[:-1])
             if value == "-c"
         ]
-        self.assertEqual(2, len(overrides))
-        override = overrides[0]
-        self.assertTrue(
-            override.startswith("mcp_servers.houdini_intelligence.command=\"")
-        )
-        self.assertIn(str(Path(sys.executable).resolve()).replace("\\", "\\\\"), override)
         self.assertEqual(
-            "mcp_servers.houdini_intelligence.required=true",
-            overrides[1],
+            [
+                "mcp_servers.houdini_intelligence.command="
+                + bridge_main._toml_basic_string(str(Path(sys.executable).resolve())),
+                "mcp_servers.houdini_intelligence.required=true",
+                'model_provider="hia_chatgpt_http"',
+                'model_providers.hia_chatgpt_http.name="HIA ChatGPT HTTP"',
+                "model_providers.hia_chatgpt_http.base_url="
+                '"https://chatgpt.com/backend-api/codex"',
+                'model_providers.hia_chatgpt_http.wire_api="responses"',
+                "model_providers.hia_chatgpt_http.requires_openai_auth=true",
+                "model_providers.hia_chatgpt_http.supports_websockets=false",
+            ],
+            overrides,
         )
         self.assertNotIn(BRIDGE_TOKEN, repr(command))
         self.assertNotIn(EXECUTOR_TOKEN, repr(command))
@@ -238,6 +243,93 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertNotIn(BRIDGE_URL, stdout.getvalue())
         self.assertNotIn(BRIDGE_TOKEN, stdout.getvalue())
         self.assertNotIn(EXECUTOR_TOKEN, stdout.getvalue())
+
+    def test_http_provider_command_is_escaped_process_local_and_secret_free(self) -> None:
+        mcp_python = 'E:\\runtime\\quoted "python"\\python.exe'
+        with mock.patch.object(
+            bridge_main,
+            "_toml_basic_string",
+            wraps=bridge_main._toml_basic_string,
+        ) as encoder:
+            command = bridge_main._codex_app_server_command(
+                REPOSITORY_ROOT / "codex.exe",
+                mcp_python,
+            )
+
+        self.assertEqual("app-server", command[1])
+        self.assertEqual(1, command.count("--strict-config"))
+        overrides = [
+            command[index + 1]
+            for index, value in enumerate(command[:-1])
+            if value == "-c"
+        ]
+        self.assertEqual(8, len(overrides))
+        self.assertEqual(
+            "mcp_servers.houdini_intelligence.command="
+            + json.dumps(mcp_python, ensure_ascii=True),
+            overrides[0],
+        )
+        self.assertEqual(
+            [
+                mcp_python,
+                "hia_chatgpt_http",
+                "HIA ChatGPT HTTP",
+                "https://chatgpt.com/backend-api/codex",
+                "responses",
+            ],
+            [call.args[0] for call in encoder.call_args_list],
+        )
+        provider_overrides = overrides[2:]
+        self.assertEqual(6, len(provider_overrides))
+        self.assertEqual(
+            {
+                'model_provider="hia_chatgpt_http"',
+                'model_providers.hia_chatgpt_http.name="HIA ChatGPT HTTP"',
+                "model_providers.hia_chatgpt_http.base_url="
+                '"https://chatgpt.com/backend-api/codex"',
+                'model_providers.hia_chatgpt_http.wire_api="responses"',
+                "model_providers.hia_chatgpt_http.requires_openai_auth=true",
+                "model_providers.hia_chatgpt_http.supports_websockets=false",
+            },
+            set(provider_overrides),
+        )
+        command_text = "\n".join(command).casefold()
+        for forbidden in (
+            "responses_websockets",
+            "stream_max_retries",
+            "bearer ",
+            "cookie",
+            "access_token",
+            "refresh_token",
+            "api_key",
+            "password",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, command_text)
+
+    def test_http_provider_command_does_not_target_persistent_config(self) -> None:
+        project_config = REPOSITORY_ROOT / ".codex" / "config.toml"
+        project_config_before = project_config.read_bytes()
+        runtime_config = (
+            REPOSITORY_ROOT / ".runtime" / "codex-home" / "config.toml"
+        )
+        runtime_before = (
+            runtime_config.read_bytes() if runtime_config.is_file() else None
+        )
+
+        command = bridge_main._codex_app_server_command(
+            REPOSITORY_ROOT / "codex.exe",
+            str(REPOSITORY_ROOT / "python.exe"),
+        )
+
+        self.assertEqual(project_config_before, project_config.read_bytes())
+        self.assertEqual(
+            runtime_before,
+            runtime_config.read_bytes() if runtime_config.is_file() else None,
+        )
+        command_text = "\n".join(command).replace("\\", "/").casefold()
+        self.assertNotIn(".codex/config.toml", command_text)
+        self.assertNotIn(".runtime/codex-home/config.toml", command_text)
 
     def test_missing_or_equal_launch_credentials_fail_before_start(self) -> None:
         for bridge_token, executor_token in ((None, EXECUTOR_TOKEN), (BRIDGE_TOKEN, BRIDGE_TOKEN)):

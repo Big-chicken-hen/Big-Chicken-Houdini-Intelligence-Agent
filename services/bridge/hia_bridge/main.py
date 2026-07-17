@@ -30,6 +30,10 @@ PINNED_CODEX_RELATIVE_PATH = Path(
     ".runtime/toolchains/codex/0.144.3/codex.exe"
 )
 CODEX_HOME_RELATIVE_PATH = Path(".runtime/codex-home")
+_HIA_CHATGPT_HTTP_PROVIDER_ID = "hia_chatgpt_http"
+_HIA_CHATGPT_HTTP_PROVIDER_NAME = "HIA ChatGPT HTTP"
+_HIA_CHATGPT_HTTP_BASE_URL = "https://chatgpt.com/backend-api/codex"
+_HIA_CHATGPT_HTTP_WIRE_API = "responses"
 _LAUNCH_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 _BRIDGE_URL_PATTERN = re.compile(
     r"^http://127\.0\.0\.1:([1-9][0-9]{0,4})$"
@@ -180,6 +184,34 @@ def _toml_basic_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
+def _codex_app_server_command(codex_exe: Path, mcp_python: str) -> list[str]:
+    """Build the strict, process-local HIA app-server command."""
+
+    provider = f"model_providers.{_HIA_CHATGPT_HTTP_PROVIDER_ID}"
+    return [
+        str(codex_exe),
+        "app-server",
+        "--strict-config",
+        "-c",
+        "mcp_servers.houdini_intelligence.command="
+        + _toml_basic_string(mcp_python),
+        "-c",
+        "mcp_servers.houdini_intelligence.required=true",
+        "-c",
+        "model_provider=" + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_ID),
+        "-c",
+        f"{provider}.name=" + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_NAME),
+        "-c",
+        f"{provider}.base_url=" + _toml_basic_string(_HIA_CHATGPT_HTTP_BASE_URL),
+        "-c",
+        f"{provider}.wire_api=" + _toml_basic_string(_HIA_CHATGPT_HTTP_WIRE_API),
+        "-c",
+        f"{provider}.requires_openai_auth=true",
+        "-c",
+        f"{provider}.supports_websockets=false",
+    ]
+
+
 def _validated_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
     project_root = Path(args.project_root)
     if not _same_windows_path(project_root, PROJECT_ROOT):
@@ -267,16 +299,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         events = EventBuffer()
         client = CodexStdioClient(
-            [
-                str(codex_exe),
-                "app-server",
-                "--strict-config",
-                "-c",
-                "mcp_servers.houdini_intelligence.command="
-                + _toml_basic_string(resolved_python),
-                "-c",
-                "mcp_servers.houdini_intelligence.required=true",
-            ],
+            _codex_app_server_command(codex_exe, resolved_python),
             cwd=project_root,
             environment=child_environment,
             policy=policy,
