@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any
 
 
-PROJECT_ROOT = Path(r"E:\houdini-intelligence-agent")
+def _default_project_root() -> Path:
+    configured = os.environ.get("HIA_PROJECT_ROOT")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[2]
+
+
+PROJECT_ROOT = _default_project_root()
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 
 
@@ -106,15 +113,11 @@ def validate_project_subpath(
 
     root_drive, root_tail = ntpath.splitdrive(root_raw)
     raw_drive, raw_tail = ntpath.splitdrive(raw)
-    if ntpath.normcase(root_drive) == ntpath.normcase("C:"):
-        _reject("C_DRIVE_FORBIDDEN", "Project root must not be on C:", root_raw)
-    if ntpath.normcase(root_drive) != ntpath.normcase("E:"):
-        _reject("INVALID_ROOT", "Project root must be on E:", root_raw)
+    if not root_drive or not ntpath.isabs(root_raw):
+        _reject("INVALID_ROOT", "Project root must be an absolute local path", root_raw)
     if ntpath.normpath(root_tail) in ("\\", "/", "."):
         _reject("DRIVE_ROOT", "A drive root is forbidden", root_raw)
 
-    if raw_drive and ntpath.normcase(raw_drive) == ntpath.normcase("C:"):
-        _reject("C_DRIVE_FORBIDDEN", "Paths on C: are forbidden", raw)
     if raw_drive and ntpath.normcase(raw_tail) in ("\\", "/", "."):
         _reject("DRIVE_ROOT", "A drive root is forbidden", raw)
     if ":" in raw_tail:

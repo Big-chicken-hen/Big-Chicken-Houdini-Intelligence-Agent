@@ -8,7 +8,14 @@ from typing import Any, Iterable
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
-_CARD_MAX_WIDTH = 760
+_CODEX_CARD_WIDTH_RATIO = 0.82
+_USER_CARD_WIDTH_RATIO = 0.68
+_CONTENT_HORIZONTAL_MARGIN = 14
+_STREAM_FLUSH_INTERVAL_MS = 40
+_COMPACTION_NOTICE_TEXT = "Codex 已自动整理较早的对话内容。"
+_LONG_THREAD_WARNING_TEXT = (
+    "当前对话较长，早期细节可能逐渐减少。开始不同任务时建议新建 Thread。"
+)
 
 
 class _ToolActivityState:
@@ -132,7 +139,7 @@ class _MarkdownBody(QtWidgets.QTextBrowser):
         self.setOpenExternalLinks(False)
         self.setOpenLinks(False)
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
@@ -149,7 +156,7 @@ class _MarkdownBody(QtWidgets.QTextBrowser):
             "body { color: %s; } "
             "h1, h2, h3 { margin-top: 8px; margin-bottom: 4px; } "
             "p { margin-top: 2px; margin-bottom: 6px; } "
-            "pre { background-color: #171b21; padding: 7px; white-space: pre-wrap; } "
+            "pre { background-color: #171b21; padding: 7px; white-space: pre; } "
             "code { font-family: Consolas, 'Courier New', monospace; } "
             "ul, ol { margin-top: 3px; margin-bottom: 5px; }" % foreground
         )
@@ -189,8 +196,8 @@ class _MessageCard(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName("hiaMessageCard")
         self.setProperty("messageRole", role)
-        self.setMinimumWidth(260)
-        self.setMaximumWidth(_CARD_MAX_WIDTH)
+        self.message_role = role
+        self.setMinimumWidth(0)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Minimum,
@@ -414,6 +421,8 @@ class _ProtocolWarning(QtWidgets.QFrame):
 class ConversationView(QtWidgets.QWidget):
     """Scrollable native conversation view with streaming message cards."""
 
+    newThreadRequested = QtCore.Signal()
+
     def __init__(self, parent: QtWidgets.QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("hiaConversationView")
@@ -441,13 +450,28 @@ class ConversationView(QtWidgets.QWidget):
         self._turn_count = 0
         self._active_codex_card: _MessageCard | None = None
         self._active_codex_text = ""
+        self._rendered_codex_text = ""
         self._active_codex_entry: dict[str, Any] | None = None
+        self._codex_stream_frozen = False
         self._tool_activity_card: _ToolActivityCard | None = None
         self._tool_activity_entry: dict[str, Any] | None = None
         self._protocol_streak_key: str | None = None
         self._protocol_streak_widget: _ProtocolWarning | None = None
         self._protocol_streak_entry: dict[str, Any] | None = None
+        self._message_cards: list[_MessageCard] = []
+        self._compaction_notices: dict[str, QtWidgets.QLabel] = {}
+        self._long_thread_warning: QtWidgets.QFrame | None = None
         self._transcript: list[dict[str, Any]] = []
+
+        self._stream_flush_timer = QtCore.QTimer(self)
+        self._stream_flush_timer.setSingleShot(True)
+        self._stream_flush_timer.setInterval(_STREAM_FLUSH_INTERVAL_MS)
+        self._stream_flush_timer.timeout.connect(self._flush_codex_markdown)
+
+        self._scroll_timer = QtCore.QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.setInterval(0)
+        self._scroll_timer.timeout.connect(self._perform_scroll_to_bottom)
 
     def is_empty(self) -> bool:
         return not self._transcript
@@ -480,6 +504,7 @@ class ConversationView(QtWidgets.QWidget):
         )
         card.body.set_markdown(str(text))
         card.set_attachments(names)
+        self._register_message_card(card)
         self._add_aligned_widget(card, QtCore.Qt.AlignmentFlag.AlignRight)
         self._transcript.append(
             {"role": "user", "title": "你", "text": str(text), "attachments": names}
@@ -489,6 +514,7 @@ class ConversationView(QtWidgets.QWidget):
     def begin_codex_message(self) -> None:
         self._finish_active_codex_if_needed()
         self._reset_protocol_streak()
+        self._codex_stream_frozen = False
         card = _MessageCard(
             "codex",
             "Codex",
@@ -497,31 +523,55 @@ class ConversationView(QtWidgets.QWidget):
             foreground="#e9edf2",
         )
         card.body.set_markdown("")
+        self._register_message_card(card)
         self._add_aligned_widget(card, QtCore.Qt.AlignmentFlag.AlignLeft)
         entry: dict[str, Any] = {"role": "codex", "title": "Codex", "text": ""}
         self._transcript.append(entry)
         self._active_codex_card = card
         self._active_codex_text = ""
+        self._rendered_codex_text = ""
         self._active_codex_entry = entry
         self._scroll_to_bottom()
 
     def append_codex_delta(self, delta: str) -> None:
+        if self._codex_stream_frozen:
+            return
         self._reset_protocol_streak()
         if self._active_codex_card is None:
             self.begin_codex_message()
         self._active_codex_text += str(delta)
-        assert self._active_codex_card is not None
-        self._active_codex_card.body.set_markdown(self._active_codex_text)
         if self._active_codex_entry is not None:
             self._active_codex_entry["text"] = self._active_codex_text
-        self._scroll_to_bottom()
+        if not self._stream_flush_timer.isActive():
+            self._stream_flush_timer.start()
 
     def finish_codex_message(self) -> None:
+        if self._stream_flush_timer.isActive():
+            self._stream_flush_timer.stop()
+        self._flush_codex_markdown()
         self._active_codex_card = None
         self._active_codex_text = ""
+        self._rendered_codex_text = ""
         self._active_codex_entry = None
         self._finish_tool_activity_if_needed()
         self._reset_protocol_streak()
+
+    def freeze_codex_message(self) -> None:
+        """Render received text once, then stop stream updates and auto-scroll."""
+
+        self._codex_stream_frozen = True
+        if self._stream_flush_timer.isActive():
+            self._stream_flush_timer.stop()
+        card = self._active_codex_card
+        if card is not None and self._rendered_codex_text != self._active_codex_text:
+            card.body.set_markdown(self._active_codex_text)
+            self._rendered_codex_text = self._active_codex_text
+        self._active_codex_card = None
+        self._active_codex_text = ""
+        self._rendered_codex_text = ""
+        self._active_codex_entry = None
+        if self._scroll_timer.isActive():
+            self._scroll_timer.stop()
 
     def update_tool_activity(
         self,
@@ -585,7 +635,6 @@ class ConversationView(QtWidgets.QWidget):
                     "failed": state.failed_count,
                 }
             )
-        self._scroll_to_bottom()
 
     def add_system_message(self, text: str) -> None:
         self._reset_protocol_streak()
@@ -632,6 +681,77 @@ class ConversationView(QtWidgets.QWidget):
         self._protocol_streak_entry = entry
         self._scroll_to_bottom()
 
+    def add_compaction_notice(self, key: str) -> None:
+        """Show one passive notice for one app-server context compaction."""
+
+        normalized_key = str(key).strip() or "context-compaction"
+        if normalized_key in self._compaction_notices:
+            return
+
+        label = QtWidgets.QLabel(_COMPACTION_NOTICE_TEXT)
+        label.setObjectName("hiaCompactionNotice")
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        label.setStyleSheet(
+            "color: #9aa4b0; background: transparent; font-size: 10px;"
+            " padding: 3px 7px;"
+        )
+        self._insert_before_stretch(label)
+        self._compaction_notices[normalized_key] = label
+        self._transcript.append(
+            {
+                "role": "context_compaction",
+                "title": "System",
+                "text": _COMPACTION_NOTICE_TEXT,
+            }
+        )
+        self._scroll_to_bottom()
+
+    def show_long_thread_warning(self) -> None:
+        """Show the one dismissible long-conversation hint for this view."""
+
+        if self._long_thread_warning is not None:
+            return
+
+        warning = QtWidgets.QFrame()
+        warning.setObjectName("hiaLongThreadWarning")
+        warning.setStyleSheet(
+            "QFrame#hiaLongThreadWarning { background-color: #2c2923;"
+            " border: 1px solid #554b37; border-radius: 6px; }"
+        )
+        layout = QtWidgets.QHBoxLayout(warning)
+        layout.setContentsMargins(8, 5, 8, 5)
+        layout.setSpacing(6)
+
+        label = QtWidgets.QLabel(_LONG_THREAD_WARNING_TEXT)
+        label.setObjectName("hiaLongThreadWarningText")
+        label.setWordWrap(True)
+        label.setStyleSheet("color: #c8bea9; font-size: 10px;")
+        layout.addWidget(label, 1)
+
+        new_thread_button = QtWidgets.QPushButton("新建 Thread")
+        new_thread_button.setObjectName("hiaLongThreadNewThreadButton")
+        new_thread_button.clicked.connect(self.newThreadRequested.emit)
+        layout.addWidget(new_thread_button)
+
+        dismiss_button = QtWidgets.QPushButton("关闭提示")
+        dismiss_button.setObjectName("hiaLongThreadDismissButton")
+        dismiss_button.clicked.connect(warning.hide)
+        layout.addWidget(dismiss_button)
+
+        self._long_thread_warning = warning
+        self._insert_before_stretch(warning)
+        self._transcript.append(
+            {
+                "role": "long_thread_warning",
+                "title": "System",
+                "text": _LONG_THREAD_WARNING_TEXT,
+            }
+        )
+        self._scroll_to_bottom()
+
     def toPlainText(self) -> str:  # noqa: N802
         blocks: list[str] = []
         for entry in self._transcript:
@@ -649,6 +769,48 @@ class ConversationView(QtWidgets.QWidget):
                 text += "\n附件：" + "、".join(str(name) for name in attachments)
             blocks.append(f"{title}\n{text}" if title else text)
         return "\n\n".join(blocks)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._update_message_card_widths()
+
+    def stop_timers(self) -> None:
+        """Stop timers owned by this view before its Panel is closed."""
+
+        self._stream_flush_timer.stop()
+        self._scroll_timer.stop()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
+        self.stop_timers()
+        super().closeEvent(event)
+
+    def _register_message_card(self, card: _MessageCard) -> None:
+        self._message_cards.append(card)
+        self._update_message_card_width(card)
+
+    def _update_message_card_widths(self) -> None:
+        for card in self._message_cards:
+            self._update_message_card_width(card)
+
+    def _update_message_card_width(self, card: _MessageCard) -> None:
+        viewport_width = max(1, int(self.scroll_area.viewport().width()))
+        available_width = max(1, viewport_width - _CONTENT_HORIZONTAL_MARGIN)
+        ratio = (
+            _USER_CARD_WIDTH_RATIO
+            if card.message_role == "user"
+            else _CODEX_CARD_WIDTH_RATIO
+        )
+        target_width = max(1, int(available_width * ratio))
+        card.setMinimumWidth(target_width)
+        card.setMaximumWidth(target_width)
+
+    def _flush_codex_markdown(self) -> None:
+        card = self._active_codex_card
+        if card is None or self._rendered_codex_text == self._active_codex_text:
+            return
+        card.body.set_markdown(self._active_codex_text)
+        self._rendered_codex_text = self._active_codex_text
+        self._scroll_to_bottom()
 
     def _finish_active_codex_if_needed(self) -> None:
         if self._active_codex_card is not None:
@@ -694,9 +856,9 @@ class ConversationView(QtWidgets.QWidget):
         self._layout.insertWidget(max(0, self._layout.count() - 1), widget)
 
     def _scroll_to_bottom(self) -> None:
-        QtCore.QTimer.singleShot(
-            0,
-            lambda: self.scroll_area.verticalScrollBar().setValue(
-                self.scroll_area.verticalScrollBar().maximum()
-            ),
-        )
+        if not self._scroll_timer.isActive():
+            self._scroll_timer.start()
+
+    def _perform_scroll_to_bottom(self) -> None:
+        scroll_bar = self.scroll_area.verticalScrollBar()
+        scroll_bar.setValue(scroll_bar.maximum())

@@ -5,5 +5,5 @@ description = "Safety-first foundation for a Houdini-embedded Codex client"
 requires-python = ">=3.10"
 
 [tool.hia]
-project-root = "E:\\houdini-intelligence-agent"
+project-root = "."
 phase = "P2-V-B4B-one-shot-local-live-acceptance"

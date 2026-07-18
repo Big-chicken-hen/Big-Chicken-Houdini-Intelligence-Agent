@@ -31,7 +31,12 @@ from .session import BridgeSession
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_SCENE_REQUEST_BYTES = 262_144
 MAX_SCENE_POLL_MS = 1_000
+MAX_MCP_HEALTH_RESPONSE_BYTES = 65_536
 SCENE_EXECUTOR_HEADER = "X-HIA-Executor-Token"
+HIA_MCP_V2_BACKEND = "hia_v2"
+FXHOUDINI_MCP_BACKEND = "fxhoudini"
+HIA_MCP_V2_HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
+HIA_MCP_V2_WIRE_PROTOCOL = "hia-mcp-v2/1"
 _SCENE_CAPABILITY_PATH = "/v1/scene/capabilities"
 _SCENE_STATUS_PATH = "/v1/scene/status"
 _SCENE_RESULT_PATH = re.compile(
@@ -57,6 +62,7 @@ class BridgeApplication:
         scene_executor_token: str | None = None,
         houdini_mcp_port: int | None = None,
         houdini_mcp_token: str | None = None,
+        houdini_mcp_backend: str = FXHOUDINI_MCP_BACKEND,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Bearer token must contain at least 32 characters")
@@ -111,8 +117,14 @@ class BridgeApplication:
             or "\n" in houdini_mcp_token
         ):
             raise ValueError("Houdini MCP token is invalid")
+        if houdini_mcp_backend not in {
+            HIA_MCP_V2_BACKEND,
+            FXHOUDINI_MCP_BACKEND,
+        }:
+            raise ValueError("Houdini MCP backend is invalid")
         self._houdini_mcp_port = houdini_mcp_port
         self._houdini_mcp_token = houdini_mcp_token
+        self._houdini_mcp_backend = houdini_mcp_backend
 
     def authorized(self, value: str | None) -> bool:
         return value is not None and hmac.compare_digest(
@@ -139,11 +151,53 @@ class BridgeApplication:
             return True
         return http_method == "POST" and _SCENE_RESULT_PATH.fullmatch(path) is not None
 
-    def houdini_mcp_status(self) -> dict[str, bool]:
+    def houdini_mcp_status(self) -> dict[str, Any]:
+        backend = self._houdini_mcp_backend
+        if backend == HIA_MCP_V2_BACKEND:
+            server_id = "hia_mcp_v2"
+            display_name = "HIA MCP V2"
+        else:
+            server_id = "houdini_intelligence"
+            display_name = "FXHoudiniMCP 1.3.0"
+        status: dict[str, Any] = {
+            "backend": backend,
+            "server_id": server_id,
+            "display_name": display_name,
+            "available": False,
+        }
         port = self._houdini_mcp_port
         token = self._houdini_mcp_token
         if port is None or token is None:
-            return {"available": False}
+            return status
+        if backend == HIA_MCP_V2_BACKEND:
+            request = urllib_request.Request(
+                f"http://127.0.0.1:{port}{HIA_MCP_V2_HEALTH_ROUTE}",
+                headers={"Authorization": f"Bearer {token}"},
+                method="GET",
+            )
+            try:
+                with urllib_request.urlopen(request, timeout=0.75) as response:
+                    raw = response.read(MAX_MCP_HEALTH_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_MCP_HEALTH_RESPONSE_BYTES:
+                    return status
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                return status
+            result = payload.get("result") if isinstance(payload, dict) else None
+            status["available"] = (
+                isinstance(payload, dict)
+                and set(payload) == {"protocol", "ok", "result"}
+                and payload.get("protocol") == HIA_MCP_V2_WIRE_PROTOCOL
+                and payload.get("ok") is True
+                and isinstance(result, dict)
+                and set(result) == {"server_id", "scene_revision"}
+                and result.get("server_id") == server_id
+                and isinstance(result.get("scene_revision"), int)
+                and not isinstance(result.get("scene_revision"), bool)
+                and result["scene_revision"] >= 0
+            )
+            return status
+
         body = urllib_parse.urlencode(
             {"json": json.dumps(["mcp.health", [], {}])}
         ).encode("utf-8")
@@ -160,10 +214,11 @@ class BridgeApplication:
             with urllib_request.urlopen(request, timeout=0.75) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except Exception:
-            return {"available": False}
-        return {
-            "available": isinstance(payload, dict) and payload.get("status") == "ok"
-        }
+            return status
+        status["available"] = (
+            isinstance(payload, dict) and payload.get("status") == "ok"
+        )
+        return status
 
 
 class LoopbackHTTPServer(ThreadingHTTPServer):

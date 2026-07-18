@@ -22,6 +22,17 @@ def _load_conversation_module() -> types.ModuleType:
     class _QtBase:
         pass
 
+    class _Signal:
+        def __init__(self) -> None:
+            self.callbacks: list[object] = []
+
+        def connect(self, callback: object) -> None:
+            self.callbacks.append(callback)
+
+        def emit(self) -> None:
+            for callback in self.callbacks:
+                callback()
+
     pyside = types.ModuleType("PySide6")
     qt_core = types.ModuleType("PySide6.QtCore")
     qt_gui = types.ModuleType("PySide6.QtGui")
@@ -30,8 +41,12 @@ def _load_conversation_module() -> types.ModuleType:
         AlignmentFlag=types.SimpleNamespace(
             AlignLeft=object(),
             AlignRight=object(),
-        )
+        ),
+        TextInteractionFlag=types.SimpleNamespace(
+            TextSelectableByMouse=object(),
+        ),
     )
+    qt_core.Signal = lambda *_args, **_kwargs: _Signal()
     qt_widgets.QWidget = _QtBase
     qt_widgets.QFrame = _QtBase
     qt_widgets.QTextBrowser = _QtBase
@@ -105,15 +120,78 @@ class _HeadlessToolCard:
 
 
 class _Body:
+    def __init__(self) -> None:
+        self.markdown_updates: list[str] = []
+
     def set_markdown(self, _text: str) -> None:
-        pass
+        self.markdown_updates.append(_text)
 
 
 class _HeadlessMessageCard:
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
+    def __init__(self, role: str = "codex", *_args: object, **_kwargs: object) -> None:
+        self.message_role = role
         self.body = _Body()
+        self.minimum_width = 0
+        self.maximum_width = 0
 
     def set_attachments(self, _names: object) -> None:
+        pass
+
+    def setMinimumWidth(self, width: int) -> None:  # noqa: N802
+        self.minimum_width = width
+
+    def setMaximumWidth(self, width: int) -> None:  # noqa: N802
+        self.maximum_width = width
+
+
+class _HeadlessTimer:
+    def __init__(self) -> None:
+        self.active = False
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def isActive(self) -> bool:  # noqa: N802
+        return self.active
+
+    def start(self) -> None:
+        self.active = True
+        self.start_calls += 1
+
+    def stop(self) -> None:
+        self.active = False
+        self.stop_calls += 1
+
+
+class _Viewport:
+    def __init__(self, width: int) -> None:
+        self.current_width = width
+
+    def width(self) -> int:
+        return self.current_width
+
+
+class _ScrollArea:
+    def __init__(self, width: int) -> None:
+        self._viewport = _Viewport(width)
+
+    def viewport(self) -> _Viewport:
+        return self._viewport
+
+
+class _Label:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def setObjectName(self, _name: str) -> None:  # noqa: N802
+        pass
+
+    def setWordWrap(self, _enabled: bool) -> None:  # noqa: N802
+        pass
+
+    def setTextInteractionFlags(self, _flags: object) -> None:  # noqa: N802
+        pass
+
+    def setStyleSheet(self, _style: str) -> None:  # noqa: N802
         pass
 
 
@@ -189,13 +267,18 @@ class ConversationToolActivityTests(unittest.TestCase):
         view._turn_count = 1
         view._active_codex_card = None
         view._active_codex_text = ""
+        view._rendered_codex_text = ""
         view._active_codex_entry = None
         view._tool_activity_card = None
         view._tool_activity_entry = None
         view._protocol_streak_key = None
         view._protocol_streak_widget = None
         view._protocol_streak_entry = None
+        view._message_cards = []
+        view._compaction_notices = {}
+        view._long_thread_warning = None
         view._transcript = []
+        view.scroll_area = _ScrollArea(1000)
         inserted: list[object] = []
         view._insert_before_stretch = inserted.append
         view._scroll_to_bottom = lambda: None
@@ -241,6 +324,169 @@ class ConversationToolActivityTests(unittest.TestCase):
         self.assertEqual(len(tool_entries), 2)
         self.assertEqual(tool_entries[1]["total"], 1)
         self.assertFalse(any(entry.get("role") == "system" for entry in tool_entries))
+
+    def test_stream_deltas_are_throttled_and_finish_flushes_every_character(self) -> None:
+        view = object.__new__(conversation_module.ConversationView)
+        card = _HeadlessMessageCard("codex")
+        entry = {"role": "codex", "text": ""}
+        timer = _HeadlessTimer()
+        scrolls: list[bool] = []
+        view._active_codex_card = card
+        view._active_codex_text = ""
+        view._rendered_codex_text = ""
+        view._active_codex_entry = entry
+        view._codex_stream_frozen = False
+        view._tool_activity_card = None
+        view._protocol_streak_key = None
+        view._protocol_streak_widget = None
+        view._protocol_streak_entry = None
+        view._stream_flush_timer = timer
+        view._scroll_to_bottom = lambda: scrolls.append(True)
+
+        view.append_codex_delta("自动")
+        view.append_codex_delta("整理")
+
+        self.assertEqual("自动整理", entry["text"])
+        self.assertEqual([], card.body.markdown_updates)
+        self.assertEqual(1, timer.start_calls)
+
+        view.finish_codex_message()
+
+        self.assertEqual(["自动整理"], card.body.markdown_updates)
+        self.assertEqual([True], scrolls)
+        self.assertEqual(1, timer.stop_calls)
+        self.assertIsNone(view._active_codex_card)
+
+    def test_freeze_flushes_without_scroll_and_blocks_late_delta(self) -> None:
+        view = object.__new__(conversation_module.ConversationView)
+        card = _HeadlessMessageCard("codex")
+        entry = {"role": "codex", "text": "已收到"}
+        stream_timer = _HeadlessTimer()
+        scroll_timer = _HeadlessTimer()
+        stream_timer.start()
+        scroll_timer.start()
+        view._active_codex_card = card
+        view._active_codex_text = "已收到"
+        view._rendered_codex_text = ""
+        view._active_codex_entry = entry
+        view._codex_stream_frozen = False
+        view._stream_flush_timer = stream_timer
+        view._scroll_timer = scroll_timer
+
+        view.freeze_codex_message()
+        view.append_codex_delta("迟到文本")
+
+        self.assertEqual(["已收到"], card.body.markdown_updates)
+        self.assertEqual("已收到", entry["text"])
+        self.assertTrue(view._codex_stream_frozen)
+        self.assertFalse(stream_timer.isActive())
+        self.assertFalse(scroll_timer.isActive())
+        self.assertIsNone(view._active_codex_card)
+
+    def test_tool_progress_does_not_force_scroll_to_bottom(self) -> None:
+        view = object.__new__(conversation_module.ConversationView)
+        card = _HeadlessToolCard()
+        card.state.update("tool-1", "execute_python", "started")
+        view._tool_activity_card = card
+        view._tool_activity_entry = {}
+        view._protocol_streak_key = None
+        view._protocol_streak_widget = None
+        view._protocol_streak_entry = None
+        scrolls: list[bool] = []
+        view._scroll_to_bottom = lambda: scrolls.append(True)
+
+        view.update_tool_progress("tool-1", "创建节点 8/12")
+
+        self.assertEqual([], scrolls)
+        self.assertIn("创建节点 8/12", view._tool_activity_entry["details"])
+
+    def test_message_card_widths_follow_viewport_ratios_without_narrow_overflow(self) -> None:
+        view = object.__new__(conversation_module.ConversationView)
+        view.scroll_area = _ScrollArea(1000)
+        codex_card = _HeadlessMessageCard("codex")
+        user_card = _HeadlessMessageCard("user")
+
+        view._update_message_card_width(codex_card)
+        view._update_message_card_width(user_card)
+
+        self.assertGreaterEqual(codex_card.maximum_width / 1000, 0.75)
+        self.assertLessEqual(codex_card.maximum_width / 1000, 0.85)
+        self.assertGreaterEqual(user_card.maximum_width / 1000, 0.60)
+        self.assertLessEqual(user_card.maximum_width / 1000, 0.70)
+
+        view.scroll_area.viewport().current_width = 20
+        view._update_message_card_width(codex_card)
+        view._update_message_card_width(user_card)
+        self.assertLessEqual(codex_card.maximum_width, 20)
+        self.assertLessEqual(user_card.maximum_width, 20)
+
+    def test_compaction_notice_deduplicates_without_touching_active_turn_state(self) -> None:
+        view = object.__new__(conversation_module.ConversationView)
+        active_card = object()
+        active_tool_card = object()
+        view._active_codex_card = active_card
+        view._active_codex_text = "仍在生成"
+        view._active_codex_entry = {"role": "codex", "text": "仍在生成"}
+        view._tool_activity_card = active_tool_card
+        view._tool_activity_entry = {"role": "tool_activity"}
+        view._turn_count = 3
+        view._compaction_notices = {}
+        view._transcript = []
+        inserted: list[object] = []
+        scrolls: list[bool] = []
+        view._insert_before_stretch = inserted.append
+        view._scroll_to_bottom = lambda: scrolls.append(True)
+
+        with mock.patch.object(
+            conversation_module.QtWidgets,
+            "QLabel",
+            _Label,
+            create=True,
+        ):
+            view.add_compaction_notice("compact-1")
+            view.add_compaction_notice("compact-1")
+
+        self.assertEqual(1, len(inserted))
+        self.assertEqual(1, len(view._transcript))
+        self.assertEqual("context_compaction", view._transcript[0]["role"])
+        self.assertEqual(
+            "Codex 已自动整理较早的对话内容。",
+            view._transcript[0]["text"],
+        )
+        self.assertIs(active_card, view._active_codex_card)
+        self.assertIs(active_tool_card, view._tool_activity_card)
+        self.assertEqual(3, view._turn_count)
+        self.assertEqual([True], scrolls)
+
+    def test_stop_timers_stops_both_owned_timers(self) -> None:
+        view = object.__new__(conversation_module.ConversationView)
+        view._stream_flush_timer = _HeadlessTimer()
+        view._scroll_timer = _HeadlessTimer()
+        view._stream_flush_timer.start()
+        view._scroll_timer.start()
+
+        view.stop_timers()
+
+        self.assertFalse(view._stream_flush_timer.isActive())
+        self.assertFalse(view._scroll_timer.isActive())
+        self.assertEqual(1, view._stream_flush_timer.stop_calls)
+        self.assertEqual(1, view._scroll_timer.stop_calls)
+
+    def test_source_keeps_code_scroll_and_only_safe_long_thread_actions(self) -> None:
+        source = CONVERSATION_VIEW_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("_CARD_MAX_WIDTH", source)
+        self.assertIn("ScrollBarAsNeeded", source)
+        self.assertIn("white-space: pre;", source)
+        self.assertNotIn("white-space: pre-wrap;", source)
+        self.assertIn(
+            "当前对话较长，早期细节可能逐渐减少。开始不同任务时建议新建 Thread。",
+            source,
+        )
+        self.assertEqual(1, source.count('QtWidgets.QPushButton("新建 Thread")'))
+        self.assertEqual(1, source.count('QtWidgets.QPushButton("关闭提示")'))
+        self.assertNotIn("压缩并继续", source)
+        self.assertNotIn("thread/compact/start", source)
 
 
 if __name__ == "__main__":

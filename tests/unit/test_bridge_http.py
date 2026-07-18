@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -9,6 +10,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any, Callable
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -129,8 +131,65 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual("127.0.0.1", self.server.server_address[0])
         self.assertEqual("authenticated", health["session"]["authentication"])
         self.assertNotIn("email", health["session"]["account"]["account"])
+        self.assertEqual(
+            {
+                "backend": "fxhoudini",
+                "server_id": "houdini_intelligence",
+                "display_name": "FXHoudiniMCP 1.3.0",
+                "available": False,
+            },
+            health["houdini_mcp"],
+        )
         with self.assertRaises(ValueError):
             LoopbackHTTPServer(("0.0.0.0", 0), self.application)
+
+    def test_hia_v2_health_uses_authenticated_get_and_strict_payload(self) -> None:
+        mcp_token = "hia-runtime-" + "x" * 40
+        application = BridgeApplication(
+            self.session,
+            self.events,
+            self.TOKEN,
+            houdini_mcp_port=45123,
+            houdini_mcp_token=mcp_token,
+            houdini_mcp_backend="hia_v2",
+        )
+        payload = {
+            "protocol": "hia-mcp-v2/1",
+            "ok": True,
+            "result": {"server_id": "hia_mcp_v2", "scene_revision": 4},
+        }
+        with mock.patch(
+            "hia_bridge.http_server.urllib_request.urlopen",
+            return_value=io.BytesIO(json.dumps(payload).encode("utf-8")),
+        ) as open_url:
+            status = application.houdini_mcp_status()
+
+        self.assertEqual(
+            {
+                "backend": "hia_v2",
+                "server_id": "hia_mcp_v2",
+                "display_name": "HIA MCP V2",
+                "available": True,
+            },
+            status,
+        )
+        request = open_url.call_args.args[0]
+        self.assertEqual(
+            "http://127.0.0.1:45123/hia-mcp-v2/v1/health",
+            request.full_url,
+        )
+        self.assertEqual("GET", request.get_method())
+        self.assertEqual(f"Bearer {mcp_token}", request.get_header("Authorization"))
+        self.assertEqual(0.75, open_url.call_args.kwargs["timeout"])
+
+        invalid_payload = {**payload, "unexpected": True}
+        with mock.patch(
+            "hia_bridge.http_server.urllib_request.urlopen",
+            return_value=io.BytesIO(json.dumps(invalid_payload).encode("utf-8")),
+        ):
+            unavailable = application.houdini_mcp_status()
+        self.assertFalse(unavailable["available"])
+        self.assertEqual("hia_v2", unavailable["backend"])
 
     def test_bad_token_is_rejected(self) -> None:
         with self.assertRaises(HTTPError) as raised:

@@ -23,6 +23,8 @@ MODEL_CURSOR_MAX_LENGTH = 4096
 MAX_LOCAL_IMAGES = 16
 LOCAL_IMAGE_PATH_MAX_LENGTH = 32_767
 LOCAL_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+HIA_MCP_V2_BACKEND = "hia_v2"
+FXHOUDINI_MCP_BACKEND = "fxhoudini"
 
 
 class BridgeSession:
@@ -33,10 +35,15 @@ class BridgeSession:
         project_root: Path,
         client: CodexStdioClient,
         events: EventBuffer,
+        *,
+        mcp_backend: str = HIA_MCP_V2_BACKEND,
     ) -> None:
+        if mcp_backend not in {HIA_MCP_V2_BACKEND, FXHOUDINI_MCP_BACKEND}:
+            raise ValueError(f"Unsupported Houdini MCP backend: {mcp_backend}")
         self._project_root = project_root
         self._client = client
         self._events = events
+        self._mcp_backend = mcp_backend
         self._lock = threading.RLock()
         self._connected = False
         self._initialize_result: Any = None
@@ -97,6 +104,7 @@ class BridgeSession:
             connected = self._connected and self._client.is_running
             return {
                 "connected": connected,
+                "mcp_backend": self._mcp_backend,
                 "codex_pid": self._client.process_id,
                 "authentication": self._authentication_status(account, account_error),
                 "account": account,
@@ -106,6 +114,39 @@ class BridgeSession:
                 "turn_status": self._turn_status,
                 "turn_active": self._turn_active,
             }
+
+    def _developer_instructions(self) -> str:
+        if self._mcp_backend == HIA_MCP_V2_BACKEND:
+            backend_instructions = (
+                "当前场景的创建、修改、连接、材质、动画、Solaris 和 Karma 默认使用已注册的 HIA MCP V2 与 HOM；"
+                "复杂操作优先用 hia_execute_hom 批量执行 Codex 生成的 HOM。"
+                "用 hia_context/hia_inspect 读取，再用 hia_scene_diff/hia_validate 验证；"
+                "hia_capture_viewport 仅按需视觉核对。"
+                "只有主代理可以调用当前会话的 hia_* Houdini MCP 工具；"
+                "子代理只做资料研究、技术方案、代码审查和规划，不得调用 hia_* 当前场景工具。"
+                "hia_search_node_types/help 等同类读取由主代理串行或少量调用，不并发扇出，"
+                "遇到 QUEUE_FULL 不立即重试；hia_execute_hom 等场景写入始终由主代理执行。"
+            )
+        else:
+            backend_instructions = (
+                "当前场景的创建、修改、连接、材质和动画默认使用已注册的 FXHoudini MCP 与 HOM；"
+                "复杂操作优先用 execute_python 批量执行 Codex 生成的 HOM。"
+                "细粒度工具用于读取、单项修改和最终验证，不要逐节点循环。"
+                "相同调用失败后先读真实错误再改用兼容方法；capture_screenshot 只做阶段性验证。"
+            )
+        return backend_instructions + (
+            "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
+            "只有用户明确要求离线、独立 HIP、批处理或后台渲染时才用 PATH 中的 hython.exe。"
+            "普通场景请求不得先搜索 src、services、docs、contracts 或插件源码；"
+            "仅用户明确要求诊断或修改 Panel、Bridge、MCP 或项目代码时读取。"
+            "上下文仅用 app-server 自动整理，不手动 compact，不创建本地摘要或记忆。"
+            "实时代码禁止 hou.hipFile.clear/load/save，不替换当前场景；新资产放入唯一新根。"
+            "不要调用 request_user_input；信息不足时采用合理默认值，无法执行才报告原因。"
+            "自行生成的截图写 HIA_CACHE_DIR/screenshots，预览写 previews，中间图写 tmp；"
+            "文件名用时间戳加短随机后缀；支持输出路径时显式传入，"
+            "不写仓库根、HIP 同目录、桌面或系统临时目录。"
+            "禁止屏幕接管。"
+        )
 
     @staticmethod
     def _sanitize_account_result(account_result: Any) -> dict[str, Any]:
@@ -151,18 +192,7 @@ class BridgeSession:
             "approvalPolicy": "on-request",
             "sandbox": "workspace-write",
             "ephemeral": False,
-            "developerInstructions": (
-                "Houdini Panel 中的创建、修改、连接、材质和动画请求默认作用于当前打开场景，"
-                "使用已注册的 FXHoudini MCP 与 HOM；多节点复杂资产优先用 execute_python 批量执行 Codex 生成的 HOM。"
-                "不要逐节点或逐参数循环调用 create_node/set_parameters；细粒度工具主要用于读取、单项修改和最终验证。"
-                "同一工具以相同参数失败后不得盲目重复；应读取真实错误并改用兼容方法。"
-                "capture_screenshot 仅用于阶段性视觉验证，不要每一步都截图。"
-                "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
-                "只有用户明确要求离线、新建独立 HIP、批处理或后台渲染时才使用 PATH 中的 hython.exe。"
-                "实时代码禁止 hou.hipFile.clear/load/save，禁止替换当前场景；生成新资产时放入唯一新根。"
-                "不要调用 request_user_input；信息不足时自行采用合理默认值继续，只有无法执行时才直接报告原因。"
-                "禁止屏幕接管。"
-            ),
+            "developerInstructions": self._developer_instructions(),
         }
         if model is not None:
             params["model"] = model
@@ -185,6 +215,7 @@ class BridgeSession:
                 "cwd": str(self._project_root),
                 "approvalPolicy": "on-request",
                 "sandbox": "workspace-write",
+                "developerInstructions": self._developer_instructions(),
             },
         )
         resolved_id = self._extract_thread_id(resumed)

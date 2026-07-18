@@ -1,16 +1,12 @@
 [CmdletBinding()]
 param(
-    [string]$BridgePython = 'D:\Python_3.10\python.exe',
-    [string]$HoudiniExe = ''
+    [string]$BridgePython = '',
+    [string]$HoudiniExe = '',
+    [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2'
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-
-$ExpectedRoot = 'E:\houdini-intelligence-agent'
-$CodexExe = 'E:\houdini-intelligence-agent\.runtime\toolchains\codex\0.144.3\codex.exe'
-$CodexHome = 'E:\houdini-intelligence-agent\.runtime\codex-home'
-$FxHoudiniRoot = 'E:\houdini-intelligence-agent\.runtime\fxhoudinimcp\1.3.0'
 
 function Get-HoudiniCandidatePaths {
     param([string]$RequestedPath)
@@ -270,7 +266,26 @@ function Set-ChildEnvironment {
     )
 
     foreach ($entry in $Values.GetEnumerator()) {
-        $StartInfo.EnvironmentVariables[$entry.Key] = [string]$entry.Value
+        if ($null -ne $StartInfo.Environment) {
+            $StartInfo.Environment[$entry.Key] = [string]$entry.Value
+        } else {
+            $StartInfo.EnvironmentVariables[$entry.Key] = [string]$entry.Value
+        }
+    }
+}
+
+function Remove-ChildEnvironment {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.ProcessStartInfo]$StartInfo,
+        [Parameter(Mandatory = $true)][string[]]$Names
+    )
+
+    foreach ($name in $Names) {
+        if ($null -ne $StartInfo.Environment) {
+            [void]$StartInfo.Environment.Remove($name)
+        } else {
+            [void]$StartInfo.EnvironmentVariables.Remove($name)
+        }
     }
 }
 
@@ -303,11 +318,57 @@ function New-LoopbackBridgeUrl {
     return "http://127.0.0.1:$port"
 }
 
-$ResolvedRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path.TrimEnd('\')
-if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($ResolvedRoot, $ExpectedRoot)) {
-    throw "Launcher must run from $ExpectedRoot; resolved root was $ResolvedRoot"
+function Resolve-ProjectCodexExecutable {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $contractRoot = Join-Path $ProjectRoot 'contracts\codex-app-server'
+    $toolchainRoot = Join-Path $ProjectRoot '.runtime\toolchains\codex'
+    $matches = @()
+    foreach ($contractDirectory in @(
+        Get-ChildItem -LiteralPath $contractRoot -Directory -ErrorAction SilentlyContinue
+    )) {
+        $candidate = Join-Path `
+            (Join-Path $toolchainRoot $contractDirectory.Name) `
+            'codex.exe'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $matches += $candidate
+        }
+    }
+    $matches = @($matches | Sort-Object -Unique)
+    if ($matches.Count -ne 1) {
+        throw "Expected exactly one project Codex toolchain matching contracts; found $($matches.Count)."
+    }
+    return [System.IO.Path]::GetFullPath([string]$matches[0])
 }
 
+function Resolve-BridgePythonExecutable {
+    param(
+        [AllowEmptyString()][string]$RequestedPath,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot
+    )
+
+    if ($RequestedPath) { return $RequestedPath }
+    $candidates = @()
+    if ($env:HIA_BRIDGE_PYTHON) { $candidates += [string]$env:HIA_BRIDGE_PYTHON }
+    $projectPython = Join-Path $ProjectRoot '.runtime\python\python.exe'
+    if (Test-Path -LiteralPath $projectPython -PathType Leaf) {
+        $candidates += $projectPython
+    }
+    foreach ($command in @(Get-Command -Name 'python.exe' -All -ErrorAction SilentlyContinue)) {
+        if ($command.Source) { $candidates += [string]$command.Source }
+    }
+    $candidates = @($candidates | Where-Object {
+        $_ -and (Test-Path -LiteralPath $_ -PathType Leaf)
+    } | ForEach-Object {
+        [System.IO.Path]::GetFullPath([string]$_)
+    } | Sort-Object -Unique)
+    if ($candidates.Count -ne 1) {
+        throw 'Pass -BridgePython with one exact python.exe path; the launcher will not guess between candidates.'
+    }
+    return [string]$candidates[0]
+}
+
+$ResolvedRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path.TrimEnd('\')
 $rootItem = Get-Item -LiteralPath $ResolvedRoot -Force
 if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Project root is a reparse point: $ResolvedRoot"
@@ -319,6 +380,11 @@ $HythonExe = Join-Path $houdiniBinDirectory 'hython.exe'
 if (-not (Test-Path -LiteralPath $HythonExe -PathType Leaf)) {
     throw "Selected Houdini installation is missing sibling hython.exe: $HythonExe"
 }
+$CodexExe = Resolve-ProjectCodexExecutable -ProjectRoot $ResolvedRoot
+$CodexHome = Join-Path $ResolvedRoot '.runtime\codex-home'
+$BridgePython = Resolve-BridgePythonExecutable `
+    -RequestedPath $BridgePython `
+    -ProjectRoot $ResolvedRoot
 $normalizedPython = [System.IO.Path]::GetFullPath($BridgePython)
 if (
     $normalizedPython -notmatch '^[A-Za-z]:\\' -or
@@ -352,13 +418,6 @@ $pythonDirectory = [System.IO.Path]::GetDirectoryName($normalizedPython)
 
 Assert-OrdinaryProjectPath -Path $CodexExe -Root $ResolvedRoot | Out-Null
 Assert-OrdinaryProjectPath -Path $CodexHome -Root $ResolvedRoot | Out-Null
-$fxMcpPython = Join-Path $FxHoudiniRoot 'venv\Scripts\python.exe'
-$fxMcpSourcePath = Join-Path $FxHoudiniRoot 'source\python'
-$fxHoudiniServerPath = Join-Path $FxHoudiniRoot 'source\houdini\scripts\python'
-Assert-OrdinaryProjectPath -Path $fxMcpPython -Root $ResolvedRoot | Out-Null
-Assert-OrdinaryProjectPath -Path $fxMcpSourcePath -Root $ResolvedRoot | Out-Null
-Assert-OrdinaryProjectPath -Path $fxHoudiniServerPath -Root $ResolvedRoot | Out-Null
-
 $sessionId = [Guid]::NewGuid().ToString('N')
 $sessionRoot = Assert-OrdinaryProjectPath `
     -Path (Join-Path $ResolvedRoot ".runtime\launcher-sessions\$sessionId") `
@@ -372,11 +431,29 @@ $houdiniPreferences = Assert-OrdinaryProjectPath `
     -Path (Join-Path $sessionRoot 'houdini-user-pref') `
     -Root $ResolvedRoot `
     -AllowMissingLeaf
+$cacheRoot = Assert-OrdinaryProjectPath `
+    -Path (Join-Path $ResolvedRoot '.runtime\cache') `
+    -Root $ResolvedRoot `
+    -AllowMissingLeaf
+$screenshotCache = Assert-OrdinaryProjectPath `
+    -Path (Join-Path $cacheRoot 'screenshots') `
+    -Root $ResolvedRoot `
+    -AllowMissingLeaf
+$previewCache = Assert-OrdinaryProjectPath `
+    -Path (Join-Path $cacheRoot 'previews') `
+    -Root $ResolvedRoot `
+    -AllowMissingLeaf
+$shortTermCache = Assert-OrdinaryProjectPath `
+    -Path (Join-Path $cacheRoot 'tmp') `
+    -Root $ResolvedRoot `
+    -AllowMissingLeaf
 [System.IO.Directory]::CreateDirectory($sessionTemp) | Out-Null
 [System.IO.Directory]::CreateDirectory($houdiniPreferences) | Out-Null
+foreach ($cacheDirectory in @($cacheRoot, $screenshotCache, $previewCache, $shortTermCache)) {
+    [System.IO.Directory]::CreateDirectory($cacheDirectory) | Out-Null
+}
 
 $bridgePythonPath = Join-Path $ResolvedRoot 'services\bridge'
-$mcpPythonPath = Join-Path $ResolvedRoot 'services\houdini_mcp'
 $projectSourcePath = Join-Path $ResolvedRoot 'src'
 $panelPythonPath = Join-Path $ResolvedRoot 'houdini_package\python_libs'
 $packageDirectory = Join-Path $ResolvedRoot 'houdini_package\packages'
@@ -384,10 +461,81 @@ $bridgeToken = New-CryptographicToken
 do {
     $sceneExecutorToken = New-CryptographicToken
 } while ([System.StringComparer]::Ordinal.Equals($bridgeToken, $sceneExecutorToken))
-$houdiniMcpToken = New-CryptographicToken
+do {
+    $houdiniMcpToken = New-CryptographicToken
+} while (
+    [System.StringComparer]::Ordinal.Equals($houdiniMcpToken, $bridgeToken) -or
+    [System.StringComparer]::Ordinal.Equals($houdiniMcpToken, $sceneExecutorToken)
+)
 $bridgeUrl = New-LoopbackBridgeUrl
 $houdiniMcpUrl = New-LoopbackBridgeUrl
 $houdiniMcpPort = ([System.Uri]$houdiniMcpUrl).Port
+
+$bridgeBackendPythonPaths = @()
+$houdiniBackendPythonPaths = @()
+$bridgeBackendEnvironment = @{}
+$houdiniBackendEnvironment = @{
+    'HIA_MCP_BACKEND' = $McpBackend
+}
+$backendEnvironmentNames = @(
+    'HIA_MCP_BACKEND',
+    'HIA_HOUDINI_MCP_PORT',
+    'HOUDINI_HOST',
+    'HOUDINI_PORT',
+    'FXHOUDINIMCP_AUTOSTART',
+    'FXHOUDINIMCP_PORT',
+    'FXHOUDINIMCP_TOKEN',
+    'HIA_MCP_V2_AUTOSTART',
+    'HIA_MCP_V2_HOST',
+    'HIA_MCP_V2_PORT',
+    'HIA_MCP_V2_TOKEN',
+    'HIA_MCP_V2_ROUTE',
+    'HIA_MCP_V2_RUNTIME_DIR'
+)
+if ($McpBackend -eq 'hia_v2') {
+    $hiaMcpServicePath = Assert-OrdinaryProjectPath `
+        -Path (Join-Path $ResolvedRoot 'services\hia_mcp_v2') `
+        -Root $ResolvedRoot
+    $hiaMcpRuntimeSource = Assert-OrdinaryProjectPath `
+        -Path (Join-Path $ResolvedRoot 'houdini_package\python_libs\hia_mcp_runtime\http_server.py') `
+        -Root $ResolvedRoot
+    $hiaMcpRuntimeDirectory = Assert-OrdinaryProjectPath `
+        -Path (Join-Path $ResolvedRoot '.runtime\hia-mcp-v2') `
+        -Root $ResolvedRoot `
+        -AllowMissingLeaf
+    [System.IO.Directory]::CreateDirectory($hiaMcpRuntimeDirectory) | Out-Null
+    $bridgeBackendPythonPaths = @($hiaMcpServicePath)
+    $bridgeBackendEnvironment = @{
+        'HIA_MCP_V2_HOST' = '127.0.0.1'
+        'HIA_MCP_V2_PORT' = [string]$houdiniMcpPort
+        'HIA_MCP_V2_TOKEN' = $houdiniMcpToken
+        'HIA_MCP_V2_ROUTE' = '/hia-mcp-v2/v1/execute'
+        'HIA_MCP_V2_RUNTIME_DIR' = $hiaMcpRuntimeDirectory
+    }
+    $houdiniBackendEnvironment += $bridgeBackendEnvironment
+    $houdiniBackendEnvironment['HIA_MCP_V2_AUTOSTART'] = '1'
+} else {
+    $fxHoudiniRoot = Join-Path $ResolvedRoot '.runtime\fxhoudinimcp\1.3.0'
+    $fxMcpPython = Join-Path $fxHoudiniRoot 'venv\Scripts\python.exe'
+    $fxMcpSourcePath = Join-Path $fxHoudiniRoot 'source\python'
+    $fxHoudiniServerPath = Join-Path $fxHoudiniRoot 'source\houdini\scripts\python'
+    Assert-OrdinaryProjectPath -Path $fxMcpPython -Root $ResolvedRoot | Out-Null
+    Assert-OrdinaryProjectPath -Path $fxMcpSourcePath -Root $ResolvedRoot | Out-Null
+    Assert-OrdinaryProjectPath -Path $fxHoudiniServerPath -Root $ResolvedRoot | Out-Null
+    $bridgeBackendPythonPaths = @((Join-Path $ResolvedRoot 'services\houdini_mcp'))
+    $houdiniBackendPythonPaths = @($fxHoudiniServerPath)
+    $bridgeBackendEnvironment = @{
+        'HIA_HOUDINI_MCP_PORT' = [string]$houdiniMcpPort
+        'FXHOUDINIMCP_TOKEN' = $houdiniMcpToken
+    }
+    $houdiniBackendEnvironment += @{
+        'FXHOUDINIMCP_AUTOSTART' = '1'
+        'FXHOUDINIMCP_PORT' = [string]$houdiniMcpPort
+        'FXHOUDINIMCP_TOKEN' = $houdiniMcpToken
+    }
+}
+$bridgeProcessPythonPath = @($bridgePythonPath) + $bridgeBackendPythonPaths + @($projectSourcePath)
+$houdiniProcessPythonPath = @($panelPythonPath) + $houdiniBackendPythonPaths + @($projectSourcePath)
 
 $bridgeArguments = @(
     '-B',
@@ -398,7 +546,9 @@ $bridgeArguments = @(
     '--codex-exe',
     $CodexExe,
     '--codex-home',
-    $CodexHome
+    $CodexHome,
+    '--mcp-backend',
+    $McpBackend
 )
 foreach ($argument in $bridgeArguments) {
     if ($argument -match '[\s"`\r\n]') {
@@ -414,22 +564,26 @@ $bridgeInfo.UseShellExecute = $false
 $bridgeInfo.CreateNoWindow = $true
 $bridgeInfo.RedirectStandardOutput = $true
 $bridgeInfo.RedirectStandardError = $false
-Set-ChildEnvironment -StartInfo $bridgeInfo -Values @{
+$bridgeEnvironment = @{
     'PATH' = "$pythonDirectory;$houdiniBinDirectory;$($env:PATH)"
-    'PYTHONPATH' = "$bridgePythonPath;$mcpPythonPath;$projectSourcePath"
+    'PYTHONPATH' = $bridgeProcessPythonPath -join ';'
     'PYTHONDONTWRITEBYTECODE' = '1'
     'PYTHONNOUSERSITE' = '1'
     'TEMP' = $sessionTemp
     'TMP' = $sessionTemp
     'CODEX_HOME' = $CodexHome
     'HIA_PROJECT_ROOT' = $ResolvedRoot
+    'HIA_CACHE_DIR' = $cacheRoot
     'HIA_EXPECTED_PYTHON_EXE' = $normalizedPython
     'HIA_BRIDGE_URL' = $bridgeUrl
     'HIA_BRIDGE_TOKEN' = $bridgeToken
     'HIA_SCENE_EXECUTOR_TOKEN' = $sceneExecutorToken
-    'HIA_HOUDINI_MCP_PORT' = [string]$houdiniMcpPort
-    'FXHOUDINIMCP_TOKEN' = $houdiniMcpToken
 }
+foreach ($entry in $bridgeBackendEnvironment.GetEnumerator()) {
+    $bridgeEnvironment[$entry.Key] = $entry.Value
+}
+Remove-ChildEnvironment -StartInfo $bridgeInfo -Names $backendEnvironmentNames
+Set-ChildEnvironment -StartInfo $bridgeInfo -Values $bridgeEnvironment
 
 $bridgeProcess = [System.Diagnostics.Process]::new()
 $bridgeProcess.StartInfo = $bridgeInfo
@@ -495,15 +649,16 @@ try {
     $houdiniInfo.WorkingDirectory = $ResolvedRoot
     $houdiniInfo.UseShellExecute = $false
     $houdiniInfo.CreateNoWindow = $false
-    Set-ChildEnvironment -StartInfo $houdiniInfo -Values @{
+    $houdiniEnvironment = @{
         'HOUDINI_PACKAGE_DIR' = $packageDirectory
         'HOUDINI_TEMP_DIR' = $sessionTemp
         'HOUDINI_USER_PREF_DIR' = $houdiniPreferences
-        'PYTHONPATH' = "$panelPythonPath;$fxHoudiniServerPath;$projectSourcePath"
+        'PYTHONPATH' = $houdiniProcessPythonPath -join ';'
         'PYTHONDONTWRITEBYTECODE' = '1'
         'TEMP' = $sessionTemp
         'TMP' = $sessionTemp
         'HIA_PROJECT_ROOT' = $ResolvedRoot
+        'HIA_CACHE_DIR' = $cacheRoot
         'HIA_BRIDGE_URL' = $bridgeUrl
         'HIA_BRIDGE_TOKEN' = $bridgeToken
         'HIA_SCENE_PROFILE' = [string]$bootstrap.scene.profile
@@ -514,10 +669,12 @@ try {
         'HIA_HOUDINI_SCHEMA_VERSION' = [string]$bootstrap.scene.schema_version
         'HIA_HOUDINI_SCHEMA_DIGEST' = [string]$bootstrap.scene.schema_digest
         'HIA_HYTHON_EXE' = $HythonExe
-        'FXHOUDINIMCP_AUTOSTART' = '1'
-        'FXHOUDINIMCP_PORT' = [string]$houdiniMcpPort
-        'FXHOUDINIMCP_TOKEN' = $houdiniMcpToken
     }
+    foreach ($entry in $houdiniBackendEnvironment.GetEnumerator()) {
+        $houdiniEnvironment[$entry.Key] = $entry.Value
+    }
+    Remove-ChildEnvironment -StartInfo $houdiniInfo -Names $backendEnvironmentNames
+    Set-ChildEnvironment -StartInfo $houdiniInfo -Values $houdiniEnvironment
     $houdiniProcess = [System.Diagnostics.Process]::new()
     $houdiniProcess.StartInfo = $houdiniInfo
     if (-not $houdiniProcess.Start()) {

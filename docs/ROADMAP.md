@@ -1,72 +1,16 @@
 # Roadmap
 
-Each phase requires explicit authorization. Completion of one phase never authorizes the next.
+This file records the current product status rather than historical phase gates.
 
-## P0 — Specification, safety, and installation preparation
+## Current status
 
-Deliverables: supported Houdini/Codex version policy; generated app-server schema; capability probes; path policy; threat model; repository safety baseline; installation plan.
+- Panel focus handling: attachment selection is non-native and non-modal, successful sends release input focus, streaming updates are batched, and Panel-owned timers and dialogs stop on close.
+- Conversation UI: user and Codex cards resize with the Panel, Markdown and code remain readable, and each Turn keeps one tool-activity card with real failures expanded.
+- Context handling: Codex automatic compaction is shown as one concise system message. There is no manual compaction control or local summarizer.
+- Local diagnostics: final runtime failures and user-requested dissatisfaction reports are merged per Turn under `<project-root>\.runtime\diagnostics\`, with credential redaction and no upload.
 
-Acceptance: every project write stays on `E:`; experimental APIs are not core dependencies; path traversal, UNC/device, ADS, reparse-point, AppData, and drive-root cases are rejected; all offline tests pass. P0-B specifically delivers the minimal repository baseline and validation-only path policy. P0-C requires separate approval.
+## Remaining acceptance
 
-## P1 — Codex connection and Houdini Panel
+Offline tests can verify event handling, layout rules, report writing, redaction, and lifecycle cleanup. They cannot prove keyboard focus behavior inside the Houdini host window.
 
-Deliverables: Python Panel; local Bridge; supervised stdio app-server; streaming messages; stop/interrupt; approvals; Thread start/resume/read; reconnect behavior.
-
-Acceptance: the UI stays responsive; restart resumes the same Codex Thread; the project keeps no custom chat-history store; control services remain authenticated and loopback-only.
-
-## P2 — Houdini MCP foundation
-
-Deliverables: Houdini MCP host; Scene Gateway; main-thread queue; deterministic general HIA-owned graph validation/application/verification; revision checks; idempotency; undo grouping; structured errors; audit trail.
-
-Acceptance: natural-language requests can produce multiple editable procedural OBJ/SOP networks through the same general graph contract; a table is the first fixture, and a structurally different fixture proves there is no object-semantic hard-coding. One Undo reverts each complete approved graph transaction; retries do not duplicate work; stale revisions fail instead of overwriting scene changes.
-
-P2-V Gate B0 is frozen pre-release with its architecture, exact five-tool schema inventory, threat model, fixtures, offline contract tests, and test plan. Gate B1 may implement only the offline deterministic adapter, queue, contract, and fake executor for `houdini_scene_info`, `houdini_node_type_info`, `houdini_graph_validate`, `houdini_graph_apply`, and `houdini_graph_verify`. B0/B1 approval does not authorize a live scene operation.
-
-## P3 — Image modeling
-
-Deliverables: single/multiview image input; ModelSpec; reference cameras and backplates; scale markers; foundational procedural SOP recipes; explicit evidence and uncertainty fields.
-
-Acceptance: one single-image and one multiview asset complete the modeling loop; occluded and hidden structure is labeled as inferred; no false absolute precision is claimed.
-
-## P4 — Independent rendering and visual QA
-
-Deliverables: immutable USD snapshot; external husk/Karma workers; AOVs; file-based preview; status/cancel/result; Codex visual review and revision loop.
-
-Acceptance: Houdini remains usable during renders; cancellation stops only the worker tree; stale-revision renders cannot modify the current scene; at least one evidenced visual-improvement iteration completes.
-
-## P5 — Full DCC coverage
-
-Deliverables: Solaris/USD assembly; MaterialX and VOP tools; Karma CPU/XPU capability handling; cameras/lights; animation; CHOP/KineFX; simulation caches; `hython` clone jobs.
-
-Acceptance: produce a layered USD scene with materials, lighting, animated camera or asset, and a rendered frame sequence; unsupported delegate features are reported rather than assumed.
-
-## P6 — Arbitrary Python tiers
-
-Deliverables: constrained `exec_isolated`; snapshot-based `exec_hython_clone`; disabled-by-default and per-use-approved `exec_live_unsafe`; checkpointing; resource limits; code hashes; audit and security tests.
-
-Acceptance: AppData access, traversal, junctions, network use, subprocess creation, timeouts, and resource exhaustion are blocked or terminated according to policy; live unsafe execution cannot receive permanent approval or subagent access.
-
-## P7 — Automated HDA publishing
-
-Deliverables: namespace/version validation; staging HDA; clean-`hython` install/instance/cook tests; dependency checks; thumbnail; manifest; checksum; atomic promotion; live install/reload.
-
-Acceptance: a new semantic-versioned HDA installs and cooks in a clean process; failure preserves staging diagnostics and never overwrites an existing version or last-known-good artifact.
-
-## P8 — Codex-native multi-agent work
-
-Deliverables: native Codex subagents; proposal schema; root arbitration; single-writer enforcement; conflict detection; stale-proposal rejection; parallel read-only, render, and immutable-artifact workflows.
-
-Acceptance: no second agent framework exists; concurrent work loses no updates; stale proposals are rejected; live HIP writes remain serialized and explicitly approved.
-
-## P9 — Network and release hardening
-
-Deliverables: authenticated remote Job Gateway; TLS/mTLS or bearer policy; rate limiting and replay defense; worker registration; recovery; contract tests; version matrix; fault tests; release packaging.
-
-Acceptance: app-server and Houdini are never directly exposed; disconnects and worker crashes recover safely; workers never receive Codex credentials; production workflows do not depend on experimental APIs.
-
-## Milestones
-
-- P2: natural language produces general procedural editable graphs; the first table fixture and at least one non-table fixture use the same protocol.
-- P4: reference images produce a model that Codex visually reviews and improves.
-- P7: a versioned HDA is tested and published automatically.
-- P9: multi-agent, network-worker, and full DCC production capabilities are hardened.
+**代码完成，等待真实 GUI 验收。**

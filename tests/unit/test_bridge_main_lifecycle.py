@@ -22,6 +22,8 @@ BRIDGE_TOKEN = "bridge_" + "b" * 40
 EXECUTOR_TOKEN = "executor_" + "e" * 40
 HOUDINI_MCP_TOKEN = "houdini_" + "m" * 40
 HOUDINI_MCP_PORT = "58123"
+HIA_MCP_V2_TOKEN = "hia_v2_" + "v" * 40
+HIA_MCP_V2_PORT = "58124"
 BRIDGE_URL = "http://127.0.0.1:54321"
 
 
@@ -87,6 +89,16 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                     "HIA_SCENE_EXECUTOR_TOKEN": EXECUTOR_TOKEN,
                     "HIA_HOUDINI_MCP_PORT": HOUDINI_MCP_PORT,
                     "FXHOUDINIMCP_TOKEN": HOUDINI_MCP_TOKEN,
+                    "HIA_MCP_V2_HOST": "127.0.0.1",
+                    "HIA_MCP_V2_PORT": HIA_MCP_V2_PORT,
+                    "HIA_MCP_V2_TOKEN": HIA_MCP_V2_TOKEN,
+                    "HIA_MCP_V2_ROUTE": "/hia-mcp-v2/v1/execute",
+                    "HIA_MCP_V2_RUNTIME_DIR": str(
+                        REPOSITORY_ROOT / ".runtime" / "hia-mcp-v2"
+                    ),
+                    "HIA_CACHE_DIR": str(
+                        REPOSITORY_ROOT / ".runtime" / "cache"
+                    ),
                     "UNREVIEWED_API_KEY": "must_not_reach_codex_child",
                 },
                 clear=False,
@@ -156,7 +168,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                 order.append("bind") or server
             ),
         ) as server_constructor, contextlib.redirect_stdout(stdout):
-            exit_code = bridge_main.run([])
+            exit_code = bridge_main.run(["--mcp-backend", "fxhoudini"])
 
         self.assertEqual(0, exit_code)
         self.assertEqual(1, session.start_count)
@@ -233,6 +245,14 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             child_environment["HIA_EXPECTED_PYTHON_EXE"],
         )
         self.assertEqual(str(REPOSITORY_ROOT), child_environment["HIA_PROJECT_ROOT"])
+        self.assertEqual(
+            str(REPOSITORY_ROOT / ".runtime" / "cache"),
+            child_environment["HIA_CACHE_DIR"],
+        )
+        for relative in ("screenshots", "previews", "tmp"):
+            self.assertTrue(
+                (REPOSITORY_ROOT / ".runtime" / "cache" / relative).is_dir()
+            )
         self.assertEqual("1", child_environment["PYTHONNOUSERSITE"])
         self.assertEqual(
             str(
@@ -265,12 +285,120 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
 
         bootstrap = json.loads(stdout.getvalue())
+        self.assertEqual("fxhoudini", bootstrap["mcp_backend"])
         self.assertNotIn("url", bootstrap)
         self.assertNotIn("token", bootstrap)
         self.assertNotIn("executor_token", bootstrap["scene"])
         self.assertNotIn(BRIDGE_URL, stdout.getvalue())
         self.assertNotIn(BRIDGE_TOKEN, stdout.getvalue())
         self.assertNotIn(EXECUTOR_TOKEN, stdout.getvalue())
+
+    def test_hia_v2_is_default_and_exclusively_registered_with_owned_environment(
+        self,
+    ) -> None:
+        order: list[str] = []
+        client = _Client(order)
+        session = _Session(order)
+        registry = SimpleNamespace(
+            manifest_digest="a" * 64,
+            schema_version="0.2.0",
+        )
+        scene_queue = SimpleNamespace(shutdown=mock.Mock())
+        server = _Server(order)
+        stdout = io.StringIO()
+
+        stack, client_constructor = self._common_patches(session, client)
+        with stack, mock.patch.object(
+            bridge_main.SchemaRegistry,
+            "b2_read_only",
+            return_value=registry,
+        ), mock.patch.object(
+            bridge_main,
+            "SceneQueue",
+            return_value=scene_queue,
+        ), mock.patch.object(
+            bridge_main,
+            "BridgeApplication",
+            return_value=object(),
+        ) as application_constructor, mock.patch.object(
+            bridge_main,
+            "LoopbackHTTPServer",
+            return_value=server,
+        ), contextlib.redirect_stdout(stdout):
+            exit_code = bridge_main.run([])
+
+        self.assertEqual(0, exit_code)
+        command = client_constructor.call_args.args[0]
+        child_environment = client_constructor.call_args.kwargs["environment"]
+        overrides = [
+            command[index + 1]
+            for index, value in enumerate(command[:-1])
+            if value == "-c"
+        ]
+        hia_server = "mcp_servers.hia_mcp_v2"
+        self.assertEqual(str(REPOSITORY_ROOT / "codex.exe"), command[0])
+        self.assertEqual(1, command.count("--strict-config"))
+        self.assertIn("mcp_servers.houdini_intelligence.enabled=false", overrides)
+        self.assertIn(
+            f"{hia_server}.command="
+            + bridge_main._toml_basic_string(str(Path(sys.executable).resolve())),
+            overrides,
+        )
+        self.assertIn(
+            f'{hia_server}.args=["-B", "-m", "hia_mcp_v2"]',
+            overrides,
+        )
+        self.assertIn(f"{hia_server}.required=true", overrides)
+        self.assertIn(
+            f'{hia_server}.default_tools_approval_mode="approve"',
+            overrides,
+        )
+        self.assertFalse(any("fxhoudinimcp" in item.casefold() for item in overrides))
+
+        self.assertEqual("127.0.0.1", child_environment["HIA_MCP_V2_HOST"])
+        self.assertEqual(HIA_MCP_V2_PORT, child_environment["HIA_MCP_V2_PORT"])
+        self.assertEqual(HIA_MCP_V2_TOKEN, child_environment["HIA_MCP_V2_TOKEN"])
+        self.assertEqual(
+            "/hia-mcp-v2/v1/execute",
+            child_environment["HIA_MCP_V2_ROUTE"],
+        )
+        self.assertEqual(
+            str(REPOSITORY_ROOT / ".runtime" / "hia-mcp-v2"),
+            child_environment["HIA_MCP_V2_RUNTIME_DIR"],
+        )
+        self.assertEqual(
+            str(REPOSITORY_ROOT / ".runtime" / "cache"),
+            child_environment["HIA_CACHE_DIR"],
+        )
+        self.assertIn("HIA_CACHE_DIR", bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT)
+        self.assertIn(
+            f'{hia_server}.env_vars='
+            + json.dumps(list(bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT)),
+            overrides,
+        )
+        for forbidden in ("HOUDINI_HOST", "HOUDINI_PORT", "FXHOUDINIMCP_TOKEN"):
+            self.assertNotIn(forbidden, child_environment)
+        python_paths = {
+            item.replace("/", "\\").rstrip("\\").casefold()
+            for item in child_environment["PYTHONPATH"].split(os.pathsep)
+        }
+        self.assertIn(
+            str(REPOSITORY_ROOT / "services" / "hia_mcp_v2")
+            .replace("/", "\\")
+            .casefold(),
+            python_paths,
+        )
+        self.assertNotIn(
+            str(REPOSITORY_ROOT / bridge_main.FXHOUDINI_MCP_SOURCE_RELATIVE_PATH)
+            .replace("/", "\\")
+            .casefold(),
+            python_paths,
+        )
+        self.assertEqual(
+            "hia_v2",
+            application_constructor.call_args.kwargs["houdini_mcp_backend"],
+        )
+        self.assertEqual("hia_v2", json.loads(stdout.getvalue())["mcp_backend"])
 
     def test_http_provider_command_is_escaped_process_local_and_secret_free(self) -> None:
         mcp_python = 'E:\\runtime\\quoted "python"\\python.exe'
@@ -341,6 +469,24 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, command_text)
+
+    def test_cache_directory_is_portable_and_rejects_path_escape(self) -> None:
+        portable_root = REPOSITORY_ROOT.parent / "portable-hia-project"
+        expected = (portable_root / ".runtime" / "cache").resolve()
+
+        self.assertEqual(expected, bridge_main._cache_directory(portable_root, None))
+        self.assertEqual(
+            expected,
+            bridge_main._cache_directory(portable_root, str(expected)),
+        )
+        with self.assertRaises(bridge_main.BridgeError) as captured:
+            bridge_main._cache_directory(
+                portable_root,
+                str(portable_root.parent / "escaped-cache"),
+            )
+        self.assertEqual("INVALID_CACHE_DIR", captured.exception.code)
+        source = Path(bridge_main.__file__).read_text(encoding="utf-8")
+        self.assertNotIn(r"E:\houdini-intelligence-agent", source)
 
     def test_http_provider_command_does_not_target_persistent_config(self) -> None:
         project_config = REPOSITORY_ROOT / ".codex" / "config.toml"

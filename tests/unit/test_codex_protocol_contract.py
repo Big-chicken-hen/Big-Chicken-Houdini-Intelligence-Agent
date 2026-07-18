@@ -175,6 +175,37 @@ class CodexProtocolContractTests(unittest.TestCase):
             self.allowed_methods("server_notifications"),
         )
 
+    def test_automatic_compaction_is_receive_only(self) -> None:
+        self.assertIn(
+            "thread/compacted",
+            self.allowed_methods("server_notifications"),
+        )
+        self.assertNotIn(
+            "thread/compact/start",
+            self.allowed_methods("client_requests"),
+        )
+
+    def test_request_user_input_remains_experimentally_excluded(self) -> None:
+        method = "item/tool/requestUserInput"
+        excluded = set(
+            self.allowlist["explicit_exclusions"]["experimental"]["methods"]
+        )
+        inventoried = {
+            entry["method"]: entry
+            for entry in self.inventory["aggregates"]["server_requests"]["methods"]
+        }
+        self.assertTrue(inventoried[method]["declared_experimental"])
+        self.assertIn(method, REQUIRED_EXCLUSIONS["experimental"])
+        self.assertIn(method, excluded)
+        for category in (
+            "client_requests",
+            "server_requests",
+            "server_notifications",
+            "client_notifications",
+        ):
+            with self.subTest(category=category):
+                self.assertNotIn(method, self.allowed_methods(category))
+
     def test_p1_passive_notifications_are_stable_and_receive_only(self) -> None:
         expected_definitions = {
             "account/rateLimits/updated": "AccountRateLimitsUpdatedNotification",

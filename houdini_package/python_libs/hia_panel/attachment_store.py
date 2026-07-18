@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import uuid
@@ -9,7 +10,14 @@ from pathlib import Path
 from typing import Union
 
 
-_DEFAULT_PROJECT_ROOT = Path(r"E:\houdini-intelligence-agent")
+def _default_project_root() -> Path:
+    configured = os.environ.get("HIA_PROJECT_ROOT")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[3]
+
+
+_DEFAULT_PROJECT_ROOT = _default_project_root()
 _SUPPORTED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 _SAFE_THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _WINDOWS_RESERVED_NAMES = frozenset(

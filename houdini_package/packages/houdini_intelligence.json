@@ -2,20 +2,17 @@
   "enable": true,
   "env": [
     {
-      "HIA_PROJECT_ROOT": "E:/houdini-intelligence-agent"
-    },
-    {
       "PYTHONPATH": {
         "method": "prepend",
-        "value": "E:/houdini-intelligence-agent/houdini_package/python_libs"
+        "value": "$HIA_PROJECT_ROOT/houdini_package/python_libs"
       }
     },
     {
       "PYTHONPATH": {
         "method": "prepend",
-        "value": "E:/houdini-intelligence-agent/src"
+        "value": "$HIA_PROJECT_ROOT/src"
       }
     }
   ],
-  "path": "E:/houdini-intelligence-agent/houdini_package"
+  "path": "$HIA_PROJECT_ROOT/houdini_package"
 }

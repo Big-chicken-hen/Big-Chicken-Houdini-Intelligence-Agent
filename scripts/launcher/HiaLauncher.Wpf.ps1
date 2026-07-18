@@ -1,0 +1,647 @@
+﻿Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+
+if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
+    [void][System.Windows.MessageBox]::Show(
+        '启动器界面需要 STA 模式。请使用 Windows PowerShell 5.1 直接运行 scripts\hia-launcher.ps1。',
+        'HIA 启动器无法继续',
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Error
+    )
+    exit 1
+}
+
+$xamlPath = Join-Path $PSScriptRoot 'HiaLauncher.xaml'
+try {
+    $xamlDocument = [xml][System.IO.File]::ReadAllText($xamlPath)
+    $xamlReader = [System.Xml.XmlNodeReader]::new($xamlDocument)
+    try {
+        $window = [System.Windows.Markup.XamlReader]::Load($xamlReader)
+    } finally {
+        $xamlReader.Close()
+    }
+} catch {
+    [void][System.Windows.MessageBox]::Show(
+        '无法加载项目本地 WPF 界面资源。请检查 scripts\launcher\HiaLauncher.xaml。',
+        'HIA 启动器无法继续',
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Error
+    )
+    exit 1
+}
+
+function Get-RequiredControl {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $control = $window.FindName($Name)
+    if ($null -eq $control) { throw "Required WPF control is missing: $Name" }
+    return $control
+}
+
+$overallStatusBadge = Get-RequiredControl -Name 'OverallStatusBadge'
+$overallStatusDot = Get-RequiredControl -Name 'OverallStatusDot'
+$overallStatusText = Get-RequiredControl -Name 'OverallStatusText'
+$mcpBackendCombo = Get-RequiredControl -Name 'McpBackendComboBox'
+$houdiniCombo = Get-RequiredControl -Name 'HoudiniComboBox'
+$browseHoudiniButton = Get-RequiredControl -Name 'BrowseHoudiniButton'
+$houdiniPathText = Get-RequiredControl -Name 'HoudiniPathText'
+$bridgeCombo = Get-RequiredControl -Name 'BridgePythonComboBox'
+$browseBridgeButton = Get-RequiredControl -Name 'BrowseBridgeButton'
+$bridgePathText = Get-RequiredControl -Name 'BridgePathText'
+$passCountText = Get-RequiredControl -Name 'PassCountText'
+$warningCountText = Get-RequiredControl -Name 'WarningCountText'
+$blockedCountText = Get-RequiredControl -Name 'BlockedCountText'
+$checksList = Get-RequiredControl -Name 'ChecksListBox'
+$emptyStateBorder = Get-RequiredControl -Name 'EmptyStateBorder'
+$emptyStateText = Get-RequiredControl -Name 'EmptyStateText'
+$busyPanel = Get-RequiredControl -Name 'BusyPanel'
+$inlineStatusBorder = Get-RequiredControl -Name 'InlineStatusBorder'
+$inlineStatusText = Get-RequiredControl -Name 'InlineStatusText'
+$reportPathTextBox = Get-RequiredControl -Name 'ReportPathTextBox'
+$rescanButton = Get-RequiredControl -Name 'RescanButton'
+$repairButton = Get-RequiredControl -Name 'RepairButton'
+$copyReportButton = Get-RequiredControl -Name 'CopyReportButton'
+$launchButton = Get-RequiredControl -Name 'LaunchButton'
+
+$brushGreen = $window.FindResource('StatusGreenBrush')
+$brushYellow = $window.FindResource('StatusYellowBrush')
+$brushRed = $window.FindResource('StatusRedBrush')
+$brushNeutral = $window.FindResource('StatusNeutralBrush')
+$brushCyan = $window.FindResource('AccentCyanBrush')
+$brushPurple = $window.FindResource('AccentPurpleBrush')
+$brushTextSecondary = $window.FindResource('TextSecondaryBrush')
+$surfaceGreen = $window.FindResource('GreenSurfaceBrush')
+$surfaceYellow = $window.FindResource('YellowSurfaceBrush')
+$surfaceRed = $window.FindResource('RedSurfaceBrush')
+$surfaceNeutral = $window.FindResource('NeutralSurfaceBrush')
+
+$script:currentCandidates = @()
+$script:currentResult = $null
+$script:lastReportPath = ''
+$script:selectionNeedsCheck = $true
+$script:preflightFailed = $false
+$script:suppressSelectionCheck = $false
+$script:isBusy = $false
+$script:initialScanStarted = $false
+
+$script:inlineStatusTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:inlineStatusTimer.Interval = [TimeSpan]::FromSeconds(2.6)
+$script:inlineStatusTimer.Add_Tick({
+    $script:inlineStatusTimer.Stop()
+    $inlineStatusBorder.Visibility = [System.Windows.Visibility]::Collapsed
+})
+
+function Set-OverallState {
+    param([Parameter(Mandatory = $true)][ValidateSet('green', 'yellow', 'red', 'neutral', 'busy')][string]$State)
+
+    switch ($State) {
+        'green' {
+            $overallStatusText.Text = '小助手：可以启动'
+            $overallStatusDot.Fill = $brushGreen
+            $overallStatusBadge.BorderBrush = $brushGreen
+            $overallStatusBadge.Background = $surfaceGreen
+        }
+        'yellow' {
+            $overallStatusText.Text = '小助手：存在警告'
+            $overallStatusDot.Fill = $brushYellow
+            $overallStatusBadge.BorderBrush = $brushYellow
+            $overallStatusBadge.Background = $surfaceYellow
+        }
+        'red' {
+            $overallStatusText.Text = '小助手：需要处理'
+            $overallStatusDot.Fill = $brushRed
+            $overallStatusBadge.BorderBrush = $brushRed
+            $overallStatusBadge.Background = $surfaceRed
+        }
+        'busy' {
+            $overallStatusText.Text = '小助手：正在检查'
+            $overallStatusDot.Fill = $brushCyan
+            $overallStatusBadge.BorderBrush = $brushPurple
+            $overallStatusBadge.Background = $surfaceNeutral
+        }
+        default {
+            $overallStatusText.Text = '小助手：等待检查'
+            $overallStatusDot.Fill = $brushNeutral
+            $overallStatusBadge.BorderBrush = $brushNeutral
+            $overallStatusBadge.Background = $surfaceNeutral
+        }
+    }
+}
+
+function Hide-InlineStatus {
+    $script:inlineStatusTimer.Stop()
+    $inlineStatusBorder.Visibility = [System.Windows.Visibility]::Collapsed
+}
+
+function Show-InlineStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [ValidateSet('success', 'warning', 'error', 'neutral')][string]$Kind = 'neutral',
+        [switch]$Transient
+    )
+
+    $script:inlineStatusTimer.Stop()
+    $inlineStatusText.Text = $Text
+    switch ($Kind) {
+        'success' {
+            $inlineStatusBorder.Background = $surfaceGreen
+            $inlineStatusBorder.BorderBrush = $brushGreen
+        }
+        'warning' {
+            $inlineStatusBorder.Background = $surfaceYellow
+            $inlineStatusBorder.BorderBrush = $brushYellow
+        }
+        'error' {
+            $inlineStatusBorder.Background = $surfaceRed
+            $inlineStatusBorder.BorderBrush = $brushRed
+        }
+        default {
+            $inlineStatusBorder.Background = $surfaceNeutral
+            $inlineStatusBorder.BorderBrush = $brushNeutral
+        }
+    }
+    $inlineStatusBorder.Visibility = [System.Windows.Visibility]::Visible
+    if ($Transient) { $script:inlineStatusTimer.Start() }
+}
+
+function Get-ComboPath {
+    param([Parameter(Mandatory = $true)]$Combo)
+
+    $selected = $Combo.SelectedItem
+    if ($null -eq $selected) { return '' }
+    $pathProperty = $selected.PSObject.Properties['path']
+    if ($null -eq $pathProperty) { return '' }
+    return [string]$pathProperty.Value
+}
+
+function Get-ComboBackend {
+    $selected = $mcpBackendCombo.SelectedItem
+    if ($null -eq $selected) { return 'hia_v2' }
+    $idProperty = $selected.PSObject.Properties['id']
+    if ($null -eq $idProperty) { return 'hia_v2' }
+    return Resolve-HiaMcpBackend -Backend ([string]$idProperty.Value)
+}
+
+function Update-PathSummaries {
+    $houdiniPath = Get-ComboPath -Combo $houdiniCombo
+    if ($houdiniPath) {
+        $houdiniPathText.Text = $houdiniPath
+        $houdiniPathText.ToolTip = $houdiniPath
+    } else {
+        $houdiniPathText.Text = '尚未选择 houdini.exe'
+        $houdiniPathText.ToolTip = '尚未选择 houdini.exe'
+    }
+
+    $bridgePath = Get-ComboPath -Combo $bridgeCombo
+    if ($bridgePath) {
+        $bridgePathText.Text = $bridgePath
+        $bridgePathText.ToolTip = $bridgePath
+    } else {
+        $bridgePathText.Text = '尚未选择 Bridge python.exe'
+        $bridgePathText.ToolTip = '尚未选择 Bridge python.exe'
+    }
+}
+
+function Set-BusyState {
+    param([Parameter(Mandatory = $true)][bool]$Busy)
+
+    $script:isBusy = $Busy
+    $busyPanel.Visibility = if ($Busy) {
+        [System.Windows.Visibility]::Visible
+    } else {
+        [System.Windows.Visibility]::Collapsed
+    }
+    $window.Cursor = if ($Busy) { [System.Windows.Input.Cursors]::Wait } else { $null }
+
+    $mcpBackendCombo.IsEnabled = -not $Busy
+    $houdiniCombo.IsEnabled = -not $Busy
+    $bridgeCombo.IsEnabled = -not $Busy
+    $browseHoudiniButton.IsEnabled = -not $Busy
+    $browseBridgeButton.IsEnabled = -not $Busy
+    $rescanButton.IsEnabled = -not $Busy
+    $repairButton.IsEnabled = -not $Busy
+    if ($Busy) {
+        $copyReportButton.IsEnabled = $false
+        $launchButton.IsEnabled = $false
+        Set-OverallState -State 'busy'
+        $window.UpdateLayout()
+        [void]$window.Dispatcher.Invoke(
+            [System.Action]{ },
+            [System.Windows.Threading.DispatcherPriority]::Render
+        )
+    } else {
+        $copyReportButton.IsEnabled = -not [string]::IsNullOrWhiteSpace($script:lastReportPath)
+        $launchButton.IsEnabled = (
+            $null -ne $script:currentResult -and
+            -not $script:selectionNeedsCheck -and
+            $script:currentResult.overall -ne 'red'
+        )
+        if ($script:preflightFailed) {
+            Set-OverallState -State 'red'
+        } elseif ($null -ne $script:currentResult) {
+            Set-OverallState -State ([string]$script:currentResult.overall)
+        } else {
+            Set-OverallState -State 'neutral'
+        }
+    }
+}
+
+function New-CheckView {
+    param([Parameter(Mandatory = $true)]$Check)
+
+    $level = ([string]$Check.level).ToLowerInvariant()
+    $statusText = '阻断'
+    $statusBrush = $brushRed
+    $adviceBrush = $brushRed
+    if ($level -eq 'green') {
+        $statusText = '通过'
+        $statusBrush = $brushGreen
+        $adviceBrush = $brushTextSecondary
+    } elseif ($level -eq 'yellow') {
+        $statusText = '警告'
+        $statusBrush = $brushYellow
+        $adviceBrush = $brushYellow
+    }
+    $advice = [string]$Check.advice
+    if ([string]::IsNullOrWhiteSpace($advice)) { $advice = '无需处理。' }
+    return [pscustomobject]@{
+        StatusText = $statusText
+        StatusBrush = $statusBrush
+        BorderBrush = $statusBrush
+        CheckName = [string]$Check.name
+        ResultText = [string]$Check.message
+        AdviceText = "建议：$advice"
+        AdviceBrush = $adviceBrush
+    }
+}
+
+function Show-Result {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    $script:currentResult = $Result
+    $script:selectionNeedsCheck = $false
+    $script:preflightFailed = $false
+    $checks = @($Result.checks)
+    $views = [System.Collections.Generic.List[object]]::new()
+    foreach ($check in $checks) { $views.Add((New-CheckView -Check $check)) }
+    $checksList.ItemsSource = $views.ToArray()
+    $emptyStateBorder.Visibility = if ($views.Count -eq 0) {
+        [System.Windows.Visibility]::Visible
+    } else {
+        [System.Windows.Visibility]::Collapsed
+    }
+
+    $passCountText.Text = [string](@($checks | Where-Object level -eq 'green').Count)
+    $warningCountText.Text = [string](@($checks | Where-Object level -eq 'yellow').Count)
+    $blockedCountText.Text = [string](@($checks | Where-Object level -eq 'red').Count)
+
+    $reportPath = ''
+    if ($null -ne $Result.report) {
+        $reportProperty = $Result.report.PSObject.Properties['json_path']
+        if ($null -ne $reportProperty) { $reportPath = [string]$reportProperty.Value }
+    }
+    if ($reportPath) {
+        $script:lastReportPath = $reportPath
+        $reportPathTextBox.Text = $reportPath
+        $reportPathTextBox.ToolTip = $reportPath
+    }
+
+    if ($Result.overall -eq 'green') {
+        Set-OverallState -State 'green'
+    } elseif ($Result.overall -eq 'yellow') {
+        Set-OverallState -State 'yellow'
+    } else {
+        Set-OverallState -State 'red'
+    }
+}
+
+function Show-PreflightFailure {
+    $script:currentResult = $null
+    $script:selectionNeedsCheck = $true
+    $script:preflightFailed = $true
+    $failedCheck = [pscustomobject]@{
+        level = 'red'
+        name = '启动器自检'
+        message = '自检过程未能完成。'
+        advice = '请在控制台运行 scripts\hia-launcher.ps1 -CheckOnly 查看可调试结果。'
+    }
+    $checksList.ItemsSource = @((New-CheckView -Check $failedCheck))
+    $emptyStateBorder.Visibility = [System.Windows.Visibility]::Collapsed
+    $passCountText.Text = '0'
+    $warningCountText.Text = '0'
+    $blockedCountText.Text = '1'
+    Set-OverallState -State 'red'
+    Show-InlineStatus -Kind 'error' -Text '自检失败；未启动 Houdini。请使用控制台检查模式定位问题。'
+}
+
+function Mark-SelectionNeedsCheck {
+    if ($script:suppressSelectionCheck -or $script:isBusy) { return }
+    $script:currentResult = $null
+    $script:selectionNeedsCheck = $true
+    $script:preflightFailed = $false
+    $checksList.ItemsSource = $null
+    $emptyStateText.Text = '环境选择已变化，重新扫描后显示新的自检结果。'
+    $emptyStateBorder.Visibility = [System.Windows.Visibility]::Visible
+    $passCountText.Text = '0'
+    $warningCountText.Text = '0'
+    $blockedCountText.Text = '0'
+    Set-OverallState -State 'neutral'
+    Update-PathSummaries
+    Set-BusyState -Busy $false
+    Show-InlineStatus -Kind 'warning' -Text '环境选择已变化，请点击“重新扫描”完成检查。'
+}
+
+function Get-PathIndex {
+    param(
+        [Parameter(Mandatory = $true)]$Combo,
+        [AllowEmptyString()][string]$Path = ''
+    )
+
+    if (-not $Path) { return -1 }
+    for ($index = 0; $index -lt $Combo.Items.Count; $index++) {
+        $item = $Combo.Items[$index]
+        $property = $item.PSObject.Properties['path']
+        if ($null -ne $property -and [System.StringComparer]::OrdinalIgnoreCase.Equals([string]$property.Value, $Path)) {
+            return $index
+        }
+    }
+    return -1
+}
+
+function Get-BackendIndex {
+    param([AllowEmptyString()][string]$Backend = '')
+
+    $resolved = Resolve-HiaMcpBackend -Backend $Backend
+    for ($index = 0; $index -lt $mcpBackendCombo.Items.Count; $index++) {
+        $item = $mcpBackendCombo.Items[$index]
+        $property = $item.PSObject.Properties['id']
+        if ($null -ne $property -and [string]$property.Value -eq $resolved) {
+            return $index
+        }
+    }
+    return -1
+}
+
+function Invoke-GuiScan {
+    param(
+        [AllowEmptyString()][string]$PreferredHoudini = '',
+        [AllowEmptyString()][string]$PreferredBridge = '',
+        [AllowEmptyString()][string]$PreferredBackend = ''
+    )
+
+    Set-BusyState -Busy $true
+    Hide-InlineStatus
+    try {
+        $script:suppressSelectionCheck = $true
+        try {
+            $backendChoice = if ($PreferredBackend) {
+                Resolve-HiaMcpBackend -Backend $PreferredBackend
+            } else {
+                Resolve-HiaMcpBackend -Backend ([string]$settings.mcp_backend)
+            }
+            $mcpBackendCombo.Items.Clear()
+            foreach ($candidate in @(Get-HiaMcpBackendChoices)) {
+                [void]$mcpBackendCombo.Items.Add($candidate)
+            }
+            $backendIndex = Get-BackendIndex -Backend $backendChoice
+            if ($backendIndex -lt 0) { throw 'The selected MCP backend is unavailable.' }
+            $mcpBackendCombo.SelectedIndex = $backendIndex
+
+            $houdiniChoice = $PreferredHoudini
+            if (-not $houdiniChoice) { $houdiniChoice = [string]$settings.houdini_exe }
+            $candidateMap = @{}
+            foreach ($candidate in @(Get-HiaHoudiniCandidates)) {
+                $candidateMap[[string]$candidate.path] = $candidate
+            }
+            if ($houdiniChoice) {
+                foreach ($candidate in @(Get-HiaHoudiniCandidates -ExplicitPath $houdiniChoice)) {
+                    $candidateMap[[string]$candidate.path] = $candidate
+                }
+            }
+            $script:currentCandidates = @(
+                $candidateMap.Values |
+                    Sort-Object -Property @{ Expression = { $_.version }; Descending = $true }, path
+            )
+            $houdiniCombo.Items.Clear()
+            foreach ($candidate in $script:currentCandidates) { [void]$houdiniCombo.Items.Add($candidate) }
+            $houdiniIndex = Get-PathIndex -Combo $houdiniCombo -Path $houdiniChoice
+            if ($houdiniIndex -ge 0) {
+                $houdiniCombo.SelectedIndex = $houdiniIndex
+            } elseif ($houdiniCombo.Items.Count -eq 1) {
+                $houdiniCombo.SelectedIndex = 0
+            } else {
+                $houdiniCombo.SelectedIndex = -1
+            }
+
+            $bridgeChoice = $PreferredBridge
+            if (-not $bridgeChoice) { $bridgeChoice = [string]$settings.bridge_python }
+            $bridgeCandidates = @(
+                Get-HiaBridgePythonCandidates `
+                    -ProjectRoot $projectRoot `
+                    -ExplicitPath $bridgeChoice `
+                    -SavedPath ([string]$settings.bridge_python)
+            )
+            if ($bridgeChoice) {
+                $knownBridge = @($bridgeCandidates | Where-Object {
+                    [System.StringComparer]::OrdinalIgnoreCase.Equals([string]$_.path, $bridgeChoice)
+                })
+                if ($knownBridge.Count -eq 0) {
+                    try { $bridgeChoice = [System.IO.Path]::GetFullPath($bridgeChoice) } catch { }
+                    $bridgeCandidates += [pscustomobject]@{
+                        path = $bridgeChoice
+                        source = 'requested'
+                        display = "缺失 — $bridgeChoice"
+                    }
+                }
+            }
+            $bridgeCombo.Items.Clear()
+            foreach ($candidate in @($bridgeCandidates | Sort-Object -Property path -Unique)) {
+                [void]$bridgeCombo.Items.Add($candidate)
+            }
+            $bridgeIndex = Get-PathIndex -Combo $bridgeCombo -Path $bridgeChoice
+            if ($bridgeIndex -ge 0) {
+                $bridgeCombo.SelectedIndex = $bridgeIndex
+            } elseif ($bridgeCombo.Items.Count -eq 1) {
+                $bridgeCombo.SelectedIndex = 0
+            } else {
+                $bridgeCombo.SelectedIndex = -1
+            }
+        } finally {
+            $script:suppressSelectionCheck = $false
+        }
+
+        Update-PathSummaries
+        $selectedHoudini = Get-ComboPath -Combo $houdiniCombo
+        $selectedBridge = Get-ComboPath -Combo $bridgeCombo
+        $selectedBackend = Get-ComboBackend
+        $script:currentResult = Invoke-PreflightAndReport `
+            -SelectedHoudini $selectedHoudini `
+            -SelectedBridge $selectedBridge `
+            -SelectedBackend $selectedBackend `
+            -Candidates $script:currentCandidates
+        Show-Result -Result $script:currentResult
+    } catch {
+        Show-PreflightFailure
+    } finally {
+        $script:suppressSelectionCheck = $false
+        Set-BusyState -Busy $false
+    }
+}
+
+function Add-OrSelectHoudiniCandidate {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $candidate = @(Get-HiaHoudiniCandidates -ExplicitPath $Path)
+    if ($candidate.Count -ne 1) {
+        Show-InlineStatus -Kind 'error' -Text '无法读取所选 houdini.exe，请确认文件仍然存在。'
+        return
+    }
+    $index = Get-PathIndex -Combo $houdiniCombo -Path ([string]$candidate[0].path)
+    $script:suppressSelectionCheck = $true
+    try {
+        if ($index -lt 0) {
+            [void]$houdiniCombo.Items.Add($candidate[0])
+            $script:currentCandidates = @($script:currentCandidates) + @($candidate[0])
+            $index = $houdiniCombo.Items.Count - 1
+        }
+        $houdiniCombo.SelectedIndex = $index
+    } finally {
+        $script:suppressSelectionCheck = $false
+    }
+    Mark-SelectionNeedsCheck
+}
+
+function Add-OrSelectBridgeCandidate {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try { $fullPath = [System.IO.Path]::GetFullPath($Path) } catch { $fullPath = $Path }
+    $index = Get-PathIndex -Combo $bridgeCombo -Path $fullPath
+    $script:suppressSelectionCheck = $true
+    try {
+        if ($index -lt 0) {
+            $candidate = [pscustomobject]@{
+                path = $fullPath
+                source = 'explicit'
+                display = "$fullPath  [explicit]"
+            }
+            [void]$bridgeCombo.Items.Add($candidate)
+            $index = $bridgeCombo.Items.Count - 1
+        }
+        $bridgeCombo.SelectedIndex = $index
+    } finally {
+        $script:suppressSelectionCheck = $false
+    }
+    Mark-SelectionNeedsCheck
+}
+
+$rescanButton.Add_Click({
+    Invoke-GuiScan `
+        -PreferredHoudini (Get-ComboPath -Combo $houdiniCombo) `
+        -PreferredBridge (Get-ComboPath -Combo $bridgeCombo) `
+        -PreferredBackend (Get-ComboBackend)
+})
+
+$mcpBackendCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
+$houdiniCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
+$bridgeCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
+
+$browseHoudiniButton.Add_Click({
+    $dialog = [Microsoft.Win32.OpenFileDialog]::new()
+    $dialog.Title = '选择 houdini.exe'
+    $dialog.Filter = 'Houdini 可执行文件 (houdini.exe)|houdini.exe'
+    $dialog.CheckFileExists = $true
+    if ($dialog.ShowDialog($window) -eq $true) {
+        Add-OrSelectHoudiniCandidate -Path $dialog.FileName
+    }
+})
+
+$browseBridgeButton.Add_Click({
+    $dialog = [Microsoft.Win32.OpenFileDialog]::new()
+    $dialog.Title = '选择 Bridge python.exe'
+    $dialog.Filter = 'Python 可执行文件 (python.exe)|python.exe'
+    $dialog.CheckFileExists = $true
+    if ($dialog.ShowDialog($window) -eq $true) {
+        Add-OrSelectBridgeCandidate -Path $dialog.FileName
+    }
+})
+
+$repairButton.Add_Click({
+    if ($script:isBusy) { return }
+    $preferredHoudini = Get-ComboPath -Combo $houdiniCombo
+    $preferredBridge = Get-ComboPath -Combo $bridgeCombo
+    $preferredBackend = Get-ComboBackend
+    Set-BusyState -Busy $true
+    try {
+        $actions = @(Repair-HiaSafeProject -ProjectRoot $projectRoot)
+    } catch {
+        Set-BusyState -Busy $false
+        Show-InlineStatus -Kind 'error' -Text '安全项目修复失败。请在控制台使用 -RepairSafeProject -CheckOnly 查看详情。'
+        return
+    }
+    Set-BusyState -Busy $false
+    Invoke-GuiScan -PreferredHoudini $preferredHoudini -PreferredBridge $preferredBridge -PreferredBackend $preferredBackend
+    if ($null -ne $script:currentResult) {
+        $detail = if ($actions.Count -gt 0) { ' ' + ($actions -join '；') } else { '' }
+        Show-InlineStatus -Kind 'success' -Transient -Text ("安全项目修复完成。$detail")
+    }
+})
+
+$copyReportButton.Add_Click({
+    if (-not $script:lastReportPath) { return }
+    try {
+        [System.Windows.Clipboard]::SetText($script:lastReportPath)
+        Show-InlineStatus -Kind 'success' -Transient -Text ("已复制报告路径：$($script:lastReportPath)")
+    } catch {
+        Show-InlineStatus -Kind 'error' -Text '未能写入剪贴板；可直接选中上方报告路径复制。'
+    }
+})
+
+$launchButton.Add_Click({
+    if ($script:selectionNeedsCheck -or $script:isBusy) { return }
+    $selectedHoudini = Get-ComboPath -Combo $houdiniCombo
+    $selectedBridge = Get-ComboPath -Combo $bridgeCombo
+    $selectedBackend = Get-ComboBackend
+    Set-BusyState -Busy $true
+    try {
+        try {
+            $script:currentResult = Invoke-PreflightAndReport `
+                -SelectedHoudini $selectedHoudini `
+                -SelectedBridge $selectedBridge `
+                -SelectedBackend $selectedBackend `
+                -Candidates $script:currentCandidates
+            Show-Result -Result $script:currentResult
+        } catch {
+            Show-PreflightFailure
+            return
+        }
+        if ($script:currentResult.overall -eq 'red') { return }
+        try {
+            Write-HiaLauncherSettings `
+                -ProjectRoot $projectRoot `
+                -HoudiniExe $selectedHoudini `
+                -BridgePython $selectedBridge `
+                -McpBackend $selectedBackend | Out-Null
+            Start-ExistingHoudiniLauncher `
+                -SelectedHoudini $selectedHoudini `
+                -SelectedBridge $selectedBridge `
+                -SelectedBackend $selectedBackend
+            Show-InlineStatus `
+                -Kind 'success' `
+                -Transient `
+                -Text '已交给 scripts\launch-houdini.ps1 启动；Houdini 生命周期仍由该脚本管理。'
+        } catch {
+            Show-InlineStatus -Kind 'error' -Text '未能启动现有 launch-houdini.ps1。请在控制台运行该脚本查看详情。'
+        }
+    } finally {
+        Set-BusyState -Busy $false
+    }
+})
+
+$window.Add_ContentRendered({
+    if ($script:initialScanStarted) { return }
+    $script:initialScanStarted = $true
+    Invoke-GuiScan -PreferredHoudini $inputs.houdini -PreferredBridge $inputs.bridge -PreferredBackend $inputs.backend
+})
+
+[void]$window.ShowDialog()

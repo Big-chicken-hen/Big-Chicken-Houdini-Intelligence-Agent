@@ -31,6 +31,7 @@ EXPECTED_ENV_VARS = [
     "TEMP",
     "TMP",
     "HIA_PROJECT_ROOT",
+    "HIA_CACHE_DIR",
     "HIA_EXPECTED_PYTHON_EXE",
     "HOUDINI_HOST",
     "HOUDINI_PORT",
@@ -111,20 +112,20 @@ class B2CCodexConfigTests(unittest.TestCase):
         _, server = _load_config()
         self.assertEqual(CODEX_0_144_3_STDIO_SERVER_KEYS, set(server))
         self.assertEqual(
-            r"E:\houdini-intelligence-agent\.runtime\fxhoudinimcp\1.3.0\venv\Scripts\python.exe",
+            r".runtime\fxhoudinimcp\1.3.0\venv\Scripts\python.exe",
             server["command"],
         )
         self.assertEqual(["-B", "-m", "fxhoudinimcp"], server["args"])
-        self.assertEqual(r"E:\houdini-intelligence-agent", server["cwd"])
+        self.assertEqual(".", server["cwd"])
         self.assertIs(server["enabled"], True)
-        self.assertIs(server["required"], True)
+        self.assertIs(server["required"], False)
         self.assertEqual(15, server["startup_timeout_sec"])
         self.assertEqual(65, server["tool_timeout_sec"])
 
-    def test_panel_session_requires_the_real_time_houdini_mcp(self) -> None:
+    def test_ordinary_project_session_keeps_houdini_mcp_optional(self) -> None:
         _, server = _load_config()
         self.assertIs(server["enabled"], True)
-        self.assertIs(server["required"], True)
+        self.assertIs(server["required"], False)
 
     def test_environment_is_name_only_and_contains_no_executor_credential(self) -> None:
         source, server = _load_config()
