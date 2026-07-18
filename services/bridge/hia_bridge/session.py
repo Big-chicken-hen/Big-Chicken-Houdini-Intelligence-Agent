@@ -20,6 +20,9 @@ REASONING_EFFORT_MAX_LENGTH = 64
 MODEL_DISPLAY_NAME_MAX_LENGTH = 512
 MODEL_DESCRIPTION_MAX_LENGTH = 8192
 MODEL_CURSOR_MAX_LENGTH = 4096
+MAX_LOCAL_IMAGES = 16
+LOCAL_IMAGE_PATH_MAX_LENGTH = 32_767
+LOCAL_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 
 
 class BridgeSession:
@@ -150,7 +153,10 @@ class BridgeSession:
             "ephemeral": False,
             "developerInstructions": (
                 "Houdini Panel 中的创建、修改、连接、材质和动画请求默认作用于当前打开场景，"
-                "使用已注册的 FXHoudini MCP 与 HOM；复杂建模优先调用 execute_python 执行 Codex 生成的 hou 代码。"
+                "使用已注册的 FXHoudini MCP 与 HOM；多节点复杂资产优先用 execute_python 批量执行 Codex 生成的 HOM。"
+                "不要逐节点或逐参数循环调用 create_node/set_parameters；细粒度工具主要用于读取、单项修改和最终验证。"
+                "同一工具以相同参数失败后不得盲目重复；应读取真实错误并改用兼容方法。"
+                "capture_screenshot 仅用于阶段性视觉验证，不要每一步都截图。"
                 "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
                 "只有用户明确要求离线、新建独立 HIP、批处理或后台渲染时才使用 PATH 中的 hython.exe。"
                 "实时代码禁止 hou.hipFile.clear/load/save，禁止替换当前场景；生成新资产时放入唯一新根。"
@@ -282,8 +288,9 @@ class BridgeSession:
         text: str,
         model: str | None = None,
         effort: str | None = None,
+        local_image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
             raise BridgeError("EMPTY_INPUT", "Natural-language input must not be empty")
         if len(text) > 65536:
             raise BridgeError("INPUT_TOO_LARGE", "Input exceeds the 65536 character limit")
@@ -299,6 +306,15 @@ class BridgeSession:
         )
         with self._lock:
             thread_id = self._validated_identifier(self._thread_id, "thread_id")
+            image_paths = self._validated_local_image_paths(
+                local_image_paths,
+                thread_id,
+            )
+            if not text.strip() and not image_paths:
+                raise BridgeError(
+                    "EMPTY_INPUT",
+                    "Natural-language input or at least one image is required",
+                )
             self._require_no_active_turn_locked()
             self._turn_generation += 1
             generation = self._turn_generation
@@ -308,15 +324,21 @@ class BridgeSession:
             self._turn_created = False
 
         try:
-            params: dict[str, Any] = {
-                "threadId": thread_id,
-                "input": [
+            turn_input: list[dict[str, Any]] = []
+            if text.strip():
+                turn_input.append(
                     {
                         "type": "text",
                         "text": text,
                         "text_elements": [],
                     }
-                ],
+                )
+            turn_input.extend(
+                {"type": "localImage", "path": path} for path in image_paths
+            )
+            params: dict[str, Any] = {
+                "threadId": thread_id,
+                "input": turn_input,
                 "cwd": str(self._project_root),
                 "approvalPolicy": "on-request",
                 "sandboxPolicy": {
@@ -397,6 +419,179 @@ class BridgeSession:
                 turn_id=turn_id,
             )
         return {"thread_id": thread_id, "turn_id": turn_id, "result": result}
+
+    def steer_turn(
+        self,
+        text: str,
+        local_image_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Append user input to the selected active Turn without changing its lifecycle."""
+
+        if not isinstance(text, str):
+            raise BridgeError("EMPTY_INPUT", "Natural-language input must not be empty")
+        if len(text) > 65536:
+            raise BridgeError("INPUT_TOO_LARGE", "Input exceeds the 65536 character limit")
+
+        with self._lock:
+            thread_id = self._validated_identifier(self._thread_id, "thread_id")
+            turn_id = self._turn_id
+            if not self._turn_active or not self._identifier_is_valid(turn_id):
+                raise BridgeError(
+                    "NO_ACTIVE_TURN",
+                    "No steerable active Turn is available",
+                    http_status=409,
+                    details={
+                        "turn_active": self._turn_active,
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "turn_status": self._turn_status,
+                    },
+                )
+            image_paths = self._validated_local_image_paths(
+                local_image_paths,
+                thread_id,
+            )
+            if not text.strip() and not image_paths:
+                raise BridgeError(
+                    "EMPTY_INPUT",
+                    "Natural-language input or at least one image is required",
+                )
+            generation = self._turn_generation
+
+        turn_input: list[dict[str, Any]] = []
+        if text.strip():
+            turn_input.append(
+                {
+                    "type": "text",
+                    "text": text,
+                    "text_elements": [],
+                }
+            )
+        turn_input.extend(
+            {"type": "localImage", "path": path} for path in image_paths
+        )
+        try:
+            result = self._client.request(
+                "turn/steer",
+                {
+                    "threadId": thread_id,
+                    "expectedTurnId": turn_id,
+                    "input": turn_input,
+                },
+            )
+        except CodexRPCError as exc:
+            turn_kind = self._non_steerable_turn_kind(exc.details)
+            if turn_kind is not None:
+                raise BridgeError(
+                    "TURN_NOT_STEERABLE",
+                    f"The active {turn_kind} Turn cannot accept appended input",
+                    http_status=409,
+                    details={
+                        "turn_kind": turn_kind,
+                        "turn_active": True,
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                    },
+                ) from exc
+            raise
+
+        acknowledged_turn_id = self._extract_steer_turn_id(result)
+        if acknowledged_turn_id != turn_id:
+            raise BridgeError(
+                "INVALID_CODEX_RESPONSE",
+                "turn/steer acknowledgement does not match the active Turn",
+                http_status=502,
+                details={
+                    "expected_turn_id": turn_id,
+                    "acknowledged_turn_id": acknowledged_turn_id,
+                },
+            )
+        with self._lock:
+            if (
+                generation != self._turn_generation
+                or not self._turn_active
+                or self._thread_id != thread_id
+                or self._turn_id != acknowledged_turn_id
+            ):
+                raise BridgeError(
+                    "TURN_CHANGED_DURING_STEER",
+                    "The active Turn changed before turn/steer was acknowledged",
+                    http_status=409,
+                    details={
+                        "expected_turn_id": turn_id,
+                        "acknowledged_turn_id": acknowledged_turn_id,
+                        "current_turn_id": self._turn_id,
+                        "turn_active": self._turn_active,
+                    },
+                )
+        return {
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "result": result,
+        }
+
+    def _validated_local_image_paths(
+        self,
+        value: Any,
+        thread_id: str,
+    ) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise BridgeError(
+                "INVALID_LOCAL_IMAGES",
+                "local_image_paths must be an array",
+            )
+        if len(value) > MAX_LOCAL_IMAGES:
+            raise BridgeError(
+                "TOO_MANY_LOCAL_IMAGES",
+                f"A Turn may include at most {MAX_LOCAL_IMAGES} images",
+                details={"max_images": MAX_LOCAL_IMAGES},
+            )
+
+        attachments_root = (
+            self._project_root / ".runtime" / "attachments"
+        ).resolve()
+        thread_directory = (attachments_root / thread_id).resolve()
+        if thread_directory.parent != attachments_root:
+            raise BridgeError(
+                "INVALID_LOCAL_IMAGE_PATH",
+                "The current Thread identifier cannot name an attachment directory",
+            )
+
+        validated: list[str] = []
+        for raw_path in value:
+            if (
+                not isinstance(raw_path, str)
+                or not raw_path
+                or len(raw_path) > LOCAL_IMAGE_PATH_MAX_LENGTH
+                or "\x00" in raw_path
+            ):
+                raise BridgeError(
+                    "INVALID_LOCAL_IMAGE_PATH",
+                    "Each local image path must be a valid absolute path",
+                )
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                raise BridgeError(
+                    "INVALID_LOCAL_IMAGE_PATH",
+                    "Each local image path must be absolute",
+                )
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(thread_directory)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise BridgeError(
+                    "INVALID_LOCAL_IMAGE_PATH",
+                    "Local images must exist inside the current Thread attachment directory",
+                ) from exc
+            if not resolved.is_file() or resolved.suffix.lower() not in LOCAL_IMAGE_SUFFIXES:
+                raise BridgeError(
+                    "INVALID_LOCAL_IMAGE",
+                    "Local images must be existing PNG, JPG, JPEG, or WEBP files",
+                )
+            validated.append(str(resolved))
+        return validated
 
     def interrupt_turn(self) -> dict[str, Any]:
         with self._lock:
@@ -689,6 +884,36 @@ class BridgeSession:
             raise BridgeError("INVALID_CODEX_RESPONSE", "Turn response has no turn object", 502)
         turn_id = result["turn"].get("id")
         return BridgeSession._validated_identifier(turn_id, "turn_id")
+
+    @staticmethod
+    def _extract_steer_turn_id(result: Any) -> str:
+        if (
+            not isinstance(result, dict)
+            or not BridgeSession._identifier_is_valid(result.get("turnId"))
+        ):
+            raise BridgeError(
+                "INVALID_CODEX_RESPONSE",
+                "turn/steer response has no turnId",
+                502,
+            )
+        return result["turnId"]
+
+    @staticmethod
+    def _non_steerable_turn_kind(error: Any) -> str | None:
+        pending = [error]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                marker = value.get("activeTurnNotSteerable")
+                if isinstance(marker, dict) and marker.get("turnKind") in {
+                    "review",
+                    "compact",
+                }:
+                    return marker["turnKind"]
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+        return None
 
     def _on_client_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")

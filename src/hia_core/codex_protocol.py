@@ -35,6 +35,7 @@ CORE_CLIENT_REQUESTS = frozenset(
         "thread/read",
         "thread/fork",
         "turn/start",
+        "turn/steer",
         "turn/interrupt",
     }
 )

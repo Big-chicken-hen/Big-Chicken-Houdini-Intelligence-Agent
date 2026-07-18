@@ -112,6 +112,7 @@ class BridgeClient(QtCore.QObject):
         *,
         model: str | None = None,
         effort: str | None = None,
+        local_image_paths: list[str] | None = None,
         context: str = "turn_start",
     ) -> str | None:
         payload: dict[str, Any] = {"text": text}
@@ -119,9 +120,28 @@ class BridgeClient(QtCore.QObject):
             payload["model"] = model
         if effort is not None:
             payload["effort"] = effort
+        if local_image_paths is not None:
+            payload["local_image_paths"] = list(local_image_paths)
         return self._request(
             "POST",
             "/v1/turn",
+            payload,
+            context=context,
+        )
+
+    def steer_turn(
+        self,
+        text: str,
+        *,
+        local_image_paths: list[str] | None = None,
+        context: str = "turn_steer",
+    ) -> str | None:
+        payload: dict[str, Any] = {"text": text}
+        if local_image_paths is not None:
+            payload["local_image_paths"] = list(local_image_paths)
+        return self._request(
+            "POST",
+            "/v1/steer",
             payload,
             context=context,
         )

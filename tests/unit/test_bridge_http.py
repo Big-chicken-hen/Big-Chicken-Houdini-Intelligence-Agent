@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -182,6 +183,86 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(original, received["input"][0]["text"])
         self.assertEqual(model, received["model"])
         self.assertEqual("high", received["effort"])
+
+    def test_turn_endpoint_forwards_local_image_paths_to_session(self) -> None:
+        attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="bridge-http-test-",
+            dir=attachments_root,
+        ) as temporary_thread_directory:
+            thread_directory = Path(temporary_thread_directory)
+            thread_id = thread_directory.name
+            image = thread_directory / "reference.png"
+            image.write_bytes(b"test image payload")
+            self.request(
+                "POST",
+                "/v1/session",
+                {"action": "resume", "thread_id": thread_id},
+            )
+            response = self.request(
+                "POST",
+                "/v1/turn",
+                {"text": "参考图片", "local_image_paths": [str(image)]},
+            )
+
+            received = response["result"]["receivedParams"]
+            self.assertEqual(thread_id, received["threadId"])
+            self.assertEqual(
+                [
+                    {
+                        "type": "text",
+                        "text": "参考图片",
+                        "text_elements": [],
+                    },
+                    {"type": "localImage", "path": str(image.resolve())},
+                ],
+                received["input"],
+            )
+
+    def test_steer_endpoint_appends_to_the_same_active_turn(self) -> None:
+        attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="bridge-steer-test-",
+            dir=attachments_root,
+        ) as temporary_thread_directory:
+            thread_directory = Path(temporary_thread_directory)
+            thread_id = thread_directory.name
+            image = thread_directory / "follow-up.webp"
+            image.write_bytes(b"test image payload")
+            self.request(
+                "POST",
+                "/v1/session",
+                {"action": "resume", "thread_id": thread_id},
+            )
+            started = self.request("POST", "/v1/turn", {"text": "initial"})
+
+            steered = self.request(
+                "POST",
+                "/v1/steer",
+                {
+                    "text": "追加要求",
+                    "local_image_paths": [str(image)],
+                },
+            )
+
+            self.assertEqual(started["turn_id"], steered["turn_id"])
+            self.assertEqual(started["turn_id"], steered["result"]["turnId"])
+            received = steered["result"]["receivedParams"]
+            self.assertEqual(thread_id, received["threadId"])
+            self.assertEqual(started["turn_id"], received["expectedTurnId"])
+            self.assertEqual(
+                [
+                    {
+                        "type": "text",
+                        "text": "追加要求",
+                        "text_elements": [],
+                    },
+                    {"type": "localImage", "path": str(image.resolve())},
+                ],
+                received["input"],
+            )
 
     def test_model_and_effort_validation_is_structured(self) -> None:
         for value in ("", "   ", "bad\nmodel", 7, "m" * 257):

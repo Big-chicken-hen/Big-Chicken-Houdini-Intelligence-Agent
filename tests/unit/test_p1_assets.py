@@ -178,7 +178,6 @@ class P1AssetTests(unittest.TestCase):
             "setParms",
             "setParm",
             "destroy",
-            "save",
             "saveAndIncrementFileName",
             "cook",
             "render",
@@ -207,7 +206,14 @@ class P1AssetTests(unittest.TestCase):
                 if (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in forbidden_attributes
+                    and (
+                        node.func.attr in forbidden_attributes
+                        or (
+                            node.func.attr == "save"
+                            and isinstance(node.func.value, ast.Attribute)
+                            and node.func.value.attr == "hipFile"
+                        )
+                    )
                 ):
                     found.setdefault(path, set()).add(node.func.attr)
         self.assertEqual({dormant}, set(found))
@@ -241,7 +247,7 @@ class P1AssetTests(unittest.TestCase):
         self.assertIn('method_text = f" method={method}"', source)
         self.assertIn("协议警告", source)
 
-    def test_panel_uses_stock_qtextedit_without_input_method_overrides(self) -> None:
+    def test_panel_uses_expandable_qtextedit_with_local_send_shortcuts(self) -> None:
         panel_path = (
             REPOSITORY_ROOT
             / "houdini_package"
@@ -249,10 +255,32 @@ class P1AssetTests(unittest.TestCase):
             / "hia_panel"
             / "panel.py"
         )
-        source = panel_path.read_text(encoding="utf-8")
-        ast.parse(source)
-        self.assertIn("self.input_edit = QtWidgets.QTextEdit()", source)
-        self.assertNotIn("self.input_edit = QtWidgets.QPlainTextEdit()", source)
+        composer_path = panel_path.with_name("composer.py")
+        panel_source = panel_path.read_text(encoding="utf-8")
+        composer_source = composer_path.read_text(encoding="utf-8")
+        ast.parse(panel_source)
+        ast.parse(composer_source)
+
+        self.assertIn(
+            "self.input_edit = ExpandableTextEdit(self)",
+            panel_source,
+        )
+        self.assertNotIn(
+            "self.input_edit = QtWidgets.QPlainTextEdit()",
+            panel_source,
+        )
+        self.assertIn(
+            "class ExpandableTextEdit(QtWidgets.QTextEdit):",
+            composer_source,
+        )
+        self.assertIn('"Ctrl+Return"', composer_source)
+        self.assertIn('"Ctrl+Enter"', composer_source)
+        self.assertIn("QtGui.QShortcut(", composer_source)
+        self.assertIn("QtGui.QKeySequence(sequence)", composer_source)
+        self.assertIn(
+            "shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)",
+            composer_source,
+        )
         for forbidden in (
             "self.input_edit.setAttribute(",
             "self.input_edit.setInputMethodHints(",
@@ -263,13 +291,58 @@ class P1AssetTests(unittest.TestCase):
             "def keyPressEvent",
             "def eventFilter",
             "def inputMethodEvent",
+            "installEventFilter",
             "QInputMethodEvent",
             "focusProxy",
             "self.input_edit.viewport(",
             "self.input_edit.viewport()",
-            "setFocus(",
         ):
-            self.assertNotIn(forbidden, source)
+            self.assertNotIn(forbidden, panel_source)
+            self.assertNotIn(forbidden, composer_source)
+
+    def test_panel_conversation_view_is_native_pyside6(self) -> None:
+        conversation_path = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_panel"
+            / "conversation_view.py"
+        )
+        source = conversation_path.read_text(encoding="utf-8")
+        ast.parse(source)
+
+        self.assertIn("from PySide6 import QtCore, QtGui, QtWidgets", source)
+        self.assertIn("class ConversationView(QtWidgets.QWidget):", source)
+        self.assertIn("QtWidgets.QTextBrowser", source)
+        self.assertIn("self.setMarkdown(text)", source)
+        self.assertIn('self.toggle_button.setText("展开详情")', source)
+        self.assertIn('self.toggle_button.setText("收起详情"', source)
+        self.assertNotIn("QtWebEngine", source)
+        self.assertNotIn("QWebEngine", source)
+
+    def test_panel_attachment_widgets_cover_file_clipboard_thumbnail_and_remove(self) -> None:
+        panel_path = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_panel"
+            / "panel.py"
+        )
+        composer_path = panel_path.with_name("composer.py")
+        panel_source = panel_path.read_text(encoding="utf-8")
+        composer_source = composer_path.read_text(encoding="utf-8")
+        ast.parse(panel_source)
+        ast.parse(composer_source)
+
+        self.assertIn("QtWidgets.QFileDialog.getOpenFileNames(", panel_source)
+        self.assertIn("self._attachment_store.copy_file(", panel_source)
+        self.assertIn("self._attachment_store.clipboard_path(", panel_source)
+        self.assertIn('image.save(path, "PNG")', panel_source)
+        self.assertIn("def insertFromMimeData", composer_source)
+        self.assertIn("source.hasImage()", composer_source)
+        self.assertIn("QtGui.QPixmap(path)", composer_source)
+        self.assertIn("class AttachmentStrip(QtWidgets.QWidget):", composer_source)
+        self.assertIn("self.remove(attachment_path)", composer_source)
 
     def test_panel_model_selectors_are_catalog_driven_and_forward_parameters(self) -> None:
         panel_path = (
@@ -799,7 +872,21 @@ foreach ($case in $cases) {{
         self.assertIn("HoudiniMCPAdapter.b2_read_only", mcp_stdio)
         self.assertNotIn("B2A_REAL_MCP_START_DISABLED", mcp_stdio)
         self.assertIn("LoopbackBridgeTransport.from_environment(", mcp_stdio)
-        self.assertIn('QtWidgets.QGroupBox("Houdini 只读状态")', panel_source)
+        panel_tree = ast.parse(panel_source)
+        build_ui = next(
+            node
+            for node in ast.walk(panel_tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_build_ui"
+        )
+        build_ui_source = ast.get_source_segment(panel_source, build_ui) or ""
+        for obsolete_ui in (
+            "Houdini 只读状态",
+            "Catalog",
+            "Schema",
+            "可用类型",
+            "5/5",
+        ):
+            self.assertNotIn(obsolete_ui, build_ui_source)
         for forbidden_button in (
             'QPushButton("Apply")',
             'QPushButton("应用")',

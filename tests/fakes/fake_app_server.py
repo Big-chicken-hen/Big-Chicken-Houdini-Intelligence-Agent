@@ -195,6 +195,10 @@ def handle_request(message: dict[str, Any]) -> None:
                 },
             }
         )
+    elif method == "turn/steer":
+        turn_id = params.get("expectedTurnId", TURN_ID)
+        response = {"turnId": turn_id, "receivedParams": params}
+        result(request_id, response)
     elif method == "turn/interrupt":
         thread_id = params.get("threadId", THREAD_ID)
         turn_id = params.get("turnId", TURN_ID)

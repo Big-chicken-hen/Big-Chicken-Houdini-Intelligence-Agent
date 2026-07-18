@@ -263,6 +263,57 @@ class BridgeClientQueueTests(unittest.TestCase):
             client.healthReceived.emission_threads[-1],
         )
 
+    def test_turn_start_forwards_local_image_paths_in_one_request(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        image_paths = [
+            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\one.png",
+            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\two.webp",
+        ]
+
+        client.start_turn(
+            "参考这些图片",
+            model="model-a",
+            effort="high",
+            local_image_paths=image_paths,
+        )
+
+        submission = transport.submissions[-1]
+        self.assertEqual("POST", submission["method"])
+        self.assertEqual("/v1/turn", submission["path"])
+        self.assertEqual(
+            {
+                "text": "参考这些图片",
+                "model": "model-a",
+                "effort": "high",
+                "local_image_paths": image_paths,
+            },
+            submission["payload"],
+        )
+
+    def test_turn_steer_forwards_text_and_local_images_without_starting_turn(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        image_paths = [
+            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\follow-up.png"
+        ]
+
+        client.steer_turn(
+            "追加要求",
+            local_image_paths=image_paths,
+            context="turn_steer:1:2:test",
+        )
+
+        submission = transport.submissions[-1]
+        self.assertEqual("POST", submission["method"])
+        self.assertEqual("/v1/steer", submission["path"])
+        self.assertEqual(
+            {
+                "text": "追加要求",
+                "local_image_paths": image_paths,
+            },
+            submission["payload"],
+        )
+        self.assertEqual("turn_steer:1:2:test", submission["context"])
+
     def test_old_generation_unknown_request_and_old_same_context_are_dropped(self) -> None:
         client, transport = _load_transport_bridge_client()
         first_id = client.get_health()

@@ -357,6 +357,13 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 body.get("text"),
                 body.get("model"),
                 body.get("effort"),
+                body.get("local_image_paths"),
+            )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/steer":
+            result = application.session.steer_turn(
+                body.get("text"),
+                body.get("local_image_paths"),
             )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/interrupt":

@@ -61,6 +61,60 @@ class CodexProtocolContractTests(unittest.TestCase):
             self.allowed_methods("client_requests"),
         )
 
+    def test_turn_steer_is_a_stable_core_request(self) -> None:
+        entries = {
+            entry["method"]: entry
+            for entry in self.allowlist["allowed"]["client_requests"]
+        }
+        self.assertEqual(
+            {
+                "method": "turn/steer",
+                "params_definition": "TurnSteerParams",
+                "response_schema": "v2/TurnSteerResponse.json",
+            },
+            entries["turn/steer"],
+        )
+
+        inventoried = {
+            entry["method"]: entry
+            for entry in self.inventory["aggregates"]["client_requests"]["methods"]
+        }["turn/steer"]
+        self.assertEqual("TurnSteerParams", inventoried["params_definition"])
+        self.assertFalse(inventoried["declared_experimental"])
+
+        schema_root = REPOSITORY_ROOT / "schemas" / "codex-app-server" / "0.144.3"
+        params = json.loads(
+            (schema_root / "v2" / "TurnSteerParams.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            {"threadId", "expectedTurnId", "input"},
+            set(params["required"]),
+        )
+        input_variants = params["definitions"]["UserInput"]["oneOf"]
+        self.assertTrue(
+            any(
+                variant["properties"]["type"].get("enum") == ["text"]
+                and "text_elements" in variant["properties"]
+                for variant in input_variants
+            )
+        )
+        self.assertTrue(
+            any(
+                variant["properties"]["type"].get("enum") == ["localImage"]
+                and "path" in variant["properties"]
+                for variant in input_variants
+            )
+        )
+
+        response = json.loads(
+            (schema_root / "v2" / "TurnSteerResponse.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(["turnId"], response["required"])
+
     def test_account_read_p1_extension_is_allowlisted(self) -> None:
         entries = {
             entry["method"]: entry

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ from hia_bridge.session import (  # noqa: E402
     MODEL_LIST_MAX_ENTRIES,
     MODEL_LIST_MAX_PAGES,
     MODEL_LIST_PAGE_SIZE,
+    MAX_LOCAL_IMAGES,
     BridgeSession,
 )
 
@@ -84,7 +86,41 @@ class _RecordingClient(_ClientStub):
         self.requests.append((method, dict(params)))
         if method == "turn/start":
             return {"turn": {"id": "turn-recorded", "status": "inProgress"}}
+        if method == "turn/steer":
+            return {"turnId": params["expectedTurnId"]}
         return super().request(method, params)
+
+
+class _SteerClient(_RecordingClient):
+    def __init__(self, steer_result: Any) -> None:
+        super().__init__()
+        self.steer_result = steer_result
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method != "turn/steer":
+            return super().request(method, params)
+        self.requests.append((method, dict(params)))
+        if isinstance(self.steer_result, Exception):
+            raise self.steer_result
+        return self.steer_result
+
+
+class _CompletingSteerClient(_RecordingClient):
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method != "turn/steer":
+            return super().request(method, params)
+        self.requests.append((method, dict(params)))
+        self.emit_notification(
+            "turn/completed",
+            {
+                "threadId": params["threadId"],
+                "turn": {
+                    "id": params["expectedTurnId"],
+                    "status": "completed",
+                },
+            },
+        )
+        return {"turnId": params["expectedTurnId"]}
 
 
 def _model_entry(
@@ -301,6 +337,225 @@ class BridgeSessionModelCatalogTests(unittest.TestCase):
         self.assertEqual(MODEL_LIST_MAX_PAGES, len(client.model_requests))
 
 
+class BridgeSessionImageInputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_project = tempfile.TemporaryDirectory(
+            dir=REPOSITORY_ROOT / ".runtime" / "tmp"
+        )
+        self.project_root = Path(self._temporary_project.name)
+        self.thread_directory = (
+            self.project_root / ".runtime" / "attachments" / "thread-test"
+        )
+        self.thread_directory.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self._temporary_project.cleanup()
+
+    def make_session(self) -> tuple[BridgeSession, _RecordingClient]:
+        client = _RecordingClient()
+        session = BridgeSession(self.project_root, client, EventBuffer())
+        session.start_thread()
+        client.requests.clear()
+        return session, client
+
+    def make_image(self, name: str) -> Path:
+        path = self.thread_directory / name
+        path.write_bytes(b"test image payload")
+        return path.resolve()
+
+    def test_text_and_images_share_turn_start_input_in_order(self) -> None:
+        first = self.make_image("first.PNG")
+        second = self.make_image("second.webp")
+        session, client = self.make_session()
+
+        session.start_turn(
+            "参考图片建立模型",
+            local_image_paths=[str(first), str(second)],
+        )
+
+        method, params = client.requests[0]
+        self.assertEqual("turn/start", method)
+        self.assertEqual(
+            [
+                {
+                    "type": "text",
+                    "text": "参考图片建立模型",
+                    "text_elements": [],
+                },
+                {"type": "localImage", "path": str(first)},
+                {"type": "localImage", "path": str(second)},
+            ],
+            params["input"],
+        )
+
+    def test_images_without_text_are_valid_turn_input(self) -> None:
+        image = self.make_image("only.jpeg")
+        session, client = self.make_session()
+
+        session.start_turn("", local_image_paths=[str(image)])
+
+        self.assertEqual(
+            [{"type": "localImage", "path": str(image)}],
+            client.requests[0][1]["input"],
+        )
+
+    def test_images_are_bounded_to_current_thread_directory_and_supported_types(self) -> None:
+        valid = self.make_image("valid.jpg")
+        outside = self.project_root / ".runtime" / "attachments" / "other-thread"
+        outside.mkdir(parents=True)
+        outside_image = outside / "outside.png"
+        outside_image.write_bytes(b"outside")
+        unsupported = self.make_image("unsupported.gif")
+
+        invalid_cases = (
+            ("not-an-array", "INVALID_LOCAL_IMAGES"),
+            ([str(outside_image.resolve())], "INVALID_LOCAL_IMAGE_PATH"),
+            ([str(unsupported)], "INVALID_LOCAL_IMAGE"),
+            ([str(self.thread_directory / "missing.png")], "INVALID_LOCAL_IMAGE_PATH"),
+            ([str(valid)] * (MAX_LOCAL_IMAGES + 1), "TOO_MANY_LOCAL_IMAGES"),
+        )
+        for local_image_paths, expected_code in invalid_cases:
+            with self.subTest(expected_code=expected_code):
+                session, client = self.make_session()
+                with self.assertRaises(BridgeError) as raised:
+                    session.start_turn(
+                        "参考图片",
+                        local_image_paths=local_image_paths,  # type: ignore[arg-type]
+                    )
+                self.assertEqual(expected_code, raised.exception.code)
+                self.assertEqual([], client.requests)
+
+
+class BridgeSessionSteerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_project = tempfile.TemporaryDirectory(
+            dir=REPOSITORY_ROOT / ".runtime" / "tmp"
+        )
+        self.project_root = Path(self._temporary_project.name)
+        self.thread_directory = (
+            self.project_root / ".runtime" / "attachments" / "thread-test"
+        )
+        self.thread_directory.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self._temporary_project.cleanup()
+
+    def make_active_session(
+        self,
+        client: _RecordingClient | None = None,
+    ) -> tuple[BridgeSession, _RecordingClient]:
+        active_client = client or _RecordingClient()
+        session = BridgeSession(self.project_root, active_client, EventBuffer())
+        session.start_thread()
+        session.start_turn("initial request")
+        active_client.requests.clear()
+        return session, active_client
+
+    def test_steer_uses_expected_turn_and_does_not_change_lifecycle(self) -> None:
+        image = self.thread_directory / "follow-up.png"
+        image.write_bytes(b"image")
+        session, client = self.make_active_session()
+        before = (
+            session._turn_generation,
+            session._turn_id,
+            session._turn_status,
+            session._turn_active,
+            session._turn_created,
+        )
+
+        result = session.steer_turn(
+            "追加要求",
+            local_image_paths=[str(image)],
+        )
+
+        self.assertEqual("turn-recorded", result["turn_id"])
+        self.assertEqual(
+            (
+                session._turn_generation,
+                session._turn_id,
+                session._turn_status,
+                session._turn_active,
+                session._turn_created,
+            ),
+            before,
+        )
+        self.assertEqual(1, len(client.requests))
+        method, params = client.requests[0]
+        self.assertEqual("turn/steer", method)
+        self.assertEqual("thread-test", params["threadId"])
+        self.assertEqual("turn-recorded", params["expectedTurnId"])
+        self.assertEqual(
+            [
+                {"type": "text", "text": "追加要求", "text_elements": []},
+                {"type": "localImage", "path": str(image.resolve())},
+            ],
+            params["input"],
+        )
+
+    def test_steer_rejects_mismatched_ack_without_mutating_turn(self) -> None:
+        client = _SteerClient({"turnId": "different-turn"})
+        session, _ = self.make_active_session(client)
+        before = session.snapshot()
+
+        with self.assertRaises(BridgeError) as raised:
+            session.steer_turn("追加要求")
+
+        self.assertEqual("INVALID_CODEX_RESPONSE", raised.exception.code)
+        self.assertEqual(before, session.snapshot())
+
+    def test_ack_is_rejected_if_the_turn_completed_before_it_arrived(self) -> None:
+        session, _ = self.make_active_session(_CompletingSteerClient())
+
+        with self.assertRaises(BridgeError) as raised:
+            session.steer_turn("追加要求")
+
+        self.assertEqual("TURN_CHANGED_DURING_STEER", raised.exception.code)
+        snapshot = session.snapshot()
+        self.assertFalse(snapshot["turn_active"])
+        self.assertEqual("completed", snapshot["turn_status"])
+
+    def test_review_and_compact_rejections_are_short_structured_conflicts(self) -> None:
+        for turn_kind in ("review", "compact"):
+            with self.subTest(turn_kind=turn_kind):
+                client = _SteerClient(
+                    CodexRPCError(
+                        "turn/steer",
+                        {
+                            "message": "active turn cannot be steered",
+                            "data": {
+                                "codexErrorInfo": {
+                                    "activeTurnNotSteerable": {
+                                        "turnKind": turn_kind
+                                    }
+                                }
+                            },
+                        },
+                    )
+                )
+                session, _ = self.make_active_session(client)
+                before = session.snapshot()
+
+                with self.assertRaises(BridgeError) as raised:
+                    session.steer_turn("追加要求")
+
+                self.assertEqual("TURN_NOT_STEERABLE", raised.exception.code)
+                self.assertEqual(409, raised.exception.http_status)
+                self.assertEqual(turn_kind, raised.exception.details["turn_kind"])
+                self.assertEqual(before, session.snapshot())
+
+    def test_steer_requires_an_active_turn(self) -> None:
+        client = _RecordingClient()
+        session = BridgeSession(self.project_root, client, EventBuffer())
+        session.start_thread()
+        client.requests.clear()
+
+        with self.assertRaises(BridgeError) as raised:
+            session.steer_turn("追加要求")
+
+        self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
+        self.assertEqual([], client.requests)
+
+
 class BridgeSessionTurnStateTests(unittest.TestCase):
     def make_session(self, client: _ClientStub) -> BridgeSession:
         session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
@@ -494,7 +749,13 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         for required_text in (
             "默认作用于当前打开场景",
             "FXHoudini MCP 与 HOM",
-            "优先调用 execute_python",
+            "多节点复杂资产优先用 execute_python 批量执行",
+            "不要逐节点或逐参数循环调用 create_node/set_parameters",
+            "细粒度工具主要用于读取、单项修改和最终验证",
+            "同一工具以相同参数失败后不得盲目重复",
+            "读取真实错误并改用兼容方法",
+            "capture_screenshot 仅用于阶段性视觉验证",
+            "不要每一步都截图",
             "实时 MCP 不可用时直接说明",
             "不得改成离线 HIP",
             "只有用户明确要求离线",

@@ -12,10 +12,11 @@ from typing import Any
 import PySide6
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from .attachment_store import AttachmentStore
 from .bridge_client import BridgeClient
 from .houdini_read_adapter import HoudiniReadAdapter, HoudiniReadAdapterError
 from .network_response import format_bridge_error
-from .turn_state import PanelTurnState, TurnStateToken
+from .turn_state import PanelTurnState, TurnPhase, TurnStateToken
 
 
 _PASSIVE_STATUS_NOTIFICATIONS = frozenset(
@@ -26,6 +27,7 @@ _PASSIVE_STATUS_NOTIFICATIONS = frozenset(
     }
 )
 _TURN_START_CONTEXT_PREFIX = "turn_start:"
+_TURN_STEER_CONTEXT_PREFIX = "turn_steer:"
 _INTERRUPT_CONTEXT_PREFIX = "interrupt:"
 _SESSION_RECONCILE_CONTEXT_PREFIX = "session_reconcile:"
 _MODELS_CONTEXT = "models"
@@ -35,6 +37,7 @@ _SCENE_WORK_CONTEXT = "scene_work"
 _SCENE_RESULT_CONTEXT_PREFIX = "scene_result:"
 _SCENE_HEARTBEAT_MS = 1_000
 _SCENE_IDLE_POLL_MS = 100
+_MAX_TURN_IMAGES = 16
 
 
 class HoudiniIntelligencePanel(QtWidgets.QWidget):
@@ -60,7 +63,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._interrupt_pending = False
         self._turn_state = PanelTurnState()
         self._turn_start_tokens: dict[str, TurnStateToken] = {}
+        self._pending_turn_drafts: dict[str, dict[str, Any]] = {}
         self._active_turn_start_context: str | None = None
+        self._turn_steer_request_pending = False
+        self._turn_steer_tokens: dict[str, TurnStateToken] = {}
+        self._pending_steer_drafts: dict[str, dict[str, Any]] = {}
+        self._active_turn_steer_context: str | None = None
+        self._stream_thread_id: str | None = None
+        self._stream_turn_id: str | None = None
         self._interrupt_tokens: dict[str, TurnStateToken] = {}
         self._active_interrupt_context: str | None = None
         self._reconciliation_tokens: dict[str, TurnStateToken] = {}
@@ -76,9 +86,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._last_houdini_report: dict[str, Any] | None = None
         self._attested_houdini_report_identity: str | None = None
         self._pending_houdini_report_identity: str | None = None
+        self._selected_node_paths: tuple[str, ...] = ()
+        self._attachment_store = AttachmentStore()
         self._scene_executor_token = os.environ.get("HIA_SCENE_EXECUTOR_TOKEN", "")
         self._build_ui()
         self._initialize_houdini_read_adapter(hou_module)
+        self._refresh_selection_status()
 
         base_url = os.environ.get("HIA_BRIDGE_URL", "")
         token = os.environ.get("HIA_BRIDGE_TOKEN", "")
@@ -102,69 +115,67 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._client.get_health()
 
     def _build_ui(self) -> None:
+        from .composer import AttachmentStrip, ExpandableTextEdit
+        from .conversation_view import ConversationView
+
         self.setObjectName("houdiniIntelligencePanel")
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
         status_row = QtWidgets.QHBoxLayout()
-        self.connection_label = QtWidgets.QLabel("Codex：正在检查…")
+        status_row.setSpacing(12)
+        self.connection_label = QtWidgets.QLabel("● Codex：正在检查…")
+        self.connection_label.setToolTip("Codex app-server 与 Bridge 的连接状态")
+        self.houdini_connection_label = QtWidgets.QLabel("● Houdini：未连接")
+        self.houdini_connection_label.setToolTip("当前 Houdini 会话是否可访问")
+        self.houdini_mcp_label = QtWidgets.QLabel("● 实时 MCP：不可用")
+        self.houdini_mcp_label.setToolTip("FXHoudini MCP 是否可用于当前会话")
+        hython_exe = os.environ.get("HIA_HYTHON_EXE", "")
+        hython_available = bool(hython_exe and os.path.isfile(hython_exe))
+        self.native_hython_label = QtWidgets.QLabel(
+            "● Native Hython：可用"
+            if hython_available
+            else "● Native Hython：不可用"
+        )
+        self.native_hython_label.setToolTip("仅用于明确要求的离线或批处理任务")
+        self.native_hython_label.setStyleSheet(
+            "color: #67c587;" if hython_available else "color: #9aa0a8;"
+        )
+        self.houdini_scene_label = QtWidgets.QLabel(
+            "Revision：不可用  ·  Dirty：不可用"
+        )
+        self.houdini_scene_label.setToolTip("当前 HIP 的 revision 与未保存状态")
+        status_row.addWidget(self.connection_label)
+        status_row.addWidget(self.houdini_connection_label)
+        status_row.addWidget(self.houdini_mcp_label)
+        status_row.addWidget(self.native_hython_label)
+        status_row.addStretch(1)
+        status_row.addWidget(self.houdini_scene_label)
+        root.addLayout(status_row)
+
+        session_row = QtWidgets.QHBoxLayout()
+        session_row.setSpacing(8)
         self.auth_label = QtWidgets.QLabel("认证：未知")
         self.thread_status_label = QtWidgets.QLabel("Thread：未选择")
         self.turn_status_label = QtWidgets.QLabel("Turn：空闲")
-        status_row.addWidget(self.connection_label)
-        status_row.addWidget(self.auth_label)
-        status_row.addStretch(1)
-        status_row.addWidget(self.thread_status_label)
-        status_row.addWidget(self.turn_status_label)
-        root.addLayout(status_row)
-
-        runtime_row = QtWidgets.QHBoxLayout()
-        self.houdini_connection_label = QtWidgets.QLabel("Houdini：未连接")
-        self.houdini_mcp_label = QtWidgets.QLabel("实时 MCP：不可用")
-        hython_exe = os.environ.get("HIA_HYTHON_EXE", "")
-        self.native_hython_label = QtWidgets.QLabel(
-            "Native Hython：可用"
-            if hython_exe and os.path.isfile(hython_exe)
-            else "Native Hython：不可用"
-        )
-        self.houdini_scene_label = QtWidgets.QLabel("Revision：不可用 / Dirty：不可用")
-        runtime_row.addWidget(self.houdini_connection_label)
-        runtime_row.addWidget(self.houdini_mcp_label)
-        runtime_row.addWidget(self.native_hython_label)
-        runtime_row.addStretch(1)
-        runtime_row.addWidget(self.houdini_scene_label)
-        root.addLayout(runtime_row)
-
-        self.houdini_status_group = QtWidgets.QGroupBox("Houdini 只读状态")
-        houdini_status = QtWidgets.QGridLayout(self.houdini_status_group)
-        self.houdini_build_label = QtWidgets.QLabel("Build：不可用")
-        self.houdini_session_label = QtWidgets.QLabel("HIP Session：不可用")
-        self.houdini_revision_label = QtWidgets.QLabel("Revision：不可用")
-        self.houdini_catalog_label = QtWidgets.QLabel("Catalog：未验证")
-        self.houdini_schema_label = QtWidgets.QLabel("Schema：未验证")
-        self.houdini_tools_label = QtWidgets.QLabel(
-            "scene_info：不可用  node_type_info：不可用  类型：0/5"
-        )
-        houdini_status.addWidget(self.houdini_build_label, 0, 0)
-        houdini_status.addWidget(self.houdini_session_label, 0, 1)
-        houdini_status.addWidget(self.houdini_revision_label, 0, 2)
-        houdini_status.addWidget(self.houdini_catalog_label, 1, 0)
-        houdini_status.addWidget(self.houdini_schema_label, 1, 1)
-        houdini_status.addWidget(self.houdini_tools_label, 1, 2)
-        self.houdini_status_group.setVisible(False)
-        root.addWidget(self.houdini_status_group)
-
-        model_row = QtWidgets.QHBoxLayout()
-        model_row.addWidget(QtWidgets.QLabel("模型"))
+        session_row.addWidget(self.auth_label)
+        session_row.addWidget(self.thread_status_label)
+        session_row.addWidget(self.turn_status_label)
+        session_row.addStretch(1)
+        session_row.addWidget(QtWidgets.QLabel("模型"))
         self.model_combo = QtWidgets.QComboBox()
         self.model_combo.addItem(_CODEX_DEFAULT_LABEL, None)
-        model_row.addWidget(self.model_combo, 1)
-        model_row.addWidget(QtWidgets.QLabel("推理强度"))
+        self.model_combo.setMaximumWidth(220)
+        self.model_combo.setToolTip("当前 Codex 模型")
+        session_row.addWidget(self.model_combo)
+        session_row.addWidget(QtWidgets.QLabel("推理"))
         self.effort_combo = QtWidgets.QComboBox()
         self.effort_combo.addItem(_CODEX_DEFAULT_LABEL, None)
-        model_row.addWidget(self.effort_combo)
-        root.addLayout(model_row)
+        self.effort_combo.setMaximumWidth(140)
+        self.effort_combo.setToolTip("当前推理强度")
+        session_row.addWidget(self.effort_combo)
+        root.addLayout(session_row)
 
         thread_row = QtWidgets.QHBoxLayout()
         self.thread_id_edit = QtWidgets.QLineEdit()
@@ -176,12 +187,36 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         thread_row.addWidget(self.resume_thread_button)
         root.addLayout(thread_row)
 
-        self.conversation = QtWidgets.QPlainTextEdit()
-        self.conversation.setReadOnly(True)
-        self.conversation.setPlaceholderText("Codex 回复、稳定计划和生命周期事件显示在这里。")
-        self.conversation.setFont(
-            QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        self.welcome_group = QtWidgets.QFrame()
+        self.welcome_group.setObjectName("welcomeCard")
+        self.welcome_group.setStyleSheet(
+            "QFrame#welcomeCard { background: #252a31; border: 1px solid #3b424c; "
+            "border-radius: 8px; }"
         )
+        welcome_layout = QtWidgets.QVBoxLayout(self.welcome_group)
+        welcome_title = QtWidgets.QLabel("从自然语言开始操作当前 Houdini 场景")
+        welcome_title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        welcome_layout.addWidget(welcome_title)
+        prompt_grid = QtWidgets.QGridLayout()
+        prompts = (
+            "在当前场景中生成模型",
+            "分析当前选中的节点",
+            "修改当前选中的节点网络",
+            "根据参考图片建模",
+            "检查当前场景中的错误",
+        )
+        self._welcome_buttons = []
+        for index, prompt in enumerate(prompts):
+            button = QtWidgets.QPushButton(prompt)
+            button.clicked.connect(
+                lambda _checked=False, value=prompt: self._fill_prompt(value)
+            )
+            prompt_grid.addWidget(button, index // 3, index % 3)
+            self._welcome_buttons.append(button)
+        welcome_layout.addLayout(prompt_grid)
+        root.addWidget(self.welcome_group)
+
+        self.conversation = ConversationView(self)
         root.addWidget(self.conversation, 1)
 
         self.approval_group = QtWidgets.QGroupBox("审批请求")
@@ -200,16 +235,29 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.approval_group.setVisible(False)
         root.addWidget(self.approval_group)
 
-        self.input_edit = QtWidgets.QTextEdit()
+        selection_row = QtWidgets.QHBoxLayout()
+        self.selection_label = QtWidgets.QLabel("当前选择：无")
+        self.selection_label.setToolTip("从 Houdini 主线程只读获取的当前节点选择")
+        self.include_selection_checkbox = QtWidgets.QCheckBox("包含当前选择")
+        self.include_selection_checkbox.setChecked(False)
+        selection_row.addWidget(self.selection_label, 1)
+        selection_row.addWidget(self.include_selection_checkbox)
+        root.addLayout(selection_row)
+
+        self.attachment_strip = AttachmentStrip(self)
+        root.addWidget(self.attachment_strip)
+
+        self.input_edit = ExpandableTextEdit(self)
         self.input_edit.setPlaceholderText(
-            "输入自然语言请求；创建和修改默认直接作用于当前 Houdini 场景。"
+            "输入自然语言请求；Enter 换行，Ctrl+Enter 发送。"
         )
-        self.input_edit.setMaximumHeight(110)
         root.addWidget(self.input_edit)
 
         action_row = QtWidgets.QHBoxLayout()
+        self.add_image_button = QtWidgets.QPushButton("添加图片")
         self.send_button = QtWidgets.QPushButton("发送")
         self.stop_button = QtWidgets.QPushButton("停止")
+        action_row.addWidget(self.add_image_button)
         action_row.addStretch(1)
         action_row.addWidget(self.send_button)
         action_row.addWidget(self.stop_button)
@@ -217,6 +265,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
         self.new_thread_button.clicked.connect(self._new_thread)
         self.resume_thread_button.clicked.connect(self._resume_thread)
+        self.add_image_button.clicked.connect(self._choose_images)
+        self.input_edit.sendRequested.connect(self._send)
+        self.input_edit.imagePasted.connect(self._add_clipboard_image)
         self.send_button.clicked.connect(self._send)
         self.stop_button.clicked.connect(self._stop)
         self.allow_button.clicked.connect(lambda: self._resolve_approval("allow"))
@@ -224,17 +275,32 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self._refresh_controls()
 
+    @staticmethod
+    def _set_status_indicator(
+        label: Any,
+        name: str,
+        value: str,
+        available: bool,
+        tooltip: str | None = None,
+    ) -> None:
+        label.setText(f"● {name}：{value}")
+        label.setStyleSheet(
+            "color: #67c587;" if available else "color: #9aa0a8;"
+        )
+        if tooltip and hasattr(label, "setToolTip"):
+            label.setToolTip(tooltip)
+
     def _initialize_houdini_read_adapter(self, hou_module: Any | None) -> None:
         """Construct the live reader on the UI thread from launcher-only state."""
 
         if hou_module is None:
             label = getattr(self, "houdini_connection_label", None)
             if label is not None:
-                label.setText("Houdini：未连接")
-            self.houdini_tools_label.setText(
-                "scene_info：不可用  node_type_info：不可用  类型：0/5"
-            )
+                self._set_status_indicator(label, "Houdini", "未连接", False)
             return
+        label = getattr(self, "houdini_connection_label", None)
+        if label is not None:
+            self._set_status_indicator(label, "Houdini", "已连接", True)
         profile = os.environ.get("HIA_SCENE_PROFILE", "")
         launch_id = os.environ.get("HIA_BRIDGE_LAUNCH_ID", "")
         generation = os.environ.get("HIA_BRIDGE_GENERATION", "")
@@ -257,7 +323,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and schema_version == "0.2.0"
             and digest_valid
         ):
-            self.houdini_schema_label.setText("Schema：B2 启动配置缺失")
             return
 
         publisher_hash = hashlib.sha256(process_nonce.encode("utf-8")).hexdigest()
@@ -276,15 +341,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         except (HoudiniReadAdapterError, TypeError, ValueError):
             label = getattr(self, "houdini_connection_label", None)
             if label is not None:
-                label.setText("Houdini：未连接")
-            self.houdini_schema_label.setText("Schema：Houdini 观察不可用")
+                self._set_status_indicator(label, "Houdini", "已连接", True)
             return
         self._houdini_adapter = adapter
         self._last_houdini_report = dict(report) if isinstance(report, dict) else None
         self._update_houdini_status(report, attested=False, pending=True)
-        self.houdini_schema_label.setText(
-            f"Schema：{schema_version} / {schema_digest[:12]}…"
-        )
 
     def _read_dirty_state(self):
         hou_module = getattr(self, "_hou_module", None)
@@ -305,23 +366,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     ) -> None:
         if not isinstance(report, dict):
             return
-        build = report.get("houdini_build")
-        session_id = report.get("hip_session_id")
+        del attested, pending
         revision = report.get("scene_revision")
         dirty = self._read_dirty_state()
-        catalog = report.get("catalog")
-        available_types = 0
-        total_types = 0
-        if isinstance(catalog, list):
-            total_types = min(len(catalog), 5)
-            available_types = sum(
-                1 for item in catalog[:5] if isinstance(item, dict) and item.get("available") is True
-            )
-        locally_available = self._houdini_report_is_locally_available(report)
-        live_available = locally_available and attested
         houdini_connection_label = getattr(self, "houdini_connection_label", None)
         if houdini_connection_label is not None:
-            houdini_connection_label.setText("Houdini：已连接")
+            self._set_status_indicator(
+                houdini_connection_label, "Houdini", "已连接", True
+            )
         revision_text = (
             str(revision)
             if isinstance(revision, int) and not isinstance(revision, bool)
@@ -331,38 +383,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         houdini_scene_label = getattr(self, "houdini_scene_label", None)
         if houdini_scene_label is not None:
             houdini_scene_label.setText(
-                f"Revision：{revision_text} / Dirty：{dirty_text}"
-            )
-        self.houdini_build_label.setText(
-            f"Build：{build}" if isinstance(build, str) and build else "Build：不可用"
-        )
-        self.houdini_session_label.setText(
-            f"HIP Session：{session_id[:12]}…"
-            if isinstance(session_id, str) and session_id
-            else "HIP Session：不可用"
-        )
-        self.houdini_revision_label.setText(
-            f"Revision：{revision}"
-            if isinstance(revision, int) and not isinstance(revision, bool)
-            else "Revision：不可用"
-        )
-        availability = (
-            "可用"
-            if live_available
-            else ("待认证" if locally_available and pending else "不可用")
-        )
-        self.houdini_tools_label.setText(
-            f"scene_info：{availability}  node_type_info：{availability}  "
-            f"类型：{available_types}/{total_types or 5}"
-        )
-        if not live_available:
-            self.houdini_catalog_label.setText(
-                "Catalog：待 Bridge 认证"
-                if locally_available and pending
-                else "Catalog：不可用"
+                f"Revision：{revision_text}  ·  Dirty：{dirty_text}"
             )
 
-    def _fail_closed_houdini_status(self, catalog_status: str) -> None:
+    def _fail_closed_houdini_status(self, _status: str) -> None:
         """Invalidate the UI-visible live capability until a fresh Bridge ACK."""
 
         self._scene_attestation_digest = None
@@ -373,7 +397,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             attested=False,
             pending=False,
         )
-        self.houdini_catalog_label.setText(catalog_status)
 
     @staticmethod
     def _houdini_report_identity(report: Any) -> str | None:
@@ -422,6 +445,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot()
     def _houdini_heartbeat(self) -> None:
+        self._refresh_selection_status()
         if (
             not self._houdini_polling_enabled
             or self._client is None
@@ -524,8 +548,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._scene_catalog_digest = catalog_digest
                 self._attested_houdini_report_identity = report_identity
                 self._update_houdini_status(report, attested=True)
-                suffix = f" / {self._scene_catalog_digest[:12]}…"
-                self.houdini_catalog_label.setText(f"Catalog：匹配{suffix}")
                 self._schedule_scene_work_poll(0)
             else:
                 self._fail_closed_houdini_status("Catalog：不可用")
@@ -584,9 +606,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _set_connection(self, text: str, connected: bool) -> None:
         self._connected = connected
-        self.connection_label.setText(f"Codex：{text}")
-        self.connection_label.setStyleSheet(
-            "color: #7ad97a;" if connected else "color: #e6a65c;"
+        self._set_status_indicator(
+            self.connection_label,
+            "Codex",
+            "已连接" if connected else "未连接",
+            connected,
+            text,
         )
 
     def _refresh_controls(self) -> None:
@@ -600,10 +625,27 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             or self._turn_start_request_pending
             or bool(self._reconciliation_tokens)
         )
+        request_ready = session_enabled and not self._turn_steer_request_pending
+        steer_available = controls.stop
         self.new_thread_button.setEnabled(controls.new_thread and session_enabled)
         self.resume_thread_button.setEnabled(controls.resume_thread and session_enabled)
-        self.send_button.setEnabled(controls.send and session_enabled)
+        self.send_button.setEnabled(
+            (controls.send or steer_available) and request_ready
+        )
         self.stop_button.setEnabled(controls.stop and not self._interrupt_pending)
+        self.send_button.setText(
+            "发送中…"
+            if self._turn_start_request_pending
+            else (
+                "追加中…"
+                if self._turn_steer_request_pending
+                else (
+                    "追加指令"
+                    if steer_available
+                    else ("Codex 回复中…" if self._turn_state.busy else "发送")
+                )
+            )
+        )
         self.thread_id_edit.setEnabled(not self._turn_state.busy and session_enabled)
         selection_enabled = (
             self._connected
@@ -612,6 +654,26 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         self.model_combo.setEnabled(selection_enabled)
         self.effort_combo.setEnabled(selection_enabled)
+        composer_enabled = (
+            (not self._turn_state.busy or steer_available)
+            and request_ready
+        )
+        input_edit = getattr(self, "input_edit", None)
+        if input_edit is not None:
+            input_edit.setEnabled(composer_enabled)
+        add_image_button = getattr(self, "add_image_button", None)
+        if add_image_button is not None:
+            add_image_button.setEnabled(
+                composer_enabled
+                and isinstance(self._selected_thread_id, str)
+                and self._selected_model_supports_images()
+            )
+        include_selection = getattr(self, "include_selection_checkbox", None)
+        if include_selection is not None:
+            include_selection.setEnabled(composer_enabled)
+        attachment_strip = getattr(self, "attachment_strip", None)
+        if attachment_strip is not None:
+            attachment_strip.setEnabled(composer_enabled)
 
     @QtCore.Slot(dict)
     def _on_health(self, payload: dict[str, Any]) -> None:
@@ -619,11 +681,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         houdini_mcp = payload.get("houdini_mcp")
         houdini_mcp_label = getattr(self, "houdini_mcp_label", None)
         if houdini_mcp_label is not None:
-            houdini_mcp_label.setText(
-                "实时 MCP：可用"
-                if isinstance(houdini_mcp, dict)
+            mcp_available = (
+                isinstance(houdini_mcp, dict)
                 and houdini_mcp.get("available") is True
-                else "实时 MCP：不可用"
+            )
+            self._set_status_indicator(
+                houdini_mcp_label,
+                "实时 MCP",
+                "可用" if mcp_available else "不可用",
+                mcp_available,
+                "FXHoudini MCP 当前会话状态",
             )
         self._apply_session(
             payload.get("session", {}),
@@ -675,6 +742,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 state_applied = False
 
         self._connected = bool(session.get("connected"))
+        self._set_status_indicator(
+            self.connection_label,
+            "Codex",
+            "已连接" if self._connected else "未连接",
+            self._connected,
+            "Codex app-server 会话状态",
+        )
         authentication = session.get("authentication")
         if authentication == "authenticated":
             self._authenticated = True
@@ -693,12 +767,31 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self.auth_label.setText("认证：不可用")
 
         if state_applied and isinstance(thread_id, str) and thread_id:
+            if (
+                isinstance(self._selected_thread_id, str)
+                and self._selected_thread_id != thread_id
+            ):
+                self.attachment_strip.clear()
+                self._stream_thread_id = None
+                self._stream_turn_id = None
             self._selected_thread_id = thread_id
             self.thread_id_edit.setText(thread_id)
             self.thread_status_label.setText(f"Thread：{thread_id}")
         elif state_applied and not self._turn_state.busy:
             self._selected_thread_id = None
             self.thread_status_label.setText("Thread：未选择")
+
+        if (
+            state_applied
+            and turn_active is True
+            and isinstance(thread_id, str)
+            and isinstance(turn_id, str)
+        ):
+            self._stream_thread_id = thread_id
+            self._stream_turn_id = turn_id
+        elif state_applied and turn_active is False and not self._turn_state.busy:
+            self._stream_thread_id = None
+            self._stream_turn_id = None
 
         if state_applied and isinstance(turn_active, bool):
             self.turn_status_label.setText(
@@ -711,6 +804,220 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._request_session_reconciliation("session_conflict")
         self._refresh_controls()
         return state_applied
+
+    def _fill_prompt(self, text: str) -> None:
+        self.input_edit.setPlainText(text)
+
+    def _read_selected_node_paths(self) -> tuple[str, ...]:
+        hou_module = getattr(self, "_hou_module", None)
+        if hou_module is None:
+            return ()
+        try:
+            nodes = tuple(hou_module.selectedNodes())
+            paths = tuple(node.path() for node in nodes)
+        except Exception:
+            return ()
+        return tuple(
+            path for path in dict.fromkeys(paths) if isinstance(path, str) and path
+        )
+
+    def _refresh_selection_status(
+        self, paths: tuple[str, ...] | None = None
+    ) -> None:
+        if paths is None:
+            paths = self._read_selected_node_paths()
+        self._selected_node_paths = paths
+        label = getattr(self, "selection_label", None)
+        if label is None:
+            return
+        if not paths:
+            label.setText("当前选择：无")
+        elif len(paths) == 1:
+            label.setText(f"当前选择：{paths[0]}")
+        else:
+            label.setText(f"当前选择：{paths[0]} 等 {len(paths)} 个节点")
+        if hasattr(label, "setToolTip"):
+            label.setToolTip("\n".join(paths) if paths else "当前没有选中节点")
+
+    def _attachment_paths(self) -> tuple[str, ...]:
+        strip = getattr(self, "attachment_strip", None)
+        if strip is None or not hasattr(strip, "paths"):
+            return ()
+        try:
+            values = strip.paths()
+        except Exception:
+            return ()
+        return tuple(path for path in values if isinstance(path, str) and path)
+
+    def _add_attachment_path(self, path: str) -> None:
+        if len(self._attachment_paths()) >= _MAX_TURN_IMAGES:
+            self._append_system(
+                f"每轮最多添加 {_MAX_TURN_IMAGES} 张图片。"
+            )
+            return
+        strip = getattr(self, "attachment_strip", None)
+        if strip is not None and hasattr(strip, "add_path"):
+            strip.add_path(path)
+
+    def _choose_images(self) -> None:
+        thread_id = self._selected_thread_id
+        if not isinstance(thread_id, str) or not thread_id:
+            self._append_system("请先新建或恢复 Thread，再添加图片。")
+            return
+        if not self._selected_model_supports_images():
+            self._append_system("当前模型不支持图片输入，请先选择支持图片的模型。")
+            return
+        paths, _selected_filter = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "添加参考图片",
+            r"E:\houdini-intelligence-agent",
+            "图片 (*.png *.jpg *.jpeg *.webp)",
+        )
+        remaining = max(0, _MAX_TURN_IMAGES - len(self._attachment_paths()))
+        if len(paths) > remaining:
+            self._append_system(
+                f"每轮最多添加 {_MAX_TURN_IMAGES} 张图片；已忽略多余选择。"
+            )
+        for source in paths[:remaining]:
+            try:
+                stored = self._attachment_store.copy_file(thread_id, source)
+            except (OSError, TypeError, ValueError) as exc:
+                self._append_system(f"图片添加失败：{exc}")
+            else:
+                self._add_attachment_path(stored)
+
+    @QtCore.Slot(object)
+    def _add_clipboard_image(self, image: Any) -> None:
+        thread_id = self._selected_thread_id
+        if not isinstance(thread_id, str) or not thread_id:
+            self._append_system("请先新建或恢复 Thread，再粘贴图片。")
+            return
+        if not self._selected_model_supports_images():
+            self._append_system("当前模型不支持图片输入，请先选择支持图片的模型。")
+            return
+        if len(self._attachment_paths()) >= _MAX_TURN_IMAGES:
+            self._append_system(f"每轮最多添加 {_MAX_TURN_IMAGES} 张图片。")
+            return
+        try:
+            path = self._attachment_store.clipboard_path(thread_id)
+            if hasattr(image, "toImage"):
+                image = image.toImage()
+            if not hasattr(image, "save") or image.save(path, "PNG") is not True:
+                raise ValueError("剪贴板图片无法保存为 PNG")
+        except (OSError, TypeError, ValueError) as exc:
+            self._append_system(f"剪贴板图片添加失败：{exc}")
+            return
+        self._add_attachment_path(path)
+
+    def _request_text_with_selection(self, text: str) -> str:
+        checkbox = getattr(self, "include_selection_checkbox", None)
+        if checkbox is None or not checkbox.isChecked():
+            return text
+        paths = self._read_selected_node_paths()
+        self._selected_node_paths = paths
+        self._refresh_selection_status(paths)
+        if not paths:
+            return text
+        selection = "\n".join(f"- {path}" for path in paths)
+        prefix = "\n\n" if text else ""
+        return f"{text}{prefix}当前 Houdini 选择（只读上下文）：\n{selection}"
+
+    def _add_user_message(
+        self,
+        text: str,
+        attachment_paths: tuple[str, ...],
+        *,
+        same_turn: bool = False,
+    ) -> None:
+        names = tuple(os.path.basename(path) for path in attachment_paths)
+        if hasattr(self.conversation, "add_user_message"):
+            self.conversation.add_user_message(
+                text or "（仅图片）",
+                names,
+                same_turn=same_turn,
+            )
+        else:
+            self.conversation.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+            self.conversation.insertPlainText(f"\nYou: {text or '（仅图片）'}\n")
+
+    def _begin_codex_message(self) -> None:
+        if hasattr(self.conversation, "begin_codex_message"):
+            self.conversation.begin_codex_message()
+        else:
+            self.conversation.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+            self.conversation.insertPlainText("Codex: ")
+
+    def _append_codex_delta(self, delta: str) -> None:
+        if hasattr(self.conversation, "append_codex_delta"):
+            self.conversation.append_codex_delta(delta)
+        else:
+            self.conversation.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+            self.conversation.insertPlainText(delta)
+
+    def _event_matches_active_stream(
+        self,
+        params: dict[str, Any],
+        *,
+        require_item_id: bool = False,
+    ) -> bool:
+        thread_id = params.get("threadId")
+        turn_id = params.get("turnId")
+        if (
+            not self._turn_state.busy
+            or not isinstance(thread_id, str)
+            or not isinstance(turn_id, str)
+            or thread_id != self._stream_thread_id
+            or turn_id != self._stream_turn_id
+        ):
+            return False
+        return not require_item_id or isinstance(params.get("itemId"), str)
+
+    def _finish_codex_message(self) -> None:
+        if hasattr(self.conversation, "finish_codex_message"):
+            self.conversation.finish_codex_message()
+
+    def _update_tool_activity(
+        self,
+        item_id: str,
+        tool_name: str,
+        status: str,
+        error: Any = None,
+    ) -> None:
+        if hasattr(self.conversation, "update_tool_activity"):
+            self.conversation.update_tool_activity(
+                item_id,
+                tool_name,
+                status,
+                error,
+            )
+
+    def _update_tool_progress(self, item_id: str, message: str) -> None:
+        if hasattr(self.conversation, "update_tool_progress"):
+            self.conversation.update_tool_progress(item_id, message)
+
+    def _accept_sent_draft(self, context: str) -> None:
+        draft = self._pending_turn_drafts.pop(context, None)
+        if not isinstance(draft, dict):
+            return
+        text = draft.get("text")
+        if isinstance(text, str) and self.input_edit.toPlainText() == text:
+            self.input_edit.clear()
+        paths = tuple(draft.get("attachment_paths") or ())
+        if paths and paths == self._attachment_paths():
+            self.attachment_strip.clear()
+
+    def _accept_steered_draft(self, context: str) -> None:
+        draft = self._pending_steer_drafts.pop(context, None)
+        if not isinstance(draft, dict):
+            return
+        text = draft.get("text")
+        paths = tuple(draft.get("attachment_paths") or ())
+        if isinstance(text, str):
+            self._add_user_message(text, paths, same_turn=True)
+            if self.input_edit.toPlainText() == text:
+                self.input_edit.clear()
+        if paths and paths == self._attachment_paths():
+            self.attachment_strip.clear()
 
     def _new_thread(self) -> None:
         if (
@@ -742,7 +1049,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _send(self) -> None:
         text = self.input_edit.toPlainText()
-        if not text.strip():
+        attachment_paths = self._attachment_paths()
+        if not text.strip() and not attachment_paths:
+            return
+        if attachment_paths and not self._selected_model_supports_images():
+            self._append_system("当前模型不支持图片输入，请选择其他模型后再发送。")
             return
         thread_id = self._selected_thread_id
         if not isinstance(thread_id, str) or not thread_id:
@@ -751,29 +1062,80 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if (
             self._session_action_pending
             or self._turn_start_request_pending
+            or self._turn_steer_request_pending
             or self._reconciliation_tokens
         ):
             return
-        if self._client is None or not self._turn_state.begin_start(thread_id):
-            self._append_system("当前 Turn 尚未完成，不能再次发送。")
+        if self._client is None:
+            return
+        if self._turn_state.busy:
+            if (
+                self._turn_state.phase is not TurnPhase.IN_PROGRESS
+                or not isinstance(self._turn_state.turn_id, str)
+            ):
+                self._append_system("当前 Turn 正在建立或同步，暂不能追加指令。")
+                self._refresh_controls()
+                return
+            self._steer_active_turn(text, attachment_paths, thread_id)
+            return
+        if not self._turn_state.begin_start(thread_id):
+            self._append_system("当前 Turn 暂不能发送。")
             self._refresh_controls()
             return
-        self.conversation.moveCursor(QtGui.QTextCursor.MoveOperation.End)
-        self.conversation.insertPlainText(f"\nYou: {text}\nCodex: ")
-        self.input_edit.clear()
+        request_text = self._request_text_with_selection(text)
+        self._add_user_message(text, attachment_paths)
+        self._begin_codex_message()
+        self._stream_thread_id = thread_id
+        self._stream_turn_id = None
+        welcome_group = getattr(self, "welcome_group", None)
+        if welcome_group is not None:
+            welcome_group.setVisible(False)
         self.turn_status_label.setText("Turn：正在创建")
         token = self._turn_state.capture_token()
         context = (
             f"{_TURN_START_CONTEXT_PREFIX}{token.generation}:{token.revision}"
         )
         self._turn_start_tokens[context] = token
+        self._pending_turn_drafts[context] = {
+            "text": text,
+            "attachment_paths": attachment_paths,
+        }
         self._active_turn_start_context = context
         self._turn_start_request_pending = True
         self._refresh_controls()
         self._client.start_turn(
-            text,
+            request_text,
             model=self._selected_model_id(),
             effort=self._selected_effort(),
+            local_image_paths=list(attachment_paths),
+            context=context,
+        )
+
+    def _steer_active_turn(
+        self,
+        text: str,
+        attachment_paths: tuple[str, ...],
+        thread_id: str,
+    ) -> None:
+        token = self._turn_state.capture_token()
+        if token.thread_id != thread_id or not isinstance(token.turn_id, str):
+            self._append_system("当前活动 Turn 不明确，暂不能追加指令。")
+            return
+        context = (
+            f"{_TURN_STEER_CONTEXT_PREFIX}{token.generation}:"
+            f"{token.revision}:{uuid.uuid4().hex}"
+        )
+        self._turn_steer_tokens[context] = token
+        self._pending_steer_drafts[context] = {
+            "text": text,
+            "attachment_paths": attachment_paths,
+        }
+        self._active_turn_steer_context = context
+        self._turn_steer_request_pending = True
+        self._refresh_controls()
+        self._client.steer_turn(
+            self._request_text_with_selection(text),
+            local_image_paths=list(attachment_paths),
             context=context,
         )
 
@@ -838,12 +1200,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._session_action_pending = False
             thread_id = payload.get("thread_id")
             if isinstance(thread_id, str):
+                if (
+                    isinstance(self._selected_thread_id, str)
+                    and self._selected_thread_id != thread_id
+                ):
+                    self.attachment_strip.clear()
                 self._selected_thread_id = thread_id
                 self.thread_id_edit.setText(thread_id)
                 self.thread_status_label.setText(f"Thread：{thread_id}")
                 action = "已新建" if context == "session_start" else "已恢复"
                 self._append_system(f"{action} Thread：{thread_id}")
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
+            self._accept_sent_draft(context)
             token = self._turn_start_tokens.pop(context, None)
             if context == self._active_turn_start_context:
                 self._active_turn_start_context = None
@@ -856,6 +1224,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 and isinstance(thread_id, str)
                 and isinstance(turn_id, str)
             ):
+                if self._stream_thread_id == thread_id:
+                    if self._stream_turn_id in {None, turn_id}:
+                        self._stream_turn_id = turn_id
+                    else:
+                        self._request_session_reconciliation(
+                            "mismatched_stream_turn_ack"
+                        )
                 if payload.get("turn_active") is False:
                     acknowledged = self._turn_state.acknowledge_start(
                         token,
@@ -883,6 +1258,23 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     )
             else:
                 self._request_session_reconciliation("late_turn_start_ack")
+        elif context.startswith(_TURN_STEER_CONTEXT_PREFIX):
+            token = self._turn_steer_tokens.pop(context, None)
+            if context == self._active_turn_steer_context:
+                self._active_turn_steer_context = None
+                self._turn_steer_request_pending = False
+            thread_id = payload.get("thread_id")
+            turn_id = payload.get("turn_id")
+            if (
+                isinstance(token, TurnStateToken)
+                and self._turn_state.token_generation_is_current(token)
+                and thread_id == token.thread_id
+                and turn_id == token.turn_id
+            ):
+                self._accept_steered_draft(context)
+            else:
+                self._pending_steer_drafts.pop(context, None)
+                self._append_system("追加响应与当前 Turn 不匹配；输入和附件已保留。")
         elif context.startswith(_INTERRUPT_CONTEXT_PREFIX):
             token = self._interrupt_tokens.pop(context, None)
             if context == self._active_interrupt_context:
@@ -935,17 +1327,57 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             params = raw_params if isinstance(raw_params, dict) else {}
             if method == "item/agentMessage/delta":
                 delta = params.get("delta")
-                if isinstance(delta, str):
-                    self.conversation.moveCursor(QtGui.QTextCursor.MoveOperation.End)
-                    self.conversation.insertPlainText(delta)
+                if isinstance(delta, str) and self._event_matches_active_stream(
+                    params, require_item_id=True
+                ):
+                    self._append_codex_delta(delta)
             elif method == "turn/plan/updated":
-                steps = params.get("plan") or []
-                rendered = " | ".join(
-                    f"{step.get('status', '?')}: {step.get('step', '')}"
-                    for step in steps
-                    if isinstance(step, dict)
-                )
-                self._append_system(f"计划：{rendered}")
+                if self._event_matches_active_stream(params):
+                    steps = params.get("plan") or []
+                    rendered = " | ".join(
+                        f"{step.get('status', '?')}: {step.get('step', '')}"
+                        for step in steps
+                        if isinstance(step, dict)
+                    )
+                    self._append_system(f"计划：{rendered}")
+            elif method in {"item/started", "item/completed"}:
+                item = params.get("item")
+                if (
+                    self._event_matches_active_stream(params)
+                    and isinstance(item, dict)
+                    and item.get("type") == "mcpToolCall"
+                ):
+                    item_id = item.get("id")
+                    tool = item.get("tool")
+                    raw_status = item.get("status")
+                    status = (
+                        "started"
+                        if method == "item/started" or raw_status == "inProgress"
+                        else raw_status
+                    )
+                    if (
+                        isinstance(item_id, str)
+                        and isinstance(status, str)
+                        and status in {"started", "completed", "failed"}
+                    ):
+                        self._update_tool_activity(
+                            item_id,
+                            tool if isinstance(tool, str) and tool else "MCP",
+                            status,
+                            item.get("error") if status == "failed" else None,
+                        )
+            elif method == "item/mcpToolCall/progress":
+                message = params.get("message")
+                item_id = params.get("itemId")
+                if (
+                    isinstance(message, str)
+                    and message
+                    and isinstance(item_id, str)
+                    and self._event_matches_active_stream(
+                        params, require_item_id=True
+                    )
+                ):
+                    self._update_tool_progress(item_id, message)
             elif method == "turn/started":
                 raw_turn = params.get("turn")
                 turn = raw_turn if isinstance(raw_turn, dict) else {}
@@ -953,6 +1385,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 turn_id = turn.get("id")
                 if isinstance(thread_id, str) and isinstance(turn_id, str):
                     if self._turn_state.observe_started(thread_id, turn_id):
+                        if self._stream_thread_id == thread_id:
+                            if self._stream_turn_id in {None, turn_id}:
+                                self._stream_turn_id = turn_id
+                            else:
+                                self._request_session_reconciliation(
+                                    "mismatched_stream_turn_started"
+                                )
                         self.turn_status_label.setText(f"Turn：{turn_id}")
                         self._refresh_controls()
                     else:
@@ -994,9 +1433,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         elif event_type == "protocol_warning":
             method = event.get("method")
             method_text = f" method={method}" if isinstance(method, str) else ""
-            self._append_system(
-                f"协议警告：{event.get('code', '')}{method_text} "
-                f"{event.get('message', '')}"
+            code = event.get("code", "")
+            message = event.get("message", "")
+            text = f"协议警告：{code}{method_text} {message}"
+            self._append_protocol_warning(
+                f"{code}|{method}|{message}",
+                text,
             )
         elif event_type == "process_exit":
             self._set_connection("app-server 已退出", False)
@@ -1083,6 +1525,27 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if context.startswith(_SESSION_RECONCILE_CONTEXT_PREFIX):
             self._reconciliation_tokens.pop(context, None)
 
+        if context.startswith(_TURN_STEER_CONTEXT_PREFIX):
+            self._turn_steer_tokens.pop(context, None)
+            self._pending_steer_drafts.pop(context, None)
+            if context == self._active_turn_steer_context:
+                self._active_turn_steer_context = None
+                self._turn_steer_request_pending = False
+            if error_code == "TURN_NOT_STEERABLE":
+                turn_kind = details.get("turn_kind")
+                label = "review" if turn_kind == "review" else "compact"
+                self._append_system(f"当前 {label} Turn 暂不能追加指令。")
+            elif error_code == "NO_ACTIVE_TURN":
+                self._append_system("当前 Turn 已结束；输入和附件已保留。")
+            else:
+                self._append_system(
+                    f"追加指令失败：{format_bridge_error(payload)}"
+                )
+            self.allow_button.setEnabled(True)
+            self.deny_button.setEnabled(True)
+            self._refresh_controls()
+            return
+
         self._append_system(f"{context} 失败：{format_bridge_error(payload)}")
         if context in {"health", "session"}:
             self._set_connection("连接失败", False)
@@ -1096,6 +1559,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._active_turn_start_context = None
                 self._turn_start_request_pending = False
             active_turn = details.get("turn_active") is True
+            if active_turn:
+                self._accept_sent_draft(context)
             failure_thread_id = details.get("thread_id")
             failure_turn_id = details.get("turn_id")
             state_reconciled = False
@@ -1111,6 +1576,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     failure_turn_id,
                 )
             elif details.get("turn_created") is False and not active_turn:
+                self._pending_turn_drafts.pop(context, None)
+                self._stream_thread_id = None
+                self._stream_turn_id = None
+                self._finish_codex_message()
                 thread_id = self._selected_thread_id or self._turn_state.thread_id
                 if isinstance(token, TurnStateToken) and isinstance(thread_id, str):
                     state_reconciled = self._turn_state.reconcile_snapshot(
@@ -1167,6 +1636,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     @QtCore.Slot(int)
     def _on_model_changed(self, _index: int = -1) -> None:
         self._update_reasoning_efforts()
+        self._refresh_controls()
 
     def _apply_models(self, raw_models: Any) -> None:
         """Replace the selector with the bounded, Bridge-filtered model catalog."""
@@ -1206,6 +1676,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         record = self._selected_model_record()
         model_id = record.get("model") if record is not None else None
         return model_id if isinstance(model_id, str) and model_id else None
+
+    def _selected_model_supports_images(self) -> bool:
+        record = self._selected_model_record()
+        if record is None:
+            return True
+        modalities = record.get("inputModalities")
+        return isinstance(modalities, list) and "image" in modalities
 
     def _selected_effort(self) -> str | None:
         effort = self.effort_combo.currentData()
@@ -1259,6 +1736,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.turn_status_label.setText(
             self._turn_status_text(status or "completed", active=False)
         )
+        self._finish_codex_message()
+        self._stream_thread_id = None
+        self._stream_turn_id = None
 
     @staticmethod
     def _turn_status_text(status: str | None, *, active: bool) -> str:
@@ -1288,8 +1768,23 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._client.poll_events(self._event_sequence)
 
     def _append_system(self, text: str) -> None:
-        self.conversation.moveCursor(QtGui.QTextCursor.MoveOperation.End)
-        self.conversation.insertPlainText(f"\n[System] {text}\n")
+        welcome_group = getattr(self, "welcome_group", None)
+        if welcome_group is not None:
+            welcome_group.setVisible(False)
+        if hasattr(self.conversation, "add_system_message"):
+            self.conversation.add_system_message(text)
+        else:
+            self.conversation.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+            self.conversation.insertPlainText(f"\n[System] {text}\n")
+
+    def _append_protocol_warning(self, key: str, text: str) -> None:
+        welcome_group = getattr(self, "welcome_group", None)
+        if welcome_group is not None:
+            welcome_group.setVisible(False)
+        if hasattr(self.conversation, "add_protocol_warning"):
+            self.conversation.add_protocol_warning(key, text)
+        else:
+            self._append_system(text)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._polling_enabled = False

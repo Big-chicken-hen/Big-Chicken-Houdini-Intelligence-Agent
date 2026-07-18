@@ -65,6 +65,11 @@
         "response_schema": "v2/TurnStartResponse.json"
       },
       {
+        "method": "turn/steer",
+        "params_definition": "TurnSteerParams",
+        "response_schema": "v2/TurnSteerResponse.json"
+      },
+      {
         "method": "turn/interrupt",
         "params_definition": "TurnInterruptParams",
         "response_schema": "v2/TurnInterruptResponse.json"
