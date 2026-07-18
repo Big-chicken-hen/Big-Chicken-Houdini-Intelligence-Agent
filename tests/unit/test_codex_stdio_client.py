@@ -90,6 +90,7 @@ class CodexStdioClientTests(unittest.TestCase):
                 "serverName": "project-codex",
                 "status": "disabled",
             },
+            "skills/changed": {},
         }
 
         for method, params in notifications.items():
@@ -321,6 +322,65 @@ class CodexStdioClientTests(unittest.TestCase):
         self.assertNotIn(secret, request_encoded)
         self.assertNotIn(url, request_encoded)
         self.assertIn("[REDACTED]", request_encoded)
+
+    def test_arbitrary_request_credentials_are_redacted_before_storage_and_emit(
+        self,
+    ) -> None:
+        secrets = {
+            "authorization": "authorization-secret-123456",
+            "bearer": "bearer-secret-123456",
+            "cookie": "cookie-secret-123456",
+            "api_key": "api-key-secret-123456",
+            "query": "query-secret-123456",
+            "password": "password-secret-123456",
+            "userinfo": "userinfo-secret-123456",
+        }
+        request_id = "approval-arbitrary-credentials"
+        self.client._handle_server_request(
+            {
+                "id": request_id,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "Authorization": f"Bearer {secrets['authorization']}",
+                    "nested": {
+                        "sessionCookie": f"session={secrets['cookie']}",
+                        "openai_api_key": secrets["api_key"],
+                        "databasePassword": secrets["password"],
+                        "totalTokens": 123,
+                    },
+                    "commandActions": [
+                        {
+                            "command": (
+                                "curl -H \"Authorization: Bearer "
+                                f"{secrets['bearer']}\" --cookie \"session="
+                                f"{secrets['cookie']}\" \"https://user:"
+                                f"{secrets['userinfo']}@example.com/data?access_token="
+                                f"{secrets['query']}\""
+                            )
+                        },
+                        {
+                            "command": (
+                                "curl -b \"sid="
+                                f"{secrets['cookie']}\" -H \"X-API-Key: "
+                                f"{secrets['api_key']}\" https://example.com"
+                            )
+                        },
+                    ],
+                },
+            }
+        )
+
+        pending = self.client.pending_server_request(request_id)
+        emitted = self.wait_for(
+            lambda event: event.get("type") == "server_request"
+            and event.get("request_id") == request_id
+        )
+        for serialized in (repr(pending), repr(emitted)):
+            for secret in secrets.values():
+                self.assertNotIn(secret, serialized)
+            self.assertIn("[REDACTED]", serialized)
+
+        self.assertEqual(123, pending["params"]["nested"]["totalTokens"])
 
 
 if __name__ == "__main__":

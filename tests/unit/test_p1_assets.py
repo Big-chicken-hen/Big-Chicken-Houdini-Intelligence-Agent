@@ -373,6 +373,7 @@ class P1AssetTests(unittest.TestCase):
             "grabKeyboard",
             "grabMouse",
             "processEvents",
+            "clearFocus(",
         ):
             self.assertNotIn(forbidden, panel_source)
         self.assertIn("self._attachment_store.copy_file(", panel_source)

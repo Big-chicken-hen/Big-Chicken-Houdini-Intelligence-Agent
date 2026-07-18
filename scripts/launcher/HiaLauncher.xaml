@@ -26,6 +26,16 @@
         <SolidColorBrush x:Key="TextPrimaryBrush" Color="#EDF1FF" />
         <SolidColorBrush x:Key="TextSecondaryBrush" Color="#AEB7D3" />
         <SolidColorBrush x:Key="TextMutedBrush" Color="#77819E" />
+        <SolidColorBrush x:Key="PickerBackgroundBrush" Color="#11172A" />
+        <SolidColorBrush x:Key="PickerPopupBrush" Color="#0D1324" />
+        <SolidColorBrush x:Key="PickerTextBrush" Color="#F4F7FF" />
+        <SolidColorBrush x:Key="PickerSecondaryTextBrush" Color="#B8C3E0" />
+        <SolidColorBrush x:Key="PickerDisabledTextBrush" Color="#95A0C2" />
+        <SolidColorBrush x:Key="PickerDisabledBackgroundBrush" Color="#101420" />
+        <SolidColorBrush x:Key="PickerHoverBrush" Color="#263559" />
+        <SolidColorBrush x:Key="PickerSelectedBrush" Color="#3B3264" />
+        <SolidColorBrush x:Key="PickerBorderBrush" Color="#526084" />
+        <SolidColorBrush x:Key="PickerFocusBrush" Color="#5EE4EF" />
         <SolidColorBrush x:Key="AccentPurpleBrush" Color="#8A6CFF" />
         <SolidColorBrush x:Key="AccentCyanBrush" Color="#4DDBE8" />
         <SolidColorBrush x:Key="AccentPinkBrush" Color="#FF79B8" />
@@ -62,45 +72,250 @@
         </Style>
 
         <Style x:Key="PickerChromeStyle" TargetType="Border">
-            <Setter Property="Background" Value="#171C2D" />
-            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="9" />
-            <Setter Property="Padding" Value="2" />
-            <Style.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="BorderBrush" Value="#6473A6" />
-                </Trigger>
-                <Trigger Property="IsKeyboardFocusWithin" Value="True">
-                    <Setter Property="BorderBrush" Value="{StaticResource AccentCyanBrush}" />
-                </Trigger>
-            </Style.Triggers>
-        </Style>
-
-        <Style TargetType="ComboBox">
-            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
-            <Setter Property="Background" Value="#171C2D" />
+            <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="Padding" Value="10,7" />
-            <Setter Property="VerticalContentAlignment" Value="Center" />
-            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+            <Setter Property="CornerRadius" Value="9" />
+            <Setter Property="Padding" Value="0" />
         </Style>
 
-        <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
-            <Setter Property="Background" Value="#171C2D" />
-            <Setter Property="Padding" Value="10,7" />
+        <Style x:Key="DarkPickerComboBoxItemStyle" TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="{StaticResource PickerTextBrush}" />
+            <Setter Property="Background" Value="{StaticResource PickerBackgroundBrush}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="11,8" />
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-            <Style.Triggers>
-                <Trigger Property="IsHighlighted" Value="True">
-                    <Setter Property="Background" Value="#2B3350" />
-                </Trigger>
-                <Trigger Property="IsSelected" Value="True">
-                    <Setter Property="Background" Value="#34345C" />
-                </Trigger>
-            </Style.Triggers>
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border
+                            x:Name="ItemChrome"
+                            Padding="{TemplateBinding Padding}"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="7">
+                            <ContentPresenter
+                                HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter Property="Foreground" Value="#FFFFFF" />
+                                <Setter TargetName="ItemChrome" Property="Background" Value="{StaticResource PickerHoverBrush}" />
+                                <Setter TargetName="ItemChrome" Property="BorderBrush" Value="{StaticResource PickerFocusBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Foreground" Value="#FFFFFF" />
+                                <Setter TargetName="ItemChrome" Property="Background" Value="{StaticResource PickerSelectedBrush}" />
+                                <Setter TargetName="ItemChrome" Property="BorderBrush" Value="#A88CFF" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter Property="Foreground" Value="#FFFFFF" />
+                                <Setter TargetName="ItemChrome" Property="BorderBrush" Value="{StaticResource PickerFocusBrush}" />
+                                <Setter TargetName="ItemChrome" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{StaticResource PickerDisabledTextBrush}" />
+                                <Setter TargetName="ItemChrome" Property="Background" Value="{StaticResource PickerDisabledBackgroundBrush}" />
+                                <Setter TargetName="ItemChrome" Property="BorderBrush" Value="#2B3147" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
+
+        <Style x:Key="DarkPickerComboBoxStyle" TargetType="ComboBox">
+            <Setter Property="Foreground" Value="{StaticResource PickerTextBrush}" />
+            <Setter Property="Background" Value="{StaticResource PickerBackgroundBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource PickerBorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,7" />
+            <Setter Property="MinHeight" Value="50" />
+            <Setter Property="MaxDropDownHeight" Value="320" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+            <Setter Property="ItemContainerStyle" Value="{StaticResource DarkPickerComboBoxItemStyle}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid SnapsToDevicePixels="True">
+                            <Border
+                                x:Name="PickerBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="9">
+                                <Grid>
+                                    <ContentPresenter
+                                        x:Name="SelectionPresenter"
+                                        Margin="{TemplateBinding Padding}"
+                                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                        VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                        Content="{TemplateBinding SelectionBoxItem}"
+                                        ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                                        ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                        IsHitTestVisible="False"
+                                        SnapsToDevicePixels="True" />
+                                    <ToggleButton
+                                        x:Name="DropDownToggle"
+                                        Width="38"
+                                        HorizontalAlignment="Right"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        ClickMode="Press"
+                                        Focusable="False"
+                                        IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                        IsTabStop="False">
+                                        <ToggleButton.Template>
+                                            <ControlTemplate TargetType="ToggleButton">
+                                                <Border Background="Transparent" CornerRadius="0,9,9,0">
+                                                    <Path
+                                                        x:Name="DropDownArrow"
+                                                        Width="10"
+                                                        Height="6"
+                                                        HorizontalAlignment="Center"
+                                                        VerticalAlignment="Center"
+                                                        Data="M 0,0 L 5,5 L 10,0 Z"
+                                                        Fill="{StaticResource PickerSecondaryTextBrush}"
+                                                        Stretch="Fill" />
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="DropDownArrow" Property="Fill" Value="{StaticResource PickerFocusBrush}" />
+                                                    </Trigger>
+                                                    <Trigger Property="IsEnabled" Value="False">
+                                                        <Setter TargetName="DropDownArrow" Property="Fill" Value="{StaticResource PickerDisabledTextBrush}" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </ToggleButton.Template>
+                                    </ToggleButton>
+                                </Grid>
+                            </Border>
+                            <Popup
+                                x:Name="PART_Popup"
+                                AllowsTransparency="False"
+                                Focusable="False"
+                                IsOpen="{TemplateBinding IsDropDownOpen}"
+                                Placement="Bottom"
+                                PlacementTarget="{Binding RelativeSource={RelativeSource TemplatedParent}}"
+                                StaysOpen="False">
+                                <Grid
+                                    MinWidth="{Binding PlacementTarget.ActualWidth, ElementName=PART_Popup}"
+                                    MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <Border
+                                        x:Name="PopupChrome"
+                                        Padding="6"
+                                        Background="{StaticResource PickerPopupBrush}"
+                                        BorderBrush="{StaticResource PickerBorderBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="9">
+                                        <ScrollViewer
+                                            CanContentScroll="True"
+                                            HorizontalScrollBarVisibility="Disabled"
+                                            VerticalScrollBarVisibility="Auto">
+                                            <ItemsPresenter
+                                                KeyboardNavigation.DirectionalNavigation="Contained"
+                                                SnapsToDevicePixels="True" />
+                                        </ScrollViewer>
+                                    </Border>
+                                </Grid>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="PickerBorder" Property="Background" Value="#18223B" />
+                                <Setter TargetName="PickerBorder" Property="BorderBrush" Value="#7586BC" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="PickerBorder" Property="BorderBrush" Value="{StaticResource PickerFocusBrush}" />
+                                <Setter TargetName="PickerBorder" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsDropDownOpen" Value="True">
+                                <Setter TargetName="PickerBorder" Property="Background" Value="#1C2744" />
+                                <Setter TargetName="PickerBorder" Property="BorderBrush" Value="#A88CFF" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{StaticResource PickerDisabledTextBrush}" />
+                                <Setter TargetName="PickerBorder" Property="Background" Value="{StaticResource PickerDisabledBackgroundBrush}" />
+                                <Setter TargetName="PickerBorder" Property="BorderBrush" Value="#2B3147" />
+                                <Setter TargetName="SelectionPresenter" Property="Opacity" Value="0.72" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <DataTemplate x:Key="HoudiniPickerItemTemplate">
+            <Grid ToolTip="{Binding path}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Text="{Binding version, StringFormat=Houdini {0}}"
+                    TextTrimming="CharacterEllipsis" />
+                <TextBlock
+                    Grid.Row="1"
+                    Margin="0,3,0,0"
+                    Foreground="{StaticResource PickerSecondaryTextBrush}"
+                    FontSize="11"
+                    Text="{Binding path}"
+                    TextTrimming="CharacterEllipsis" />
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="BridgePickerItemTemplate">
+            <Grid ToolTip="{Binding path}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Text="{Binding source, StringFormat=Bridge Python · {0}}"
+                    TextTrimming="CharacterEllipsis" />
+                <TextBlock
+                    Grid.Row="1"
+                    Margin="0,3,0,0"
+                    Foreground="{StaticResource PickerSecondaryTextBrush}"
+                    FontSize="11"
+                    Text="{Binding path}"
+                    TextTrimming="CharacterEllipsis" />
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="BackendPickerItemTemplate">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Text="{Binding display}"
+                    TextTrimming="CharacterEllipsis" />
+                <TextBlock
+                    Grid.Row="1"
+                    Margin="0,3,0,0"
+                    Foreground="{StaticResource PickerSecondaryTextBrush}"
+                    FontSize="11"
+                    Text="{Binding id, StringFormat=backend · {0}}"
+                    TextTrimming="CharacterEllipsis" />
+            </Grid>
+        </DataTemplate>
 
         <Style x:Key="ActionButtonStyle" TargetType="Button">
             <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
@@ -381,8 +596,9 @@
                     <ComboBox
                         x:Name="McpBackendComboBox"
                         AutomationProperties.Name="MCP backend"
-                        DisplayMemberPath="display"
                         IsEditable="False"
+                        ItemTemplate="{StaticResource BackendPickerItemTemplate}"
+                        Style="{StaticResource DarkPickerComboBoxStyle}"
                         TabIndex="0" />
                 </Border>
 
@@ -391,8 +607,9 @@
                     <ComboBox
                         x:Name="HoudiniComboBox"
                         AutomationProperties.Name="Houdini 版本"
-                        DisplayMemberPath="display"
                         IsEditable="False"
+                        ItemTemplate="{StaticResource HoudiniPickerItemTemplate}"
+                        Style="{StaticResource DarkPickerComboBoxStyle}"
                         TabIndex="1" />
                 </Border>
                 <Button
@@ -421,8 +638,9 @@
                     <ComboBox
                         x:Name="BridgePythonComboBox"
                         AutomationProperties.Name="Bridge Python"
-                        DisplayMemberPath="display"
                         IsEditable="False"
+                        ItemTemplate="{StaticResource BridgePickerItemTemplate}"
+                        Style="{StaticResource DarkPickerComboBoxStyle}"
                         TabIndex="3" />
                 </Border>
                 <Button

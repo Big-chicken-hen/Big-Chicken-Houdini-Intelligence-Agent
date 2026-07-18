@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import copy
+import ntpath
+import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -25,6 +28,339 @@ LOCAL_IMAGE_PATH_MAX_LENGTH = 32_767
 LOCAL_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 HIA_MCP_V2_BACKEND = "hia_v2"
 FXHOUDINI_MCP_BACKEND = "fxhoudini"
+
+_COMMAND_WRITE_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\b(?:set|add|clear)-content\b|\b(?:set|clear)-item\b|"
+    r"\bout-file\b|\bnew-item\b|"
+    r"\bremove-item\b|\bcopy-item\b|\bmove-item\b|\brename-item\b|"
+    r"\btee-object\b[^\r\n]*\s-filepath\b|"
+    r"\b(?:invoke-webrequest|invoke-restmethod|iwr|irm)\b"
+    r"[^\r\n]*\s-outfile\b|"
+    r"(?:^|[;&|]\s*|\bcmd(?:\.exe)?\s+/[ck]\s+)"
+    r"\s*(?:curl|wget)(?:\.exe)?\b[^\r\n]*"
+    r"\s(?:-o|--output(?:-document)?)(?:\s+|=)|"
+    r"(?:^|[;&|]\s*|\bcmd(?:\.exe)?\s+/[ck]\s+)"
+    r"\s*(?:del|erase|rm|rd|rmdir|mkdir|md|copy|move|xcopy|robocopy)\b|"
+    r"\b(?:write|append)all(?:text|bytes)\b|\bwrite_(?:text|bytes)\b|"
+    r"\b(?:copyfile|copy2|copytree)\s*\(|"
+    r"\b(?:unlink|remove|rmtree|makedirs|mkdir|rename|replace)\s*\(|"
+    r"\bopen\s*\([^\r\n]*[, ]\s*['\"]?[wax](?:\+)?['\"]?"
+    r"|(?<![<>=])>>?(?![=])"
+    r")"
+)
+_MOVE_PATTERN = re.compile(
+    r"(?i)\bmove-item\b|"
+    r"(?:^|[;&|]\s*|\bcmd(?:\.exe)?\s+/[ck]\s+)\s*move\b|"
+    r"\brobocopy\b[^\r\n]*\s/(?:mov|move)\b"
+)
+_COPY_PATTERN = re.compile(
+    r"(?i)\bcopy-item\b|\b(?:copyfile|copy2|copytree)\s*\(|"
+    r"(?:^|[;&|]\s*|\bcmd(?:\.exe)?\s+/[ck]\s+)"
+    r"\s*(?:copy|xcopy|robocopy)\b"
+)
+_RENAME_PATTERN = re.compile(r"(?i)\brename-item\b|\brename\s*\(")
+_WINDOWS_PATH_PATTERN = re.compile(
+    r'''(?ix)
+    "(?P<double>[a-z]:[\\/][^"]*)"
+    |'(?P<single>[a-z]:[\\/][^']*)'
+    |(?<![a-z])(?P<bare>[a-z]:[\\/][^\s|;&><,"']*)
+    '''
+)
+_DESTINATION_FLAG_PATTERN = re.compile(
+    r'''(?ix)
+    -(?:destination|dest)\s+
+    (?:"(?P<double>[^"]+)"|'(?P<single>[^']+)'|(?P<bare>[^\s|;&]+))
+    '''
+)
+_TARGET_FLAG_PATTERN = re.compile(
+    r'''(?ix)
+    -(?:literalpath|path|filepath|outfile|output|output-document|o)(?:\s+|=)
+    (?:"(?P<double>[^"]+)"|'(?P<single>[^']+)'|(?P<bare>[^\s|;&]+))
+    '''
+)
+_REDIRECTION_TARGET_PATTERN = re.compile(
+    r'''(?ix)
+    (?<![<>=])>>?(?![=])\s*
+    (?:"(?P<double>[^"]+)"|'(?P<single>[^']+)'|(?P<bare>[^\s|;&]+))
+    '''
+)
+_SYSTEM_LOCATION_REFERENCE_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\$(?:\{(?:env:)?(?:systemdrive|userprofile|home|appdata|localappdata|"
+    r"programfiles|programfiles\(x86\)|systemroot|windir)\}|"
+    r"(?:env:)?(?:systemdrive|userprofile|home|appdata|localappdata|programfiles|"
+    r"programfiles\(x86\)|systemroot|windir)\b)|"
+    r"%(?:systemdrive|userprofile|home|appdata|localappdata|programfiles|"
+    r"programfiles\(x86\)|systemroot|windir)%|"
+    r"~[\\/]|"
+    r"\[environment\]::getfolderpath\s*\(\s*['\"](?:desktop|"
+    r"userprofile|applicationdata|localapplicationdata|programfiles)"
+    r"['\"]\s*\)"
+    r")"
+)
+
+
+def _system_drive() -> str:
+    for candidate in (
+        os.environ.get("SystemDrive"),
+        os.environ.get("SystemRoot"),
+        os.environ.get("WINDIR"),
+        str(Path.home()),
+    ):
+        drive = ntpath.splitdrive(str(candidate or ""))[0]
+        if re.fullmatch(r"[A-Za-z]:", drive):
+            return drive.casefold()
+    return "c:"
+
+
+def _match_value(match: re.Match[str]) -> str:
+    return next(
+        (value for value in match.groupdict().values() if value is not None),
+        "",
+    ).strip().rstrip(",)")
+
+
+def _command_texts(params: dict[str, Any]) -> tuple[str, ...]:
+    texts: list[str] = []
+    actions = params.get("commandActions")
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            command = action.get("command")
+            if isinstance(command, str) and command.strip():
+                texts.append(command)
+    if texts:
+        return tuple(texts)
+    command = params.get("command")
+    if isinstance(command, str) and command.strip():
+        texts.append(command)
+    return tuple(texts)
+
+
+def _normalized_windows_path(value: str, cwd: str | None = None) -> str | None:
+    candidate = value.strip().strip("\"'")
+    if not candidate or "\x00" in candidate:
+        return None
+    if not ntpath.isabs(candidate):
+        if not isinstance(cwd, str) or not ntpath.isabs(cwd):
+            return None
+        candidate = ntpath.join(cwd, candidate)
+    return ntpath.normcase(ntpath.normpath(candidate))
+
+
+def _path_is_within(value: str, root: str) -> bool:
+    try:
+        return ntpath.commonpath((value, root)) == root
+    except ValueError:
+        return False
+
+
+def _path_is_system_write_target(
+    value: str,
+    *,
+    cwd: str | None,
+    project_root: Path,
+    system_drive: str,
+) -> bool:
+    target = _normalized_windows_path(value, cwd)
+    project = _normalized_windows_path(str(project_root))
+    if target is None or project is None:
+        return False
+    if _path_is_within(target, project):
+        return False
+    return ntpath.splitdrive(target)[0].casefold() == system_drive
+
+
+def _command_requires_system_drive_approval(
+    params: dict[str, Any],
+    *,
+    project_root: Path,
+    system_drive: str,
+) -> bool:
+    cwd = params.get("cwd") if isinstance(params.get("cwd"), str) else None
+    for command in _command_texts(params):
+        if _COMMAND_WRITE_PATTERN.search(command) is None:
+            continue
+
+        targets = [
+            _match_value(match)
+            for match in _REDIRECTION_TARGET_PATTERN.finditer(command)
+        ]
+        if _MOVE_PATTERN.search(command) is not None:
+            targets.extend(
+                _match_value(match)
+                for match in _WINDOWS_PATH_PATTERN.finditer(command)
+            )
+            targets.extend(
+                _match_value(match)
+                for match in _TARGET_FLAG_PATTERN.finditer(command)
+            )
+            targets.extend(
+                _match_value(match)
+                for match in _DESTINATION_FLAG_PATTERN.finditer(command)
+            )
+        elif _COPY_PATTERN.search(command) is not None:
+            destinations = [
+                _match_value(match)
+                for match in _DESTINATION_FLAG_PATTERN.finditer(command)
+            ]
+            if destinations:
+                targets.extend(destinations)
+            else:
+                paths = [
+                    _match_value(match)
+                    for match in _WINDOWS_PATH_PATTERN.finditer(command)
+                ]
+                if paths:
+                    targets.append(paths[-1])
+        elif _RENAME_PATTERN.search(command) is not None:
+            targets.extend(
+                _match_value(match)
+                for match in _WINDOWS_PATH_PATTERN.finditer(command)
+            )
+            targets.extend(
+                _match_value(match)
+                for match in _TARGET_FLAG_PATTERN.finditer(command)
+            )
+        else:
+            flagged = [
+                _match_value(match)
+                for match in _TARGET_FLAG_PATTERN.finditer(command)
+            ]
+            targets.extend(flagged)
+            if not flagged and not targets:
+                targets.extend(
+                    _match_value(match)
+                    for match in _WINDOWS_PATH_PATTERN.finditer(command)
+                )
+
+        if any(
+            _SYSTEM_LOCATION_REFERENCE_PATTERN.search(target)
+            for target in targets
+        ):
+            return True
+        if (
+            not targets
+            and _SYSTEM_LOCATION_REFERENCE_PATTERN.search(command) is not None
+        ):
+            return True
+
+        if any(
+            _path_is_system_write_target(
+                target,
+                cwd=cwd,
+                project_root=project_root,
+                system_drive=system_drive,
+            )
+            for target in targets
+            if target
+        ):
+            return True
+        if not targets and isinstance(cwd, str) and _path_is_system_write_target(
+            ".",
+            cwd=cwd,
+            project_root=project_root,
+            system_drive=system_drive,
+        ):
+            return True
+    return False
+
+
+def _permission_write_targets(params: dict[str, Any]) -> tuple[str, ...]:
+    permissions = params.get("permissions")
+    if not isinstance(permissions, dict):
+        return ()
+    file_system = permissions.get("fileSystem")
+    if not isinstance(file_system, dict):
+        return ()
+
+    targets: list[str] = []
+    legacy_write = file_system.get("write")
+    if isinstance(legacy_write, list):
+        targets.extend(value for value in legacy_write if isinstance(value, str))
+
+    entries = file_system.get("entries")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("access") != "write":
+                continue
+            path = entry.get("path")
+            if not isinstance(path, dict):
+                continue
+            path_type = path.get("type")
+            if path_type == "path" and isinstance(path.get("path"), str):
+                targets.append(path["path"])
+            elif path_type == "glob_pattern" and isinstance(
+                path.get("pattern"), str
+            ):
+                targets.append(path["pattern"])
+            elif path_type == "special" and isinstance(path.get("value"), dict):
+                special = path["value"]
+                kind = special.get("kind")
+                if kind == "root":
+                    targets.append(system_drive + "\\")
+                elif kind == "unknown" and isinstance(special.get("path"), str):
+                    targets.append(special["path"])
+    return tuple(targets)
+
+
+def _requires_system_drive_approval(
+    method: Any,
+    params: Any,
+    *,
+    project_root: Path,
+    system_drive: str | None = None,
+) -> bool:
+    if not isinstance(method, str) or not isinstance(params, dict):
+        return False
+    resolved_system_drive = (system_drive or _system_drive()).casefold()
+    if method == "item/commandExecution/requestApproval":
+        return _command_requires_system_drive_approval(
+            params,
+            project_root=project_root,
+            system_drive=resolved_system_drive,
+        )
+    if method == "item/fileChange/requestApproval":
+        grant_root = params.get("grantRoot")
+        return isinstance(grant_root, str) and _path_is_system_write_target(
+            grant_root,
+            cwd=None,
+            project_root=project_root,
+            system_drive=resolved_system_drive,
+        )
+    if method == "item/permissions/requestApproval":
+        cwd = params.get("cwd") if isinstance(params.get("cwd"), str) else None
+        return any(
+            _path_is_system_write_target(
+                target,
+                cwd=cwd,
+                project_root=project_root,
+                system_drive=resolved_system_drive,
+            )
+            for target in _permission_write_targets(params)
+        )
+    return False
+
+
+def _offered_execpolicy_amendment(params: Any) -> list[str] | None:
+    if not isinstance(params, dict):
+        return None
+    amendment = params.get("proposedExecpolicyAmendment")
+    if (
+        not isinstance(amendment, list)
+        or not amendment
+        or not all(isinstance(part, str) and part.strip() for part in amendment)
+    ):
+        return None
+    available = params.get("availableDecisions")
+    if available is not None and (
+        not isinstance(available, list)
+        or "acceptWithExecpolicyAmendment" not in available
+    ):
+        return None
+    return list(amendment)
 
 
 class BridgeSession:
@@ -135,6 +471,8 @@ class BridgeSession:
                 "相同调用失败后先读真实错误再改用兼容方法；capture_screenshot 只做阶段性验证。"
             )
         return backend_instructions + (
+            "外部研究先定本阶段必需 URL，优先原生 web/search；没有网页工具时才把同阶段公开页合为"
+            "一次 PowerShell 只读批量读取，不逐页审批；复用已取内容，不重复抓取相近页面。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
             "只有用户明确要求离线、独立 HIP、批处理或后台渲染时才用 PATH 中的 hython.exe。"
             "普通场景请求不得先搜索 src、services、docs、contracts 或插件源码；"
@@ -639,10 +977,10 @@ class BridgeSession:
         return {"thread_id": thread_id, "turn_id": turn_id, "result": result}
 
     def resolve_approval(self, request_id: RequestId, decision: str) -> dict[str, Any]:
-        if decision not in {"allow", "deny"}:
+        if decision not in {"allow", "deny", "allow_rule"}:
             raise BridgeError(
                 "INVALID_APPROVAL_DECISION",
-                "Approval decision must be 'allow' or 'deny'",
+                "Approval decision must be 'allow', 'deny', or 'allow_rule'",
             )
         request = self._client.pending_server_request(request_id)
         if request is None:
@@ -653,7 +991,24 @@ class BridgeSession:
             )
         method = request["method"]
         params = request.get("params", {})
-        if method in {
+        if decision == "allow_rule":
+            amendment = _offered_execpolicy_amendment(params)
+            if (
+                method != "item/commandExecution/requestApproval"
+                or amendment is None
+            ):
+                raise BridgeError(
+                    "INVALID_APPROVAL_DECISION",
+                    "This approval request does not offer a persistent command rule",
+                )
+            response = {
+                "decision": {
+                    "acceptWithExecpolicyAmendment": {
+                        "execpolicy_amendment": list(amendment),
+                    }
+                }
+            }
+        elif method in {
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
         }:
@@ -948,7 +1303,23 @@ class BridgeSession:
 
     def _on_client_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
-        if event_type == "codex_notification":
+        if event_type == "server_request":
+            method = event.get("method")
+            params = event.get("params")
+            if not _requires_system_drive_approval(
+                method,
+                params,
+                project_root=self._project_root,
+            ):
+                try:
+                    self.resolve_approval(event.get("request_id"), "allow")
+                except Exception:
+                    # If the one-shot automatic response cannot be delivered,
+                    # keep the original request visible so it is never lost.
+                    pass
+                else:
+                    return
+        elif event_type == "codex_notification":
             method = event.get("method")
             params = event.get("params")
             params = params if isinstance(params, dict) else {}

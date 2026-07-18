@@ -213,6 +213,7 @@ class CodexProtocolContractTests(unittest.TestCase):
             "remoteControl/status/changed": (
                 "RemoteControlStatusChangedNotification"
             ),
+            "skills/changed": "SkillsChangedNotification",
         }
         self.assertEqual(
             set(expected_definitions),

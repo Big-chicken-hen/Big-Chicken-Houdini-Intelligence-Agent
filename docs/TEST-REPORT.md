@@ -663,3 +663,84 @@
 - 第一次从 Codex 只读沙箱运行完整测试在 120 秒超时；`-v` 定位后确认测试需要向项目 `.runtime` 写临时 fixture，但沙箱返回 `WinError 5`。允许仅在项目 `.runtime` 写入后，完整套件为 621/621、26.910 秒，证明不是产品死锁；临时 fixture 均被 Git 忽略。
 - `skill-creator/scripts/quick_validate.py` 首次因当前 Python 缺少 PyYAML 无法启动。PyYAML 仅安装到被忽略的 `.runtime/skill-validation` 后，`houdini-visual-research` 返回 `Skill is valid!`；该依赖与验证目录均未进入提交。
 - 便携路径、附件与 Bridge 生命周期定向测试 31/31 通过；`git diff --check` 通过，仅有既有 LF→CRLF 提示。尚待真实 Houdini GUI 验收 WPF 启动、Panel 焦点/停止、16-call 排队与成功 200 日志静默。
+
+## Panel 系统盘审批降噪与 `skills/changed`（2026-07-18）
+
+### 真实问题与根因
+
+- `item/commandExecution/requestApproval` 原先直接把整段协议 JSON 放进 Panel，目的、目标和影响无法快速判断；同时纯时间格式转换、公开网页 GET、项目内正常读写也逐次等待人工决定。
+- ShaderToy 首屏资料读取与 SideFX COP Wrangle 文档查询都属于公开网页只读 GET，却被拆成逐页 PowerShell 审批；developerInstructions 没有要求优先原生 web/search、同一研究阶段批量读取和复用已取内容。
+- app-server 的 `skills/changed` 是稳定的被动列表变化通知，但不在精确接收集合中，因此产生 `UNKNOWN_NOTIFICATION_IGNORED` 提示。
+- 原始 server request 在进入 Bridge pending/EventBuffer 后才由 Panel 展示层脱敏，任意 Authorization、Cookie 或 API key 文本仍可能先留在内存事件中。
+
+### 最小修复行为
+
+- Bridge 在既有 approval request 入口做一次无状态判定：纯计算/格式转换、只读本地查询、公开网页 GET、项目根内正常读写以及既有 HIA/FX MCP 自动批准路径不弹窗，并继续使用 app-server 原有一次性 `accept` 响应。只有命令明确在当前系统盘创建、修改、移动或删除文件时才发布给 Panel；未设置全局 `approval=never`，未自动批准任意 PowerShell，也未修改 HIA MCP 的 `default_tools_approval_mode="approve"`。
+- 判定优先使用 `params.commandActions[].command`，只有缺失时才回退到序列化 `params.command`。覆盖 PowerShell 内容/项目目标与系统目标的区分、Copy 只判断写入目标、Move 同时判断源删除和目标写入、系统环境路径、重定向、常见 PowerShell/.NET/Python 写法及 curl/wget 显式输出；无法可靠确认系统盘变更时不伪造风险结论。
+- Panel 只为真实系统盘变更显示可读卡片：客观目的、操作类型、实际系统目标、cwd/URL 和中性影响提示；主按钮固定为“允许一次”“拒绝”。原始 command、availableDecisions 和完整 JSON 默认折叠到“高级详情”。只有协议同时提供有效 amendment 且没有从 availableDecisions 排除时，才在高级区显示“以后允许相同命令规则（持续授权）”；不会自动选择。既有 `allow → accept` 与 `deny → decline` 不变，持续规则使用 app-server 原生 `acceptWithExecpolicyAmendment` 响应。
+- Authorization/Bearer、Cookie、API key、token/password/secret、curl header/cookie、URL credential 与 userinfo 在 Bridge 写入 pending/EventBuffer 前递归脱敏；Panel formatter 再做一次显示防护，完整 JSON 中不保留原值。
+- developerInstructions 要求外部研究先确定本阶段必需 URL，优先原生 web/search；没有网页工具时才把同阶段公开页面合并为一次 PowerShell 只读读取，复用已有内容，不逐页审批。HIA MCP 当前场景仍只由主代理串行调用。
+- `skills/changed` 仅精确加入稳定的被动接收集合并由 Panel no-op；其余未知通知仍由协议层拒绝，只是不再把 `UNKNOWN_NOTIFICATION_IGNORED` 刷到对话中。
+- 没有新增 Agent、Planner、审批策略引擎、数据库、重试器、状态机、全局 event filter、窗口抢焦或模态对话框；未修改 launcher、第三方 FXHoudiniMCP、HIA MCP 工具集合或 Houdini 运行时。
+
+### 两个真实网页样例
+
+- `[DateTimeOffset]::FromUnixTimeSeconds(...).ToString(...)`、ShaderToy 页面前 5000 字符读取、SideFX `sidefx.com/docs/houdini/nodes/cop/wrangle.html` 的 VEX/kernel/pixel 筛选均直接一次性允许，不显示审批卡。
+- 若命令改为把网页输出显式写到系统盘，例如 `Invoke-RestMethod ... -OutFile C:\...` 或 `curl.exe ... -o C:\...`，则显示系统盘写入卡；项目目录内输出仍不弹窗。
+
+### 验证结果与并行阻断
+
+- 审批/Panel/协议/stdio/HTTP 合并定向：130/130 通过；后续 Bridge + Panel 精确回归 83/83 通过；HIA MCP V2、Bridge strict config、launcher/backend 互斥与 P1 相邻回归 86/86 通过。
+- 最终边界复核覆盖项目内 value 含 `$env:USERPROFILE` 不误弹，以及 `Set-Item`、IRM `-OutFile`、curl `-o`、`AppendAllText`、`shutil.copyfile(E,C)`、`Tee-Object -FilePath C:`、`${env:SystemDrive}` 等明确系统盘写入；10/10 精确定向通过。Copy/Move 卡片目的也指向实际系统目标。
+- 本轮唯一一次完整测试：`python -B -m unittest discover -s tests -t . -v`，637 项中 636 通过、1 失败，用时 28.651 秒。失败为 `LauncherBackendIntegrationTests.test_wpf_has_one_backend_picker_and_passes_one_selected_value`：完整测试运行期间并行任务把 `scripts/launcher/HiaLauncher.xaml` 的旧 `DisplayMemberPath="display"` 改为 `ItemTemplate`，但对应旧断言尚未同步；该精确用例随后单独复核仍失败。审批任务未修改或回退这些并行 launcher 文件，也未重复运行完整套件。
+- 未启动真实 Houdini GUI。人工验收：在真实 Panel 依次提交时间转换、ShaderToy/SideFX 只读研究和一个明确 `C:\Users\Public\HIA-Approval-Test.txt` 写入；前两类不应弹窗，第三类应显示折叠且已脱敏的系统盘审批卡，并可分别验证“允许一次”“拒绝”和协议实际提供时的持续规则。确认过程中 Panel 不抢 Houdini 焦点。
+
+## Launcher EXE 与高对比选择器收口（2026-07-18）
+
+### 实际工具链与发布结果
+
+- 开始时系统 `dotnet --info` 只有 x64 .NET/WindowsDesktop Runtime 8.0.13，明确显示 `No SDKs were found`。按任务要求没有安装全局 SDK；构建进程把 `DOTNET_CLI_HOME`、`NUGET_PACKAGES`、NuGet HTTP/plugin cache、`TEMP`、`TMP`、bin、obj 和 publish 全部定向到项目 `.runtime`。
+- Microsoft 官方 .NET 8 发布元数据 `https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/8.0/releases.json` 给出最新 SDK `8.0.423`；实际下载地址为官方 `https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.423/dotnet-sdk-8.0.423-win-x64.zip`。构建脚本在解压前用元数据中的 SHA-512 校验归档。
+- SDK 解压到 `.runtime/toolchains/dotnet`；真实 `dotnet publish` 目标为 win-x64、self-contained、managed single-file、非 trimmed。为避免 native self-extraction 写到项目外，五个 WPF native sidecar 与 EXE 一起留在 `.runtime/dist/launcher`。
+- 最终 `HoudiniIntelligenceLauncher.exe` 为 153,402,752 bytes（146.30 MiB），发布目录共 6 个文件、161,617,720 bytes；SHA-256 为 `cfcbbb5ec78706947c117af50ff3a429ca303d15c96f596c39dab070043b1547`。构建脚本与独立复核均以 `--smoke-test` 退出 0，未启动 PowerShell GUI 或真实 Houdini。
+- `.runtime/toolchains`、downloads、cache、build 与 dist 均由既有 `.runtime/` 规则忽略；源码、SDK 和产物均未暂存、提交或推送。
+
+### 下载、权限与构建过程中遇到的问题
+
+- 首次在受限 shell 用 `Invoke-WebRequest` 获取官方安装脚本时返回“基础连接已经关闭：接收时发生错误”；允许本任务的官方网络请求后安装脚本成功下载，但其内部解析/下载数分钟无输出且工具链目录没有字节进展。已解决：终止该构建，改为解析 Microsoft 官方 release metadata 并使用明确 SDK ZIP，不安装全局组件。
+- PowerShell `Invoke-WebRequest` 下载大 ZIP 初期吞吐很低；终止父构建后遗留三个本轮子 PowerShell 进程持有 ZIP。普通 `Stop-Process` 返回 Access denied。已解决：按 PID 与启动时间精确核对后，仅提权终止 33424、28528、25812；构建脚本改用 Windows 自带 `curl.exe --continue-at -` 续传，保留完整 SHA-512 校验。未结束其他共享进程，未删除部分归档。
+- 第一次 publish 出现一条 `ProjectRootLocator.cs` 的 CS8600 nullable warning。已解决：用显式父目录空值分支替代可空赋值，移动项目根测试继续通过；第二次 publish 无 warning。
+- 一次跨文件 `apply_patch` 因上下文放错文件未应用；已用两个精确上下文重新应用。一次精确 unittest 命令误用不存在的测试类名，随后读取实际 `LauncherBackendIntegrationTests` 后重跑。两项均已解决，没有产品改动丢失。
+- 一次 WPF 命令用 Windows PowerShell 5.1 默认 ANSI `Get-Content` 误读无 BOM UTF-8 中文，产生伪 XML 错误。已解决：按生产路径改用 `File.ReadAllText`，XAML 成功加载为 `System.Windows.Window`，`HoudiniComboBox` 与 `DarkPickerComboBoxStyle` 可解析。
+- 最终只读交付扫描把 Windows 通配符直接放入 `rg` 路径，返回 os error 123。已解决：改用 `rg -g '*.cs'` 重跑并取得完整文件定位；产品与测试结果不受影响。
+
+### UI 与并行回归收口
+
+- Houdini、Bridge 与 backend 选择器改用显式暗色 `ComboBox`、`ComboBoxItem` 和 Popup 模板；选中、Hover、键盘焦点、禁用状态均有独立背景、文字和边框。Houdini/build 或 Bridge source 为主行，路径为可省略副行并保留完整 Tooltip；没有外部图片、AI 图片、第三方 UI/图标或固定安装盘路径。
+- 并行完整测试先前唯一失败是旧用例仍要求 `DisplayMemberPath="display"`。本任务没有回退 XAML，而是把该用例改为验证 `BackendPickerItemTemplate`、`HoudiniPickerItemTemplate`、版本/路径/Tooltip、五类高对比资源以及不存在旧 `DisplayMemberPath`。首次新断言把 Hover/Selected 错放在外层 ComboBox 范围，精确测试失败；已把范围扩到协作的 ComboBoxItem 样式，随后通过。
+
+### 自动验证与人工边界
+
+- 新增三个 EXE/UI 精确回归 3/3；最终合并 launcher/backend/普通 Codex 配置定向 33/33；五个 PowerShell 文件 AST 0 错误；真实 Windows PowerShell 5.1 WPF XAML 加载通过；便携假项目根测试通过；真实 publish 与 smoke-test 通过。`git diff --check` 退出码 0，仅报告共享工作树既有 LF→CRLF 提示。
+- 没有再次运行完整测试：共享任务已按“完整测试最多一次”执行 637 项，本节只收口其唯一 launcher 旧断言并运行 launcher 定向测试。
+- 仍需人工验证：双击 EXE、真实多 Houdini 版本选择、100%/125%/150%/200% DPI、最小窗口长路径、鼠标与键盘 Hover/Focus/Popup、黄色可启动/红色禁用、剪贴板提示，以及最终真实 Houdini/Panel 生命周期。自动测试从未启动 Houdini GUI。
+
+## Panel 发送后 Houdini 视窗失焦（2026-07-18）
+
+### 真实问题与代码路径定位
+
+- 用户观察到 Panel 交互后，其他 Houdini 视窗有时无法拖动或操作，必须最小化并恢复 Houdini 才恢复。真实 Houdini GUI 本轮未启动，因此离线测试不能冒充宿主级复现；该边界继续保留为人工验收项。
+- 可确定的代码级风险路径是从输入框用 `Ctrl+Enter` 启动或追加 Turn：快捷键回调尚未返回时，`_refresh_controls()` 会禁用当前持有焦点的输入框，随后代码又主动调用 `clearFocus()`。这会在按键释放前强制产生 focus-out，可能让 Houdini 宿主输入状态失配；最小化/恢复后恢复的现象与该机制一致，但仍需真实 GUI 确认。
+- 四条相邻路径已逐项排查：附件选择器已经是 `DontUseNativeDialog + NonModal + show()`；审批卡只是 Panel 内嵌控件；流式刷新只更新消息与滚动条；`closeEvent()` 会停止 Panel/ConversationView 自有计时器并释放本地客户端。它们均没有模态 `exec`、全局 event filter、鼠标/键盘 grab、`activateWindow()` 或 `raise_()`，没有证据支持把审批卡当成模态根因。
+
+### 最小修复行为
+
+- 删除 Turn start/steer 成功发出后的两次 `input_edit.clearFocus()`，不再主动清空 Houdini 主窗口内的当前 focus widget。
+- 仅把文本编辑器的 enabled 状态与发送按钮、附件控件的请求锁分开：start、steer 或限定 session 对账 pending 时输入框保持启用，确保 `Ctrl+Enter` 的 key-release 仍由原控件收完，也允许继续编辑下一条草稿；发送按钮仍禁用，`_send()` 的既有 pending guard 仍阻止重复 Turn。
+- 附件选择、审批卡、流式刷新和 Panel 关闭生命周期未增加任何焦点接管或窗口激活代码，也未新增 event filter、计时器、状态机或模态 UI。
+
+### 验证结果与人工验收
+
+- 定向运行 `tests.unit.test_panel_wiring`、`tests.unit.test_conversation_tool_activity`、`tests.unit.test_p1_assets`，92/92 通过，用时 0.952 秒。
+- 回归覆盖 start/steer pending 时输入框保持启用、发送按钮禁用、重复 `_send()` 不产生第二个请求、全 Panel 源码不再调用 `clearFocus()`；既有附件非模态、审批卡、流式计时器和 closeEvent 生命周期测试同时通过。
+- 未运行完整测试套件，也未启动 Houdini。人工验收需完整退出 Houdini 后由 launcher 重启：分别用 `Ctrl+Enter` 和发送按钮启动/追加 Turn，并在发送中、持续流式输出、附件选择器打开/取消、审批卡显示/允许/拒绝、Panel 关闭再重开后立即拖动 Scene View 与 Network View；预期不再需要最小化 Houdini 才能恢复操作。

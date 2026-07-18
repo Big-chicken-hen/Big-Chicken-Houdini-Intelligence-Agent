@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from hia_bridge.session import (  # noqa: E402
     MODEL_LIST_PAGE_SIZE,
     MAX_LOCAL_IMAGES,
     BridgeSession,
+    _requires_system_drive_approval,
 )
 
 
@@ -91,6 +93,46 @@ class _RecordingClient(_ClientStub):
         return super().request(method, params)
 
 
+class _ApprovalClient(_RecordingClient):
+    def __init__(self, *, fail_response: bool = False) -> None:
+        super().__init__()
+        self.pending: dict[Any, dict[str, Any]] = {}
+        self.approval_responses: list[tuple[Any, dict[str, Any]]] = []
+        self.fail_response = fail_response
+
+    def emit_approval(
+        self,
+        request_id: str,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        request = {"method": method, "params": dict(params)}
+        self.pending[request_id] = request
+        assert self._event_sink is not None
+        self._event_sink(
+            {
+                "type": "server_request",
+                "request_id": request_id,
+                **request,
+            }
+        )
+
+    def pending_server_request(self, request_id: Any) -> dict[str, Any] | None:
+        request = self.pending.get(request_id)
+        return dict(request) if request is not None else None
+
+    def respond_to_server_request(
+        self,
+        request_id: Any,
+        response: dict[str, Any],
+    ) -> str:
+        if self.fail_response:
+            raise BridgeError("TEST_RESPONSE_FAILED", "test response failed")
+        request = self.pending.pop(request_id)
+        self.approval_responses.append((request_id, dict(response)))
+        return request["method"]
+
+
 class _SteerClient(_RecordingClient):
     def __init__(self, steer_result: Any) -> None:
         super().__init__()
@@ -142,6 +184,340 @@ def _model_entry(
         ],
         "defaultReasoningEffort": "low",
     }
+
+
+class BridgeSessionApprovalRoutingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.system_drive = os.environ.get("SystemDrive") or "C:"
+
+    def make_session(
+        self,
+        *,
+        fail_response: bool = False,
+        project_root: Path = REPOSITORY_ROOT,
+    ) -> tuple[BridgeSession, _ApprovalClient, EventBuffer]:
+        client = _ApprovalClient(fail_response=fail_response)
+        events = EventBuffer()
+        return BridgeSession(project_root, client, events), client, events
+
+    @staticmethod
+    def command_params(command: str, *, cwd: str | None = None) -> dict[str, Any]:
+        return {
+            "command": command,
+            "cwd": cwd or str(REPOSITORY_ROOT),
+            "itemId": "item-approval",
+            "startedAtMs": 1,
+            "threadId": "thread-approval",
+            "turnId": "turn-approval",
+        }
+
+    def test_only_explicit_system_drive_changes_require_manual_approval(self) -> None:
+        project_file = str(REPOSITORY_ROOT / ".runtime" / "tmp" / "approval.txt")
+        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
+        auto_commands = (
+            "[DateTimeOffset]::FromUnixTimeSeconds(1).ToString('u')",
+            (
+                "$r = Invoke-WebRequest -UseBasicParsing "
+                "'https://www.shadertoy.com/view/ltffzl'; "
+                "$r.Content.Substring(0, [Math]::Min(5000, $r.Content.Length))"
+            ),
+            (
+                "$r = Invoke-WebRequest -UseBasicParsing "
+                "'https://www.sidefx.com/docs/houdini/nodes/cop/wrangle.html'; "
+                "$r.Content | Select-String -Pattern 'VEX|kernel|pixel'"
+            ),
+            f"Get-Content -LiteralPath '{system_file}'",
+            f"Get-Content -LiteralPath '{self.system_drive}\\README.md'",
+            f"Set-Content -LiteralPath '{project_file}' -Value test",
+            (
+                f"Set-Content -LiteralPath '{project_file}' "
+                "-Value '$env:USERPROFILE'"
+            ),
+            f"Get-Content '{system_file}' > '{project_file}'",
+            "curl.exe 'https://www.shadertoy.com/view/ltffzl'",
+            (
+                f"Copy-Item -LiteralPath '{system_file}' -Destination "
+                f"'{project_file}'"
+            ),
+            (
+                "Copy-Item -LiteralPath '$env:USERPROFILE\\input.png' "
+                f"-Destination '{project_file}'"
+            ),
+        )
+        for command in auto_commands:
+            with self.subTest(command=command):
+                self.assertFalse(
+                    _requires_system_drive_approval(
+                        "item/commandExecution/requestApproval",
+                        self.command_params(command),
+                        project_root=REPOSITORY_ROOT,
+                        system_drive=self.system_drive,
+                    )
+                )
+
+        for command in (
+            f"Set-Content -LiteralPath '{system_file}' -Value test",
+            f"Remove-Item -LiteralPath '{system_file}'",
+            f"rm '{system_file}'",
+            f"rd '{self.system_drive}\\Users\\Public\\HIA-Test'",
+            f"python -c \"import os; os.remove(r'{system_file}')\"",
+            f"Set-Item -LiteralPath '{system_file}' -Value test",
+            (
+                "Invoke-RestMethod 'https://example.com/data' -OutFile "
+                f"'{system_file}'"
+            ),
+            f"curl.exe 'https://example.com/data' -o '{system_file}'",
+            f"[IO.File]::AppendAllText('{system_file}', 'test')",
+            f"shutil.copyfile(r'{project_file}', r'{system_file}')",
+            f"'test' | Tee-Object -FilePath '{system_file}'",
+            f"open(r'{system_file}', 'wb')",
+            f"'test' > '{system_file}'",
+            "Set-Content -LiteralPath '$env:SystemDrive\\HIA-Test.txt' -Value test",
+            "Set-Content -LiteralPath '${env:SystemDrive}\\HIA-Test.txt' -Value test",
+            "Set-Content -LiteralPath '%SystemDrive%\\HIA-Test.txt' -Value test",
+            "Set-Content -LiteralPath '~\\HIA-Test.txt' -Value test",
+            (
+                f"Copy-Item -LiteralPath '{project_file}' -Destination "
+                "'$env:SystemDrive\\HIA-Test.txt'"
+            ),
+            (
+                f"Move-Item -LiteralPath '{system_file}' -Destination "
+                f"'{project_file}'"
+            ),
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(
+                    _requires_system_drive_approval(
+                        "item/commandExecution/requestApproval",
+                        self.command_params(command),
+                        project_root=REPOSITORY_ROOT,
+                        system_drive=self.system_drive,
+                    )
+                )
+
+    def test_command_actions_take_precedence_over_broken_serialized_command(self) -> None:
+        params = self.command_params(
+            "broken fallback; Set-Content C:\\Users\\Public\\wrong.txt"
+        )
+        params["commandActions"] = [
+            {
+                "command": (
+                    "Invoke-WebRequest -UseBasicParsing "
+                    "'https://www.shadertoy.com/view/ltffzl'"
+                )
+            }
+        ]
+
+        self.assertFalse(
+            _requires_system_drive_approval(
+                "item/commandExecution/requestApproval",
+                params,
+                project_root=REPOSITORY_ROOT,
+                system_drive=self.system_drive,
+            )
+        )
+
+    def test_project_root_remains_auto_allowed_when_it_is_on_system_drive(self) -> None:
+        project_root = Path(self.system_drive + "\\HIA-Portable")
+        params = self.command_params(
+            "Set-Content -LiteralPath "
+            f"'{project_root}\\.runtime\\tmp\\approval.txt' -Value test",
+            cwd=str(project_root),
+        )
+        self.assertFalse(
+            _requires_system_drive_approval(
+                "item/commandExecution/requestApproval",
+                params,
+                project_root=project_root,
+                system_drive=self.system_drive,
+            )
+        )
+
+    def test_file_and_permission_approvals_only_prompt_for_system_write(self) -> None:
+        system_root = self.system_drive + "\\ProgramData\\HIA"
+        project_root = str(REPOSITORY_ROOT / ".runtime")
+        self.assertTrue(
+            _requires_system_drive_approval(
+                "item/fileChange/requestApproval",
+                {"grantRoot": system_root},
+                project_root=REPOSITORY_ROOT,
+                system_drive=self.system_drive,
+            )
+        )
+        for grant_root in (None, project_root):
+            self.assertFalse(
+                _requires_system_drive_approval(
+                    "item/fileChange/requestApproval",
+                    {"grantRoot": grant_root},
+                    project_root=REPOSITORY_ROOT,
+                    system_drive=self.system_drive,
+                )
+            )
+
+        def permission(access: str, path: str) -> dict[str, Any]:
+            return {
+                "cwd": str(REPOSITORY_ROOT),
+                "permissions": {
+                    "fileSystem": {
+                        "entries": [
+                            {
+                                "access": access,
+                                "path": {"type": "path", "path": path},
+                            }
+                        ]
+                    }
+                },
+            }
+
+        self.assertTrue(
+            _requires_system_drive_approval(
+                "item/permissions/requestApproval",
+                permission("write", system_root),
+                project_root=REPOSITORY_ROOT,
+                system_drive=self.system_drive,
+            )
+        )
+        for params in (
+            permission("read", system_root),
+            permission("write", project_root),
+            {
+                "cwd": str(REPOSITORY_ROOT),
+                "permissions": {"network": {"enabled": True}},
+            },
+        ):
+            self.assertFalse(
+                _requires_system_drive_approval(
+                    "item/permissions/requestApproval",
+                    params,
+                    project_root=REPOSITORY_ROOT,
+                    system_drive=self.system_drive,
+                )
+            )
+
+    def test_auto_allow_uses_existing_accept_and_never_publishes_card(self) -> None:
+        _session, client, events = self.make_session()
+        for request_id, url in (
+            ("approval-auto-shadertoy", "https://www.shadertoy.com/view/ltffzl"),
+            (
+                "approval-auto-sidefx",
+                "https://www.sidefx.com/docs/houdini/nodes/cop/wrangle.html",
+            ),
+        ):
+            client.emit_approval(
+                request_id,
+                "item/commandExecution/requestApproval",
+                self.command_params(
+                    f"Invoke-WebRequest -UseBasicParsing '{url}'"
+                ),
+            )
+
+        self.assertEqual(
+            [
+                ("approval-auto-shadertoy", {"decision": "accept"}),
+                ("approval-auto-sidefx", {"decision": "accept"}),
+            ],
+            client.approval_responses,
+        )
+        self.assertEqual({}, client.pending)
+        published = events.poll(0, timeout=0)["events"]
+        self.assertFalse(
+            any(event.get("type") == "server_request" for event in published)
+        )
+        self.assertTrue(
+            any(
+                event.get("type") == "approval_resolved"
+                and event.get("decision") == "allow"
+                for event in published
+            )
+        )
+
+    def test_persistent_rule_is_only_sent_when_the_protocol_offers_it(self) -> None:
+        session, client, _events = self.make_session()
+        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
+        params = self.command_params(
+            f"Set-Content -LiteralPath '{system_file}' -Value test"
+        )
+        params["proposedExecpolicyAmendment"] = [
+            "Set-Content",
+            "-LiteralPath",
+        ]
+        client.emit_approval(
+            "approval-rule",
+            "item/commandExecution/requestApproval",
+            params,
+        )
+
+        session.resolve_approval("approval-rule", "allow_rule")
+
+        self.assertEqual(
+            [
+                (
+                    "approval-rule",
+                    {
+                        "decision": {
+                            "acceptWithExecpolicyAmendment": {
+                                "execpolicy_amendment": [
+                                    "Set-Content",
+                                    "-LiteralPath",
+                                ]
+                            }
+                        }
+                    },
+                )
+            ],
+            client.approval_responses,
+        )
+
+        params_without_rule = self.command_params(
+            f"Remove-Item -LiteralPath '{system_file}'"
+        )
+        params_without_rule["proposedExecpolicyAmendment"] = ["Remove-Item"]
+        params_without_rule["availableDecisions"] = ["accept", "decline"]
+        client.emit_approval(
+            "approval-no-rule",
+            "item/commandExecution/requestApproval",
+            params_without_rule,
+        )
+        with self.assertRaises(BridgeError) as raised:
+            session.resolve_approval("approval-no-rule", "allow_rule")
+        self.assertEqual("INVALID_APPROVAL_DECISION", raised.exception.code)
+        self.assertIn("approval-no-rule", client.pending)
+
+    def test_system_write_and_auto_response_failure_fall_back_to_panel(self) -> None:
+        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
+        _session, client, events = self.make_session()
+        client.emit_approval(
+            "approval-manual-system",
+            "item/commandExecution/requestApproval",
+            self.command_params(
+                f"Set-Content -LiteralPath '{system_file}' -Value test"
+            ),
+        )
+        self.assertEqual([], client.approval_responses)
+        self.assertIn("approval-manual-system", client.pending)
+        self.assertTrue(
+            any(
+                event.get("type") == "server_request"
+                for event in events.poll(0, timeout=0)["events"]
+            )
+        )
+
+        _session, failed_client, failed_events = self.make_session(
+            fail_response=True
+        )
+        failed_client.emit_approval(
+            "approval-auto-failed",
+            "item/commandExecution/requestApproval",
+            self.command_params("[DateTimeOffset]::FromUnixTimeSeconds(1)"),
+        )
+        self.assertIn("approval-auto-failed", failed_client.pending)
+        self.assertTrue(
+            any(
+                event.get("type") == "server_request"
+                and event.get("request_id") == "approval-auto-failed"
+                for event in failed_events.poll(0, timeout=0)["events"]
+            )
+        )
 
 
 class _BlockingTurnClient(_ClientStub):
@@ -756,7 +1132,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         self.assertEqual("workspace-write", params["sandbox"])
         self.assertEqual("on-request", params["approvalPolicy"])
         instructions = params["developerInstructions"]
-        self.assertLessEqual(len(instructions), 850)
+        self.assertLessEqual(len(instructions), 900)
         for required_text in (
             "当前场景的创建、修改、连接、材质和动画默认使用",
             "FXHoudini MCP 与 HOM",
@@ -805,7 +1181,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         session.start_thread()
 
         instructions = client.requests[0][1]["developerInstructions"]
-        self.assertLessEqual(len(instructions), 850)
+        self.assertLessEqual(len(instructions), 900)
         for required_text in (
             "HIA MCP V2 与 HOM",
             "hia_execute_hom 批量执行",
@@ -830,6 +1206,34 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden_text, instructions)
         self.assertEqual("hia_v2", session.snapshot()["mcp_backend"])
+
+    def test_research_instructions_batch_public_pages_without_weakening_hia_serial_io(
+        self,
+    ) -> None:
+        for backend in ("fxhoudini", "hia_v2"):
+            with self.subTest(backend=backend):
+                session, client = self.make_session(backend)
+                session.start_thread()
+                instructions = client.requests[0][1]["developerInstructions"]
+                for required_text in (
+                    "先定本阶段必需 URL",
+                    "优先原生 web/search",
+                    "同阶段公开页合为一次 PowerShell 只读批量读取",
+                    "不逐页审批",
+                    "复用已取内容",
+                    "不重复抓取相近页面",
+                ):
+                    self.assertIn(required_text, instructions)
+                if backend == "hia_v2":
+                    self.assertIn(
+                        "hia_search_node_types/help 等同类读取由主代理串行或少量调用",
+                        instructions,
+                    )
+                    self.assertIn("不并发扇出", instructions)
+                    self.assertIn(
+                        "hia_execute_hom 等场景写入始终由主代理执行",
+                        instructions,
+                    )
 
     def test_thread_resume_enables_workspace_write_with_on_request_approval(self) -> None:
         session, client = self.make_session()

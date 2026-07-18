@@ -1,29 +1,32 @@
 # Research and Sources
 
-Use Codex web search or another available research tool when an external reference materially affects technique or visual fidelity. Do not browse for a simple successful Box/parameter request.
+Use external research when it materially affects technique or visual fidelity. For complex, unfamiliar, reference-driven, material, rendering, simulation, animation, or ShaderToy work, research iteratively and cross-check as many high-quality sources as the decision genuinely needs. Do not browse for a simple successful Box/parameter request.
 
 Research is required when the user names or links a ShaderToy, GLSL example, paper, tutorial, website, artist, project, named effect, or reference image, and when current Houdini/version limitations could change the decision.
 
 ## Source order
 
-1. Original author, project, artwork, paper, repository, or exact referenced page.
-2. Current SideFX documentation and official SideFX tutorials for Houdini behavior.
+1. Current SideFX documentation and official SideFX tutorials for Houdini behavior.
+2. Original papers, authors, projects, repositories, artwork, and exact referenced pages, including the original ShaderToy page.
 3. The upstream standard or project documentation, such as MaterialX or OpenUSD.
-4. Reputable secondary explanations only to fill a clearly identified gap.
+4. Reliable technical explanations, extending to community experience only when primary sources leave a practical gap.
 
 Do not treat searches through this repository's src, services, docs, or contracts as visual research. Read those only when the user explicitly requests plugin development or debugging.
 
 ## Research procedure
 
-1. Search narrowly for the original item and the Houdini systems likely to implement it.
-2. Open the primary pages rather than relying on search snippets. For version-sensitive behavior, check the active Houdini build and current documentation.
-3. Extract only reusable facts: algorithm stages, coordinate assumptions, data flow, constraints, renderer support, and quality cues.
-4. Keep a compact source ledger in the task handoff or requested artifact:
+1. Plan the current stage's evidence needs and high-value starting sources before retrieval; do not impose a fixed limit on search rounds or source count.
+2. Prefer Codex-native web/search tools. Run additional searches, open multiple pages, and follow necessary citations as the investigation develops; cross-check important claims before choosing the Houdini implementation.
+3. Reuse already retrieved content. Reduce duplicate visits and aimless searching, not research depth.
+4. Only when native web/search is unavailable, use one or a small number of read-only batch network commands. Combine related URLs instead of requesting PowerShell approval page by page; do not request global Shell auto-approval or create an approval system.
+5. Read primary pages rather than relying on search snippets. For version-sensitive behavior, check the active Houdini build and current documentation.
+6. Extract only reusable facts: algorithm stages, coordinate assumptions, data flow, constraints, renderer support, and quality cues.
+7. Keep a compact source ledger in the task handoff or requested artifact:
 
    | Title/source | Author or owner | URL | Access date | License/status | How used |
    | --- | --- | --- | --- | --- | --- |
 
-5. Mark inaccessible pages, ambiguous attribution, and unsupported inferences explicitly.
+8. Mark inaccessible pages, ambiguous attribution, and unsupported inferences explicitly.
 
 ## Copyright and licensing
 

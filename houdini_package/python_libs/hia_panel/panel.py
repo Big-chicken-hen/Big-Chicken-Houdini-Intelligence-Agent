@@ -14,6 +14,7 @@ from typing import Any
 import PySide6
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from .approval_card import format_approval_card
 from .attachment_store import AttachmentStore
 from .bridge_client import BridgeClient
 from .houdini_read_adapter import HoudiniReadAdapter, HoudiniReadAdapterError
@@ -27,6 +28,7 @@ _PASSIVE_STATUS_NOTIFICATIONS = frozenset(
         "remoteControl/status/changed",
         "mcpServer/startupStatus/updated",
         "account/rateLimits/updated",
+        "skills/changed",
     }
 )
 _TURN_START_CONTEXT_PREFIX = "turn_start:"
@@ -97,6 +99,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._models_requested = False
         self._pending_approvals: deque[dict[str, Any]] = deque()
         self._current_approval: dict[str, Any] | None = None
+        self._current_approval_offers_persistent_rule = False
         self._houdini_adapter: HoudiniReadAdapter | None = None
         self._houdini_polling_enabled = False
         self._scene_capability_pending = False
@@ -286,8 +289,28 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.approval_text.setReadOnly(True)
         self.approval_text.setMaximumHeight(150)
         approval_layout.addWidget(self.approval_text)
+        self.approval_details_button = QtWidgets.QPushButton("高级详情")
+        self.approval_details_button.setCheckable(True)
+        self.approval_details_button.setChecked(False)
+        self.approval_details_button.setVisible(False)
+        approval_layout.addWidget(self.approval_details_button)
+        self.approval_details_text = QtWidgets.QPlainTextEdit()
+        self.approval_details_text.setReadOnly(True)
+        self.approval_details_text.setMaximumHeight(220)
+        self.approval_details_text.setVisible(False)
+        approval_layout.addWidget(self.approval_details_text)
+        self.persistent_allow_note = QtWidgets.QLabel(
+            "持续授权：以后允许协议提供的相同命令规则。"
+        )
+        self.persistent_allow_note.setVisible(False)
+        approval_layout.addWidget(self.persistent_allow_note)
+        self.persistent_allow_button = QtWidgets.QPushButton(
+            "以后允许相同命令规则"
+        )
+        self.persistent_allow_button.setVisible(False)
+        approval_layout.addWidget(self.persistent_allow_button)
         approval_buttons = QtWidgets.QHBoxLayout()
-        self.allow_button = QtWidgets.QPushButton("允许")
+        self.allow_button = QtWidgets.QPushButton("允许一次")
         self.deny_button = QtWidgets.QPushButton("拒绝")
         approval_buttons.addStretch(1)
         approval_buttons.addWidget(self.allow_button)
@@ -338,6 +361,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.input_edit.imagePasted.connect(self._add_clipboard_image)
         self.send_button.clicked.connect(self._send)
         self.stop_button.clicked.connect(self._stop)
+        self.approval_details_button.toggled.connect(self._toggle_approval_details)
+        self.persistent_allow_button.clicked.connect(
+            lambda: self._resolve_approval("allow_rule")
+        )
         self.allow_button.clicked.connect(lambda: self._resolve_approval("allow"))
         self.deny_button.clicked.connect(lambda: self._resolve_approval("deny"))
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
@@ -794,9 +821,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         composer_enabled = stopping or (
             (not self._turn_state.busy or steer_available) and request_ready
         )
+        editor_enabled = composer_enabled or bool(
+            self._turn_start_request_pending
+            or self._turn_steer_request_pending
+            or self._reconciliation_tokens
+        )
         input_edit = getattr(self, "input_edit", None)
         if input_edit is not None:
-            input_edit.setEnabled(composer_enabled)
+            input_edit.setEnabled(editor_enabled)
         add_image_button = getattr(self, "add_image_button", None)
         if add_image_button is not None:
             add_image_button.setEnabled(
@@ -1871,15 +1903,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._active_turn_start_context = context
         self._turn_start_request_pending = True
         self._refresh_controls()
-        request_id = self._client.start_turn(
+        self._client.start_turn(
             request_text,
             model=self._selected_model_id(),
             effort=self._selected_effort(),
             local_image_paths=list(attachment_paths),
             context=context,
         )
-        if request_id is not None:
-            self.input_edit.clearFocus()
 
     def _steer_active_turn(
         self,
@@ -1904,13 +1934,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._turn_steer_request_pending = True
         self._merge_diagnostic_user_input(text, attachment_paths)
         self._refresh_controls()
-        request_id = self._client.steer_turn(
+        self._client.steer_turn(
             self._request_text_with_selection(text),
             local_image_paths=list(attachment_paths),
             context=context,
         )
-        if request_id is not None:
-            self.input_edit.clearFocus()
 
     def _stop(self) -> None:
         controls = self._turn_state.derive_controls(
@@ -2092,9 +2120,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._schedule_stop_reconciliation(token)
         elif context.startswith("approval_"):
             self._current_approval = None
+            self._current_approval_offers_persistent_rule = False
             self.approval_group.setVisible(False)
+            self.approval_details_button.setChecked(False)
+            self.approval_details_button.setVisible(False)
+            self.approval_details_text.setVisible(False)
+            self.persistent_allow_note.setVisible(False)
+            self.persistent_allow_button.setVisible(False)
             self.allow_button.setEnabled(True)
             self.deny_button.setEnabled(True)
+            self.persistent_allow_button.setEnabled(True)
             self._show_next_approval()
         self._refresh_controls()
 
@@ -2194,6 +2229,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _show_protocol_notice(self, event: dict[str, Any]) -> None:
         method = event.get("method")
         code = event.get("code")
+        if code == "UNKNOWN_NOTIFICATION_IGNORED":
+            return
         message = self._notice_text(event) or str(event.get("message") or "")
         method_text = str(method) if isinstance(method, str) else ""
         signature = f"{method_text} {code or ''} {message}".casefold()
@@ -2375,19 +2412,37 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if self._current_approval is not None or not self._pending_approvals:
             return
         self._current_approval = self._pending_approvals.popleft()
-        display = {
-            "method": self._current_approval.get("method"),
-            "params": self._current_approval.get("params", {}),
-        }
-        text = json.dumps(display, ensure_ascii=False, indent=2)
-        self.approval_text.setPlainText(text[:12000])
+        card = format_approval_card(self._current_approval)
+        self._current_approval_offers_persistent_rule = (
+            card.offers_persistent_rule
+        )
+        self.approval_text.setPlainText(card.summary)
+        self.approval_details_text.setPlainText(card.advanced_details)
+        self.approval_details_button.setChecked(False)
+        self.approval_details_button.setText("高级详情")
+        self.approval_details_button.setVisible(True)
+        self.approval_details_text.setVisible(False)
+        self.persistent_allow_note.setVisible(False)
+        self.persistent_allow_button.setVisible(False)
         self.approval_group.setVisible(True)
+
+    def _toggle_approval_details(self, checked: bool) -> None:
+        self.approval_details_button.setText(
+            "收起高级详情" if checked else "高级详情"
+        )
+        self.approval_details_text.setVisible(bool(checked))
+        show_persistent = bool(checked) and bool(
+            self._current_approval_offers_persistent_rule
+        )
+        self.persistent_allow_note.setVisible(show_persistent)
+        self.persistent_allow_button.setVisible(show_persistent)
 
     def _resolve_approval(self, decision: str) -> None:
         if self._current_approval is None or self._client is None:
             return
         self.allow_button.setEnabled(False)
         self.deny_button.setEnabled(False)
+        self.persistent_allow_button.setEnabled(False)
         self._client.resolve_approval(
             self._current_approval.get("request_id"),
             decision,
@@ -2607,6 +2662,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._request_session_reconciliation("turn_start_failure")
         self.allow_button.setEnabled(True)
         self.deny_button.setEnabled(True)
+        self.persistent_allow_button.setEnabled(True)
         self._refresh_controls()
 
     def _request_session_reconciliation(self, reason: str) -> bool:

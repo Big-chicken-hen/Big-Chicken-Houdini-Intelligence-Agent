@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -27,6 +28,48 @@ _SENSITIVE_ENVIRONMENT_MARKERS = (
     "PROXY",
 )
 _SENSITIVE_ENVIRONMENT_NAMES = frozenset({"HIA_BRIDGE_URL"})
+
+_SENSITIVE_FIELD_NAMES = frozenset(
+    {
+        "apikey",
+        "authorization",
+        "cookie",
+        "credentials",
+        "password",
+        "secret",
+        "setcookie",
+        "token",
+    }
+)
+_CURL_SENSITIVE_HEADER_PATTERN = re.compile(
+    r"(?i)((?<!\S)(?:-H|--header)\s+)([\"'])(\s*(?:authorization|"
+    r"proxy-authorization|cookie|set-cookie|x-api-key|api-key)\s*:)[^\"']*\2"
+)
+_CURL_COOKIE_PATTERN = re.compile(
+    r"(?i)((?<!\S)(?:--cookie|-b)\s+)(?:\"[^\"]*\"|'[^']*'|[^\s]+)"
+)
+_AUTHORIZATION_PATTERN = re.compile(
+    r"(?i)(\bauthorization[\"']?\s*[:=]\s*[\"']?(?:bearer|basic)?\s*)"
+    r"([^\s\"'`;,&}\[\]]+)"
+)
+_BEARER_PATTERN = re.compile(
+    r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{6,})"
+)
+_NAMED_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)(\b(?:x[-_]?api[-_]?key|api[-_]?key|access[-_]?token|auth[-_]?token|"
+    r"bearer[-_]?token|id[-_]?token|refresh[-_]?token|password|secret|credential|"
+    r"cookie|set-cookie)[\"']?\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;&)}\[\]]+)"
+)
+_QUERY_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)([?&](?:api[_-]?key|access[_-]?token|auth[_-]?token|id[_-]?token|"
+    r"refresh[_-]?token|token|password|secret|credential)=)"
+    r"([^&#\s\"'\[\]]+)"
+)
+_URL_USERINFO_PATTERN = re.compile(
+    r"(?i)(https?://)[^/@\s:\"']+:[^/@\s\"']+@"
+)
+_OPENAI_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
 
 
 @dataclass
@@ -506,20 +549,76 @@ class CodexStdioClient:
         redacted = value
         for secret in self._sensitive_values:
             redacted = redacted.replace(secret, "[REDACTED]")
+        redacted = _CURL_SENSITIVE_HEADER_PATTERN.sub(
+            lambda match: (
+                f"{match.group(1)}{match.group(2)}{match.group(3)} "
+                f"[REDACTED]{match.group(2)}"
+            ),
+            redacted,
+        )
+        redacted = _CURL_COOKIE_PATTERN.sub(
+            lambda match: f"{match.group(1)}[REDACTED]",
+            redacted,
+        )
+        redacted = _URL_USERINFO_PATTERN.sub(r"\1[REDACTED]@", redacted)
+        redacted = _AUTHORIZATION_PATTERN.sub(r"\1[REDACTED]", redacted)
+        redacted = _BEARER_PATTERN.sub(r"\1[REDACTED]", redacted)
+        redacted = _NAMED_CREDENTIAL_PATTERN.sub(r"\1[REDACTED]", redacted)
+        redacted = _QUERY_CREDENTIAL_PATTERN.sub(r"\1[REDACTED]", redacted)
+        redacted = _OPENAI_KEY_PATTERN.sub("[REDACTED]", redacted)
         return redacted
+
+    @staticmethod
+    def _is_sensitive_key(value: str) -> bool:
+        normalized = "".join(
+            character for character in value.lower() if character.isalnum()
+        )
+        if normalized in _SENSITIVE_FIELD_NAMES:
+            return True
+        if normalized.endswith(
+            (
+                "apikey",
+                "authorization",
+                "cookie",
+                "credential",
+                "password",
+                "secret",
+                "accesstoken",
+                "authtoken",
+                "bearertoken",
+                "idtoken",
+                "refreshtoken",
+            )
+        ):
+            return True
+        words = re.findall(
+            r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|[0-9]+",
+            value.replace("-", " ").replace("_", " "),
+        )
+        lowered_words = [word.lower() for word in words]
+        if any(
+            word in {"authorization", "cookie", "credential", "password", "secret"}
+            for word in lowered_words
+        ):
+            return True
+        return any(
+            first == "api" and second == "key"
+            for first, second in zip(lowered_words, lowered_words[1:])
+        )
 
     def _redact_value(self, value: Any) -> Any:
         if isinstance(value, str):
             return self._redact_text(value)
         if isinstance(value, dict):
-            return {
-                (
-                    self._redact_text(key)
-                    if isinstance(key, str)
-                    else key
-                ): self._redact_value(item)
-                for key, item in value.items()
-            }
+            redacted: dict[Any, Any] = {}
+            for key, item in value.items():
+                redacted_key = self._redact_text(key) if isinstance(key, str) else key
+                redacted[redacted_key] = (
+                    "[REDACTED]"
+                    if isinstance(key, str) and self._is_sensitive_key(key)
+                    else self._redact_value(item)
+                )
+            return redacted
         if isinstance(value, list):
             return [self._redact_value(item) for item in value]
         if isinstance(value, tuple):

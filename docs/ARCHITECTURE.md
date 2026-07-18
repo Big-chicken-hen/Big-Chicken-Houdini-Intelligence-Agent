@@ -48,13 +48,17 @@ Reports remain local and are ignored by Git through the existing `.runtime/` rul
 ## Launcher preflight boundary
 
 ```text
-scripts/hia-launcher.ps1
+.runtime/dist/launcher/HoudiniIntelligenceLauncher.exe
+  → locate the project root and invoke scripts/hia-launcher.ps1
+or scripts/hia-launcher.ps1 directly
   → read-only discovery and bounded probes
   → one backend choice in .runtime/launcher/settings.json
   → scripts/launch-houdini.ps1
   → one Bridge/app-server/Houdini backend lifecycle
 ```
 
-The launcher is a PowerShell/WPF shell with the standard Windows window frame, not another Agent or service. Its module derives the project root from the launcher location, enumerates Houdini without a version allowlist, requires explicit selection when more than one installation exists, and binds port probes only to `127.0.0.1`. `hia_v2` is the default; `fxhoudini` is an explicit fallback. `scripts/launch-houdini.ps1` remains the only lifecycle entry and injects only the selected backend's paths and environment. HIA V2 uses its own random port/token, `HIA_MCP_V2_*`, `/hia-mcp-v2/v1/*`, and `.runtime/hia-mcp-v2`; fallback keeps the locked third-party runtime without sharing those names.
+The distributable launcher is a thin self-contained .NET 8 WPF WinExe host. It derives the project root from `AppContext.BaseDirectory`, verifies project markers, and starts the existing PowerShell/WPF launcher; it does not duplicate discovery, preflight, repair, settings, reporting, or lifecycle rules. The managed payload is single-file while native WPF components remain as five sidecars beside the EXE, avoiding extraction outside the project. The project-local SDK, CLI home, NuGet caches, build intermediates, and publish directory all live below ignored `.runtime`; no global SDK, PATH, registry, or AppData mutation is required. `scripts/hia-launcher.ps1` remains the direct debugging and CLI entry.
+
+The launcher uses the standard Windows window frame, not another Agent or service. Its module derives the project root from the launcher location, enumerates Houdini without a version allowlist, requires explicit selection when more than one installation exists, and binds port probes only to `127.0.0.1`. `hia_v2` is the default; `fxhoudini` is an explicit fallback. `scripts/launch-houdini.ps1` remains the only lifecycle entry and injects only the selected backend's paths and environment. HIA V2 uses its own random port/token, `HIA_MCP_V2_*`, `/hia-mcp-v2/v1/*`, and `.runtime/hia-mcp-v2`; fallback keeps the locked third-party runtime without sharing those names.
 
 Portable project configuration uses paths relative to the project or `$HIA_PROJECT_ROOT`, which the lifecycle script supplies only to child processes. Safe repair is deliberately limited to project-local runtime directories and those locked relative-path fields.

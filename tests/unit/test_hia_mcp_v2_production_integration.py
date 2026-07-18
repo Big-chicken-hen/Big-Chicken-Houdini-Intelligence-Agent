@@ -206,10 +206,11 @@ class LauncherBackendIntegrationTests(unittest.TestCase):
             )
             self.assertEqual("fxhoudini", persisted["mcp_backend"])
 
-    def test_wpf_has_one_backend_picker_and_passes_one_selected_value(self) -> None:
+    def test_wpf_has_high_contrast_picker_templates_and_passes_one_backend(self) -> None:
         xaml_path = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.xaml"
         root = ET.parse(xaml_path).getroot()
         name_attribute = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
+        key_attribute = "{http://schemas.microsoft.com/winfx/2006/xaml}Key"
         pickers = [
             element
             for element in root.iter()
@@ -217,8 +218,56 @@ class LauncherBackendIntegrationTests(unittest.TestCase):
             and element.attrib.get(name_attribute) == "McpBackendComboBox"
         ]
         self.assertEqual(1, len(pickers))
-        self.assertEqual("display", pickers[0].attrib.get("DisplayMemberPath"))
+        self.assertEqual(
+            "{StaticResource BackendPickerItemTemplate}",
+            pickers[0].attrib.get("ItemTemplate"),
+        )
+        self.assertEqual(
+            "{StaticResource DarkPickerComboBoxStyle}",
+            pickers[0].attrib.get("Style"),
+        )
+        self.assertNotIn("DisplayMemberPath", pickers[0].attrib)
         self.assertEqual("False", pickers[0].attrib.get("IsEditable"))
+
+        houdini_picker = next(
+            element
+            for element in root.iter()
+            if element.tag.endswith("ComboBox")
+            and element.attrib.get(name_attribute) == "HoudiniComboBox"
+        )
+        self.assertEqual(
+            "{StaticResource HoudiniPickerItemTemplate}",
+            houdini_picker.attrib.get("ItemTemplate"),
+        )
+        self.assertNotIn("DisplayMemberPath", houdini_picker.attrib)
+
+        resources = {
+            element.attrib[key_attribute]: ET.tostring(element, encoding="unicode")
+            for element in root.iter()
+            if key_attribute in element.attrib
+        }
+        houdini_template = resources["HoudiniPickerItemTemplate"]
+        for expected in (
+            "Binding version",
+            "Binding path",
+            "ToolTip",
+            "TextTrimming=\"CharacterEllipsis\"",
+            "PickerSecondaryTextBrush",
+        ):
+            self.assertIn(expected, houdini_template)
+
+        picker_style = (
+            resources["DarkPickerComboBoxStyle"]
+            + resources["DarkPickerComboBoxItemStyle"]
+        )
+        for expected in (
+            "PickerBackgroundBrush",
+            "PickerTextBrush",
+            "PickerHoverBrush",
+            "PickerSelectedBrush",
+            "PickerDisabledTextBrush",
+        ):
+            self.assertIn(expected, picker_style)
 
         wpf_source = (
             REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Wpf.ps1"

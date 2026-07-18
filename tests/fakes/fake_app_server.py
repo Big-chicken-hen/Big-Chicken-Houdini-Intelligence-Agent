@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import ntpath
+import os
 import sys
 from typing import Any
 
@@ -10,6 +12,11 @@ from typing import Any
 THREAD_ID = "thread-fake"
 TURN_ID = "turn-fake"
 APPROVAL_ID = "approval-fake"
+SYSTEM_DRIVE = (
+    ntpath.splitdrive(os.environ.get("SystemRoot", ""))[0]
+    or os.environ.get("SystemDrive")
+    or "C:"
+)
 
 
 _turn_counter = 0
@@ -190,7 +197,10 @@ def handle_request(message: dict[str, Any]) -> None:
                     "turnId": turn_id,
                     "itemId": f"item-command-{turn_id}",
                     "startedAtMs": 1,
-                    "command": "fake read-only command",
+                    "command": (
+                        "Set-Content -LiteralPath "
+                        f"'{SYSTEM_DRIVE}\\HIA-Fake-Approval.txt' -Value test"
+                    ),
                     "reason": "fake approval test",
                 },
             }

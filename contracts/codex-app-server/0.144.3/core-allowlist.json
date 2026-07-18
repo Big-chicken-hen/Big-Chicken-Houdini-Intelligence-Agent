@@ -256,6 +256,11 @@
         "method": "remoteControl/status/changed",
         "params_definition": "RemoteControlStatusChangedNotification",
         "purpose": "passive-observation-only"
+      },
+      {
+        "method": "skills/changed",
+        "params_definition": "SkillsChangedNotification",
+        "purpose": "passive-observation-only"
       }
     ]
   },

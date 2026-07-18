@@ -21,6 +21,11 @@ LAUNCHER_PATH = REPOSITORY_ROOT / "scripts" / "hia-launcher.ps1"
 WPF_SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Wpf.ps1"
 XAML_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.xaml"
 LIFECYCLE_PATH = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+EXE_PROJECT_ROOT = REPOSITORY_ROOT / "launcher" / "HoudiniIntelligenceLauncher"
+EXE_PROJECT_PATH = EXE_PROJECT_ROOT / "HoudiniIntelligenceLauncher.csproj"
+EXE_APP_PATH = EXE_PROJECT_ROOT / "App.xaml.cs"
+EXE_ROOT_LOCATOR_PATH = EXE_PROJECT_ROOT / "ProjectRootLocator.cs"
+EXE_BUILD_SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "build-launcher.ps1"
 UI_READY_PATHS = (
     REPOSITORY_ROOT / "houdini_package" / "python3.10libs" / "uiready.py",
     REPOSITORY_ROOT / "houdini_package" / "python3.11libs" / "uiready.py",
@@ -535,6 +540,214 @@ try {{
             },
             uri_set,
         )
+
+    def test_wpf_runtime_pickers_have_explicit_high_contrast_templates(self) -> None:
+        tree = ET.parse(XAML_PATH)
+        root = tree.getroot()
+        presentation = "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}"
+        xaml_key = "{http://schemas.microsoft.com/winfx/2006/xaml}Key"
+        xaml_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
+
+        resources = {
+            element.attrib[xaml_key]: element.attrib.get("Color", "")
+            for element in root.iter(f"{presentation}SolidColorBrush")
+            if xaml_key in element.attrib
+        }
+
+        def channel(value: int) -> float:
+            normalized = value / 255.0
+            return (
+                normalized / 12.92
+                if normalized <= 0.04045
+                else ((normalized + 0.055) / 1.055) ** 2.4
+            )
+
+        def luminance(color: str) -> float:
+            rgb = tuple(int(color[index : index + 2], 16) for index in (1, 3, 5))
+            return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+
+        def contrast(first: str, second: str) -> float:
+            lighter, darker = sorted((luminance(first), luminance(second)), reverse=True)
+            return (lighter + 0.05) / (darker + 0.05)
+
+        self.assertGreater(
+            contrast(resources["PickerTextBrush"], resources["PickerBackgroundBrush"]),
+            7.0,
+        )
+        self.assertGreater(
+            contrast(
+                resources["PickerSecondaryTextBrush"],
+                resources["PickerBackgroundBrush"],
+            ),
+            4.5,
+        )
+        self.assertGreater(
+            contrast(
+                resources["PickerDisabledTextBrush"],
+                resources["PickerDisabledBackgroundBrush"],
+            ),
+            4.5,
+        )
+
+        styles = {
+            element.attrib.get(xaml_key): ET.tostring(element, encoding="unicode")
+            for element in root.iter(f"{presentation}Style")
+            if xaml_key in element.attrib
+        }
+        combo_style = styles["DarkPickerComboBoxStyle"]
+        item_style = styles["DarkPickerComboBoxItemStyle"]
+        for required in (
+            "ControlTemplate",
+            "PART_Popup",
+            "PickerPopupBrush",
+            "Background",
+            "Foreground",
+            "BorderBrush",
+            "IsMouseOver",
+            "IsKeyboardFocusWithin",
+            "IsDropDownOpen",
+            "IsEnabled",
+        ):
+            self.assertIn(required, combo_style)
+        for required in (
+            "ControlTemplate",
+            "Background",
+            "Foreground",
+            "BorderBrush",
+            "IsHighlighted",
+            "IsSelected",
+            "IsKeyboardFocusWithin",
+            "IsEnabled",
+        ):
+            self.assertIn(required, item_style)
+
+        combo_expectations = {
+            "McpBackendComboBox": "BackendPickerItemTemplate",
+            "HoudiniComboBox": "HoudiniPickerItemTemplate",
+            "BridgePythonComboBox": "BridgePickerItemTemplate",
+        }
+        combo_boxes = {
+            element.attrib.get(xaml_name): element
+            for element in root.iter(f"{presentation}ComboBox")
+        }
+        for name, template in combo_expectations.items():
+            combo = combo_boxes[name]
+            self.assertEqual(
+                "{StaticResource DarkPickerComboBoxStyle}", combo.attrib["Style"]
+            )
+            self.assertEqual(
+                f"{{StaticResource {template}}}", combo.attrib["ItemTemplate"]
+            )
+            self.assertNotIn("DisplayMemberPath", combo.attrib)
+
+        templates = {
+            element.attrib.get(xaml_key): ET.tostring(element, encoding="unicode")
+            for element in root.iter(f"{presentation}DataTemplate")
+            if xaml_key in element.attrib
+        }
+        for template_name in ("HoudiniPickerItemTemplate", "BridgePickerItemTemplate"):
+            template = templates[template_name]
+            self.assertGreaterEqual(template.count("TextBlock"), 2)
+            self.assertIn("path", template)
+            self.assertIn("ToolTip", template)
+            self.assertIn("CharacterEllipsis", template)
+        self.assertIn("version", templates["HoudiniPickerItemTemplate"])
+        self.assertIn("source", templates["BridgePickerItemTemplate"])
+
+    def test_exe_project_root_locator_works_after_project_move(self) -> None:
+        fake_root = self.sandbox / "moved-launcher-project"
+        nested_launcher = fake_root / ".runtime" / "dist" / "launcher"
+        (fake_root / "scripts").mkdir(parents=True)
+        nested_launcher.mkdir(parents=True)
+        (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (fake_root / "scripts" / "hia-launcher.ps1").write_text(
+            "# launcher marker\n", encoding="utf-8"
+        )
+        (fake_root / "scripts" / "launch-houdini.ps1").write_text(
+            "# lifecycle marker\n", encoding="utf-8"
+        )
+        compiler_temp = self.sandbox / "csharp-compiler-temp"
+        output = self.run_powershell(
+            f"""
+[System.IO.Directory]::CreateDirectory({_ps_literal(compiler_temp)}) | Out-Null
+$env:TEMP = {_ps_literal(compiler_temp)}
+$env:TMP = {_ps_literal(compiler_temp)}
+$source = [System.IO.File]::ReadAllText({_ps_literal(EXE_ROOT_LOCATOR_PATH)})
+Add-Type -TypeDefinition $source -Language CSharp
+[HoudiniIntelligenceLauncher.ProjectRootLocator]::Find({_ps_literal(nested_launcher)})
+"""
+        )
+        self.assertEqual(str(fake_root), output)
+
+        locator_source = EXE_ROOT_LOCATOR_PATH.read_text(encoding="utf-8")
+        app_source = EXE_APP_PATH.read_text(encoding="utf-8")
+        self.assertIn("AppContext.BaseDirectory", app_source)
+        self.assertIn("DirectoryInfo", locator_source)
+        self.assertIn("current.Parent", locator_source)
+        self.assertNotIn("Environment.CurrentDirectory", app_source + locator_source)
+        self.assertIsNone(
+            re.search(r"(?i)(?:^|[\"'\s])[a-z]:[\\/]", app_source + locator_source)
+        )
+
+    def test_exe_project_and_build_script_are_portable_and_self_contained(self) -> None:
+        project = ET.parse(EXE_PROJECT_PATH).getroot()
+        properties = {
+            element.tag: (element.text or "").strip()
+            for group in project.findall("PropertyGroup")
+            for element in group
+        }
+        self.assertEqual("WinExe", properties["OutputType"])
+        self.assertEqual("net8.0-windows", properties["TargetFramework"])
+        self.assertEqual("true", properties["UseWPF"])
+        self.assertEqual("HoudiniIntelligenceLauncher", properties["AssemblyName"])
+        self.assertEqual("win-x64", properties["RuntimeIdentifier"])
+        self.assertEqual("true", properties["SelfContained"])
+        self.assertEqual("true", properties["PublishSingleFile"])
+        self.assertEqual("false", properties["IncludeNativeLibrariesForSelfExtract"])
+        self.assertEqual("false", properties["PublishTrimmed"])
+        self.assertEqual([], project.findall(".//PackageReference"))
+
+        build_source = EXE_BUILD_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        app_source = EXE_APP_PATH.read_text(encoding="utf-8")
+        locator_source = EXE_ROOT_LOCATOR_PATH.read_text(encoding="utf-8")
+        combined = build_source + app_source + locator_source
+        for required in (
+            "$PSScriptRoot",
+            ".runtime",
+            "DOTNET_CLI_HOME",
+            "NUGET_PACKAGES",
+            "NUGET_HTTP_CACHE_PATH",
+            "NUGET_PLUGINS_CACHE_PATH",
+            "$env:TEMP",
+            "$env:TMP",
+            "BaseOutputPath",
+            "BaseIntermediateOutputPath",
+            "MSBuildProjectExtensionsPath",
+            "dist\\launcher",
+            "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/8.0/releases.json",
+            "https://builds.dotnet.microsoft.com/",
+            "Get-FileHash",
+            "--continue-at",
+            "Expand-Archive",
+            "win-x64",
+            "--self-contained",
+            "--smoke-test",
+        ):
+            self.assertIn(required, build_source)
+        self.assertIn('Path.Combine(projectRoot, "scripts", "hia-launcher.ps1")', app_source)
+        self.assertIn("ArgumentList.Add", app_source)
+        self.assertNotIn("Remove-Item", build_source)
+        self.assertNotIn("SetEnvironmentVariable", combined)
+        self.assertIsNone(re.search(r"(?i)(?:^|[\"'\s])[a-z]:[\\/]", combined))
+
+        launcher_assets = [
+            path
+            for root_path in (EXE_PROJECT_ROOT, XAML_PATH.parent)
+            for path in root_path.rglob("*")
+            if path.suffix.lower()
+            in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico", ".mp4"}
+        ]
+        self.assertEqual([], launcher_assets)
 
     def test_cli_modes_do_not_load_wpf_assets(self) -> None:
         fake_root = self.sandbox / "portable-cli-no-ui"

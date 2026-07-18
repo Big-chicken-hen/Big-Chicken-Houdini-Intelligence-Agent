@@ -25,13 +25,20 @@ After a report is saved, copy its path and give the file to Codex when asking fo
 
 ## Windows launcher and preflight
 
-Run the dependency-free launcher from any checkout location; it derives the project root from its own path:
+The preferred distributable entry is a self-contained win-x64 EXE. The first local build downloads the current .NET 8 SDK only into the ignored project `.runtime` tree, then publishes and smoke-tests the launcher without starting Houdini:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1 -InstallLocalSdk
+.\.runtime\dist\launcher\HoudiniIntelligenceLauncher.exe
+```
+
+Future builds can omit `-InstallLocalSdk`. Users of the published folder do not need a global .NET Runtime or SDK. Keep the small native WPF sidecars beside the EXE and move the project as one directory; the EXE walks upward from its own location to derive the project root, so the project can live on any ordinary local drive. The PowerShell entry remains the dependency-free debugging and CLI fallback:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\hia-launcher.ps1
 ```
 
-The Windows-only WPF window uses the standard system title bar with a DPI-aware dark Houdini-style shell, an original built-in vector HIA assistant mark, and no external UI assets or runtime. It scans `HFS`, `PATH`, read-only registry entries, and SideFX's usual Program Files directories. Every discovered Houdini version is shown with its full `houdini.exe` path. When several versions exist, choose one explicitly. The launcher also lets you choose Bridge Python and one mutually exclusive MCP backend: **HIA MCP V2** is recommended and selected by default; **FXHoudiniMCP 1.3.0** is the manual fallback. Changing any environment selection marks the result as stale and requires a rescan before launch.
+The Windows-only WPF window uses the standard system title bar with a DPI-aware dark Houdini-style shell, an original built-in vector HIA assistant mark, and no external UI assets. Houdini, Bridge, and backend pickers use explicit high-contrast dark templates for selected, popup, hover, focus, and disabled states. Houdini/build or Bridge source appears on the main line; the full executable path appears below with ellipsis and a complete Tooltip. It scans `HFS`, `PATH`, read-only registry entries, and SideFX's usual Program Files directories. When several Houdini versions exist, choose one explicitly. **HIA MCP V2** is recommended and selected by default; **FXHoudiniMCP 1.3.0** is the manual fallback. Changing any environment selection marks the result as stale and requires a rescan before launch.
 
 Preflight validates the selected `houdini.exe` and sibling `hython.exe`, compares short read-only build probes, reports Houdini's Python major/minor and `import hou`, and checks Bridge imports, the project-local Codex executable/login, only the selected MCP backend, package/config files, `.runtime` writes, and loopback-only port allocation. Green is ready, yellow is actionable but non-blocking, and red prevents launch.
 

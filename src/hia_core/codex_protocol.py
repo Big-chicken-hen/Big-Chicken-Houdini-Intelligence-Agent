@@ -52,6 +52,7 @@ P1_PASSIVE_SERVER_NOTIFICATIONS = frozenset(
         "account/rateLimits/updated",
         "mcpServer/startupStatus/updated",
         "remoteControl/status/changed",
+        "skills/changed",
     }
 )
 CORE_SERVER_NOTIFICATIONS = frozenset(

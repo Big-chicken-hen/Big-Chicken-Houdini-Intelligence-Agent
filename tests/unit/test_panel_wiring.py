@@ -431,6 +431,7 @@ class _BridgeClientShim:
         self.capability_reports: list[dict[str, Any]] = []
         self.scene_polls: list[int] = []
         self.scene_results: list[tuple[str, str, dict[str, Any]]] = []
+        self.approval_decisions: list[tuple[Any, str]] = []
         self.start_turn_result: str | None = "turn-request"
         self.steer_turn_result: str | None = "steer-request"
 
@@ -466,6 +467,10 @@ class _BridgeClientShim:
 
     def interrupt(self, *, context: str) -> None:
         self.interrupt_contexts.append(context)
+
+    def resolve_approval(self, request_id: Any, decision: str) -> str:
+        self.approval_decisions.append((request_id, decision))
+        return f"approval_{decision}"
 
     def get_session(self, *, context: str) -> None:
         self.session_contexts.append(context)
@@ -618,6 +623,7 @@ def _make_panel() -> Any:
     panel._models_requested = False
     panel._pending_approvals = deque()
     panel._current_approval = None
+    panel._current_approval_offers_persistent_rule = False
     panel._houdini_adapter = None
     panel._houdini_polling_enabled = False
     panel._scene_capability_pending = False
@@ -661,8 +667,18 @@ def _make_panel() -> Any:
     panel.welcome_group = _Widget()
     panel.approval_group = _Widget()
     panel.approval_text = _Widget()
-    panel.allow_button = _Widget()
-    panel.deny_button = _Widget()
+    panel.approval_details_button = _Widget("高级详情")
+    panel.approval_details_text = _Widget()
+    panel.persistent_allow_note = _Widget(
+        "持续授权：以后允许协议提供的相同命令规则。"
+    )
+    panel.persistent_allow_button = _Widget("以后允许相同命令规则")
+    panel.approval_details_button.setVisible(False)
+    panel.approval_details_text.setVisible(False)
+    panel.persistent_allow_note.setVisible(False)
+    panel.persistent_allow_button.setVisible(False)
+    panel.allow_button = _Widget("允许一次")
+    panel.deny_button = _Widget("拒绝")
     panel.input_edit = _Widget()
     panel.add_image_button = _Widget()
     panel.report_issue_button = _Widget()
@@ -878,22 +894,43 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("未保存表示当前 HIP 是否有尚未保存的修改", panel_source)
         self.assertNotIn("Revision：不可用  ·  Dirty：不可用", panel_source)
 
-    def test_successful_turn_start_and_steer_each_clear_focus_once(self) -> None:
+    def test_turn_start_and_steer_do_not_force_houdini_focus_change(self) -> None:
         panel = _make_panel()
 
-        _context, _turn_id = _start_active_turn(panel, 1)
-        self.assertEqual(1, panel.input_edit.clear_focus_calls)
+        panel.input_edit.setPlainText("先生成基础模型")
+        panel._send()
+        start_context = panel._client.turn_requests[-1][-1]
+        self.assertTrue(panel.input_edit.isEnabled())
+        self.assertFalse(panel.send_button.isEnabled())
+        self.assertEqual(0, panel.input_edit.clear_focus_calls)
+        panel._send()
+        self.assertEqual(1, len(panel._client.turn_requests))
+
+        turn_id = "turn-focus-1"
+        panel._on_action_completed(
+            start_context,
+            {
+                "thread_id": "thread-1",
+                "turn_id": turn_id,
+                "turn_active": True,
+                "turn_status": "inProgress",
+            },
+        )
 
         panel.input_edit.setPlainText("继续调整材质")
         panel._send()
-        self.assertEqual(2, panel.input_edit.clear_focus_calls)
+        self.assertTrue(panel.input_edit.isEnabled())
+        self.assertFalse(panel.send_button.isEnabled())
+        self.assertEqual(0, panel.input_edit.clear_focus_calls)
+        panel._send()
+        self.assertEqual(1, len(panel._client.steer_requests))
 
         _text, _images, steer_context = panel._client.steer_requests[-1]
         panel._on_action_completed(
             steer_context,
-            {"thread_id": "thread-1", "turn_id": _turn_id},
+            {"thread_id": "thread-1", "turn_id": turn_id},
         )
-        self.assertEqual(2, panel.input_edit.clear_focus_calls)
+        self.assertEqual(0, panel.input_edit.clear_focus_calls)
 
     def test_conversation_roles_and_streaming_share_one_codex_card(self) -> None:
         panel = _make_panel()
@@ -1247,7 +1284,7 @@ class PanelWiringTests(unittest.TestCase):
 
         panel._send()
         _text, _images, steer_context = panel._client.steer_requests[-1]
-        self.assertEqual(2, panel.input_edit.clear_focus_calls)
+        self.assertEqual(0, panel.input_edit.clear_focus_calls)
         panel._on_request_failed(
             steer_context,
             {
@@ -1263,7 +1300,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("继续调整材质", panel.input_edit.toPlainText())
         self.assertEqual([attachment], panel.attachment_strip.paths())
         self.assertEqual("追加指令", panel.send_button.text())
-        self.assertEqual(2, panel.input_edit.clear_focus_calls)
+        self.assertEqual(0, panel.input_edit.clear_focus_calls)
         self.assertIn("当前 review Turn 暂不能追加指令。", panel.conversation.toPlainText())
         self.assertNotIn("CODEX_RPC_ERROR", panel.conversation.toPlainText())
         self.assertEqual(
@@ -1294,9 +1331,9 @@ class PanelWiringTests(unittest.TestCase):
         panel = _make_panel()
         warning = {
             "type": "protocol_warning",
-            "code": "UNKNOWN_NOTIFICATION_IGNORED",
-            "method": "future/notification",
-            "message": "Recorded and ignored",
+            "code": "INVALID_JSONL",
+            "method": "app-server/stdout",
+            "message": "Ignored invalid JSONL",
         }
 
         panel._render_event(warning)
@@ -1450,7 +1487,7 @@ class PanelWiringTests(unittest.TestCase):
         _text, _model, _effort, images, context = panel._client.turn_requests[-1]
         self.assertEqual([attachment], images)
         self.assertEqual("发送中…", panel.send_button.text())
-        self.assertEqual(1, panel.input_edit.clear_focus_calls)
+        self.assertEqual(0, panel.input_edit.clear_focus_calls)
         panel._on_request_failed(
             context,
             {
@@ -1468,7 +1505,7 @@ class PanelWiringTests(unittest.TestCase):
 
         self.assertEqual("参考图片修改当前场景", panel.input_edit.toPlainText())
         self.assertEqual([attachment], panel.attachment_strip.paths())
-        self.assertEqual(1, panel.input_edit.clear_focus_calls)
+        self.assertEqual(0, panel.input_edit.clear_focus_calls)
         records = panel._diagnostic_writer.records
         self.assertEqual(1, len(records))
         self.assertEqual("turn-start-failure", records[0]["slug"])
@@ -2416,13 +2453,221 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual(4, len(panel._client.turn_requests))
         self.assertEqual([], panel._client.session_contexts)
 
-    def test_passive_notifications_are_silent_but_warning_shows_method(self) -> None:
+    def test_system_drive_approval_is_readable_redacted_and_collapsed(self) -> None:
+        panel = _make_panel()
+        system_drive = os.environ.get("SystemDrive") or "C:"
+        target = system_drive + "\\Users\\Public\\HIA-Approval-Test.txt"
+        event = {
+            "type": "server_request",
+            "request_id": "approval-readable-1",
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "cwd": str(REPOSITORY_ROOT),
+                "command": "serialized fallback with broken PowerShell quoting",
+                "commandActions": [
+                    {
+                        "type": "unknown",
+                        "command": (
+                            f"Set-Content -LiteralPath '{target}' -Value test; "
+                            "$headers = @{ Authorization = 'Bearer approval-secret-token'; "
+                            "Cookie = 'session=approval-cookie-secret'; "
+                            "'X-Api-Key' = 'approval-api-key-secret' }; "
+                            "curl.exe --cookie \"session=curl-cookie-secret\" "
+                            "-H \"Authorization: Bearer curl-auth-secret\" "
+                            "https://example.com"
+                        ),
+                    }
+                ],
+                "availableDecisions": [
+                    "accept",
+                    "decline",
+                    "acceptWithExecpolicyAmendment",
+                ],
+                "proposedExecpolicyAmendment": ["Set-Content", "-LiteralPath"],
+                "authorization": "Bearer approval-secret-token",
+                "cookie": "session=approval-cookie-secret",
+                "api_key": "approval-api-key-secret",
+                "tailMarker": "kept-in-complete-json",
+            },
+        }
+
+        panel._render_event(event)
+
+        summary = panel.approval_text.toPlainText()
+        details = panel.approval_details_text.toPlainText()
+        self.assertIn("目的：修改系统盘文件", summary)
+        self.assertIn("操作类型：文件写入", summary)
+        self.assertIn(target, summary)
+        self.assertIn("可能在系统盘创建、修改、移动或删除文件", summary)
+        self.assertEqual("允许一次", panel.allow_button.text())
+        self.assertEqual("拒绝", panel.deny_button.text())
+        self.assertTrue(panel.approval_group.isVisible())
+        self.assertTrue(panel.approval_details_button.isVisible())
+        self.assertFalse(panel.approval_details_button.isChecked())
+        self.assertFalse(panel.approval_details_text.isVisible())
+        self.assertFalse(panel.persistent_allow_note.isVisible())
+        self.assertFalse(panel.persistent_allow_button.isVisible())
+        self.assertTrue(
+            details.startswith(
+                "原始 command：\nSet-Content -LiteralPath"
+            )
+        )
+        self.assertIn("availableDecisions", details)
+        self.assertIn("以后允许相同命令规则", details)
+        self.assertIn("持续授权", details)
+        self.assertIn("kept-in-complete-json", details)
+        for secret in (
+            "approval-secret-token",
+            "approval-cookie-secret",
+            "approval-api-key-secret",
+            "curl-cookie-secret",
+            "curl-auth-secret",
+        ):
+            self.assertNotIn(secret, summary + details)
+        self.assertIn("[REDACTED]", details)
+
+        panel._toggle_approval_details(True)
+        self.assertTrue(panel.approval_details_text.isVisible())
+        self.assertTrue(panel.persistent_allow_note.isVisible())
+        self.assertTrue(panel.persistent_allow_button.isVisible())
+        self.assertIn("持续授权", panel.persistent_allow_note.text())
+        self.assertEqual("收起高级详情", panel.approval_details_button.text())
+        panel._resolve_approval("allow")
+        self.assertEqual(
+            [("approval-readable-1", "allow")],
+            panel._client.approval_decisions,
+        )
+
+    def test_persistent_command_rule_is_an_explicit_advanced_choice(self) -> None:
+        panel = _make_panel()
+        system_drive = os.environ.get("SystemDrive") or "C:"
+        target = system_drive + "\\Users\\Public\\HIA-Approval-Test.txt"
+        panel._render_event(
+            {
+                "type": "server_request",
+                "request_id": "approval-rule-choice",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "commandActions": [
+                        {
+                            "command": (
+                                f"Set-Content -LiteralPath '{target}' -Value test"
+                            )
+                        }
+                    ],
+                    "proposedExecpolicyAmendment": [
+                        "Set-Content",
+                        "-LiteralPath",
+                    ],
+                },
+            }
+        )
+
+        self.assertFalse(panel.persistent_allow_button.isVisible())
+        panel._toggle_approval_details(True)
+        self.assertTrue(panel.persistent_allow_button.isVisible())
+        panel._resolve_approval("allow_rule")
+        self.assertEqual(
+            [("approval-rule-choice", "allow_rule")],
+            panel._client.approval_decisions,
+        )
+
+        panel = _make_panel()
+        panel._render_event(
+            {
+                "type": "server_request",
+                "request_id": "approval-rule-not-offered",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "command": f"Remove-Item -LiteralPath '{target}'",
+                    "availableDecisions": ["accept", "decline"],
+                    "proposedExecpolicyAmendment": ["Remove-Item"],
+                },
+            }
+        )
+        panel._toggle_approval_details(True)
+        self.assertFalse(panel.persistent_allow_button.isVisible())
+
+    def test_approval_purpose_prefers_the_actual_system_target(self) -> None:
+        panel = _make_panel()
+        system_drive = os.environ.get("SystemDrive") or "C:"
+        source = str(REPOSITORY_ROOT / "source.txt")
+        target = system_drive + "\\Users\\Public\\copied.txt"
+        panel._render_event(
+            {
+                "type": "server_request",
+                "request_id": "approval-copy-target",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "commandActions": [
+                        {
+                            "command": (
+                                f"Copy-Item -LiteralPath '{source}' "
+                                f"-Destination '{target}'"
+                            )
+                        }
+                    ]
+                },
+            }
+        )
+        self.assertIn(
+            f"目的：修改系统盘文件：{target}",
+            panel.approval_text.toPlainText(),
+        )
+
+        panel = _make_panel()
+        panel._render_event(
+            {
+                "type": "server_request",
+                "request_id": "approval-env-target",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "command": (
+                        "Set-Content -LiteralPath "
+                        "'${env:SystemDrive}\\HIA-Test.txt' -Value test"
+                    )
+                },
+            }
+        )
+        self.assertIn(
+            "目标路径：${env:SystemDrive}\\HIA-Test.txt",
+            panel.approval_text.toPlainText(),
+        )
+
+    def test_approval_deny_value_and_optional_persistent_note_are_unchanged(self) -> None:
+        panel = _make_panel()
+        panel._render_event(
+            {
+                "type": "server_request",
+                "request_id": "approval-readable-2",
+                "method": "item/fileChange/requestApproval",
+                "params": {
+                    "grantRoot": "C:\\ProgramData\\HIA",
+                    "reason": "write requested",
+                },
+            }
+        )
+
+        details = panel.approval_details_text.toPlainText()
+        self.assertIn("允许修改系统盘目录", panel.approval_text.toPlainText())
+        self.assertNotIn("以后允许相同命令规则", details)
+        panel._toggle_approval_details(True)
+        self.assertFalse(panel.persistent_allow_note.isVisible())
+        self.assertFalse(panel.persistent_allow_button.isVisible())
+        panel._resolve_approval("deny")
+        self.assertEqual(
+            [("approval-readable-2", "deny")],
+            panel._client.approval_decisions,
+        )
+
+    def test_passive_and_unknown_notifications_are_silent(self) -> None:
         panel = _make_panel()
         before = panel.conversation.toPlainText()
         passive_methods = (
             "remoteControl/status/changed",
             "mcpServer/startupStatus/updated",
             "account/rateLimits/updated",
+            "skills/changed",
         )
         panel._on_events(
             {
@@ -2449,10 +2694,7 @@ class PanelWiringTests(unittest.TestCase):
                 "message": "Recorded and ignored",
             }
         )
-        warning = panel.conversation.toPlainText()
-        self.assertIn("UNKNOWN_NOTIFICATION_IGNORED", warning)
-        self.assertIn("future/unknown/notification", warning)
-        self.assertIn("协议提示：", warning)
+        self.assertEqual(before, panel.conversation.toPlainText())
 
     def test_unicode_model_and_effort_reach_turn_start_without_changes(self) -> None:
         panel = _make_panel()
