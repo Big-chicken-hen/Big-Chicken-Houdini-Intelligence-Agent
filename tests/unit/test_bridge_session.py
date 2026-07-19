@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -20,8 +21,10 @@ from hia_bridge.session import (  # noqa: E402
     MODEL_LIST_MAX_PAGES,
     MODEL_LIST_PAGE_SIZE,
     MAX_LOCAL_IMAGES,
+    THREAD_PREVIEW_MAX_LENGTH,
     BridgeSession,
     _requires_system_drive_approval,
+    _thread_cwd_filters,
 )
 
 
@@ -56,7 +59,7 @@ class _ClientStub:
         if method == "thread/start":
             return {"thread": {"id": "thread-test"}}
         if method == "thread/resume":
-            return {"thread": {"id": params["threadId"]}}
+            return {"thread": {"id": params["threadId"], "turns": []}}
         if method == "thread/read":
             return {"thread": {"id": params["threadId"], "turns": []}}
         if method == "turn/interrupt":
@@ -77,6 +80,36 @@ class _ScriptedModelClient(_ClientStub):
         if not self.responses:
             raise AssertionError("Unexpected extra model/list page request")
         return self.responses.pop(0)
+
+
+class _ThreadHistoryClient(_ClientStub):
+    def __init__(self, list_response: dict[str, Any]) -> None:
+        super().__init__()
+        self.list_response = list_response
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.requests.append((method, dict(params)))
+        if method == "thread/list":
+            return self.list_response
+        if method == "thread/name/set":
+            return {}
+        return super().request(method, params)
+
+
+class _ThreadContentClient(_ClientStub):
+    def __init__(self, response: dict[str, Any]) -> None:
+        super().__init__()
+        self.response = response
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.requests.append((method, dict(params)))
+        if method in {"thread/resume", "thread/read"}:
+            return self.response
+        if method == "turn/start":
+            return {"turn": {"id": "turn-after-resume", "status": "inProgress"}}
+        return super().request(method, params)
 
 
 class _RecordingClient(_ClientStub):
@@ -178,6 +211,14 @@ def _model_entry(
         "hidden": hidden,
         "isDefault": model == "model-a",
         "inputModalities": ["text", "image"],
+        "serviceTiers": [
+            {
+                "id": "priority",
+                "name": "Fast",
+                "description": "Faster responses",
+            }
+        ],
+        "defaultServiceTier": "priority" if model == "model-a" else None,
         "supportedReasoningEfforts": [
             {"reasoningEffort": "low", "description": "Faster"},
             {"reasoningEffort": "high", "description": "Deeper"},
@@ -611,6 +652,268 @@ class _FailingTurnClient(_ClientStub):
         raise AssertionError(f"Unexpected failure mode: {self.failure}")
 
 
+class BridgeSessionThreadHistoryTests(unittest.TestCase):
+    def test_list_threads_sanitizes_preview_but_keeps_identity_fields_strict(
+        self,
+    ) -> None:
+        preview = "first line\nsecond\tline\x00" + "x" * 20_000
+        client = _ThreadHistoryClient(
+            {
+                "data": [
+                    {
+                        "id": "thread-current",
+                        "cwd": str(REPOSITORY_ROOT),
+                        "name": None,
+                        "preview": preview,
+                        "updatedAt": 20,
+                    }
+                ]
+            }
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.list_threads()
+
+        sanitized = result["threads"][0]["preview"]
+        self.assertLessEqual(len(sanitized), THREAD_PREVIEW_MAX_LENGTH)
+        self.assertTrue(sanitized.startswith("first line second line"))
+        self.assertFalse(any(ord(character) < 32 for character in sanitized))
+
+        for field, value in (
+            ("id", "bad\nthread"),
+            ("cwd", str(REPOSITORY_ROOT) + "\nforeign"),
+        ):
+            with self.subTest(field=field):
+                entry = {
+                    "id": "thread-current",
+                    "cwd": str(REPOSITORY_ROOT),
+                    "name": None,
+                    "preview": "valid",
+                    "updatedAt": 20,
+                }
+                entry[field] = value
+                strict_session = BridgeSession(
+                    REPOSITORY_ROOT,
+                    _ThreadHistoryClient({"data": [entry]}),
+                    EventBuffer(),
+                )
+                with self.assertRaises(BridgeError) as raised:
+                    strict_session.list_threads()
+                self.assertEqual("INVALID_THREAD_LIST_RESPONSE", raised.exception.code)
+                self.assertEqual(field, raised.exception.details["field"])
+
+    def test_resume_projects_complete_chat_once_and_continues_same_thread(self) -> None:
+        large_tool_output = "x" * (4 * 1024 * 1024 + 1)
+        client = _ThreadContentClient(
+            {
+                "thread": {
+                    "id": "thread-current",
+                    "turns": [
+                        {
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "content": [
+                                        {"type": "text", "text": "第一条完整问题"},
+                                        {
+                                            "type": "localImage",
+                                            "path": r"E:\refs\cabin.png",
+                                        },
+                                        {"type": "skill", "name": "ignored"},
+                                    ],
+                                },
+                                {
+                                    "type": "commandExecution",
+                                    "aggregatedOutput": large_tool_output,
+                                },
+                                {"type": "agentMessage", "text": "第一条完整回答"},
+                            ]
+                        },
+                        {
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "content": [
+                                        {"type": "text", "text": "继续修改木屋"}
+                                    ],
+                                },
+                                {"type": "agentMessage", "text": "第二条完整回答"},
+                            ]
+                        },
+                    ],
+                }
+            }
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.resume_thread("thread-current")
+
+        self.assertEqual(["thread/resume"], [method for method, _ in client.requests])
+        self.assertNotIn("resume", result)
+        self.assertEqual(
+            [
+                "userMessage",
+                "agentMessage",
+                "userMessage",
+                "agentMessage",
+            ],
+            [
+                item["type"]
+                for turn in result["read"]["thread"]["turns"]
+                for item in turn["items"]
+            ],
+        )
+        self.assertEqual(
+            [
+                {"type": "text", "text": "第一条完整问题"},
+                {"type": "localImage", "path": r"E:\refs\cabin.png"},
+            ],
+            result["read"]["thread"]["turns"][0]["items"][0]["content"],
+        )
+        self.assertLess(
+            len(json.dumps(result, ensure_ascii=False).encode("utf-8")),
+            4 * 1024 * 1024,
+        )
+
+        session.start_turn("继续同一会话")
+        self.assertEqual("thread-current", client.requests[-1][1]["threadId"])
+
+    def test_read_projects_all_chat_messages_in_original_order(self) -> None:
+        messages = [
+            {"type": "agentMessage", "text": f"message-{index}"}
+            for index in range(105)
+        ]
+        client = _ThreadContentClient(
+            {
+                "thread": {
+                    "id": "thread-current",
+                    "turns": [{"items": messages}],
+                }
+            }
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.read_thread("thread-current")
+
+        projected = result["result"]["thread"]["turns"][0]["items"]
+        self.assertEqual(105, len(projected))
+        self.assertEqual("message-0", projected[0]["text"])
+        self.assertEqual("message-104", projected[-1]["text"])
+
+    def test_list_threads_filters_response_after_dual_cwd_query(self) -> None:
+        client = _ThreadHistoryClient(
+            {
+                "data": [
+                    {
+                        "id": "thread-foreign",
+                        "cwd": str(REPOSITORY_ROOT.parent / "other-project"),
+                        "name": "Other project",
+                        "preview": "must not leak",
+                        "updatedAt": 1,
+                    },
+                    {
+                        "id": "thread-current",
+                        "cwd": str(REPOSITORY_ROOT),
+                        "name": "Current project",
+                        "preview": "latest Houdini work",
+                        "updatedAt": 20,
+                        "recencyAt": 21,
+                        "path": "must-not-be-forwarded",
+                    },
+                ]
+            }
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.list_threads()
+
+        self.assertEqual(
+            [
+                (
+                    "thread/list",
+                    {
+                        "cwd": [
+                            str(REPOSITORY_ROOT),
+                            "\\\\?\\" + str(REPOSITORY_ROOT),
+                        ],
+                        "archived": False,
+                        "limit": 20,
+                        "modelProviders": [],
+                        "useStateDbOnly": True,
+                        "sortKey": "recency_at",
+                        "sortDirection": "desc",
+                    },
+                )
+            ],
+            client.requests,
+        )
+        self.assertEqual(
+            {
+                "threads": [
+                    {
+                        "thread_id": "thread-current",
+                        "name": "Current project",
+                        "preview": "latest Houdini work",
+                        "updated_at": 20,
+                        "recency_at": 21,
+                    }
+                ]
+            },
+            result,
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended paths only")
+    def test_list_threads_accepts_windows_extended_cwd(self) -> None:
+        client = _ThreadHistoryClient(
+            {
+                "data": [
+                    {
+                        "id": "thread-current",
+                        "cwd": "\\\\?\\" + str(REPOSITORY_ROOT),
+                        "name": "Recovered thread",
+                        "preview": "survived a Houdini crash",
+                        "updatedAt": 30,
+                    }
+                ]
+            }
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.list_threads()
+
+        self.assertEqual("thread-current", result["threads"][0]["thread_id"])
+
+    def test_thread_cwd_filters_cover_drive_and_unc_extended_forms(self) -> None:
+        self.assertEqual(
+            [r"E:\portable-project", r"\\?\E:\portable-project"],
+            _thread_cwd_filters(r"E:\portable-project"),
+        )
+        self.assertEqual(
+            [r"\\server\share\portable-project", r"\\?\UNC\server\share\portable-project"],
+            _thread_cwd_filters(r"\\?\UNC\server\share\portable-project"),
+        )
+
+    def test_rename_thread_forwards_the_original_name(self) -> None:
+        client = _ThreadHistoryClient({"data": []})
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+        name = "  Houdini lookdev  "
+
+        result = session.rename_thread("thread-current", name)
+
+        self.assertEqual(
+            ("thread/name/set", {"threadId": "thread-current", "name": name}),
+            client.requests[-1],
+        )
+        self.assertEqual(
+            {
+                "thread_id": "thread-current",
+                "name": name,
+                "result": {},
+            },
+            result,
+        )
+
+
 class BridgeSessionModelCatalogTests(unittest.TestCase):
     def make_session(self, responses: list[Any]) -> tuple[BridgeSession, _ScriptedModelClient]:
         client = _ScriptedModelClient(responses)
@@ -651,6 +954,8 @@ class BridgeSessionModelCatalogTests(unittest.TestCase):
             "description",
             "isDefault",
             "inputModalities",
+            "serviceTiers",
+            "defaultServiceTier",
             "supportedReasoningEfforts",
             "defaultReasoningEffort",
         }
@@ -660,13 +965,37 @@ class BridgeSessionModelCatalogTests(unittest.TestCase):
                 {"reasoningEffort", "description"},
                 set(model["supportedReasoningEfforts"][0]),
             )
+            self.assertEqual(
+                {"id", "name", "description"},
+                set(model["serviceTiers"][0]),
+            )
+        self.assertEqual("priority", result["models"][0]["defaultServiceTier"])
+        self.assertIsNone(result["models"][1]["defaultServiceTier"])
 
     def test_model_list_rejects_cursor_cycle_and_malformed_response(self) -> None:
+        invalid_service_tiers = _model_entry("invalid-service-tiers")
+        invalid_service_tiers["serviceTiers"] = "priority"
+        duplicate_service_tiers = _model_entry("duplicate-service-tiers")
+        duplicate_service_tiers["serviceTiers"] = [
+            duplicate_service_tiers["serviceTiers"][0],
+            dict(duplicate_service_tiers["serviceTiers"][0]),
+        ]
+        invalid_default_service_tier = _model_entry("invalid-default-service-tier")
+        invalid_default_service_tier["defaultServiceTier"] = "unadvertised"
         scenarios: dict[str, list[Any]] = {
             "non_object_root": [[]],
             "non_array_data": [{"data": {}, "nextCursor": None}],
             "invalid_model": [{"data": [{}], "nextCursor": None}],
             "invalid_cursor": [{"data": [], "nextCursor": 3}],
+            "invalid_service_tiers": [
+                {"data": [invalid_service_tiers], "nextCursor": None}
+            ],
+            "duplicate_service_tiers": [
+                {"data": [duplicate_service_tiers], "nextCursor": None}
+            ],
+            "invalid_default_service_tier": [
+                {"data": [invalid_default_service_tier], "nextCursor": None}
+            ],
             "cursor_cycle": [
                 {"data": [], "nextCursor": "same"},
                 {"data": [], "nextCursor": "same"},
@@ -1131,8 +1460,9 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         self.assertEqual("thread/start", method)
         self.assertEqual("workspace-write", params["sandbox"])
         self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertIsNone(params["serviceTier"])
         instructions = params["developerInstructions"]
-        self.assertLessEqual(len(instructions), 900)
+        self.assertLessEqual(len(instructions), 1_000)
         for required_text in (
             "当前场景的创建、修改、连接、材质和动画默认使用",
             "FXHoudini MCP 与 HOM",
@@ -1156,12 +1486,15 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "不要调用 request_user_input",
             "信息不足时采用合理默认值",
             "无法执行才报告原因",
-            "截图写 HIA_CACHE_DIR/screenshots",
+            "自动截图写 HIA_CACHE_DIR/screenshots",
             "预览写 previews",
             "中间图写 tmp",
-            "文件名用时间戳加短随机后缀",
-            "支持输出路径时显式传入",
-            "不写仓库根、HIP 同目录、桌面或系统临时目录",
+            "文件名加时间戳和短随机后缀",
+            "插件源码、内部缓存、自动截图/预览/附件/临时/诊断必须留项目内",
+            "用户明确指定的最终渲染、EXR、视频、USD、模拟缓存或导出是用户交付物",
+            "可写所选普通本地项目外目录",
+            "未指定才用 HIA_RENDER_OUTPUT_DIR",
+            "始终报告最终路径",
             "禁止屏幕接管",
         ):
             with self.subTest(required_text=required_text):
@@ -1181,7 +1514,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         session.start_thread()
 
         instructions = client.requests[0][1]["developerInstructions"]
-        self.assertLessEqual(len(instructions), 900)
+        self.assertLessEqual(len(instructions), 1_000)
         for required_text in (
             "HIA MCP V2 与 HOM",
             "hia_execute_hom 批量执行",
@@ -1238,12 +1571,13 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
     def test_thread_resume_enables_workspace_write_with_on_request_approval(self) -> None:
         session, client = self.make_session()
 
-        session.resume_thread("thread-existing")
+        session.resume_thread("thread-existing", service_tier="priority")
 
         method, params = client.requests[0]
         self.assertEqual("thread/resume", method)
         self.assertEqual("workspace-write", params["sandbox"])
         self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual("priority", params["serviceTier"])
         self.assertIn("FXHoudini MCP 与 HOM", params["developerInstructions"])
         self.assertNotIn("baseInstructions", params)
         self.assertNotIn("config", params)
@@ -1253,11 +1587,12 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         session.start_thread()
         client.requests.clear()
 
-        session.start_turn("read Houdini state")
+        session.start_turn("read Houdini state", service_tier="priority")
 
         method, params = client.requests[0]
         self.assertEqual("turn/start", method)
         self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual("priority", params["serviceTier"])
         self.assertEqual(
             {"type": "workspaceWrite", "networkAccess": False},
             params["sandboxPolicy"],

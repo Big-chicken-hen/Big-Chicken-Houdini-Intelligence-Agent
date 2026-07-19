@@ -211,37 +211,89 @@ class BridgeHTTPTests(unittest.TestCase):
             "description",
             "isDefault",
             "inputModalities",
+            "serviceTiers",
+            "defaultServiceTier",
             "supportedReasoningEfforts",
             "defaultReasoningEffort",
         }
         for model in response["models"]:
             self.assertEqual(expected_keys, set(model))
             self.assertNotIn("hidden", model)
+            self.assertEqual([], model["serviceTiers"])
+            self.assertIsNone(model["defaultServiceTier"])
             for effort in model["supportedReasoningEfforts"]:
                 self.assertEqual(
                     {"reasoningEffort", "description"},
                     set(effort),
                 )
 
-    def test_unicode_model_and_effort_are_forwarded_without_loss(self) -> None:
+    def test_thread_history_list_and_rename_routes(self) -> None:
+        listed = self.request("GET", "/v1/threads")
+
+        self.assertEqual(
+            {
+                "ok": True,
+                "threads": [
+                    {
+                        "thread_id": "thread-fake",
+                        "name": "Fake Thread",
+                        "preview": "fake thread",
+                        "updated_at": 1_720_000_000,
+                        "recency_at": 1_720_000_001,
+                    }
+                ],
+            },
+            listed,
+        )
+
+        name = "  Houdini lookdev  "
+        renamed = self.request(
+            "POST",
+            "/v1/threads/name",
+            {"thread_id": "thread-fake", "name": name},
+        )
+        self.assertEqual("thread-fake", renamed["thread_id"])
+        self.assertEqual(name, renamed["name"])
+        self.assertEqual(
+            {"threadId": "thread-fake", "name": name},
+            renamed["result"]["receivedParams"],
+        )
+
+    def test_unicode_model_effort_and_service_tier_are_forwarded_without_loss(
+        self,
+    ) -> None:
         original = "中文输入测试：请生成一张四条腿的桌子，尺寸为 120×60×75 厘米。"
         model = "fake-default-model"
         started = self.request(
             "POST",
             "/v1/session",
-            {"action": "start", "model": model},
+            {
+                "action": "start",
+                "model": model,
+                "service_tier": "priority",
+            },
         )
         self.assertEqual(model, started["result"]["receivedParams"]["model"])
+        self.assertEqual(
+            "priority",
+            started["result"]["receivedParams"]["serviceTier"],
+        )
 
         turn = self.request(
             "POST",
             "/v1/turn",
-            {"text": original, "model": model, "effort": "high"},
+            {
+                "text": original,
+                "model": model,
+                "effort": "high",
+                "service_tier": "priority",
+            },
         )
         received = turn["result"]["receivedParams"]
         self.assertEqual(original, received["input"][0]["text"])
         self.assertEqual(model, received["model"])
         self.assertEqual("high", received["effort"])
+        self.assertEqual("priority", received["serviceTier"])
 
     def test_turn_endpoint_forwards_local_image_paths_to_session(self) -> None:
         attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
@@ -323,7 +375,7 @@ class BridgeHTTPTests(unittest.TestCase):
                 received["input"],
             )
 
-    def test_model_and_effort_validation_is_structured(self) -> None:
+    def test_model_effort_and_service_tier_validation_is_structured(self) -> None:
         for value in ("", "   ", "bad\nmodel", 7, "m" * 257):
             with self.subTest(model=value):
                 with self.assertRaises(HTTPError) as raised:
@@ -355,14 +407,31 @@ class BridgeHTTPTests(unittest.TestCase):
                     payload["structured_error"]["code"],
                 )
 
+        for value in ("", "   ", "bad\ntier", 7, "t" * 257):
+            with self.subTest(service_tier=value):
+                with self.assertRaises(HTTPError) as raised:
+                    self.request(
+                        "POST",
+                        "/v1/turn",
+                        {"text": "hello", "service_tier": value},
+                    )
+                self.assertEqual(400, raised.exception.code)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(
+                    "INVALID_SERVICE_TIER",
+                    payload["structured_error"]["code"],
+                )
+
     def test_session_turn_events_approval_and_interrupt(self) -> None:
         started = self.request("POST", "/v1/session", {"action": "start"})
         self.assertEqual("thread-fake", started["thread_id"])
         self.assertNotIn("model", started["result"]["receivedParams"])
+        self.assertIsNone(started["result"]["receivedParams"]["serviceTier"])
         turn = self.request("POST", "/v1/turn", {"text": "hello"})
         self.assertEqual("turn-fake", turn["turn_id"])
         self.assertNotIn("model", turn["result"]["receivedParams"])
         self.assertNotIn("effort", turn["result"]["receivedParams"])
+        self.assertIsNone(turn["result"]["receivedParams"]["serviceTier"])
 
         _, after = self.wait_for_event(
             lambda event: event.get("type") == "server_request"

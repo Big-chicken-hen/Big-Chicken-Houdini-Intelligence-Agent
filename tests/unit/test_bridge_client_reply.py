@@ -274,6 +274,7 @@ class BridgeClientQueueTests(unittest.TestCase):
             "参考这些图片",
             model="model-a",
             effort="high",
+            service_tier="priority",
             local_image_paths=image_paths,
         )
 
@@ -285,9 +286,86 @@ class BridgeClientQueueTests(unittest.TestCase):
                 "text": "参考这些图片",
                 "model": "model-a",
                 "effort": "high",
+                "service_tier": "priority",
                 "local_image_paths": image_paths,
             },
             submission["payload"],
+        )
+
+    def test_thread_start_and_resume_forward_dynamic_service_tier(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.start_thread(model="model-a", service_tier="priority")
+        self.assertEqual(
+            {
+                "action": "start",
+                "model": "model-a",
+                "service_tier": "priority",
+            },
+            transport.submissions[-1]["payload"],
+        )
+
+        client.resume_thread("thread-a", service_tier=None)
+        self.assertEqual(
+            {
+                "action": "resume",
+                "thread_id": "thread-a",
+                "service_tier": None,
+            },
+            transport.submissions[-1]["payload"],
+        )
+
+    def test_thread_history_requests_preserve_paths_payloads_and_contexts(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.get_threads()
+        client.read_thread("thread-a", context="history_read:thread-a")
+        client.rename_thread(
+            "thread-a",
+            "Houdini lookdev",
+            context="history_rename:thread-a",
+        )
+        client.resume_thread(
+            "thread-a",
+            service_tier="priority",
+            context="history_resume:thread-a",
+        )
+
+        self.assertEqual(
+            [
+                ("GET", "/v1/threads", None, "threads"),
+                (
+                    "POST",
+                    "/v1/session",
+                    {"action": "read", "thread_id": "thread-a"},
+                    "history_read:thread-a",
+                ),
+                (
+                    "POST",
+                    "/v1/threads/name",
+                    {"thread_id": "thread-a", "name": "Houdini lookdev"},
+                    "history_rename:thread-a",
+                ),
+                (
+                    "POST",
+                    "/v1/session",
+                    {
+                        "action": "resume",
+                        "thread_id": "thread-a",
+                        "service_tier": "priority",
+                    },
+                    "history_resume:thread-a",
+                ),
+            ],
+            [
+                (
+                    submission["method"],
+                    submission["path"],
+                    submission["payload"],
+                    submission["context"],
+                )
+                for submission in transport.submissions
+            ],
         )
 
     def test_turn_steer_forwards_text_and_local_images_without_starting_turn(self) -> None:

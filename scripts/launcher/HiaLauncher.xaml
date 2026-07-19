@@ -579,6 +579,8 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="150" />
@@ -663,6 +665,51 @@
                     Text="尚未选择 Bridge python.exe"
                     TextTrimming="CharacterEllipsis"
                     ToolTip="尚未选择 Bridge python.exe" />
+
+                <TextBlock
+                    Grid.Row="6"
+                    Margin="0,4,0,0"
+                    VerticalAlignment="Center"
+                    Foreground="{StaticResource TextSecondaryBrush}"
+                    Text="最终渲染输出目录" />
+                <Border
+                    Grid.Row="6"
+                    Grid.Column="1"
+                    Margin="0,4,10,0"
+                    Background="{StaticResource PickerBackgroundBrush}"
+                    BorderBrush="{StaticResource PickerBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="9">
+                    <TextBox
+                        x:Name="RenderOutputTextBox"
+                        Padding="11,8"
+                        AutomationProperties.Name="最终渲染输出目录"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        CaretBrush="{StaticResource AccentCyanBrush}"
+                        Foreground="{StaticResource PickerTextBrush}"
+                        TabIndex="5"
+                        ToolTip="留空时使用项目 .runtime/cache"
+                        VerticalContentAlignment="Center" />
+                </Border>
+                <Button
+                    x:Name="BrowseRenderOutputButton"
+                    Grid.Row="6"
+                    Grid.Column="2"
+                    Margin="0,4,0,0"
+                    AutomationProperties.Name="选择最终渲染输出目录"
+                    Content="选择…"
+                    Style="{StaticResource CompactButtonStyle}"
+                    TabIndex="6" />
+                <TextBlock
+                    Grid.Row="7"
+                    Grid.Column="1"
+                    Grid.ColumnSpan="2"
+                    Margin="3,6,0,0"
+                    Foreground="{StaticResource TextMutedBrush}"
+                    FontSize="11"
+                    Text="最终 EXR、图片、视频、USD、导出和模拟缓存可放在这里；留空时使用项目 .runtime/cache。它与内部截图、预览和临时缓存目录不同。"
+                    TextWrapping="Wrap" />
             </Grid>
         </Border>
 
@@ -844,6 +891,8 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="10" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
@@ -853,32 +902,40 @@
                         AutomationProperties.Name="重新扫描"
                         Content="重新扫描"
                         Style="{StaticResource ActionButtonStyle}"
-                        TabIndex="4" />
+                        TabIndex="7" />
                     <Button
                         x:Name="RepairButton"
                         Grid.Column="2"
                         AutomationProperties.Name="修复安全项目"
                         Content="修复安全项目"
                         Style="{StaticResource ActionButtonStyle}"
-                        TabIndex="5" />
+                        TabIndex="8" />
+                    <Button
+                        x:Name="CleanupScreenshotsButton"
+                        Grid.Column="4"
+                        AutomationProperties.Name="清理截图缓存"
+                        Content="清理截图缓存"
+                        Style="{StaticResource ActionButtonStyle}"
+                        TabIndex="9"
+                        ToolTip="只清理项目 .runtime\cache\screenshots 第一层的 HIA PNG 截图" />
                     <Button
                         x:Name="CopyReportButton"
-                        Grid.Column="4"
+                        Grid.Column="6"
                         AutomationProperties.Name="复制报告路径"
                         Content="复制报告路径"
                         IsEnabled="False"
                         Style="{StaticResource ActionButtonStyle}"
-                        TabIndex="6" />
+                        TabIndex="10" />
                     <Button
                         x:Name="LaunchButton"
-                        Grid.Column="6"
+                        Grid.Column="8"
                         MinWidth="172"
                         AutomationProperties.Name="启动 Houdini"
                         Content="启动 Houdini  ✦"
                         IsDefault="True"
                         IsEnabled="False"
                         Style="{StaticResource PrimaryButtonStyle}"
-                        TabIndex="7" />
+                        TabIndex="11" />
                 </Grid>
             </Grid>
         </Border>

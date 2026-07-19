@@ -20,6 +20,14 @@ Local HTTP services bind only to `127.0.0.1` and use a fresh random token for ea
 
 Creation and modification requests target the currently open scene by default. Native `hython` is a separate helper used only for an explicit offline HIP, batch job, independent verification, long simulation, or background render. An unavailable live MCP connection is reported directly and never causes an implicit switch to an offline project.
 
+## Runtime cache and final outputs
+
+Automatic screenshots, AI previews, attachments, temporary files, and diagnostics remain under the project-local `.runtime/cache`, `.runtime/attachments`, or `.runtime/diagnostics` directories. The launcher passes `HIA_RENDER_OUTPUT_DIR` to the Bridge, Codex app-server, selected MCP child, and Houdini; it defaults to `<project-root>/.runtime/cache` when the user has not selected a final-output directory.
+
+A user-explicit final render, EXR, video, USD, simulation cache, or export may use an ordinary local directory outside the plugin repository. That exception does not change the project-local cache boundary of `hia_capture_viewport`. The completed operation reports the actual final output path.
+
+The launcher's only cache-deletion operation is the user-invoked screenshot cleanup. It recomputes `<project-root>/.runtime/cache/screenshots`, requires an exact case-insensitive path match, rejects any reparse point in the project-root/runtime/cache/screenshots chain, previews the fixed candidate set, and requests one confirmation. Deletion is limited to unchanged, ordinary, first-level PNG files from that preview; subdirectories and every other runtime or delivery location remain outside its scope.
+
 ## Conversation and automatic compaction
 
 The Panel owns presentation only: responsive user and Codex cards, Markdown and code, attachments, selection context, and one tool-activity card per Turn. It does not summarize or maintain a second memory.
@@ -52,7 +60,7 @@ Reports remain local and are ignored by Git through the existing `.runtime/` rul
   → locate the project root and invoke scripts/hia-launcher.ps1
 or scripts/hia-launcher.ps1 directly
   → read-only discovery and bounded probes
-  → one backend choice in .runtime/launcher/settings.json
+  → one backend choice and optional final-output directory in .runtime/launcher/settings.json
   → scripts/launch-houdini.ps1
   → one Bridge/app-server/Houdini backend lifecycle
 ```
@@ -61,4 +69,6 @@ The distributable launcher is a thin self-contained .NET 8 WPF WinExe host. It d
 
 The launcher uses the standard Windows window frame, not another Agent or service. Its module derives the project root from the launcher location, enumerates Houdini without a version allowlist, requires explicit selection when more than one installation exists, and binds port probes only to `127.0.0.1`. `hia_v2` is the default; `fxhoudini` is an explicit fallback. `scripts/launch-houdini.ps1` remains the only lifecycle entry and injects only the selected backend's paths and environment. HIA V2 uses its own random port/token, `HIA_MCP_V2_*`, `/hia-mcp-v2/v1/*`, and `.runtime/hia-mcp-v2`; fallback keeps the locked third-party runtime without sharing those names.
 
-Portable project configuration uses paths relative to the project or `$HIA_PROJECT_ROOT`, which the lifecycle script supplies only to child processes. Safe repair is deliberately limited to project-local runtime directories and those locked relative-path fields.
+Final delivery output is a separate launcher setting, not an internal cache or a Panel/session-history feature. A non-empty `render_output_dir` may point to any ordinary writable local absolute directory outside Windows and Houdini installations; an empty value resolves to project-local `.runtime/cache`. The WPF launcher validates and places only the resolved value in the child lifecycle process environment as `HIA_RENDER_OUTPUT_DIR`. The lifecycle validates it again, creates it without clearing contents, and injects it independently into the Bridge and Houdini child environments. Existing `HIA_CACHE_DIR` remains project-local and continues to own only internal screenshots, previews, and short-lived cache data; the variables are never assigned from one another.
+
+Portable project configuration uses paths relative to the project or `$HIA_PROJECT_ROOT`, which the lifecycle script supplies only to child processes. The explicit final-output delivery directory is the sole launcher setting that may intentionally be an absolute path outside the project; leaving it empty retains fully portable project-local behavior. Safe repair is deliberately limited to project-local runtime directories and those locked relative-path fields.

@@ -359,23 +359,30 @@ $check | ConvertTo-Json -Compress
         fake_root.mkdir()
         houdini = fake_root / "Houdini" / "bin" / "houdini.exe"
         bridge = fake_root / "Python" / "python.exe"
+        render_output = fake_root / "Final Output"
         self.run_powershell(
             f"""
 Write-HiaLauncherSettings `
     -ProjectRoot {_ps_literal(fake_root)} `
     -HoudiniExe {_ps_literal(houdini)} `
     -BridgePython {_ps_literal(bridge)} `
+    -RenderOutputDir {_ps_literal(render_output)} `
     -McpBackend fxhoudini | Out-Null
 """
         )
         settings_path = fake_root / ".runtime" / "launcher" / "settings.json"
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
-        self.assertEqual({"houdini_exe", "bridge_python", "mcp_backend"}, set(settings))
+        self.assertEqual(
+            {"houdini_exe", "bridge_python", "render_output_dir", "mcp_backend"},
+            set(settings),
+        )
         self.assertEqual(str(houdini), settings["houdini_exe"])
         self.assertEqual(str(bridge), settings["bridge_python"])
+        self.assertEqual(str(render_output), settings["render_output_dir"])
         self.assertEqual("fxhoudini", settings["mcp_backend"])
 
         settings.pop("mcp_backend")
+        settings.pop("render_output_dir")
         settings_path.write_text(json.dumps(settings), encoding="utf-8")
         output = self.run_powershell(
             f"""
@@ -386,11 +393,330 @@ $choices = @(Get-HiaMcpBackendChoices)
         )
         payload = json.loads(output)
         self.assertEqual("hia_v2", payload["settings"]["mcp_backend"])
+        self.assertEqual("", payload["settings"]["render_output_dir"])
         self.assertEqual(str(houdini), payload["settings"]["houdini_exe"])
         self.assertEqual(
             ["hia_v2", "fxhoudini"],
             [choice["id"] for choice in payload["choices"]],
         )
+
+    def test_render_output_directory_defaults_validates_and_creates_writable_local_path(self) -> None:
+        fake_root = self.sandbox / "render-output-project"
+        fake_root.mkdir()
+        houdini_root = fake_root / "Houdini 22.0"
+        houdini = houdini_root / "bin" / "houdini.exe"
+        custom_output = fake_root / "deliverables" / "final"
+        output = self.run_powershell(
+            f"""
+$root = {_ps_literal(fake_root)}
+$houdini = {_ps_literal(houdini)}
+$custom = {_ps_literal(custom_output)}
+$default = Resolve-HiaRenderOutputDirectory -ProjectRoot $root -Path '' -HoudiniExe $houdini
+$beforeCreate = Test-Path -LiteralPath $custom
+$resolved = Resolve-HiaRenderOutputDirectory -ProjectRoot $root -Path $custom -HoudiniExe $houdini
+$created = Resolve-HiaRenderOutputDirectory -ProjectRoot $root -Path $custom -HoudiniExe $houdini -Create
+$outside = Resolve-HiaRenderOutputDirectory -ProjectRoot $root -Path {_ps_literal(self.sandbox / 'outside-render-output')} -HoudiniExe $houdini -Create
+[IO.File]::WriteAllText((Join-Path $created 'keep.txt'), 'keep')
+$createdAgain = Resolve-HiaRenderOutputDirectory -ProjectRoot $root -Path $custom -HoudiniExe $houdini -Create
+function Get-RenderOutputError([string]$Value) {{
+    try {{
+        Resolve-HiaRenderOutputDirectory -ProjectRoot $root -Path $Value -HoudiniExe $houdini | Out-Null
+        return ''
+    }} catch {{
+        return [string]$_.Exception.Message
+    }}
+}}
+[pscustomobject]@{{
+    default = $default
+    default_exists = (Test-Path -LiteralPath $default)
+    before_create = $beforeCreate
+    resolved = $resolved
+    created = $createdAgain
+    keep = (Test-Path -LiteralPath (Join-Path $createdAgain 'keep.txt') -PathType Leaf)
+    relative_error = (Get-RenderOutputError 'relative\output')
+    device_error = (Get-RenderOutputError '\\.\C:\HIA-output')
+    outside = $outside
+    windows_error = (Get-RenderOutputError (Join-Path $env:SystemRoot 'HIA-output-test'))
+    houdini_error = (Get-RenderOutputError (Join-Path {_ps_literal(houdini_root)} 'renders'))
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual(str(fake_root / ".runtime" / "cache"), payload["default"])
+        self.assertFalse(payload["default_exists"])
+        self.assertFalse(payload["before_create"])
+        self.assertEqual(str(custom_output), payload["resolved"])
+        self.assertEqual(str(custom_output), payload["created"])
+        self.assertEqual(str(self.sandbox / "outside-render-output"), payload["outside"])
+        self.assertTrue(payload["keep"])
+        for key in (
+            "relative_error",
+            "device_error",
+            "windows_error",
+            "houdini_error",
+        ):
+            self.assertTrue(payload[key], key)
+        self.assertEqual([], list(custom_output.glob(".hia-write-probe-*.tmp")))
+
+    def test_screenshot_cache_cleanup_deletes_only_confirmed_top_level_png_files(self) -> None:
+        fake_root = self.sandbox / "screenshot-cleanup-project"
+        (fake_root / "scripts").mkdir(parents=True)
+        (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (fake_root / "scripts" / "launch-houdini.ps1").write_text(
+            "# lifecycle marker\n", encoding="utf-8"
+        )
+        screenshots = fake_root / ".runtime" / "cache" / "screenshots"
+        screenshots.mkdir(parents=True)
+        first = screenshots / "viewport-a.png"
+        second = screenshots / "flipbook-b.PNG"
+        first.write_bytes(b"abc")
+        second.write_bytes(b"12345")
+        keep_jpg = screenshots / "keep.jpg"
+        keep_text = screenshots / "keep.txt"
+        keep_jpg.write_bytes(b"jpg")
+        keep_text.write_text("keep", encoding="utf-8")
+        nested = screenshots / "nested"
+        nested.mkdir()
+        nested_png = nested / "inside.png"
+        nested_png.write_bytes(b"nested")
+
+        untouched_files = []
+        for relative in (
+            Path(".runtime/cache/previews/keep.png"),
+            Path(".runtime/cache/tmp/keep.png"),
+            Path(".runtime/attachments/keep.png"),
+            Path(".runtime/diagnostics/keep.png"),
+        ):
+            path = fake_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"untouched")
+            untouched_files.append(path)
+        final_output = self.sandbox / "external-final-output" / "keep.png"
+        final_output.parent.mkdir()
+        final_output.write_bytes(b"final")
+        outside_bait = self.sandbox / "screenshots" / "viewport-a.png"
+        outside_bait.parent.mkdir()
+        outside_bait.write_bytes(b"bait")
+
+        output = self.run_powershell(
+            f"""
+$root = {_ps_literal(fake_root)}
+$preview = Invoke-HiaScreenshotCacheCleanup -ProjectRoot $root
+$previewPreserved = (
+    (Test-Path -LiteralPath {_ps_literal(first)} -PathType Leaf) -and
+    (Test-Path -LiteralPath {_ps_literal(second)} -PathType Leaf)
+)
+function Get-CleanupError([object]$CleanupPlan) {{
+    try {{
+        Invoke-HiaScreenshotCacheCleanup -ProjectRoot $root -Plan $CleanupPlan -Delete | Out-Null
+        return ''
+    }} catch {{
+        return [string]$_.Exception.Message
+    }}
+}}
+$mismatchPlan = [pscustomobject]@{{
+    target_path = {_ps_literal(outside_bait.parent)}
+    skipped_count = $preview.skipped_count
+    candidates = $preview.candidates
+}}
+$escapePlan = [pscustomobject]@{{
+    target_path = (Join-Path $preview.target_path '..\previews')
+    skipped_count = $preview.skipped_count
+    candidates = $preview.candidates
+}}
+$mismatchError = Get-CleanupError $mismatchPlan
+$escapeError = Get-CleanupError $escapePlan
+$failedPlansPreserved = (
+    (Test-Path -LiteralPath {_ps_literal(first)} -PathType Leaf) -and
+    (Test-Path -LiteralPath {_ps_literal(second)} -PathType Leaf) -and
+    (Test-Path -LiteralPath {_ps_literal(outside_bait)} -PathType Leaf)
+)
+$result = Invoke-HiaScreenshotCacheCleanup -ProjectRoot $root -Plan $preview -Delete
+try {{
+    Invoke-HiaScreenshotCacheCleanup `
+        -ProjectRoot ([System.IO.Path]::GetPathRoot($root)) | Out-Null
+    $driveRootError = ''
+}} catch {{
+    $driveRootError = [string]$_.Exception.Message
+}}
+[pscustomobject]@{{
+    preview_target = $preview.target_path
+    preview_exists = $preview.directory_exists
+    preview_count = $preview.matched_count
+    preview_bytes = $preview.matched_bytes
+    preview_skipped = $preview.skipped_count
+    preview_preserved = $previewPreserved
+    mismatch_error = $mismatchError
+    escape_error = $escapeError
+    failed_plans_preserved = $failedPlansPreserved
+    drive_root_error = $driveRootError
+    deleted_count = $result.deleted_count
+    deleted_bytes = $result.deleted_bytes
+    skipped_count = $result.skipped_count
+    failed_count = $result.failed_count
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual(str(screenshots), payload["preview_target"])
+        self.assertTrue(payload["preview_exists"])
+        self.assertEqual(2, payload["preview_count"])
+        self.assertEqual(8, payload["preview_bytes"])
+        self.assertEqual(3, payload["preview_skipped"])
+        self.assertTrue(payload["preview_preserved"])
+        self.assertTrue(payload["mismatch_error"])
+        self.assertTrue(payload["escape_error"])
+        self.assertTrue(payload["failed_plans_preserved"])
+        self.assertTrue(payload["drive_root_error"])
+        self.assertEqual(2, payload["deleted_count"])
+        self.assertEqual(8, payload["deleted_bytes"])
+        self.assertEqual(3, payload["skipped_count"])
+        self.assertEqual(0, payload["failed_count"])
+
+        self.assertTrue(screenshots.is_dir())
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        for path in (
+            keep_jpg,
+            keep_text,
+            nested_png,
+            *untouched_files,
+            final_output,
+            outside_bait,
+        ):
+            self.assertTrue(path.is_file(), path)
+
+    def test_screenshot_cache_cleanup_rejects_every_reparse_path_level(self) -> None:
+        def write_project_markers(project: Path) -> None:
+            (project / "scripts").mkdir(parents=True, exist_ok=True)
+            (project / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+            (project / "scripts" / "launch-houdini.ps1").write_text(
+                "# lifecycle marker\n", encoding="utf-8"
+            )
+
+        for level in ("project-root", "runtime", "cache", "screenshots"):
+            with self.subTest(level=level):
+                case_root = self.sandbox / f"reparse-{level}"
+                case_root.mkdir()
+                if level == "project-root":
+                    target = case_root / "real-project"
+                    write_project_markers(target)
+                    marker = target / ".runtime" / "cache" / "screenshots" / "keep.png"
+                    marker.parent.mkdir(parents=True)
+                    project = case_root / "linked-project"
+                    link = project
+                else:
+                    project = case_root / "project"
+                    write_project_markers(project)
+                    if level == "runtime":
+                        target = case_root / "runtime-target"
+                        marker = target / "cache" / "screenshots" / "keep.png"
+                        link = project / ".runtime"
+                    elif level == "cache":
+                        (project / ".runtime").mkdir()
+                        target = case_root / "cache-target"
+                        marker = target / "screenshots" / "keep.png"
+                        link = project / ".runtime" / "cache"
+                    else:
+                        (project / ".runtime" / "cache").mkdir(parents=True)
+                        target = case_root / "screenshots-target"
+                        marker = target / "keep.png"
+                        link = project / ".runtime" / "cache" / "screenshots"
+                    marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_bytes(b"keep")
+
+                output = self.run_powershell(
+                    f"""
+$link = {_ps_literal(link)}
+$target = {_ps_literal(target)}
+$created = $false
+try {{
+    New-Item -ItemType Junction -Path $link -Target $target | Out-Null
+    $created = $true
+    try {{
+        Invoke-HiaScreenshotCacheCleanup -ProjectRoot {_ps_literal(project)} | Out-Null
+        $errorText = ''
+    }} catch {{
+        $errorText = [string]$_.Exception.Message
+    }}
+    [pscustomobject]@{{
+        error = $errorText
+        marker_exists = (Test-Path -LiteralPath {_ps_literal(marker)} -PathType Leaf)
+    }} | ConvertTo-Json -Compress
+}} finally {{
+    if ($created) {{
+        $linkItem = Get-Item -LiteralPath $link -Force -ErrorAction Stop
+        if (
+            ([int]$linkItem.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -eq 0
+        ) {{
+            throw 'Test junction unexpectedly lost its reparse-point attribute.'
+        }}
+        [System.IO.Directory]::Delete($link, $false)
+    }}
+}}
+"""
+                )
+                payload = json.loads(output)
+                self.assertIn("reparse point", payload["error"])
+                self.assertTrue(payload["marker_exists"])
+                self.assertFalse(link.exists())
+                self.assertTrue(marker.is_file())
+
+    def test_screenshot_cache_cleanup_source_is_fail_closed_and_non_recursive(self) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8-sig")
+        start = source.index("function Invoke-HiaScreenshotCacheCleanup")
+        end = source.index("function Test-HiaLoopbackPorts", start)
+        cleanup_source = source[start:end]
+
+        for required in (
+            "Get-HiaProjectRoot",
+            "Join-Path $root '.runtime\\cache\\screenshots'",
+            "[System.StringComparer]::OrdinalIgnoreCase.Equals",
+            "GetFileSystemInfos()",
+            "[System.IO.FileAttributes]::ReparsePoint",
+            "[System.IO.File]::Delete",
+            "'.png'",
+            "last_write_utc_ticks",
+        ):
+            self.assertIn(required, cleanup_source)
+        for forbidden in (
+            "StartsWith",
+            "Remove-Item",
+            "-Recurse",
+            "$HOME",
+            "USERPROFILE",
+            "HIA_RENDER_OUTPUT_DIR",
+            "~",
+            "'*'",
+            '"*"',
+        ):
+            self.assertNotIn(forbidden, cleanup_source)
+        self.assertIsNone(
+            re.search(r"(?i)(?:^|[\"'\s])[a-z]:[\\/]", cleanup_source)
+        )
+
+        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        handler_start = wpf_source.index("$cleanupScreenshotsButton.Add_Click")
+        handler_end = wpf_source.index("$copyReportButton.Add_Click", handler_start)
+        cleanup_handler = wpf_source[handler_start:handler_end]
+        preview_call = cleanup_handler.index("Invoke-HiaScreenshotCacheCleanup")
+        confirmation = cleanup_handler.index("[System.Windows.MessageBox]::Show")
+        delete_call = cleanup_handler.index("-Delete", confirmation)
+        self.assertLess(preview_call, confirmation)
+        self.assertLess(confirmation, delete_call)
+        for required in (
+            "唯一允许目标",
+            "匹配 PNG 文件",
+            "总大小",
+            "[System.Windows.MessageBoxButton]::YesNo",
+            "[System.Windows.MessageBoxResult]::No",
+            "未删除任何文件",
+            "已删除 {0} 个",
+            "跳过 {2} 个",
+            "失败 {3} 个",
+            "$cleanupScreenshotsButton.IsEnabled = -not $Busy",
+        ):
+            self.assertIn(required, wpf_source)
 
     def test_preflight_checks_only_the_selected_mcp_backend(self) -> None:
         fake_root = self.sandbox / "backend-preflight"
@@ -428,6 +754,8 @@ $fxResult = Invoke-HiaPreflight `
             "HoudiniPathText": "System.Windows.Controls.TextBlock",
             "BridgePythonComboBox": "System.Windows.Controls.ComboBox",
             "BridgePathText": "System.Windows.Controls.TextBlock",
+            "RenderOutputTextBox": "System.Windows.Controls.TextBox",
+            "BrowseRenderOutputButton": "System.Windows.Controls.Button",
             "PassCountText": "System.Windows.Controls.TextBlock",
             "WarningCountText": "System.Windows.Controls.TextBlock",
             "BlockedCountText": "System.Windows.Controls.TextBlock",
@@ -437,6 +765,7 @@ $fxResult = Invoke-HiaPreflight `
             "ReportPathTextBox": "System.Windows.Controls.TextBox",
             "RescanButton": "System.Windows.Controls.Button",
             "RepairButton": "System.Windows.Controls.Button",
+            "CleanupScreenshotsButton": "System.Windows.Controls.Button",
             "CopyReportButton": "System.Windows.Controls.Button",
             "LaunchButton": "System.Windows.Controls.Button",
         }
@@ -504,6 +833,18 @@ try {{
         self.assertIn("<Path", xaml_source)
         self.assertIn("<Ellipse", xaml_source)
         self.assertIn("CornerRadius=", xaml_source)
+        for text in (
+            "最终渲染输出目录",
+            "EXR",
+            "图片",
+            "视频",
+            "USD",
+            "导出",
+            "模拟缓存",
+            ".runtime/cache",
+            "内部截图、预览和临时缓存目录不同",
+        ):
+            self.assertIn(text, xaml_source)
         for trigger in ("IsMouseOver", "IsPressed", "IsKeyboardFocused", "IsEnabled"):
             self.assertIn(trigger, xaml_source)
 
@@ -822,8 +1163,11 @@ Add-Type -TypeDefinition $source -Language CSharp
             "McpBackendComboBox",
             "RescanButton",
             "RepairButton",
+            "CleanupScreenshotsButton",
             "CopyReportButton",
             "LaunchButton",
+            "RenderOutputTextBox",
+            "BrowseRenderOutputButton",
         ):
             self.assertIn(f'x:Name="{control_name}"', xaml_source)
         self.assertEqual(
@@ -836,6 +1180,13 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertNotIn("System.Drawing", combined)
         self.assertNotIn("HIA_BRIDGE_TOKEN", launcher_source + wpf_source)
         self.assertNotIn("HIA_BRIDGE_URL", launcher_source + wpf_source)
+        self.assertIn("[AllowEmptyString()][string]$RenderOutputDir = ''", launcher_source)
+        self.assertIn("'HIA_RENDER_OUTPUT_DIR'", launcher_source)
+        self.assertNotIn("'-RenderOutputDir'", launcher_source)
+        self.assertNotIn("$env:HIA_RENDER_OUTPUT_DIR =", combined)
+        self.assertIn("Invoke-HiaScreenshotCacheCleanup", wpf_source)
+        self.assertIn("[System.Windows.MessageBoxButton]::YesNo", wpf_source)
+        self.assertIn("[System.Windows.MessageBoxResult]::No", wpf_source)
 
     def test_lifecycle_uses_one_portable_project_cache_for_both_children(self) -> None:
         source = LIFECYCLE_PATH.read_text(encoding="utf-8")
@@ -845,6 +1196,10 @@ Add-Type -TypeDefinition $source -Language CSharp
         for child in ("screenshots", "previews", "tmp"):
             self.assertIn(f"Join-Path $cacheRoot '{child}'", source)
         self.assertEqual(2, source.count("'HIA_CACHE_DIR' = $cacheRoot"))
+        self.assertEqual(2, source.count("'HIA_RENDER_OUTPUT_DIR' = $renderOutputRoot"))
+        self.assertIn("-Path ([string]$env:HIA_RENDER_OUTPUT_DIR)", source)
+        self.assertIn("$renderOutputRoot = Resolve-HiaRenderOutputDirectory", source)
+        self.assertNotIn("$renderOutputRoot = $cacheRoot", source)
         self.assertIn("'TEMP' = $sessionTemp", source)
         self.assertIn("'TMP' = $sessionTemp", source)
         self.assertIn("'HOUDINI_TEMP_DIR' = $sessionTemp", source)

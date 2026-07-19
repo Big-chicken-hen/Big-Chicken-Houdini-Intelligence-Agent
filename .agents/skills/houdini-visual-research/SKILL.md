@@ -42,4 +42,5 @@ For the active scene, default to HIA MCP V2 and HOM. Keep live `hia_*` scene I/O
 - Understand an external algorithm before translating it. Never claim arbitrary GLSL can be pasted unchanged into Karma or MaterialX.
 - Prefer original authors, SideFX documentation/tutorials, original papers, and original projects. Do not copy substantial code when licensing is absent or unclear.
 - Preserve the current scene and report partial changes after failures. Avoid unbounded retries; produce the diagnostic report described in visual-validation.md when its trigger is met.
+- Leave Fast/serviceTier selection, conversation history, and disconnect/reconnect handling to the Panel and Bridge; do not simulate or implement them in this skill.
 - Do not create another agent, planner, semantic memory, database, monitoring service, or network service.

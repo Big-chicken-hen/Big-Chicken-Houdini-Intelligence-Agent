@@ -273,10 +273,37 @@ class HoudiniExecutor:
                 raise HiaRuntimeError("NODE_NOT_FOUND", "The requested Houdini node does not exist", {"path": node_path})
             node_type = node.type()
         else:
-            category_name = str(arguments.get("category", ""))
-            type_name = str(arguments.get("node_type", ""))
+            category_name = str(arguments.get("category", "")).strip()
+            type_name = str(arguments.get("node_type", "")).strip()
+            if "/" in type_name:
+                category_prefix, bare_type_name = (
+                    part.strip() for part in type_name.split("/", 1)
+                )
+                if not category_prefix or not bare_type_name:
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        "Qualified node_type must use non-empty Category/name segments",
+                        {"category": category_name, "node_type": type_name},
+                    )
+                if (
+                    category_name
+                    and category_name.casefold() != category_prefix.casefold()
+                ):
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        "category conflicts with the node_type category prefix",
+                        {
+                            "category": category_name,
+                            "node_type_category": category_prefix,
+                        },
+                    )
+                category_name = category_name or category_prefix
+                type_name = bare_type_name
             if not category_name or not type_name:
-                raise HiaRuntimeError("INVALID_ARGUMENTS", "Provide node_path or both category and node_type")
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    "Provide node_path, category plus node_type, or node_type as Category/name",
+                )
             categories = self._hou.nodeTypeCategories()
             category = next(
                 (value for key, value in categories.items() if str(key).casefold() == category_name.casefold()),

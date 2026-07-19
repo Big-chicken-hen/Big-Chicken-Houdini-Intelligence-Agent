@@ -41,6 +41,28 @@ class FakeNodeType:
         return ("", "root", "", "")
 
 
+class FakeHelpNodeType:
+    def name(self) -> str:
+        return "wrangle"
+
+    def category(self) -> Any:
+        return FakeNamed("Cop")
+
+    def description(self) -> str:
+        return "COP Wrangle"
+
+    def nameComponents(self) -> tuple[str, ...]:
+        return ("", "wrangle", "", "")
+
+
+class FakeNodeTypeCategory:
+    def __init__(self, node_type: FakeHelpNodeType) -> None:
+        self._node_type = node_type
+
+    def nodeTypes(self) -> dict[str, FakeHelpNodeType]:  # noqa: N802
+        return {"wrangle": self._node_type}
+
+
 class FakeNamed:
     def __init__(self, name: str) -> None:
         self._name = name
@@ -199,6 +221,52 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
         with self.assertRaises(HiaRuntimeError) as raised:
             self.executor.dispatch("hia_create_node", {})
         self.assertEqual("TOOL_NOT_FOUND", raised.exception.code)
+
+    def test_node_help_accepts_qualified_and_separated_installed_type_names(
+        self,
+    ) -> None:
+        installed_type = FakeHelpNodeType()
+        self.hou.nodeTypeCategories = lambda: {
+            "Cop": FakeNodeTypeCategory(installed_type)
+        }
+
+        separated = self.executor.dispatch(
+            "hia_node_help",
+            {
+                "category": "Cop",
+                "node_type": "wrangle",
+                "include_parameters": False,
+            },
+        )
+        qualified = self.executor.dispatch(
+            "hia_node_help",
+            {"node_type": "Cop/wrangle", "include_parameters": False},
+        )
+        redundant_prefix = self.executor.dispatch(
+            "hia_node_help",
+            {
+                "category": " cop ",
+                "node_type": " COP / wrangle ",
+                "include_parameters": False,
+            },
+        )
+
+        self.assertEqual(separated, qualified)
+        self.assertEqual(separated, redundant_prefix)
+        self.assertEqual("Cop", qualified["result"]["category"])
+        self.assertEqual("wrangle", qualified["result"]["name"])
+
+    def test_node_help_rejects_empty_or_conflicting_qualified_segments(self) -> None:
+        for arguments in (
+            {"node_type": "Cop/"},
+            {"node_type": "/wrangle"},
+            {"category": "Sop", "node_type": "Cop/wrangle"},
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(
+                HiaRuntimeError
+            ) as captured:
+                self.executor.dispatch("hia_node_help", arguments)
+            self.assertEqual("INVALID_ARGUMENTS", captured.exception.code)
 
     def test_viewport_defaults_to_portable_timestamped_screenshot_cache(self) -> None:
         temp_root = REPOSITORY_ROOT / ".runtime" / "tmp"

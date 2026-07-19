@@ -131,6 +131,40 @@ class CodexStdioClientTests(unittest.TestCase):
         self.assertIsNone(second["nextCursor"])
         self.assertEqual("fake-secondary-model", second["data"][0]["model"])
 
+    def test_stable_thread_history_requests_and_name_notification(self) -> None:
+        self.initialize()
+        list_params = {
+            "cwd": str(REPOSITORY_ROOT),
+            "archived": False,
+            "limit": 20,
+            "sortKey": "recency_at",
+            "sortDirection": "desc",
+        }
+
+        listed = self.client.request("thread/list", list_params)
+
+        self.assertEqual(list_params, listed["receivedParams"])
+        self.assertEqual("thread-fake", listed["data"][0]["id"])
+        self.assertEqual(str(REPOSITORY_ROOT), listed["data"][0]["cwd"])
+
+        name = "  Houdini lookdev  "
+        renamed = self.client.request(
+            "thread/name/set",
+            {"threadId": "thread-fake", "name": name},
+        )
+        self.assertEqual(
+            {"threadId": "thread-fake", "name": name},
+            renamed["receivedParams"],
+        )
+        notification = self.wait_for(
+            lambda event: event.get("type") == "codex_notification"
+            and event.get("method") == "thread/name/updated"
+        )
+        self.assertEqual(
+            {"threadId": "thread-fake", "threadName": name},
+            notification["params"],
+        )
+
     def test_streaming_reply_plan_and_approval(self) -> None:
         self.initialize()
         thread = self.client.request("thread/start", {})

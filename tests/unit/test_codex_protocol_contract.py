@@ -154,6 +154,85 @@ class CodexProtocolContractTests(unittest.TestCase):
         ):
             self.assertNotIn("model/list", self.allowed_methods(category))
 
+    def test_thread_history_methods_are_stable_and_strictly_directed(self) -> None:
+        client_entries = {
+            entry["method"]: entry
+            for entry in self.allowlist["allowed"]["client_requests"]
+        }
+        expected_requests = {
+            "thread/list": (
+                "ThreadListParams",
+                "v2/ThreadListResponse.json",
+            ),
+            "thread/name/set": (
+                "ThreadSetNameParams",
+                "v2/ThreadSetNameResponse.json",
+            ),
+        }
+        inventoried_requests = {
+            entry["method"]: entry
+            for entry in self.inventory["aggregates"]["client_requests"]["methods"]
+        }
+        for method, (params_definition, response_schema) in expected_requests.items():
+            with self.subTest(method=method):
+                self.assertEqual(
+                    params_definition,
+                    client_entries[method]["params_definition"],
+                )
+                self.assertEqual(
+                    response_schema,
+                    client_entries[method]["response_schema"],
+                )
+                self.assertEqual("thread-history", client_entries[method]["purpose"])
+                self.assertEqual(
+                    params_definition,
+                    inventoried_requests[method]["params_definition"],
+                )
+                self.assertFalse(
+                    inventoried_requests[method]["declared_experimental"]
+                )
+
+        notification = "thread/name/updated"
+        notification_entries = {
+            entry["method"]: entry
+            for entry in self.allowlist["allowed"]["server_notifications"]
+        }
+        inventoried_notifications = {
+            entry["method"]: entry
+            for entry in self.inventory["aggregates"]["server_notifications"]["methods"]
+        }
+        self.assertEqual(
+            "ThreadNameUpdatedNotification",
+            notification_entries[notification]["params_definition"],
+        )
+        self.assertEqual(
+            "thread-history",
+            notification_entries[notification]["purpose"],
+        )
+        self.assertEqual(
+            "ThreadNameUpdatedNotification",
+            inventoried_notifications[notification]["params_definition"],
+        )
+        self.assertFalse(
+            inventoried_notifications[notification]["declared_experimental"]
+        )
+
+        for method in expected_requests:
+            for category in (
+                "server_requests",
+                "server_notifications",
+                "client_notifications",
+            ):
+                with self.subTest(method=method, category=category):
+                    self.assertNotIn(method, self.allowed_methods(category))
+        for category in (
+            "client_requests",
+            "server_requests",
+            "client_notifications",
+        ):
+            with self.subTest(method=notification, category=category):
+                self.assertNotIn(notification, self.allowed_methods(category))
+
     def test_initialized_notification_is_exact(self) -> None:
         self.assertEqual(
             CORE_CLIENT_NOTIFICATIONS,

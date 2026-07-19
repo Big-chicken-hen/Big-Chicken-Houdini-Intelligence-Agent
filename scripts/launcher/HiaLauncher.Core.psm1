@@ -513,6 +513,343 @@ function Test-HiaRuntimeWritable {
     }
 }
 
+function Test-HiaPathWithinDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Directory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) { return $false }
+    try {
+        $normalizedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+        $normalizedDirectory = [System.IO.Path]::GetFullPath($Directory).TrimEnd('\')
+    } catch {
+        return $false
+    }
+    return (
+        [System.StringComparer]::OrdinalIgnoreCase.Equals($normalizedPath, $normalizedDirectory) -or
+        $normalizedPath.StartsWith(
+            $normalizedDirectory + '\',
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    )
+}
+
+function Resolve-HiaRenderOutputDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowEmptyString()][string]$Path = '',
+        [AllowEmptyString()][string]$HoudiniExe = '',
+        [switch]$Create
+    )
+
+    $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $requested = if ([string]::IsNullOrWhiteSpace($Path)) {
+        Join-Path $root '.runtime\cache'
+    } else {
+        $Path.Trim()
+    }
+    if ($requested.StartsWith('\') -or $requested -notmatch '^[A-Za-z]:[\\/]') {
+        throw '最终输出目录必须是普通本地盘的绝对路径；不接受相对、UNC 或设备路径。'
+    }
+
+    try {
+        $resolved = [System.IO.Path]::GetFullPath($requested).TrimEnd('\')
+    } catch {
+        throw '最终输出目录不是有效的 Windows 路径。'
+    }
+    if (
+        $resolved -notmatch '^[A-Za-z]:\\' -or
+        $resolved.Substring(2).Contains(':') -or
+        $resolved -match '^[A-Za-z]:$'
+    ) {
+        throw '最终输出目录必须是普通本地盘目录；不接受盘符根、ADS 或设备路径。'
+    }
+    try {
+        $drive = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($resolved))
+        if ($drive.DriveType -notin @(
+            [System.IO.DriveType]::Fixed,
+            [System.IO.DriveType]::Removable
+        )) {
+            throw 'not local'
+        }
+    } catch {
+        throw '最终输出目录必须位于可用的本地固定盘或可移动盘。'
+    }
+
+    $forbiddenRoots = [System.Collections.Generic.List[string]]::new()
+    if ($env:SystemRoot) { $forbiddenRoots.Add([string]$env:SystemRoot) }
+    if ($env:HFS) { $forbiddenRoots.Add([string]$env:HFS) }
+    if ($HoudiniExe) {
+        try {
+            $houdiniBin = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($HoudiniExe))
+            if ($houdiniBin) {
+                $houdiniRoot = [System.IO.Directory]::GetParent($houdiniBin)
+                if ($null -ne $houdiniRoot) { $forbiddenRoots.Add($houdiniRoot.FullName) }
+            }
+        } catch { }
+    }
+    foreach ($forbiddenRoot in $forbiddenRoots) {
+        if (Test-HiaPathWithinDirectory -Path $resolved -Directory $forbiddenRoot) {
+            throw '最终输出目录不能位于 Windows 或 Houdini 安装目录中。'
+        }
+    }
+    if ($resolved -match '(?i)\\Side Effects Software\\Houdini[^\\]*(?:\\|$)') {
+        throw '最终输出目录不能位于 Houdini 安装目录中。'
+    }
+
+    if ((Test-Path -LiteralPath $resolved) -and -not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw '最终输出目录指向了文件，而不是文件夹。'
+    }
+    if ($Create) {
+        try {
+            [System.IO.Directory]::CreateDirectory($resolved) | Out-Null
+        } catch {
+            throw '最终输出目录无法创建。'
+        }
+    }
+
+    $probeDirectory = $resolved
+    while (-not (Test-Path -LiteralPath $probeDirectory -PathType Container)) {
+        $parent = [System.IO.Directory]::GetParent($probeDirectory)
+        if ($null -eq $parent) { break }
+        $probeDirectory = $parent.FullName
+    }
+    if (
+        -not (Test-Path -LiteralPath $probeDirectory -PathType Container) -or
+        -not (Test-HiaRuntimeWritable -RuntimePath $probeDirectory)
+    ) {
+        throw '最终输出目录不存在且无法创建，或目录不可写。'
+    }
+    return $resolved
+}
+
+function Invoke-HiaScreenshotCacheCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowNull()][object]$Plan = $null,
+        [switch]$Delete
+    )
+
+    if (
+        [string]::IsNullOrWhiteSpace($ProjectRoot) -or
+        $ProjectRoot.Trim() -notmatch '^[A-Za-z]:[\\/]'
+    ) {
+        throw '截图缓存清理要求启动器提供普通本地盘上的绝对项目根目录。'
+    }
+    try {
+        $fullSuppliedRoot = [System.IO.Path]::GetFullPath($ProjectRoot.Trim())
+        $driveRoot = [System.IO.Path]::GetPathRoot($fullSuppliedRoot)
+        if (
+            [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                $fullSuppliedRoot.TrimEnd('\'),
+                $driveRoot.TrimEnd('\')
+            )
+        ) {
+            throw 'drive root is not a project directory'
+        }
+        $suppliedRoot = $fullSuppliedRoot.TrimEnd('\')
+        $root = Get-HiaProjectRoot -StartingPath $suppliedRoot
+        if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($suppliedRoot, $root)) {
+            throw 'project root mismatch'
+        }
+        $runtimePath = [System.IO.Path]::GetFullPath((Join-Path $root '.runtime')).TrimEnd('\')
+        $cachePath = [System.IO.Path]::GetFullPath((Join-Path $root '.runtime\cache')).TrimEnd('\')
+        $expected = [System.IO.Path]::GetFullPath(
+            (Join-Path $root '.runtime\cache\screenshots')
+        ).TrimEnd('\')
+    } catch {
+        throw '项目根或截图缓存目标路径无法安全解析；已拒绝清理。'
+    }
+
+    $target = $expected
+    if ($Delete) {
+        if ($null -eq $Plan) { throw '缺少已由用户确认的截图缓存清理预览；已拒绝清理。' }
+        $targetProperty = $Plan.PSObject.Properties['target_path']
+        if ($null -eq $targetProperty -or [string]::IsNullOrWhiteSpace([string]$targetProperty.Value)) {
+            throw '截图缓存清理预览没有有效目标；已拒绝清理。'
+        }
+        try {
+            $target = [System.IO.Path]::GetFullPath([string]$targetProperty.Value).TrimEnd('\')
+        } catch {
+            throw '截图缓存清理预览目标无法规范化；已拒绝清理。'
+        }
+    }
+    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($target, $expected)) {
+        throw '截图缓存目标与项目内唯一允许目录不精确相等；已拒绝清理。'
+    }
+
+    $pathChain = @($root, $runtimePath, $cachePath, $expected)
+    $assertSafePathChain = {
+        param([bool]$RequireAll)
+
+        foreach ($pathToCheck in $pathChain) {
+            try {
+                $pathItem = Get-Item -LiteralPath $pathToCheck -Force -ErrorAction Stop
+            } catch {
+                if (-not $RequireAll -and -not (Test-Path -LiteralPath $pathToCheck)) {
+                    return $false
+                }
+                throw '截图缓存路径链缺失或无法读取；已拒绝清理。'
+            }
+            if (-not $pathItem.PSIsContainer) {
+                throw '截图缓存路径链包含非目录对象；已拒绝清理。'
+            }
+            if (
+                ([int]$pathItem.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+            ) {
+                throw '项目根或截图缓存路径链包含 reparse point、junction 或 symlink；已拒绝清理。'
+            }
+        }
+        return $true
+    }
+
+    if (-not (& $assertSafePathChain ([bool]$Delete))) {
+        return [pscustomobject]@{
+            target_path = $expected
+            directory_exists = $false
+            matched_count = 0
+            matched_bytes = [long]0
+            deleted_count = 0
+            deleted_bytes = [long]0
+            skipped_count = 0
+            failed_count = 0
+            candidates = @()
+        }
+    }
+
+    if ($Delete) {
+        $candidatesProperty = $Plan.PSObject.Properties['candidates']
+        $skippedProperty = $Plan.PSObject.Properties['skipped_count']
+        if ($null -eq $candidatesProperty -or $null -eq $skippedProperty) {
+            throw '截图缓存清理预览内容不完整；已拒绝清理。'
+        }
+        $matches = @($candidatesProperty.Value)
+        $skippedCount = [Math]::Max(0, [int]$skippedProperty.Value)
+    } else {
+        $matches = [System.Collections.Generic.List[object]]::new()
+        $skippedCount = 0
+    }
+
+    if (-not $Delete) {
+        $directory = [System.IO.DirectoryInfo]::new($expected)
+        foreach ($entry in @($directory.GetFileSystemInfos())) {
+            try {
+                if (
+                    ([int]$entry.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+                ) {
+                    $skippedCount++
+                    continue
+                }
+                if ($entry -isnot [System.IO.FileInfo]) {
+                    $skippedCount++
+                    continue
+                }
+                if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($entry.Extension, '.png')) {
+                    $skippedCount++
+                    continue
+                }
+                $parentPath = [System.IO.Path]::GetFullPath($entry.DirectoryName).TrimEnd('\')
+                if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($parentPath, $expected)) {
+                    $skippedCount++
+                    continue
+                }
+                $matches.Add([pscustomobject]@{
+                    path = $entry.FullName
+                    bytes = [long]$entry.Length
+                    last_write_utc_ticks = [long]$entry.LastWriteTimeUtc.Ticks
+                })
+            } catch {
+                $skippedCount++
+            }
+        }
+    }
+
+    $matchedBytes = [long]0
+    foreach ($match in $matches) { $matchedBytes += [long]$match.bytes }
+    if (-not $Delete) {
+        return [pscustomobject]@{
+            target_path = $expected
+            directory_exists = $true
+            matched_count = $matches.Count
+            matched_bytes = $matchedBytes
+            deleted_count = 0
+            deleted_bytes = [long]0
+            skipped_count = $skippedCount
+            failed_count = 0
+            candidates = $matches.ToArray()
+        }
+    }
+
+    $deletedCount = 0
+    $deletedBytes = [long]0
+    $failedCount = 0
+    foreach ($match in $matches) {
+        [void](& $assertSafePathChain $true)
+        try {
+            $pathProperty = $match.PSObject.Properties['path']
+            $bytesProperty = $match.PSObject.Properties['bytes']
+            $timeProperty = $match.PSObject.Properties['last_write_utc_ticks']
+            if ($null -eq $pathProperty -or $null -eq $bytesProperty -or $null -eq $timeProperty) {
+                throw '清理预览中的文件记录不完整。'
+            }
+            $candidatePath = [System.IO.Path]::GetFullPath([string]$pathProperty.Value)
+            $candidateParent = [System.IO.Path]::GetFullPath(
+                [System.IO.Path]::GetDirectoryName($candidatePath)
+            ).TrimEnd('\')
+            if (
+                -not [System.StringComparer]::OrdinalIgnoreCase.Equals($candidateParent, $expected) -or
+                -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                    [System.IO.Path]::GetExtension($candidatePath),
+                    '.png'
+                )
+            ) {
+                throw '清理预览中的文件路径不再满足精确目录或扩展名限制。'
+            }
+            $file = Get-Item -LiteralPath $candidatePath -Force -ErrorAction Stop
+            $fileParent = [System.IO.Path]::GetFullPath($file.DirectoryName).TrimEnd('\')
+            if (
+                $file -isnot [System.IO.FileInfo] -or
+                ([int]$file.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                -not [System.StringComparer]::OrdinalIgnoreCase.Equals($file.Extension, '.png') -or
+                -not [System.StringComparer]::OrdinalIgnoreCase.Equals($fileParent, $expected)
+            ) {
+                throw '文件在删除前不再满足截图缓存安全条件。'
+            }
+            if (
+                [long]$file.Length -ne [long]$bytesProperty.Value -or
+                [long]$file.LastWriteTimeUtc.Ticks -ne [long]$timeProperty.Value
+            ) {
+                throw '文件在用户确认后发生变化；已跳过。'
+            }
+            $fileBytes = [long]$file.Length
+            [System.IO.File]::Delete($file.FullName)
+            if ([System.IO.File]::Exists($file.FullName)) {
+                throw '文件删除后仍然存在。'
+            }
+            $deletedCount++
+            $deletedBytes += $fileBytes
+        } catch {
+            $failedCount++
+            $skippedCount++
+        }
+    }
+
+    return [pscustomobject]@{
+        target_path = $expected
+        directory_exists = $true
+        matched_count = $matches.Count
+        matched_bytes = $matchedBytes
+        deleted_count = $deletedCount
+        deleted_bytes = $deletedBytes
+        skipped_count = $skippedCount
+        failed_count = $failedCount
+        candidates = @()
+    }
+}
+
 function Test-HiaLoopbackPorts {
     try {
         $first = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
@@ -536,7 +873,9 @@ function Invoke-HiaProjectChecks {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowEmptyString()][string]$HoudiniExe = '',
         [AllowEmptyString()][string]$BridgePython = '',
+        [AllowEmptyString()][string]$RenderOutputDir = '',
         [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2',
         [int]$TimeoutSeconds = 12,
         [hashtable]$ProbeOverrides = @{}
@@ -570,7 +909,32 @@ function Invoke-HiaProjectChecks {
     $checks += New-HiaCheckResult -Id 'project.runtime_writable' -Name '.runtime writable' `
         -Level $(if ($runtimeWritable) { 'green' } else { 'red' }) `
         -Message $(if ($runtimeWritable) { '.runtime 可写，探针文件已自动清除。' } else { '.runtime 不存在或不可写。' }) `
-        -Advice $(if ($runtimeWritable) { '无需处理。' } else { '点击“修复安全项目”创建目录，或修复项目目录权限。' })
+            -Advice $(if ($runtimeWritable) { '无需处理。' } else { '点击“修复安全项目”创建目录，或修复项目目录权限。' })
+
+    try {
+        $resolvedRenderOutput = Resolve-HiaRenderOutputDirectory `
+            -ProjectRoot $ProjectRoot `
+            -Path $RenderOutputDir `
+            -HoudiniExe $HoudiniExe
+        $renderOutputExists = Test-Path -LiteralPath $resolvedRenderOutput -PathType Container
+        $renderOutputLevel = if ($renderOutputExists) { 'green' } else { 'yellow' }
+        $renderOutputMessage = if ([string]::IsNullOrWhiteSpace($RenderOutputDir)) {
+            "未指定最终输出目录；将使用项目本地 $resolvedRenderOutput。"
+        } elseif ($renderOutputExists) {
+            "最终输出目录存在且可写：$resolvedRenderOutput"
+        } else {
+            "最终输出目录尚不存在，但启动时可以创建：$resolvedRenderOutput"
+        }
+        $checks += New-HiaCheckResult -Id 'project.render_output' -Name 'Final render output directory' `
+            -Level $renderOutputLevel `
+            -Message $renderOutputMessage `
+            -Advice $(if ($renderOutputExists) { '无需处理。' } else { '启动 Houdini 时会创建一次；也可使用“选择…”先创建并选择目录。' })
+    } catch {
+        $checks += New-HiaCheckResult -Id 'project.render_output' -Name 'Final render output directory' `
+            -Level 'red' `
+            -Message ([string]$_.Exception.Message) `
+            -Advice '选择可创建、可写的普通本地绝对目录；不要选择 Windows 或 Houdini 安装目录。'
+    }
 
     $loopbackAvailable = if ($ProbeOverrides.ContainsKey('loopback')) {
         [bool]$ProbeOverrides.loopback
@@ -787,6 +1151,7 @@ function Invoke-HiaPreflight {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [AllowEmptyString()][string]$HoudiniExe = '',
         [AllowEmptyString()][string]$BridgePython = '',
+        [AllowEmptyString()][string]$RenderOutputDir = '',
         [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2',
         [object[]]$Candidates = @(),
         [int]$TimeoutSeconds = 12,
@@ -799,7 +1164,7 @@ function Invoke-HiaPreflight {
     }
     $checks = @()
     $checks += @(Invoke-HiaHoudiniChecks -HoudiniExe $HoudiniExe -Candidates $Candidates -TimeoutSeconds $TimeoutSeconds -ProbeOverrides $ProbeOverrides)
-    $checks += @(Invoke-HiaProjectChecks -ProjectRoot $root -BridgePython $BridgePython -McpBackend $McpBackend -TimeoutSeconds $TimeoutSeconds -ProbeOverrides $ProbeOverrides)
+    $checks += @(Invoke-HiaProjectChecks -ProjectRoot $root -HoudiniExe $HoudiniExe -BridgePython $BridgePython -RenderOutputDir $RenderOutputDir -McpBackend $McpBackend -TimeoutSeconds $TimeoutSeconds -ProbeOverrides $ProbeOverrides)
     $level = Get-HiaOverallLevel -Checks $checks
     return [pscustomobject]@{
         schema_version = 1
@@ -808,6 +1173,7 @@ function Invoke-HiaPreflight {
         overall = $level
         selected_houdini = $HoudiniExe
         bridge_python = $BridgePython
+        render_output_dir = $RenderOutputDir
         mcp_backend = $McpBackend
         candidates = @($Candidates)
         checks = @($checks)
@@ -886,7 +1252,7 @@ function Read-HiaLauncherSettings {
 
     $settingsPath = Join-Path $ProjectRoot '.runtime\launcher\settings.json'
     if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
-        return [pscustomobject]@{ houdini_exe = ''; bridge_python = ''; mcp_backend = 'hia_v2' }
+        return [pscustomobject]@{ houdini_exe = ''; bridge_python = ''; render_output_dir = ''; mcp_backend = 'hia_v2' }
     }
     try {
         $settings = [System.IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json
@@ -903,10 +1269,11 @@ function Read-HiaLauncherSettings {
         return [pscustomobject]@{
             houdini_exe = [string]$settings.houdini_exe
             bridge_python = [string]$settings.bridge_python
+            render_output_dir = if ($null -eq $settings.PSObject.Properties['render_output_dir']) { '' } else { [string]$settings.render_output_dir }
             mcp_backend = $backend
         }
     } catch {
-        return [pscustomobject]@{ houdini_exe = ''; bridge_python = ''; mcp_backend = 'hia_v2' }
+        return [pscustomobject]@{ houdini_exe = ''; bridge_python = ''; render_output_dir = ''; mcp_backend = 'hia_v2' }
     }
 }
 
@@ -915,15 +1282,25 @@ function Write-HiaLauncherSettings {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)][string]$HoudiniExe,
         [Parameter(Mandatory = $true)][string]$BridgePython,
+        [AllowEmptyString()][string]$RenderOutputDir = '',
         [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2'
     )
 
     $directory = Join-Path $ProjectRoot '.runtime\launcher'
     [System.IO.Directory]::CreateDirectory($directory) | Out-Null
     $settingsPath = Join-Path $directory 'settings.json'
+    $storedRenderOutput = if ([string]::IsNullOrWhiteSpace($RenderOutputDir)) {
+        ''
+    } else {
+        Resolve-HiaRenderOutputDirectory `
+            -ProjectRoot $ProjectRoot `
+            -Path $RenderOutputDir `
+            -HoudiniExe $HoudiniExe
+    }
     $settings = [ordered]@{
         houdini_exe = [System.IO.Path]::GetFullPath($HoudiniExe)
         bridge_python = [System.IO.Path]::GetFullPath($BridgePython)
+        render_output_dir = $storedRenderOutput
         mcp_backend = $McpBackend
     }
     $json = $settings | ConvertTo-Json
@@ -1032,10 +1409,12 @@ Export-ModuleMember -Function @(
     'Get-HiaPinnedCodexExecutable',
     'Get-HiaProjectRoot',
     'Get-HiaProbePayload',
+    'Invoke-HiaScreenshotCacheCleanup',
     'Invoke-HiaPreflight',
     'Invoke-HiaProcess',
     'Read-HiaLauncherSettings',
     'Repair-HiaSafeProject',
+    'Resolve-HiaRenderOutputDirectory',
     'Resolve-HiaMcpBackend',
     'Test-HiaHoudiniProbeConsistency',
     'Test-HiaLoopbackPorts',

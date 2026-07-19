@@ -201,10 +201,11 @@ class LauncherBackendIntegrationTests(unittest.TestCase):
             self.assertEqual(expected_settings.resolve(), Path(result["path"]).resolve())
             persisted = json.loads(expected_settings.read_text(encoding="utf-8-sig"))
             self.assertEqual(
-                {"houdini_exe", "bridge_python", "mcp_backend"},
+                {"houdini_exe", "bridge_python", "render_output_dir", "mcp_backend"},
                 set(persisted),
             )
             self.assertEqual("fxhoudini", persisted["mcp_backend"])
+            self.assertEqual("", persisted["render_output_dir"])
 
     def test_wpf_has_high_contrast_picker_templates_and_passes_one_backend(self) -> None:
         xaml_path = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.xaml"

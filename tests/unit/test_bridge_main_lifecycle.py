@@ -99,6 +99,9 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                     "HIA_CACHE_DIR": str(
                         REPOSITORY_ROOT / ".runtime" / "cache"
                     ),
+                    "HIA_RENDER_OUTPUT_DIR": str(
+                        REPOSITORY_ROOT / ".runtime" / "cache"
+                    ),
                     "UNREVIEWED_API_KEY": "must_not_reach_codex_child",
                 },
                 clear=False,
@@ -249,6 +252,10 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             str(REPOSITORY_ROOT / ".runtime" / "cache"),
             child_environment["HIA_CACHE_DIR"],
         )
+        self.assertEqual(
+            str(REPOSITORY_ROOT / ".runtime" / "cache"),
+            child_environment["HIA_RENDER_OUTPUT_DIR"],
+        )
         for relative in ("screenshots", "previews", "tmp"):
             self.assertTrue(
                 (REPOSITORY_ROOT / ".runtime" / "cache" / relative).is_dir()
@@ -370,7 +377,15 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             str(REPOSITORY_ROOT / ".runtime" / "cache"),
             child_environment["HIA_CACHE_DIR"],
         )
+        self.assertEqual(
+            str(REPOSITORY_ROOT / ".runtime" / "cache"),
+            child_environment["HIA_RENDER_OUTPUT_DIR"],
+        )
         self.assertIn("HIA_CACHE_DIR", bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT)
+        self.assertIn(
+            "HIA_RENDER_OUTPUT_DIR",
+            bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT,
+        )
         self.assertIn(
             f'{hia_server}.env_vars='
             + json.dumps(list(bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT)),

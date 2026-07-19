@@ -36,14 +36,16 @@ class _ManualTimer:
         self._callback = callback
         self._active = False
         self.start_calls = 0
+        self.start_delays: list[int] = []
         self.stop_calls = 0
 
     def isActive(self) -> bool:  # noqa: N802
         return self._active
 
-    def start(self) -> None:
+    def start(self, delay_ms: int = 0) -> None:
         self._active = True
         self.start_calls += 1
+        self.start_delays.append(delay_ms)
 
     def stop(self) -> None:
         self._active = False
@@ -77,6 +79,9 @@ def _load_real_panel_class() -> type:
     qt_widgets = types.ModuleType("PySide6.QtWidgets")
     qt_core.Slot = _slot
     qt_core.QTimer = _HeadlessTimer
+    qt_core.Qt = types.SimpleNamespace(
+        ItemDataRole=types.SimpleNamespace(ToolTipRole=object())
+    )
     qt_gui.QTextCursor = _HeadlessTextCursor
     qt_widgets.QWidget = _HeadlessQWidget
     pyside.QtCore = qt_core
@@ -134,6 +139,7 @@ class _Widget:
         self._checked = False
         self._tooltip = ""
         self._style_sheet = ""
+        self._item_roles: dict[tuple[int, Any], Any] = {}
         self.clear_focus_calls = 0
 
     def setEnabled(self, enabled: bool) -> None:
@@ -187,6 +193,7 @@ class _Widget:
     def clear(self) -> None:
         self._text = ""
         self._items.clear()
+        self._item_roles.clear()
         self._current_index = -1
 
     def clearFocus(self) -> None:  # noqa: N802
@@ -222,6 +229,13 @@ class _Widget:
     def itemData(self, index: int) -> Any:
         return self._items[index][1]
 
+    def setItemData(self, index: int, data: Any, role: Any = None) -> None:
+        if role is None:
+            label, _old_data = self._items[index]
+            self._items[index] = (label, data)
+        else:
+            self._item_roles[(index, role)] = data
+
 
 class _ConversationShim:
     def __init__(self) -> None:
@@ -233,6 +247,16 @@ class _ConversationShim:
         self._long_warning_shown = False
         self.stop_timer_calls = 0
         self.freeze_calls = 0
+        self.clear_calls = 0
+
+    def clear_messages(self) -> None:
+        self.entries.clear()
+        self._active_codex_index = None
+        self._tool_activity_index = None
+        self._protocol_streak_key = None
+        self._compaction_keys.clear()
+        self._long_warning_shown = False
+        self.clear_calls += 1
 
     def add_user_message(
         self,
@@ -424,6 +448,13 @@ class _BridgeClientShim:
         ] = []
         self.steer_requests: list[tuple[str, list[str], str]] = []
         self.thread_requests: list[str | None] = []
+        self.thread_service_tiers: list[str | None] = []
+        self.turn_service_tiers: list[str | None] = []
+        self.resume_requests: list[tuple[str, str | None, str]] = []
+        self.thread_list_requests = 0
+        self.thread_read_requests: list[tuple[str, str]] = []
+        self.thread_rename_requests: list[tuple[str, str, str]] = []
+        self.health_requests = 0
         self.interrupt_contexts: list[str] = []
         self.session_contexts: list[str] = []
         self.model_requests = 0
@@ -435,8 +466,23 @@ class _BridgeClientShim:
         self.start_turn_result: str | None = "turn-request"
         self.steer_turn_result: str | None = "steer-request"
 
-    def start_thread(self, *, model: str | None) -> None:
+    def start_thread(
+        self,
+        *,
+        model: str | None,
+        service_tier: str | None,
+    ) -> None:
         self.thread_requests.append(model)
+        self.thread_service_tiers.append(service_tier)
+
+    def resume_thread(
+        self,
+        thread_id: str,
+        *,
+        service_tier: str | None,
+        context: str,
+    ) -> None:
+        self.resume_requests.append((thread_id, service_tier, context))
 
     def start_turn(
         self,
@@ -444,12 +490,14 @@ class _BridgeClientShim:
         *,
         model: str | None,
         effort: str | None,
+        service_tier: str | None,
         local_image_paths: list[str],
         context: str,
     ) -> str | None:
         self.turn_requests.append(
             (text, model, effort, list(local_image_paths), context)
         )
+        self.turn_service_tiers.append(service_tier)
         return self.start_turn_result
 
     def steer_turn(
@@ -465,6 +513,19 @@ class _BridgeClientShim:
     def get_models(self) -> None:
         self.model_requests += 1
 
+    def get_threads(self) -> None:
+        self.thread_list_requests += 1
+
+    def read_thread(self, thread_id: str, *, context: str) -> None:
+        self.thread_read_requests.append((thread_id, context))
+
+    def rename_thread(self, thread_id: str, name: str, *, context: str) -> None:
+        self.thread_rename_requests.append((thread_id, name, context))
+
+    def get_health(self) -> str:
+        self.health_requests += 1
+        return "health-request"
+
     def interrupt(self, *, context: str) -> None:
         self.interrupt_contexts.append(context)
 
@@ -472,7 +533,7 @@ class _BridgeClientShim:
         self.approval_decisions.append((request_id, decision))
         return f"approval_{decision}"
 
-    def get_session(self, *, context: str) -> None:
+    def get_session(self, *, context: str = "session") -> None:
         self.session_contexts.append(context)
 
     def dispose(self) -> None:
@@ -621,6 +682,22 @@ def _make_panel() -> Any:
     panel._stopping_turn_token = None
     panel._reconciliation_tokens = {}
     panel._models_requested = False
+    panel._models_resolved = True
+    panel._threads_requested = False
+    panel._thread_history = [
+        {
+            "thread_id": "thread-1",
+            "name": "Current thread",
+            "preview": "",
+            "updated_at": 1_752_825_600,
+        }
+    ]
+    panel._auto_restore_attempted = False
+    panel._initial_thread_read_requested = False
+    panel._reconnect_attempt = 0
+    panel._reconnecting = False
+    panel._reconnect_exhausted_notice_shown = False
+    panel._app_server_exit_notice_shown = False
     panel._pending_approvals = deque()
     panel._current_approval = None
     panel._current_approval_offers_persistent_rule = False
@@ -643,6 +720,7 @@ def _make_panel() -> Any:
     panel._last_report_path = None
     panel._diagnostic_writer_error = None
     panel._stop_reconcile_timer = _ManualTimer(panel._reconcile_stopping_turn)
+    panel._reconnect_timer = _ManualTimer(panel._attempt_bridge_reconnect)
     panel._diagnostic_writer = _DiagnosticWriterShim()
     panel._scene_executor_token = "executor-secret"
     panel._poll_timer = _TimerShim()
@@ -659,6 +737,12 @@ def _make_panel() -> Any:
     panel.native_hython_label = _Widget("● Native Hython：不可用")
     panel.houdini_scene_label = _Widget("场景版本：不可用  ·  未保存：不可用")
     panel.thread_id_edit = _Widget("thread-1")
+    panel.history_combo = _Widget()
+    panel.history_combo.addItem("Current thread", panel._thread_history[0])
+    panel.refresh_threads_button = _Widget()
+    panel.thread_name_edit = _Widget("Current thread")
+    panel.rename_thread_button = _Widget()
+    panel.copy_thread_id_button = _Widget()
     panel.new_thread_button = _Widget()
     panel.resume_thread_button = _Widget()
     panel.send_button = _Widget()
@@ -690,6 +774,11 @@ def _make_panel() -> Any:
     panel.model_combo.addItem("Codex 默认", None)
     panel.effort_combo = _Widget()
     panel.effort_combo.addItem("Codex 默认", None)
+    panel.service_tier_label = _Widget("速度")
+    panel.service_tier_combo = _Widget()
+    panel.service_tier_combo.addItem("标准", None)
+    panel.service_tier_label.setVisible(False)
+    panel.service_tier_combo.setVisible(False)
     panel._refresh_controls()
     return panel
 
@@ -856,6 +945,8 @@ class PanelWiringTests(unittest.TestCase):
         panel._render_event({"type": "process_exit"})
         self.assertEqual("● FXHoudiniMCP：不可用", panel.houdini_mcp_label.text())
         self.assertIn("#9aa0a8", panel.houdini_mcp_label.styleSheet())
+        self.assertIn("请重启 launcher", panel.conversation.toPlainText())
+        self.assertIn("不会自动重放", panel.conversation.toPlainText())
 
     def test_dirty_status_reads_current_houdini_session(self) -> None:
         panel = _make_panel()
@@ -2695,6 +2786,463 @@ class PanelWiringTests(unittest.TestCase):
             }
         )
         self.assertEqual(before, panel.conversation.toPlainText())
+
+    def test_dynamic_service_tier_is_distinct_from_effort_and_forwarded(self) -> None:
+        panel = _make_panel()
+        model = {
+            "model": "dynamic-model",
+            "displayName": "Dynamic Model",
+            "description": "",
+            "isDefault": True,
+            "inputModalities": ["text", "image"],
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "high", "description": "Deep reasoning"}
+            ],
+            "defaultReasoningEffort": "high",
+            "serviceTiers": [
+                {
+                    "id": "priority-live-id",
+                    "name": "快速",
+                    "description": "来自实时目录的优先处理说明",
+                }
+            ],
+            "defaultServiceTier": "priority-live-id",
+        }
+
+        panel._apply_models([model])
+
+        self.assertTrue(panel.service_tier_combo.isVisible())
+        self.assertEqual("快速", panel.service_tier_combo.itemText(1))
+        self.assertEqual("priority-live-id", panel._selected_service_tier())
+        self.assertEqual("high", panel._selected_effort())
+        self.assertIn("实时目录", panel.service_tier_combo.toolTip())
+
+        panel.input_edit.setPlainText("use fast service")
+        panel._send()
+        self.assertEqual("priority-live-id", panel._client.turn_service_tiers[-1])
+        self.assertEqual("high", panel._client.turn_requests[-1][2])
+
+        standard_panel = _make_panel()
+        standard_panel._apply_models([model])
+        standard_panel.service_tier_combo.setCurrentIndex(0)
+        standard_panel._on_service_tier_changed(0)
+        standard_panel._new_thread()
+        self.assertEqual([None], standard_panel._client.thread_service_tiers)
+
+        standard_panel._apply_models(
+            [
+                {
+                    **model,
+                    "serviceTiers": [],
+                    "defaultServiceTier": None,
+                }
+            ]
+        )
+        self.assertFalse(standard_panel.service_tier_combo.isVisible())
+
+    def test_history_auto_restores_once_and_renders_stable_messages(self) -> None:
+        panel = _make_panel()
+        panel._selected_thread_id = None
+        panel._thread_history = []
+        threads = [
+            {
+                "thread_id": "019f-history-one",
+                "name": "售货机材质",
+                "preview": "fallback preview",
+                "updated_at": 1_752_825_600,
+            },
+            {
+                "thread_id": "019f-history-two",
+                "name": None,
+                "preview": "检查当前节点网络",
+                "updated_at": 1_752_739_200,
+            },
+        ]
+
+        panel._apply_threads(threads)
+
+        self.assertEqual(2, panel.history_combo.count())
+        self.assertIn("售货机材质", panel.history_combo.itemText(0))
+        self.assertNotIn("019f-history-one", panel.history_combo.itemText(0))
+        self.assertEqual(
+            [("019f-history-one", None, "session_auto_resume")],
+            panel._client.resume_requests,
+        )
+
+        panel._on_request_failed(
+            "session_auto_resume",
+            {"structured_error": {"code": "CODEX_RPC_ERROR", "message": "no"}},
+        )
+        panel._apply_threads(threads)
+        self.assertEqual(1, len(panel._client.resume_requests))
+
+        panel._selected_thread_id = "019f-history-one"
+        panel._render_thread_read(
+            {
+                "read": {
+                    "thread": {
+                        "id": "019f-history-one",
+                        "turns": [
+                            {
+                                "items": [
+                                    {
+                                        "type": "userMessage",
+                                        "content": [
+                                            {"type": "text", "text": "继续调整材质"},
+                                            {
+                                                "type": "localImage",
+                                                "path": r"E:\refs\look.png",
+                                            },
+                                        ],
+                                    },
+                                    {"type": "agentMessage", "text": "已经完成。"},
+                                    {"type": "commandExecution", "command": "ignored"},
+                                ]
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        self.assertEqual(1, panel.conversation.clear_calls)
+        self.assertIn("继续调整材质", panel.conversation.toPlainText())
+        self.assertIn("已经完成", panel.conversation.toPlainText())
+        self.assertNotIn("ignored", panel.conversation.toPlainText())
+
+    def test_history_failure_shows_only_sanitized_code_and_field(self) -> None:
+        panel = _make_panel()
+
+        panel._on_request_failed(
+            "threads",
+            {
+                "structured_error": {
+                    "code": "INVALID_THREAD_LIST_RESPONSE",
+                    "message": "Bearer must-not-be-shown",
+                    "details": {"field": "preview"},
+                }
+            },
+        )
+
+        text = panel.conversation.toPlainText()
+        self.assertIn("INVALID_THREAD_LIST_RESPONSE", text)
+        self.assertIn("field=preview", text)
+        self.assertNotIn("must-not-be-shown", text)
+
+    def test_history_click_and_rename_use_codex_thread_identity(self) -> None:
+        panel = _make_panel()
+        panel._apply_threads(
+            [
+                {
+                    "thread_id": "019f-history-one",
+                    "name": "旧名称",
+                    "preview": "",
+                    "updated_at": 1_752_825_600,
+                }
+            ]
+        )
+        panel._resume_history_selection(0)
+        self.assertEqual(
+            [("019f-history-one", None, "session_resume")],
+            panel._client.resume_requests,
+        )
+        panel._session_action_pending = False
+        panel.thread_name_edit.setText("用户命名")
+        panel._rename_thread()
+        thread_id, name, context = panel._client.thread_rename_requests[-1]
+        self.assertEqual("019f-history-one", thread_id)
+        self.assertEqual("用户命名", name)
+        self.assertTrue(context.startswith("thread_rename:"))
+        panel._on_action_completed(
+            context,
+            {"thread_id": thread_id, "name": name},
+        )
+        self.assertIn("用户命名", panel.history_combo.itemText(0))
+
+    def test_reopened_panel_reads_current_thread_once_without_resume(self) -> None:
+        panel = _make_panel()
+
+        panel._on_health(
+            {
+                "houdini_mcp": {"backend": "hia_v2", "available": True},
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_active": False,
+                },
+            }
+        )
+        panel._on_health(
+            {
+                "houdini_mcp": {"backend": "hia_v2", "available": True},
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_active": False,
+                },
+            }
+        )
+
+        self.assertEqual(
+            [("thread-1", "thread_read:initial")],
+            panel._client.thread_read_requests,
+        )
+        self.assertEqual([], panel._client.resume_requests)
+
+    def test_long_history_is_complete_and_missing_name_does_not_clear(self) -> None:
+        panel = _make_panel()
+        panel._apply_threads(
+            [
+                {
+                    "thread_id": "thread-1",
+                    "name": "保留名称",
+                    "preview": "preview",
+                    "updated_at": 1_752_825_600,
+                },
+                {
+                    "thread_id": "thread-2",
+                    "name": "候选会话",
+                    "preview": "preview two",
+                    "updated_at": 1_752_739_200,
+                },
+            ]
+        )
+        panel.history_combo.setCurrentIndex(1)
+        panel._on_history_index_changed(1)
+        panel._apply_threads(panel._thread_history)
+        self.assertEqual("thread-2", panel._selected_history_record()["thread_id"])
+
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "thread/name/updated",
+                "params": {"threadId": "thread-1"},
+            }
+        )
+        self.assertEqual("保留名称", panel._thread_history[0]["name"])
+
+        panel._selected_thread_id = "thread-1"
+        panel._turn_state = PanelTurnState()
+        panel._render_thread_read(
+            {
+                "read": {
+                    "thread": {
+                        "id": "thread-1",
+                        "turns": [
+                            {
+                                "items": [
+                                    {
+                                        "type": "agentMessage",
+                                        "text": f"message-{index}",
+                                    }
+                                    for index in range(105)
+                                ]
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        codex_entries = [
+            entry for entry in panel.conversation.entries if entry["role"] == "codex"
+        ]
+        self.assertEqual(105, len(codex_entries))
+        self.assertIn("message-0", panel.conversation.toPlainText())
+        self.assertIn("message-104", panel.conversation.toPlainText())
+        self.assertNotIn("仅展示最近 100 条", panel.conversation.toPlainText())
+
+    def test_bridge_reconnect_is_bounded_and_never_replays_turn(self) -> None:
+        panel = _make_panel()
+        panel.input_edit.setPlainText("保留的草稿")
+        attachment = r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\ref.png"
+        panel.attachment_strip.add_path(attachment)
+        failure = {
+            "structured_error": {
+                "code": "NETWORK_ERROR",
+                "message": "Bridge unavailable",
+            }
+        }
+
+        panel._on_request_failed("events", failure)
+        self.assertEqual([500], panel._reconnect_timer.start_delays)
+        self.assertEqual("保留的草稿", panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+        self.assertEqual("thread-1", panel._selected_thread_id)
+
+        for expected_delay in (1_000, 2_000, 4_000, 8_000):
+            panel._reconnect_timer.fire()
+            panel._on_request_failed("health", failure)
+            self.assertEqual(expected_delay, panel._reconnect_timer.start_delays[-1])
+        panel._reconnect_timer.fire()
+        panel._on_request_failed("health", failure)
+
+        self.assertEqual([500, 1_000, 2_000, 4_000, 8_000], panel._reconnect_timer.start_delays)
+        self.assertEqual(5, panel._client.health_requests)
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertIn("请重启 launcher", panel.conversation.toPlainText())
+
+    def test_reconcile_network_failure_releases_lock_before_health_recovery(self) -> None:
+        panel = _make_panel()
+        context = "session_reconcile:1:1:network"
+        panel._reconciliation_tokens[context] = panel._turn_state.capture_token()
+        panel._refresh_controls()
+        self.assertFalse(panel.new_thread_button.isEnabled())
+
+        panel._on_request_failed(
+            context,
+            {
+                "structured_error": {
+                    "code": "NETWORK_ERROR",
+                    "message": "Bridge unavailable",
+                }
+            },
+        )
+        self.assertEqual({}, panel._reconciliation_tokens)
+
+        panel._reconnect_timer.fire()
+        panel._on_health(
+            {
+                "houdini_mcp": {"backend": "hia_v2", "available": True},
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_active": False,
+                },
+            }
+        )
+        self.assertTrue(panel.new_thread_button.isEnabled())
+        self.assertEqual([], panel._client.session_contexts)
+
+    def test_catalog_network_failures_are_refetched_after_reconnect(self) -> None:
+        panel = _make_panel()
+        panel._models_requested = True
+        panel._models_resolved = False
+        panel._threads_requested = True
+        failure = {
+            "structured_error": {
+                "code": "NETWORK_ERROR",
+                "message": "Bridge unavailable",
+            }
+        }
+
+        panel._on_request_failed("models", failure)
+        panel._on_request_failed("threads", failure)
+        self.assertFalse(panel._models_requested)
+        self.assertFalse(panel._threads_requested)
+
+        panel._reconnect_timer.fire()
+        panel._on_health(
+            {
+                "houdini_mcp": {"backend": "hia_v2", "available": True},
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_active": False,
+                },
+            }
+        )
+        self.assertEqual(1, panel._client.model_requests)
+        self.assertEqual(1, panel._client.thread_list_requests)
+
+    def test_auto_restore_waits_for_live_model_tiers(self) -> None:
+        panel = _make_panel()
+        panel._selected_thread_id = None
+        panel._models_resolved = False
+        panel._thread_history = []
+        panel._apply_threads(
+            [
+                {
+                    "thread_id": "thread-fast",
+                    "name": "Fast history",
+                    "preview": "",
+                    "updated_at": 1_752_825_600,
+                }
+            ]
+        )
+        self.assertEqual([], panel._client.resume_requests)
+
+        panel._on_action_completed(
+            "models",
+            {
+                "models": [
+                    {
+                        "model": "dynamic-model",
+                        "displayName": "Dynamic Model",
+                        "description": "",
+                        "isDefault": True,
+                        "inputModalities": ["text"],
+                        "supportedReasoningEfforts": [],
+                        "defaultReasoningEffort": None,
+                        "serviceTiers": [
+                            {
+                                "id": "live-fast",
+                                "name": "快速",
+                                "description": "live model/list tier",
+                            }
+                        ],
+                        "defaultServiceTier": "live-fast",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(
+            [("thread-fast", "live-fast", "session_auto_resume")],
+            panel._client.resume_requests,
+        )
+
+    def test_process_exit_freezes_active_turn_without_marking_terminal(self) -> None:
+        panel = _make_panel()
+        _context, _turn_id = _start_active_turn(panel, 1)
+        self.assertTrue(panel._turn_state.busy)
+
+        panel._render_event({"type": "process_exit"})
+
+        self.assertEqual(1, panel.conversation.freeze_calls)
+        self.assertTrue(panel._turn_state.busy)
+        self.assertEqual(
+            "Turn：状态待确认（app-server 已退出）",
+            panel.turn_status_label.text(),
+        )
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertIn("请重启 launcher", panel.conversation.toPlainText())
+
+    def test_successful_reconnect_syncs_session_and_read_without_replay(self) -> None:
+        panel = _make_panel()
+        panel.input_edit.setPlainText("draft")
+        panel._on_request_failed(
+            "events",
+            {
+                "structured_error": {
+                    "code": "NETWORK_TIMEOUT",
+                    "message": "timeout",
+                }
+            },
+        )
+        panel._reconnect_timer.fire()
+        panel._on_health(
+            {
+                "houdini_mcp": {"backend": "hia_v2", "available": True},
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_active": False,
+                },
+            }
+        )
+
+        self.assertEqual(0, panel._reconnect_attempt)
+        self.assertFalse(panel._reconnecting)
+        self.assertEqual([], panel._client.session_contexts)
+        self.assertEqual(
+            [("thread-1", "thread_read:reconnect")],
+            panel._client.thread_read_requests,
+        )
+        self.assertEqual("draft", panel.input_edit.toPlainText())
+        self.assertEqual([], panel._client.turn_requests)
 
     def test_unicode_model_and_effort_reach_turn_start_without_changes(self) -> None:
         panel = _make_panel()

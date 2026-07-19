@@ -3,6 +3,7 @@ param(
     [AllowEmptyString()][string]$HoudiniExe = '',
     [AllowEmptyString()][string]$BridgePython = '',
     [AllowEmptyString()][string]$McpBackend = '',
+    [AllowEmptyString()][string]$RenderOutputDir = '',
     [switch]$CheckOnly,
     [switch]$Json,
     [switch]$RepairSafeProject,
@@ -21,6 +22,7 @@ function Get-SelectedInputs {
         [AllowEmptyString()][string]$RequestedHoudini,
         [AllowEmptyString()][string]$RequestedBridge,
         [AllowEmptyString()][string]$RequestedBackend,
+        [AllowEmptyString()][string]$RequestedRenderOutput,
         [Parameter(Mandatory = $true)]$Settings
     )
 
@@ -62,12 +64,18 @@ function Get-SelectedInputs {
     } else {
         Resolve-HiaMcpBackend -Backend ([string]$Settings.mcp_backend)
     }
+    $selectedRenderOutput = if ($RequestedRenderOutput) {
+        try { [System.IO.Path]::GetFullPath($RequestedRenderOutput) } catch { $RequestedRenderOutput }
+    } else {
+        [string]$Settings.render_output_dir
+    }
     return [pscustomobject]@{
         candidates = @($candidates)
         bridge_candidates = @($bridgeCandidates)
         houdini = $selectedHoudini
         bridge = $selectedBridge
         backend = $selectedBackend
+        render_output = $selectedRenderOutput
     }
 }
 
@@ -76,6 +84,7 @@ function Invoke-PreflightAndReport {
         [AllowEmptyString()][string]$SelectedHoudini,
         [AllowEmptyString()][string]$SelectedBridge,
         [ValidateSet('hia_v2', 'fxhoudini')][string]$SelectedBackend,
+        [AllowEmptyString()][string]$SelectedRenderOutput,
         [Parameter(Mandatory = $true)][object[]]$Candidates
     )
 
@@ -83,6 +92,7 @@ function Invoke-PreflightAndReport {
         -ProjectRoot $projectRoot `
         -HoudiniExe $SelectedHoudini `
         -BridgePython $SelectedBridge `
+        -RenderOutputDir $SelectedRenderOutput `
         -McpBackend $SelectedBackend `
         -Candidates $Candidates `
         -TimeoutSeconds $ProbeTimeoutSeconds
@@ -106,6 +116,7 @@ function Write-ConsoleSummary {
 
     Write-Output "Overall: $($Result.overall)"
     Write-Output "MCP backend: $($Result.mcp_backend)"
+    Write-Output "Final output: $($Result.render_output_dir)"
     Write-Output "JSON report: $($Result.report.json_path)"
     Write-Output "Log report:  $($Result.report.log_path)"
     foreach ($check in $Result.checks) {
@@ -118,9 +129,15 @@ function Start-ExistingHoudiniLauncher {
     param(
         [Parameter(Mandatory = $true)][string]$SelectedHoudini,
         [Parameter(Mandatory = $true)][string]$SelectedBridge,
-        [ValidateSet('hia_v2', 'fxhoudini')][string]$SelectedBackend
+        [ValidateSet('hia_v2', 'fxhoudini')][string]$SelectedBackend,
+        [AllowEmptyString()][string]$SelectedRenderOutput = ''
     )
 
+    $resolvedRenderOutput = Resolve-HiaRenderOutputDirectory `
+        -ProjectRoot $projectRoot `
+        -Path $SelectedRenderOutput `
+        -HoudiniExe $SelectedHoudini `
+        -Create
     $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $launchScript = Join-Path $projectRoot 'scripts\launch-houdini.ps1'
     $arguments = @(
@@ -137,6 +154,11 @@ function Start-ExistingHoudiniLauncher {
     $startInfo.WorkingDirectory = $projectRoot
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $false
+    if ($null -ne $startInfo.Environment) {
+        $startInfo.Environment['HIA_RENDER_OUTPUT_DIR'] = $resolvedRenderOutput
+    } else {
+        $startInfo.EnvironmentVariables['HIA_RENDER_OUTPUT_DIR'] = $resolvedRenderOutput
+    }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { throw 'The existing Houdini launcher process did not start.' }
@@ -153,13 +175,14 @@ if ($RepairSafeProject) {
 }
 
 $settings = Read-HiaLauncherSettings -ProjectRoot $projectRoot
-$inputs = Get-SelectedInputs -RequestedHoudini $HoudiniExe -RequestedBridge $BridgePython -RequestedBackend $McpBackend -Settings $settings
+$inputs = Get-SelectedInputs -RequestedHoudini $HoudiniExe -RequestedBridge $BridgePython -RequestedBackend $McpBackend -RequestedRenderOutput $RenderOutputDir -Settings $settings
 
 if ($CheckOnly -or $Json) {
     $result = Invoke-PreflightAndReport `
         -SelectedHoudini $inputs.houdini `
         -SelectedBridge $inputs.bridge `
         -SelectedBackend $inputs.backend `
+        -SelectedRenderOutput $inputs.render_output `
         -Candidates $inputs.candidates
     if ($Json) {
         Write-Output (ConvertTo-HiaRedactedJson -Value $result -Depth 12)

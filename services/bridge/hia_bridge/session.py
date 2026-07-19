@@ -20,9 +20,15 @@ MODEL_LIST_MAX_PAGES = 16
 MODEL_LIST_MAX_ENTRIES = 512
 MODEL_IDENTIFIER_MAX_LENGTH = 256
 REASONING_EFFORT_MAX_LENGTH = 64
+SERVICE_TIER_MAX_LENGTH = 256
+MODEL_SERVICE_TIER_MAX_ENTRIES = 32
 MODEL_DISPLAY_NAME_MAX_LENGTH = 512
 MODEL_DESCRIPTION_MAX_LENGTH = 8192
 MODEL_CURSOR_MAX_LENGTH = 4096
+THREAD_LIST_LIMIT = 20
+THREAD_NAME_MAX_LENGTH = 512
+THREAD_PREVIEW_MAX_LENGTH = 8192
+THREAD_CWD_MAX_LENGTH = 32_767
 MAX_LOCAL_IMAGES = 16
 LOCAL_IMAGE_PATH_MAX_LENGTH = 32_767
 LOCAL_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
@@ -148,6 +154,40 @@ def _normalized_windows_path(value: str, cwd: str | None = None) -> str | None:
             return None
         candidate = ntpath.join(cwd, candidate)
     return ntpath.normcase(ntpath.normpath(candidate))
+
+
+def _normalized_thread_cwd(value: str) -> str | None:
+    candidate = value.strip()
+    if candidate.startswith("\\\\?\\UNC\\"):
+        candidate = "\\\\" + candidate[8:]
+    elif candidate.startswith("\\\\?\\"):
+        candidate = candidate[4:]
+    try:
+        return os.path.normcase(str(Path(candidate).resolve(strict=False)))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _thread_cwd_filters(value: str) -> list[str]:
+    """Return ordinary and Windows extended spellings for one project cwd."""
+
+    candidate = value.strip()
+    if candidate.startswith("\\\\?\\UNC\\"):
+        ordinary = "\\\\" + candidate[8:]
+        extended = candidate
+    elif candidate.startswith("\\\\?\\"):
+        ordinary = candidate[4:]
+        extended = candidate
+    elif candidate.startswith("\\\\"):
+        ordinary = candidate
+        extended = "\\\\?\\UNC\\" + candidate[2:]
+    elif re.match(r"^[A-Za-z]:[\\/]", candidate):
+        ordinary = candidate
+        extended = "\\\\?\\" + candidate
+    else:
+        return [candidate]
+
+    return list(dict.fromkeys((ordinary, extended)))
 
 
 def _path_is_within(value: str, root: str) -> bool:
@@ -480,9 +520,10 @@ class BridgeSession:
             "上下文仅用 app-server 自动整理，不手动 compact，不创建本地摘要或记忆。"
             "实时代码禁止 hou.hipFile.clear/load/save，不替换当前场景；新资产放入唯一新根。"
             "不要调用 request_user_input；信息不足时采用合理默认值，无法执行才报告原因。"
-            "自行生成的截图写 HIA_CACHE_DIR/screenshots，预览写 previews，中间图写 tmp；"
-            "文件名用时间戳加短随机后缀；支持输出路径时显式传入，"
-            "不写仓库根、HIP 同目录、桌面或系统临时目录。"
+            "自动截图写 HIA_CACHE_DIR/screenshots，预览写 previews，中间图写 tmp，文件名加时间戳和短随机后缀；"
+            "插件源码、内部缓存、自动截图/预览/附件/临时/诊断必须留项目内。"
+            "用户明确指定的最终渲染、EXR、视频、USD、模拟缓存或导出是用户交付物，"
+            "可写所选普通本地项目外目录；未指定才用 HIA_RENDER_OUTPUT_DIR，并始终报告最终路径。"
             "禁止屏幕接管。"
         )
 
@@ -517,11 +558,20 @@ class BridgeSession:
                 return "login_required"
         return "unavailable"
 
-    def start_thread(self, model: str | None = None) -> dict[str, Any]:
+    def start_thread(
+        self,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> dict[str, Any]:
         model = self._validated_optional_selection(
             model,
             "model",
             MODEL_IDENTIFIER_MAX_LENGTH,
+        )
+        service_tier = self._validated_optional_selection(
+            service_tier,
+            "service_tier",
+            SERVICE_TIER_MAX_LENGTH,
         )
         with self._lock:
             self._require_no_active_turn_locked()
@@ -531,6 +581,7 @@ class BridgeSession:
             "sandbox": "workspace-write",
             "ephemeral": False,
             "developerInstructions": self._developer_instructions(),
+            "serviceTier": service_tier,
         }
         if model is not None:
             params["model"] = model
@@ -542,8 +593,17 @@ class BridgeSession:
         self._events.publish("thread_selected", action="start", thread_id=thread_id)
         return {"thread_id": thread_id, "result": result}
 
-    def resume_thread(self, thread_id: str) -> dict[str, Any]:
+    def resume_thread(
+        self,
+        thread_id: str,
+        service_tier: str | None = None,
+    ) -> dict[str, Any]:
         thread_id = self._validated_identifier(thread_id, "thread_id")
+        service_tier = self._validated_optional_selection(
+            service_tier,
+            "service_tier",
+            SERVICE_TIER_MAX_LENGTH,
+        )
         with self._lock:
             self._require_no_active_turn_locked()
         resumed = self._client.request(
@@ -554,20 +614,17 @@ class BridgeSession:
                 "approvalPolicy": "on-request",
                 "sandbox": "workspace-write",
                 "developerInstructions": self._developer_instructions(),
+                "serviceTier": service_tier,
             },
         )
         resolved_id = self._extract_thread_id(resumed)
-        read_result = self._client.request(
-            "thread/read",
-            {"threadId": resolved_id, "includeTurns": True},
-        )
+        read_result = self._project_thread_messages(resumed, resolved_id)
         with self._lock:
             self._thread_id = resolved_id
             self._reset_turn_locked()
         self._events.publish("thread_selected", action="resume", thread_id=resolved_id)
         return {
             "thread_id": resolved_id,
-            "resume": resumed,
             "read": read_result,
         }
 
@@ -579,7 +636,98 @@ class BridgeSession:
             "thread/read",
             {"threadId": selected, "includeTurns": True},
         )
-        return {"thread_id": selected, "result": result}
+        return {
+            "thread_id": selected,
+            "result": self._project_thread_messages(result, selected),
+        }
+
+    def list_threads(self) -> dict[str, Any]:
+        """Return one recent page for this project without local persistence."""
+
+        result = self._client.request(
+            "thread/list",
+            {
+                "cwd": _thread_cwd_filters(str(self._project_root)),
+                "archived": False,
+                "limit": THREAD_LIST_LIMIT,
+                "modelProviders": [],
+                "useStateDbOnly": True,
+                "sortKey": "recency_at",
+                "sortDirection": "desc",
+            },
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+            raise self._invalid_thread_response("Response data must be an array")
+
+        project_root = _normalized_thread_cwd(str(self._project_root))
+        threads: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in result["data"][:THREAD_LIST_LIMIT]:
+            if not isinstance(entry, dict):
+                raise self._invalid_thread_response("Thread entry must be an object")
+            thread_id = self._validated_thread_response_string(
+                entry.get("id"), "id", MODEL_IDENTIFIER_MAX_LENGTH, allow_empty=False
+            )
+            cwd = self._validated_thread_response_string(
+                entry.get("cwd"), "cwd", THREAD_CWD_MAX_LENGTH, allow_empty=False
+            )
+            entry_root = _normalized_thread_cwd(cwd)
+            if entry_root != project_root:
+                continue
+            if thread_id in seen:
+                raise self._invalid_thread_response(
+                    "Response contains a duplicate thread id", field="id"
+                )
+            seen.add(thread_id)
+
+            raw_name = entry.get("name")
+            name = None
+            if raw_name is not None:
+                name = self._validated_thread_response_string(
+                    raw_name,
+                    "name",
+                    THREAD_NAME_MAX_LENGTH,
+                    allow_empty=True,
+                )
+            preview = self._sanitized_thread_preview(entry.get("preview"))
+            updated_at = entry.get("updatedAt")
+            if not isinstance(updated_at, int) or isinstance(updated_at, bool) or updated_at < 0:
+                raise self._invalid_thread_response(
+                    "Thread updatedAt must be a non-negative integer",
+                    field="updatedAt",
+                )
+            record: dict[str, Any] = {
+                "thread_id": thread_id,
+                "name": name,
+                "preview": preview,
+                "updated_at": updated_at,
+            }
+            recency_at = entry.get("recencyAt")
+            if recency_at is not None:
+                if (
+                    not isinstance(recency_at, int)
+                    or isinstance(recency_at, bool)
+                    or recency_at < 0
+                ):
+                    raise self._invalid_thread_response(
+                        "Thread recencyAt must be a non-negative integer or null",
+                        field="recencyAt",
+                    )
+                record["recency_at"] = recency_at
+            threads.append(record)
+        return {"threads": threads}
+
+    def rename_thread(self, thread_id: str, name: str) -> dict[str, Any]:
+        thread_id = self._validated_identifier(thread_id, "thread_id")
+        name = self._validated_optional_selection(
+            name, "thread_name", THREAD_NAME_MAX_LENGTH
+        )
+        if name is None:
+            raise BridgeError("INVALID_THREAD_NAME", "thread_name is required")
+        result = self._client.request(
+            "thread/name/set", {"threadId": thread_id, "name": name}
+        )
+        return {"thread_id": thread_id, "name": name, "result": result}
 
     def list_models(self) -> dict[str, Any]:
         """Return a bounded, sanitized catalog of non-hidden Codex models."""
@@ -658,6 +806,7 @@ class BridgeSession:
         model: str | None = None,
         effort: str | None = None,
         local_image_paths: list[str] | None = None,
+        service_tier: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(text, str):
             raise BridgeError("EMPTY_INPUT", "Natural-language input must not be empty")
@@ -672,6 +821,11 @@ class BridgeSession:
             effort,
             "effort",
             REASONING_EFFORT_MAX_LENGTH,
+        )
+        service_tier = self._validated_optional_selection(
+            service_tier,
+            "service_tier",
+            SERVICE_TIER_MAX_LENGTH,
         )
         with self._lock:
             thread_id = self._validated_identifier(self._thread_id, "thread_id")
@@ -714,6 +868,7 @@ class BridgeSession:
                     "type": "workspaceWrite",
                     "networkAccess": False,
                 },
+                "serviceTier": service_tier,
             }
             if model is not None:
                 params["model"] = model
@@ -1071,6 +1226,55 @@ class BridgeSession:
             details=details,
         )
 
+    @staticmethod
+    def _invalid_thread_response(
+        message: str,
+        *,
+        field: str | None = None,
+    ) -> BridgeError:
+        details = {"field": field} if field is not None else None
+        return BridgeError(
+            "INVALID_THREAD_LIST_RESPONSE",
+            message,
+            http_status=502,
+            details=details,
+        )
+
+    @classmethod
+    def _validated_thread_response_string(
+        cls,
+        value: Any,
+        field: str,
+        max_length: int,
+        *,
+        allow_empty: bool,
+    ) -> str:
+        if (
+            not isinstance(value, str)
+            or (not allow_empty and not value.strip())
+            or len(value) > max_length
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise cls._invalid_thread_response(
+                f"Response field {field} is invalid", field=field
+            )
+        return value
+
+    @classmethod
+    def _sanitized_thread_preview(cls, value: Any) -> str:
+        """Bound display-only preview text without rejecting the whole page."""
+
+        if not isinstance(value, str):
+            raise cls._invalid_thread_response(
+                "Response field preview is invalid", field="preview"
+            )
+        prefix = value[:THREAD_PREVIEW_MAX_LENGTH]
+        without_controls = "".join(
+            " " if ord(character) < 32 or ord(character) == 127 else character
+            for character in prefix
+        )
+        return " ".join(without_controls.split())[:THREAD_PREVIEW_MAX_LENGTH]
+
     @classmethod
     def _validated_response_string(
         cls,
@@ -1139,6 +1343,70 @@ class BridgeSession:
                 field="inputModalities",
             )
 
+        raw_service_tiers = entry.get("serviceTiers", [])
+        if (
+            not isinstance(raw_service_tiers, list)
+            or len(raw_service_tiers) > MODEL_SERVICE_TIER_MAX_ENTRIES
+        ):
+            raise cls._invalid_model_response(
+                "Model serviceTiers is invalid",
+                field="serviceTiers",
+            )
+        service_tiers: list[dict[str, str]] = []
+        seen_service_tiers: set[str] = set()
+        for raw_service_tier in raw_service_tiers:
+            if not isinstance(raw_service_tier, dict):
+                raise cls._invalid_model_response(
+                    "Service tier option must be an object",
+                    field="serviceTiers",
+                )
+            service_tier_id = cls._validated_response_string(
+                raw_service_tier.get("id"),
+                "serviceTiers.id",
+                SERVICE_TIER_MAX_LENGTH,
+                allow_empty=False,
+            )
+            service_tier_name = cls._validated_response_string(
+                raw_service_tier.get("name"),
+                "serviceTiers.name",
+                MODEL_DISPLAY_NAME_MAX_LENGTH,
+                allow_empty=True,
+            )
+            service_tier_description = cls._validated_response_string(
+                raw_service_tier.get("description"),
+                "serviceTiers.description",
+                MODEL_DESCRIPTION_MAX_LENGTH,
+                allow_empty=True,
+            )
+            if service_tier_id in seen_service_tiers:
+                raise cls._invalid_model_response(
+                    "Model contains a duplicate service tier",
+                    field="serviceTiers",
+                )
+            seen_service_tiers.add(service_tier_id)
+            service_tiers.append(
+                {
+                    "id": service_tier_id,
+                    "name": service_tier_name,
+                    "description": service_tier_description,
+                }
+            )
+
+        raw_default_service_tier = entry.get("defaultServiceTier")
+        default_service_tier = None
+        if raw_default_service_tier is not None:
+            default_service_tier = cls._validated_response_string(
+                raw_default_service_tier,
+                "defaultServiceTier",
+                SERVICE_TIER_MAX_LENGTH,
+                allow_empty=False,
+            )
+            if default_service_tier not in seen_service_tiers:
+                raise cls._invalid_model_response(
+                    "Model defaultServiceTier is not advertised in serviceTiers",
+                    field="defaultServiceTier",
+                )
+
         raw_efforts = entry.get("supportedReasoningEfforts")
         if not isinstance(raw_efforts, list) or len(raw_efforts) > 32:
             raise cls._invalid_model_response(
@@ -1192,6 +1460,8 @@ class BridgeSession:
             "description": description,
             "isDefault": is_default,
             "inputModalities": list(input_modalities),
+            "serviceTiers": service_tiers,
+            "defaultServiceTier": default_service_tier,
             "supportedReasoningEfforts": efforts,
             "defaultReasoningEffort": default_effort,
         }
@@ -1263,6 +1533,79 @@ class BridgeSession:
             raise BridgeError("INVALID_CODEX_RESPONSE", "Thread response has no thread object", 502)
         thread_id = result["thread"].get("id")
         return BridgeSession._validated_identifier(thread_id, "thread_id")
+
+    @staticmethod
+    def _project_thread_messages(
+        result: Any,
+        expected_thread_id: str,
+    ) -> dict[str, Any]:
+        """Return only the complete stable chat fields consumed by the Panel."""
+
+        thread_id = BridgeSession._extract_thread_id(result)
+        if thread_id != expected_thread_id:
+            raise BridgeError(
+                "INVALID_CODEX_RESPONSE",
+                "Thread response does not match the requested thread",
+                502,
+            )
+        thread = result["thread"]
+        turns = thread.get("turns")
+        if not isinstance(turns, list):
+            raise BridgeError(
+                "INVALID_CODEX_RESPONSE",
+                "Thread response has no turns array",
+                502,
+            )
+
+        projected_turns: list[dict[str, Any]] = []
+        for turn in turns:
+            if not isinstance(turn, dict) or not isinstance(turn.get("items"), list):
+                raise BridgeError(
+                    "INVALID_CODEX_RESPONSE",
+                    "Thread response contains an invalid turn",
+                    502,
+                )
+            projected_items: list[dict[str, Any]] = []
+            for item in turn["items"]:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "userMessage":
+                    content = item.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    projected_content: list[dict[str, str]] = []
+                    for entry in content:
+                        if not isinstance(entry, dict):
+                            continue
+                        if entry.get("type") == "text" and isinstance(
+                            entry.get("text"), str
+                        ):
+                            projected_content.append(
+                                {"type": "text", "text": entry["text"]}
+                            )
+                        elif entry.get("type") == "localImage" and isinstance(
+                            entry.get("path"), str
+                        ):
+                            projected_content.append(
+                                {"type": "localImage", "path": entry["path"]}
+                            )
+                    projected_items.append(
+                        {"type": "userMessage", "content": projected_content}
+                    )
+                elif item.get("type") == "agentMessage" and isinstance(
+                    item.get("text"), str
+                ):
+                    projected_items.append(
+                        {"type": "agentMessage", "text": item["text"]}
+                    )
+            projected_turns.append({"items": projected_items})
+
+        return {
+            "thread": {
+                "id": thread_id,
+                "turns": projected_turns,
+            }
+        }
 
     @staticmethod
     def _extract_turn_id(result: Any) -> str:

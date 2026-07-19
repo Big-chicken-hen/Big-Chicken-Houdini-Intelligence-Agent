@@ -40,6 +40,18 @@
         "purpose": "p1-read-only-model-catalog"
       },
       {
+        "method": "thread/list",
+        "params_definition": "ThreadListParams",
+        "response_schema": "v2/ThreadListResponse.json",
+        "purpose": "thread-history"
+      },
+      {
+        "method": "thread/name/set",
+        "params_definition": "ThreadSetNameParams",
+        "response_schema": "v2/ThreadSetNameResponse.json",
+        "purpose": "thread-history"
+      },
+      {
         "method": "thread/start",
         "params_definition": "ThreadStartParams",
         "response_schema": "v2/ThreadStartResponse.json"
@@ -131,6 +143,11 @@
         "method": "thread/started",
         "params_definition": "ThreadStartedNotification",
         "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "thread/name/updated",
+        "params_definition": "ThreadNameUpdatedNotification",
+        "purpose": "thread-history"
       },
       {
         "method": "thread/status/changed",

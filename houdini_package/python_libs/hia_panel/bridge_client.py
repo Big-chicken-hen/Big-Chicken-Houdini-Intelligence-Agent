@@ -87,8 +87,46 @@ class BridgeClient(QtCore.QObject):
 
         return self._request("GET", "/v1/models", context="models")
 
-    def start_thread(self, *, model: str | None = None) -> str | None:
-        payload: dict[str, Any] = {"action": "start"}
+    def get_threads(self) -> str | None:
+        return self._request("GET", "/v1/threads", context="threads")
+
+    def read_thread(
+        self,
+        thread_id: str,
+        *,
+        context: str = "thread_read",
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/session",
+            {"action": "read", "thread_id": thread_id},
+            context=context,
+        )
+
+    def rename_thread(
+        self,
+        thread_id: str,
+        name: str,
+        *,
+        context: str = "thread_rename",
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/threads/name",
+            {"thread_id": thread_id, "name": name},
+            context=context,
+        )
+
+    def start_thread(
+        self,
+        *,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> str | None:
+        payload: dict[str, Any] = {
+            "action": "start",
+            "service_tier": service_tier,
+        }
         if model is not None:
             payload["model"] = model
         return self._request(
@@ -98,12 +136,22 @@ class BridgeClient(QtCore.QObject):
             context="session_start",
         )
 
-    def resume_thread(self, thread_id: str) -> str | None:
+    def resume_thread(
+        self,
+        thread_id: str,
+        *,
+        service_tier: str | None = None,
+        context: str = "session_resume",
+    ) -> str | None:
         return self._request(
             "POST",
             "/v1/session",
-            {"action": "resume", "thread_id": thread_id},
-            context="session_resume",
+            {
+                "action": "resume",
+                "thread_id": thread_id,
+                "service_tier": service_tier,
+            },
+            context=context,
         )
 
     def start_turn(
@@ -112,10 +160,14 @@ class BridgeClient(QtCore.QObject):
         *,
         model: str | None = None,
         effort: str | None = None,
+        service_tier: str | None = None,
         local_image_paths: list[str] | None = None,
         context: str = "turn_start",
     ) -> str | None:
-        payload: dict[str, Any] = {"text": text}
+        payload: dict[str, Any] = {
+            "text": text,
+            "service_tier": service_tier,
+        }
         if model is not None:
             payload["model"] = model
         if effort is not None:

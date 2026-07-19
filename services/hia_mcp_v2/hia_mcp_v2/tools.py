@@ -140,7 +140,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_node_help",
         "dynamic_node_knowledge",
-        "Resolve a live node type or node path and return its real versioned name, context, input rules, parameter templates, definition/source hints, and installed help metadata.",
+        "Resolve installed Houdini help using one of three inputs: node_path; category plus a bare node_type; or node_type=\"Category/name\". Returns the real versioned name, context, input rules, parameter templates, definition/source hints, and installed help metadata.",
         _object(
             {
                 "node_path": PATH,

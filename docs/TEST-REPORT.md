@@ -744,3 +744,130 @@
 - 定向运行 `tests.unit.test_panel_wiring`、`tests.unit.test_conversation_tool_activity`、`tests.unit.test_p1_assets`，92/92 通过，用时 0.952 秒。
 - 回归覆盖 start/steer pending 时输入框保持启用、发送按钮禁用、重复 `_send()` 不产生第二个请求、全 Panel 源码不再调用 `clearFocus()`；既有附件非模态、审批卡、流式计时器和 closeEvent 生命周期测试同时通过。
 - 未运行完整测试套件，也未启动 Houdini。人工验收需完整退出 Houdini 后由 launcher 重启：分别用 `Ctrl+Enter` 和发送按钮启动/追加 Turn，并在发送中、持续流式输出、附件选择器打开/取消、审批卡显示/允许/拒绝、Panel 关闭再重开后立即拖动 Scene View 与 Network View；预期不再需要最小化 Houdini 才能恢复操作。
+
+## Houdini Visual Research Skill 规则同步（2026-07-18）
+
+### 实际验证不顺
+
+- 默认 Python 直接运行 `skill-creator/scripts/quick_validate.py` 时，在进入 Skill 内容检查前因缺少 PyYAML 失败：`ModuleNotFoundError: No module named 'yaml'`。
+- 改用项目根下的一次性依赖目录后完成原校验脚本；下载 PyYAML 时发生一次 `files.pythonhosted.org` 连接超时重试，但随后自动恢复。首次清理保护因 `E:/` 与 `E:\` 的文本形式不同而拒绝删除，规范化并核对父目录及固定临时目录名后安全清理；未影响用户文件。
+
+### 验证结果
+
+- `quick_validate.py` 最终返回 `Skill is valid!`，临时验证目录已清理。
+- 既有四个静态案例 4/4 通过；新增 `hia_node_help` 调用、交付物路径语义、Panel/Bridge 职责边界检查 3/3 通过。复杂视觉研究深度与简单 Box 直达行为均保持。
+- 未运行完整项目测试，未启动 Houdini 或修改场景。
+
+### 最终审计补充
+
+- 合并 `rg` 正则首次使用 PowerShell 双引号，内部的 `node_type="Category/name"` 被错误拆成路径参数并返回 os error；该命令只读且没有写入。改用单引号正则后重跑通过。
+
+## HIA MCP V2 `hia_node_help` 限定名兼容（2026-07-18）
+
+### 真实根因与最小修复
+
+- 真实失败请求为 `node_type="Cop/wrangle"` 且未传 `category`，旧 runtime 只接受 `node_path` 或 `category + node_type`，因此在动态 Houdini 目录查询前返回 `INVALID_ARGUMENTS`。改成 `category="Cop", node_type="wrangle"` 后成功；当日 132 次 `hia_node_help` 中 129 次成功，问题不是 `QUEUE_FULL`、动态帮助或参数模板故障。
+- `_node_help` 保留现有 `node_path` 与 `category + 裸 node_type` 路径；仅在没有 `node_path` 时，把 `node_type="Category/name"` 按第一个 `/` 拆分并 trim，再进入原有 `nodeTypeCategories()/nodeTypes()` 动态查询。已给 category 且前缀大小写不敏感一致时也兼容；空段或前缀冲突返回结构化 `INVALID_ARGUMENTS`。
+- `hia_node_help` 工具描述明确列出三种输入形式。没有增加别名数据库、节点白名单、工具、队列或帮助缓存，也未修改 FXHoudiniMCP。
+- 根据用户纠正，本轮没有写入任何最终输出目录限制或 project-root confinement。`hia_capture_viewport` 仍只写 `.runtime/cache/screenshots`；最终渲染、EXR、视频、USD、模拟缓存和导出仍由 `hia_execute_hom` 使用用户明确路径或 launcher 提供的 `HIA_RENDER_OUTPUT_DIR`，可位于项目外普通本地目录；MCP 不新增路径验证器或输出管理器。
+
+### 验证
+
+- 定向命令：`python -B -m unittest -v tests.unit.test_hia_mcp_v2_runtime tests.unit.test_hia_mcp_v2_protocol`
+- 结果：17/17 通过。新增回归证明 `Cop/wrangle`、`category="Cop" + node_type="wrangle"` 以及相同冗余前缀返回完全一致；`Cop/`、`/wrangle` 和冲突的 `Sop + Cop/wrangle` 均返回 `INVALID_ARGUMENTS`。既有 viewport cache 路径、16 工具协议、批量 HOM 和取消边界同时通过。
+- 最终只读审计首次使用了当前 Windows PowerShell 不支持的 `|| $true` 分隔写法，命令在执行任何子命令前解析失败；随后一次含 Markdown 反引号的双引号 `rg` 定位命令也因 PowerShell 字符串未终止而在解析期失败。两者均改为顺序执行和单引号模式后成功，未写文件。期间并行 launcher 任务新增了自己的 `HIA_RENDER_OUTPUT_DIR` 传递改动，本任务完整保留且未修改这些文件。
+- 未运行完整测试套件，未启动 Houdini GUI，未暂存、提交或推送。
+
+## 启动器最终交付输出目录（2026-07-18）
+
+### 实现边界
+
+- WPF 环境卡新增可编辑的“最终渲染输出目录”和 Windows Shell 原生文件夹选择按钮，文案明确覆盖最终 EXR、图片、视频、USD、导出和模拟缓存，并说明它与内部截图、预览、临时缓存不同。旧设置缺少 `render_output_dir` 时按空值读取；成功启动前仍只写项目本地 `.runtime/launcher/settings.json`。
+- 空值解析为项目 `.runtime/cache`。非空值可位于插件项目外任意普通、用户可写的本地绝对目录；拒绝相对、UNC/设备、ADS、盘符根、不可用盘、现有文件、Windows 目录和所选/明显 Houdini 安装目录。不存在的目录只在用户浏览新建或点击启动时调用一次 `Directory.CreateDirectory`，不枚举、删除或清理已有内容；可写性使用 `DeleteOnClose` 自有探针。
+- WPF 启动 `scripts/launch-houdini.ps1` 子进程时只在该 `ProcessStartInfo` 环境设置解析后的 `HIA_RENDER_OUTPUT_DIR`，不修改当前/系统环境，也不增加生命周期命令行参数。唯一生命周期再次复用同一解析器并分别注入 Bridge 与 Houdini。既有两处 `HIA_CACHE_DIR = $cacheRoot` 及 screenshots/previews/tmp 目录保持不变，两变量不互相赋值。
+- 本轮没有修改 Panel、Bridge、MCP、HOM、Skill、会话历史、Fast 模式或断线 supervisor。
+
+### 实际问题与处理
+
+- 首次 XAML 补丁的两个新 `RowDefinition` 因上下文过宽误加到 Houdini picker `DataTemplate`。在运行测试前通过局部 diff 发现并移回环境卡；真实 WPF XAML 随后成功解析，两个新控件类型正确。
+- 实现中一度把自定义最终目录误收紧为项目根后代，与最终交付物需求冲突。收到纠正后立即删除该限制，并把回归改为证明“位于假项目根外、但仍是普通本地可写目录”的路径能够解析和创建；项目内部缓存边界未改变。
+- Windows PowerShell 5.1 没有可靠的原生 WPF `OpenFolderDialog`，且现有边界禁止重新引入 WinForms。处理为使用零依赖 Windows Shell `BrowseForFolder`，同时保留可键盘编辑的 TextBox；Server Core/禁用 Explorer Shell 与真实文件夹对话框仍需人工验收。
+
+### 验证
+
+- 首轮新增/相邻精确测试 8/8，通过后最终 launcher 定向与两项 backend/settings 相邻回归 27/27 通过，用时 8.700 秒。
+- PowerShell AST：`hia-launcher.ps1`、Core、WPF、`launch-houdini.ps1`、`build-launcher.ps1` 共 5/5 通过；Windows PowerShell 5.1 `XamlReader.Load` 与 `RenderOutputTextBox`/`BrowseRenderOutputButton` 控件查找通过。
+- 覆盖空值默认、项目外普通本地输出、按需创建/可写、保留已有文件、相对/设备/Windows/Houdini 路径拒绝、旧设置兼容、设置四字段、WPF 文案、纯子进程环境传递及 `HIA_CACHE_DIR`/`HIA_RENDER_OUTPUT_DIR` 静态隔离。
+- 未运行完整测试套件，未启动 EXE 或 Houdini GUI。人工待验收：真实 Shell 文件夹选择/新建、长路径、清空后默认目录、黄色缺目录允许启动、红色非法目录禁用启动，以及 Houdini 子进程看到两个独立环境变量。
+
+## Codex 快速模式、历史会话与最小断线恢复（2026-07-18）
+
+### 真实根因与最小修复
+
+- Codex 0.144.3 的实时 `model/list` 已提供 `serviceTiers/defaultServiceTier`，固定协议也已支持 `thread/start`、`thread/resume`、`turn/start` 的 `serviceTier`；旧 Bridge sanitizer 丢弃这些字段，三条请求也未转发，因此过去只能调 reasoning effort，并不是真正的 Fast。现在速度选择器只显示当前模型实时公布的档位与说明；“标准”显式传 `null`，实际 tier ID 不写死，reasoning effort 仍独立。
+- 固定协议已有稳定的 `thread/list`、`thread/name/set` 与 `thread/name/updated`，但严格 allowlist 和 Panel 都未接入，只能手填 UUID。现在 Bridge 只请求当前项目 cwd、未归档、按 `recency_at desc` 的首 20 条，再二次过滤 cwd 和最小展示字段；Panel 显示 `name || preview || 短 ID` 与更新时间，点击恢复，名称由 Codex 持久化，完整 UUID 只用于复制/高级提示，没有本地聊天或别名数据库。无当前会话时仅自动尝试恢复最近一条一次；重开 Panel 时只读当前会话一次，历史只创建最近 100 条可读消息控件，避免长 Thread 卡住 Houdini UI 主线程。
+- Panel 原先初始 health 只请求一次，event 网络失败只固定 1500ms 继续 poll，不做 health/session/read 对账。现在仅对真实网络错误用 Panel 自有单次 QTimer 按 0.5/1/2/4/8 秒有限重连；保留草稿、附件、thread 和 event cursor，成功后只同步权威 session/read，绝不重放状态不明的 Turn、HOM 或场景写入。现有 stdio client 不能安全原地重启 app-server，因此进程退出只明确要求重启 launcher，不新增 supervisor。
+- 输出规则明确区分内部数据与用户交付物：插件源码、内部缓存、自动截图/预览/附件/临时/诊断留项目内；用户明确指定的最终 render/EXR/video/USD/模拟缓存/导出可写所选普通本地项目外目录，未指定才用 `HIA_RENDER_OUTPUT_DIR`（默认 `.runtime/cache`），并必须报告实际最终路径。`hia_capture_viewport` 的项目缓存边界未改变。
+
+### 实际不顺与处理
+
+- 合并渲染规则后，四个旧 developerInstructions 回归仍要求旧截图措辞和 900 字符上限；生产指令已变为 970 字符。测试改为验证新的项目内缓存/项目外交付物边界和 1000 字符上限，随后 Bridge session 28/28 通过。
+- Panel 首次定向为 62/63：新增重连测试的 `_BridgeClientShim.get_session` 仍要求显式 context，而生产客户端已有默认值；只同步测试 shim 后 63/63 通过。
+- P1 静态回归首次 33/34：旧断言要求单行 `start_thread(model=...)`，与新增独立 `service_tier` 参数后的多行调用不兼容；改为验证模型、effort、service tier 三项动态接线后 34/34 通过。
+- launcher 并行测试曾短暂出现“项目外最终目录必须报错”的冲突断言，定向一度 36/37；没有回退并行文件。该断言由 launcher 任务按用户交付物规则移除后，launcher/Bridge 生命周期 37/37 通过。
+- 最终只读状态审查发现三处可复现竞态：session reconcile 网络失败会遗留 UI 锁；重连 health 后的冗余 session 请求可能晚到污染新 Turn；threads 先于 model/list 返回会让自动恢复意外使用标准速度。已分别改为在重连前释放关联 token、只信任 health 内嵌 session 并只读 thread/read、等待模型目录成功或明确失败后再自动恢复；活动 Turn 遇到 app-server 退出也会立即冻结为静态“状态待确认”，不伪装完成。
+
+### 定向验证与人工边界
+
+- service tier Bridge/session/HTTP/client：54/54；Panel wiring 最终：69/69；conversation/P1 静态回归：34/34；Bridge session：28/28；Bridge HTTP/client/stdio/协议契约：65/65；launcher/Bridge 生命周期/HIA MCP V2 生产接入：47/47，均通过。`git diff --check` 退出 0，仅有共享工作树既有 LF→CRLF 提示。
+- launcher 安全截图缓存清理收口且所有并行 Agent 停止写入后，唯一一次完整套件 `python -B -m unittest discover -s tests -t . -v` 为 661/661 通过，用时 32.936 秒；覆盖当前共享工作树全部 35 个修改文件，无 failure、error、超时或跳过。
+- 未启动真实 Houdini GUI。人工验收需由 launcher 全新启动 Houdini：确认速度选择器来自实时 model/list 且标准/快速分别作用于 start/resume/turn；历史列表、重命名、关闭重开与最近会话一次恢复正常；临时中断 Bridge 时草稿/附件保留且只读对账、不重复建节点；app-server 退出提示重启 launcher；显式项目外最终渲染实际写入所选目录并在回复中报告路径。
+
+## 启动器手动截图缓存清理（2026-07-18）
+
+### 安全边界与已解决问题
+
+- 首方 `hia_capture_viewport` 的 viewport 与 flipbook 实现均只生成 `.png`，因此清理白名单只有大小写不敏感的 PNG。目标每次只从启动器解析出的 project root 重新计算为 `.runtime/cache/screenshots`，确认计划中的目标必须与该规范绝对路径精确相等；不使用前缀判断、用户目录变量、固定盘符、通配枚举或递归删除。
+- 初始实现草案在确认后重新枚举目录，存在把确认后新出现截图纳入删除范围的语义风险。已解决：预览固定记录候选的完整路径、大小和 UTC 修改时间；确认后仅逐项复核并删除这份计划中的未变化普通 PNG，新出现、变化、子目录、reparse 或其他扩展对象全部跳过，不转向其他目录重试。
+- project root、`.runtime`、`cache`、`screenshots` 四级在预览、执行及每个文件删除前检查 reparse-point 属性；任一级 junction/symlink 都立即拒绝。删除使用逐文件 `System.IO.File.Delete`，不删除 `screenshots` 目录本身，也不触碰 previews、tmp、attachments、diagnostics、源码或 `HIA_RENDER_OUTPUT_DIR`/最终交付目录。
+
+### 定向验证与人工边界
+
+- 新增正常清理回归证明：只删除 screenshots 第一层 `.png`/`.PNG`；项目外同名诱饵、JPG/TXT、嵌套 PNG、previews、tmp、attachments、diagnostics 和项目外最终输出全部保留；路径不匹配、逃逸计划与盘符根均零写入拒绝。四个层级的真实 Windows junction 测试均 fail-closed，junction 目标文件保持不变，并在测试 `finally` 中仅解除测试自有链接。
+- 单项安全回归 3/3 通过；最终 `python -m unittest tests.unit.test_launcher_preflight -v` 为 28/28，通过时间 11.186 秒。五个 launcher/lifecycle/build PowerShell 文件 AST 均 0 错误；XAML XML 解析为 `Window` 且能找到 `CleanupScreenshotsButton`，定向测试中的 Windows PowerShell 5.1 `XamlReader.Load` 也通过。
+- `git diff --check` 退出码 0，仅显示共享工作树既有 LF→CRLF 提示。本轮未运行完整测试套件，未启动 EXE、Houdini 或真实 GUI。仍需人工点击验证确认框默认“否”、取消零写入、长目标路径显示，以及真实缓存有文件时的删除/释放/跳过计数状态卡。
+
+## Houdini 崩溃后历史会话不可见（2026-07-19）
+
+### 真实根因与最小修复
+
+- 用户的主会话 `019f7895-ab3c-7ac0-a15b-4bb48474452d` 仍未归档，rollout 文件约 101 MB，最后一行 JSON 有效；聊天内容没有因 Houdini 崩溃丢失。
+- Codex 状态库把该会话 cwd 记录为 Windows 扩展路径 `\\?\E:\houdini-intelligence-agent`，Bridge 却向 `thread/list` 传普通路径 `E:\houdini-intelligence-agent`。app-server 在数据库层精确筛选后返回空数组，所以 Panel 只能显示“暂无历史会话”。
+- Bridge 现在让 `thread/list` 同时精确匹配普通 cwd 与 Windows `\\?\`/`\\?\UNC\` 等价形式，并保留本地规范化二次过滤；`modelProviders: []` 保留同项目不同 provider 的主会话，`useStateDbOnly: true` 避免刷新时扫描或修复约 101 MB rollout。`sourceKinds` 继续省略，沿用 0.144.3 的 interactive 默认值，不把 subagent 混入历史。没有修改会话文件、状态库、Thread ID、聊天存储或 Panel UI。
+- 完整 `thread/read(includeTurns=true)` 的真实 JSON 约 48 MB，而 Panel HTTP 的固定响应上限是 4 MiB；旧 `resume_thread()` 还会先收一份完整 `thread/resume`、再读一份完整 `thread/read`，最后把两份都塞进 HTTP 响应，接近 96 MB，必然无法在 Panel 打开。现在 Bridge 直接使用 0.144.3 明确保证含完整 `turns` 的 `thread/resume`，只按原顺序投影 Panel 实际消费的全部 `userMessage.content(text/localImage)` 与 `agentMessage.text`；工具执行等巨量内部项不穿过 HTTP，但 app-server 已恢复的完整上下文和真实 Thread ID 不变。普通 `thread/read` 使用同一无持久化投影，Panel 也取消旧的最近 100 条截断，不建立本地数据库、索引器或 rollout 解析器。
+
+### 实际不顺与处理
+
+- 最初候选取消服务端 cwd 后只取全局最近 20 条再本地过滤；审查发现其他项目若占满首屏，本项目仍会再次显示为空。固定 0.144.3 schema 证明 cwd 支持字符串数组，因此改为一次传普通/扩展两种精确形式，没有增加分页器、索引器或恢复框架。
+- 首次裸 app-server 烟雾沿用默认 model provider，只返回 9 条 `openai` 历史，目标 `hia_chatgpt_http` Thread 未出现；`thread/read` 当时已能读取目标，说明会话本身有效。按 0.144.3 稳定协议补 `modelProviders: []` 后重测，双 cwd 数组、普通 cwd、扩展 cwd 和无 cwd 均把目标列为第 1 条。最终产品采用双 cwd 数组，继续由服务端排除其他项目。
+- 一次精确烟雾脚本因漏掉右括号在 Python 解析阶段退出；最终投影烟雾的首次临时脚本又因未把项目 `src` 加入 `sys.path`，在导入 Bridge 前退出。两次都发生在 app-server 启动和数据库访问之前；修正脚本后复用项目内隔离状态库副本完成验证，没有修改原会话数据库。
+
+### 验证与人工边界
+
+- 真实 Codex app-server 0.144.3 列表烟雾：最终列表 20 条，目标 `019f7895-ab3c-7ac0-a15b-4bb48474452d` 位于第 1 条，subagent 为 0；目标数据库行烟雾前后完全一致。
+- 使用 Panel 当前生产 `thread/resume` 参数的隔离烟雾成功恢复同一 Thread：原始 resume 含 6 个完整 Turn，耗时 5.750 秒；Bridge 投影后是 172 条可见聊天（27 条用户、145 条 Codex），JSON 仅 59,688 字节，低于 4 MiB 上限，且 session 中选中的仍是原 Thread ID。此前单独的完整 resume/read 原始响应分别为 48,089,328/48,088,824 字节、耗时 5.640/5.657 秒，证明问题是 Panel 传输与旧重复响应，不是聊天内容损坏。烟雾没有启动 Turn、重放 HOM 或启动 Houdini。
+- 首轮历史定向 10/10 通过；最终相关模块 `test_bridge_session`、`test_panel_wiring`、`test_bridge_http`、`test_bridge_client_reply`、`test_codex_stdio_client`、`test_codex_protocol_contract` 合计 166/166 通过。新增回归覆盖一次 resume、剔除超过 4 MiB 的工具明细后投影仍低于上限、全部正文及顺序、105 条历史不截断、继续 Turn 使用同一 Thread ID，以及既有 Bridge/Panel/协议行为。
+- 尚需完全退出当前 Houdini/Bridge 后由 launcher 重启，点击历史会话“刷新”，确认标题“我需要你做一个复杂的木屋”出现；点击“打开”后应从最早问题到最新回复完整显示，并可直接继续该会话。运行中的旧 Bridge 不会热加载本次修复。
+
+### GUI 复验失败后的二次根因与修正
+
+- 用户于 18:13:06 完整重启后，Panel 仍显示“暂无历史会话”，并重复给出通用“历史会话暂不可用”提示。取证时该次 Houdini、Bridge 和项目 Codex 进程均已退出，随机 loopback endpoint/token 从不落盘，session 目录也没有 Bridge 日志，因此没有把 connection refused 冒充原业务错误。项目本地 app-server trace 只读证明 pid 15188 在 18:14:42 收到一次 `thread/list`，18:14:44–48 又收到四次，说明当时请求确实到达 app-server；trace 不保留对应 Bridge HTTP structured_error。代码审查同时确认 Panel 的 `threads` 失败分支会丢弃已有的结构化 code/field。
+- 使用 launcher 的 HIA MCP V2 strict-config、真实 `BridgeSession.list_threads()` 和隔离状态库副本复现到准确错误：`INVALID_THREAD_LIST_RESPONSE`，`field=preview`。app-server 实际已返回 20 条，木屋 Thread 是第 1 条且 preview 仅 12 字；第 2/3 条 preview 各约 17.2K，第 4/5 条约 10.1K，多条还含 LF、TAB 等控制字符。旧 Bridge 在处理第 2 条时把展示摘要当身份字段拒绝，导致整个成功列表变成 HTTP 502。
+- preview 现在仅要求 app-server 返回 string，然后对前 8192 字符做控制字符空格化、空白归一和最终有界截断；一条异常摘要不再拖垮整批。Thread ID、cwd、updatedAt/recencyAt 等身份字段仍严格验证，没有改写数据库、建立索引或解析 rollout。Panel 若再次收到 `threads` 失败，只显示脱敏、短小的 code 与 field，不再吞掉根因，也不显示 RPC message、token 或正文。
+- 第一次 strict-config 复现副本缺少真实 CODEX_HOME 中的项目 trusted 条目，导致禁用的兼容 MCP 表缺少项目配置基底并在 initialize 前报 `invalid transport`。把隔离 config 对齐真实 launcher 的 trusted 状态后，未经删改的生产 strict-config 正常启动；该不顺只影响隔离烟雾，没有修改产品配置或原会话数据库。
+
+### 二次验证
+
+- 真实 strict-config + Bridge HTTP + Panel 固定 4 MiB `HttpTransport` 本地闭环：`GET /v1/threads` 为 HTTP 200，返回 20 条、36,642 字节，木屋 Thread 索引为 0；等价于点击“打开”的 `POST /v1/session` 为 HTTP 200、59,698 字节，恢复 6 Turn/172 条投影消息。无 Houdini 的 Panel 生产 renderer 实际创建 172 条用户/Codex 消息，session 仍选择原 Thread ID。
+- 修复后首轮精确测试 10/10；最终相关模块 `test_bridge_session`、`test_panel_wiring`、`test_bridge_http`、`test_bridge_client_reply`、`test_codex_stdio_client`、`test_codex_protocol_contract`、`test_bridge_main_lifecycle`、`test_hia_mcp_v2_production_integration` 合计 190/190 通过。未运行完整套件，未启动 Houdini、Turn 或 HOM，未修改原会话数据库。
+- 仍需由 launcher 再启动一次真实 Houdini 做最后 GUI 验收；新 Panel 若列表仍失败，会直接显示可继续定位的脱敏 code/field，而不是通用提示。

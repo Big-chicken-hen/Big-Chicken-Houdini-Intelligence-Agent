@@ -8,6 +8,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$launcherCore = Join-Path $PSScriptRoot 'launcher\HiaLauncher.Core.psm1'
+Import-Module -Force -DisableNameChecking $launcherCore
+
 function Get-HoudiniCandidatePaths {
     param([string]$RequestedPath)
 
@@ -435,6 +438,11 @@ $cacheRoot = Assert-OrdinaryProjectPath `
     -Path (Join-Path $ResolvedRoot '.runtime\cache') `
     -Root $ResolvedRoot `
     -AllowMissingLeaf
+$renderOutputRoot = Resolve-HiaRenderOutputDirectory `
+    -ProjectRoot $ResolvedRoot `
+    -Path ([string]$env:HIA_RENDER_OUTPUT_DIR) `
+    -HoudiniExe $HoudiniExe `
+    -Create
 $screenshotCache = Assert-OrdinaryProjectPath `
     -Path (Join-Path $cacheRoot 'screenshots') `
     -Root $ResolvedRoot `
@@ -574,6 +582,7 @@ $bridgeEnvironment = @{
     'CODEX_HOME' = $CodexHome
     'HIA_PROJECT_ROOT' = $ResolvedRoot
     'HIA_CACHE_DIR' = $cacheRoot
+    'HIA_RENDER_OUTPUT_DIR' = $renderOutputRoot
     'HIA_EXPECTED_PYTHON_EXE' = $normalizedPython
     'HIA_BRIDGE_URL' = $bridgeUrl
     'HIA_BRIDGE_TOKEN' = $bridgeToken
@@ -659,6 +668,7 @@ try {
         'TMP' = $sessionTemp
         'HIA_PROJECT_ROOT' = $ResolvedRoot
         'HIA_CACHE_DIR' = $cacheRoot
+        'HIA_RENDER_OUTPUT_DIR' = $renderOutputRoot
         'HIA_BRIDGE_URL' = $bridgeUrl
         'HIA_BRIDGE_TOKEN' = $bridgeToken
         'HIA_SCENE_PROFILE' = [string]$bootstrap.scene.profile

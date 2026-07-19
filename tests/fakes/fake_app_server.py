@@ -135,6 +135,35 @@ def handle_request(message: dict[str, Any]) -> None:
             )
         else:
             result(request_id, {"data": [], "nextCursor": None})
+    elif method == "thread/list":
+        result(
+            request_id,
+            {
+                "data": [
+                    {
+                        "id": THREAD_ID,
+                        "cwd": os.getcwd(),
+                        "name": "Fake Thread",
+                        "preview": "fake thread",
+                        "updatedAt": 1_720_000_000,
+                        "recencyAt": 1_720_000_001,
+                    }
+                ],
+                "nextCursor": None,
+                "receivedParams": params,
+            },
+        )
+    elif method == "thread/name/set":
+        result(request_id, {"receivedParams": params})
+        emit(
+            {
+                "method": "thread/name/updated",
+                "params": {
+                    "threadId": params.get("threadId", THREAD_ID),
+                    "threadName": params.get("name"),
+                },
+            }
+        )
     elif method == "thread/start":
         response = thread_payload()
         response["receivedParams"] = params

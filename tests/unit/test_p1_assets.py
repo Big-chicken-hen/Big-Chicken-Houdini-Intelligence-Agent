@@ -420,12 +420,15 @@ class P1AssetTests(unittest.TestCase):
         source = panel_path.read_text(encoding="utf-8")
         ast.parse(source)
         self.assertIn("self._client.get_models()", source)
-        self.assertIn("self._client.start_thread(model=self._selected_model_id())", source)
+        self.assertIn("self._client.start_thread(", source)
         self.assertIn("model=self._selected_model_id()", source)
         self.assertIn("effort=self._selected_effort()", source)
+        self.assertIn("service_tier=self._selected_service_tier()", source)
         self.assertIn('payload.get("models")', source)
         self.assertIn("supportedReasoningEfforts", source)
         self.assertIn("defaultReasoningEffort", source)
+        self.assertIn("serviceTiers", source)
+        self.assertIn("defaultServiceTier", source)
 
     def test_panel_wires_authoritative_terminal_and_bounded_reconciliation(self) -> None:
         panel_path = (

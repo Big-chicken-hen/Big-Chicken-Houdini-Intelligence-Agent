@@ -476,6 +476,29 @@ class ConversationView(QtWidgets.QWidget):
     def is_empty(self) -> bool:
         return not self._transcript
 
+    def clear_messages(self) -> None:
+        """Clear only the visible conversation before showing another Thread."""
+
+        self.stop_timers()
+        while self._layout.count() > 1:
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._turn_count = 0
+        self._active_codex_card = None
+        self._active_codex_text = ""
+        self._rendered_codex_text = ""
+        self._active_codex_entry = None
+        self._codex_stream_frozen = False
+        self._tool_activity_card = None
+        self._tool_activity_entry = None
+        self._reset_protocol_streak()
+        self._message_cards = []
+        self._compaction_notices = {}
+        self._long_thread_warning = None
+        self._transcript = []
+
     def add_user_message(
         self,
         text: str,

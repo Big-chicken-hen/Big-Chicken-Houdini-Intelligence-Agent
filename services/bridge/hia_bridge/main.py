@@ -55,6 +55,7 @@ HIA_MCP_V2_CHILD_ENVIRONMENT = (
     "TMP",
     "HIA_PROJECT_ROOT",
     "HIA_CACHE_DIR",
+    "HIA_RENDER_OUTPUT_DIR",
     "HIA_EXPECTED_PYTHON_EXE",
     "HIA_MCP_V2_HOST",
     "HIA_MCP_V2_PORT",
@@ -423,6 +424,13 @@ def run(argv: Sequence[str] | None = None) -> int:
             project_root,
             os.environ.get("HIA_CACHE_DIR"),
         )
+        configured_render_output = os.environ.get("HIA_RENDER_OUTPUT_DIR")
+        render_output_directory = (
+            configured_render_output.strip()
+            if isinstance(configured_render_output, str)
+            and configured_render_output.strip()
+            else str(cache_directory)
+        )
         for directory in (
             cache_directory,
             cache_directory / "screenshots",
@@ -520,6 +528,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "PYTHONNOUSERSITE": "1",
                 "HIA_PROJECT_ROOT": str(project_root),
                 "HIA_CACHE_DIR": str(cache_directory),
+                "HIA_RENDER_OUTPUT_DIR": render_output_directory,
                 "HIA_EXPECTED_PYTHON_EXE": resolved_python,
                 **mcp_environment,
             }

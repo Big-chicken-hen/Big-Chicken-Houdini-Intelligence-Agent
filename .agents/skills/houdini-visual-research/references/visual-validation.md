@@ -37,7 +37,9 @@ At runtime, write the report under the project root at:
 
 Treat it as an untracked runtime artifact: never stage or commit it. This skill defines the contract only; it does not require monitoring, telemetry, a database, a background service, an Issue integration, or a complex schema.
 
-Store viewport screenshots under `.runtime/cache/screenshots`, generated previews under `.runtime/cache/previews`, and user-provided attachments under `.runtime/attachments`. Treat all three as portable project-relative runtime paths; do not stage or commit them.
+Store automatic viewport screenshots under `.runtime/cache/screenshots`, visual-check previews under `.runtime/cache/previews`, temporary research artifacts under `.runtime/cache`, and user-provided attachments under `.runtime/attachments`. Treat these as portable project-relative runtime paths; do not stage or commit them.
+
+Treat final renders, EXRs, videos, USD files, exports, and simulation caches as user deliverables. Honor an explicit user output path first, otherwise use launcher-provided `HIA_RENDER_OUTPUT_DIR` when available; either may be an ordinary local directory outside the project. If neither is specified, default to `.runtime/cache`. Always tell the user the final path. Do not add an approval layer, output manager, or cleanup system for this rule.
 
 ## Diagnostic report contract
 

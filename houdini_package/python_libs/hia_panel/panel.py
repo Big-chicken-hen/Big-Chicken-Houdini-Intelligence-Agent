@@ -8,6 +8,7 @@ import os
 import sys
 import uuid
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -36,13 +37,20 @@ _TURN_STEER_CONTEXT_PREFIX = "turn_steer:"
 _INTERRUPT_CONTEXT_PREFIX = "interrupt:"
 _SESSION_RECONCILE_CONTEXT_PREFIX = "session_reconcile:"
 _MODELS_CONTEXT = "models"
+_THREADS_CONTEXT = "threads"
+_THREAD_READ_CONTEXT_PREFIX = "thread_read:"
+_THREAD_RENAME_CONTEXT_PREFIX = "thread_rename:"
+_AUTO_RESUME_CONTEXT = "session_auto_resume"
 _CODEX_DEFAULT_LABEL = "Codex 默认"
+_CODEX_STANDARD_TIER_LABEL = "标准"
 _SCENE_CAPABILITY_CONTEXT = "scene_capabilities"
 _SCENE_WORK_CONTEXT = "scene_work"
 _SCENE_RESULT_CONTEXT_PREFIX = "scene_result:"
 _SCENE_HEARTBEAT_MS = 1_000
 _SCENE_IDLE_POLL_MS = 100
 _STOP_RECONCILE_DELAY_MS = 2_500
+_RECONNECT_DELAYS_MS = (500, 1_000, 2_000, 4_000, 8_000)
+_RECONNECTABLE_ERROR_CODES = frozenset({"NETWORK_ERROR", "NETWORK_TIMEOUT"})
 _MAX_TURN_IMAGES = 16
 _LONG_THREAD_WARNING = (
     "当前对话较长，早期细节可能逐渐减少。开始不同任务时建议新建 Thread。"
@@ -97,6 +105,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._stopping_turn_token: TurnStateToken | None = None
         self._reconciliation_tokens: dict[str, TurnStateToken] = {}
         self._models_requested = False
+        self._models_resolved = False
+        self._threads_requested = False
+        self._thread_history: list[dict[str, Any]] = []
+        self._auto_restore_attempted = False
+        self._initial_thread_read_requested = False
+        self._reconnect_attempt = 0
+        self._reconnecting = False
+        self._reconnect_exhausted_notice_shown = False
+        self._app_server_exit_notice_shown = False
         self._pending_approvals: deque[dict[str, Any]] = deque()
         self._current_approval: dict[str, Any] | None = None
         self._current_approval_offers_persistent_rule = False
@@ -141,6 +158,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._stop_reconcile_timer.setSingleShot(True)
         self._stop_reconcile_timer.setInterval(_STOP_RECONCILE_DELAY_MS)
         self._stop_reconcile_timer.timeout.connect(self._reconcile_stopping_turn)
+        self._reconnect_timer = QtCore.QTimer(self)
+        self._reconnect_timer.setSingleShot(True)
+        self._reconnect_timer.timeout.connect(self._attempt_bridge_reconnect)
         self._build_ui()
         self._initialize_houdini_read_adapter(hou_module)
         self._refresh_selection_status()
@@ -230,14 +250,40 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.effort_combo.setMaximumWidth(140)
         self.effort_combo.setToolTip("当前推理强度")
         session_row.addWidget(self.effort_combo)
+        self.service_tier_label = QtWidgets.QLabel("速度")
+        self.service_tier_combo = QtWidgets.QComboBox()
+        self.service_tier_combo.addItem(_CODEX_STANDARD_TIER_LABEL, None)
+        self.service_tier_combo.setMaximumWidth(150)
+        self.service_tier_combo.setToolTip(
+            "速度档位来自当前模型的实时 model/list。"
+        )
+        self.service_tier_label.setVisible(False)
+        self.service_tier_combo.setVisible(False)
+        session_row.addWidget(self.service_tier_label)
+        session_row.addWidget(self.service_tier_combo)
         root.addLayout(session_row)
 
         thread_row = QtWidgets.QHBoxLayout()
+        thread_row.addWidget(QtWidgets.QLabel("历史会话"))
+        self.history_combo = QtWidgets.QComboBox()
+        self.history_combo.addItem("暂无历史会话", None)
+        self.history_combo.setMinimumWidth(280)
+        self.history_combo.setToolTip("当前项目最近 20 条未归档 Codex 会话")
+        self.refresh_threads_button = QtWidgets.QPushButton("刷新")
+        self.thread_name_edit = QtWidgets.QLineEdit()
+        self.thread_name_edit.setPlaceholderText("会话名称")
+        self.thread_name_edit.setMaximumWidth(180)
+        self.rename_thread_button = QtWidgets.QPushButton("重命名")
+        self.copy_thread_id_button = QtWidgets.QPushButton("复制 ID")
         self.thread_id_edit = QtWidgets.QLineEdit()
-        self.thread_id_edit.setPlaceholderText("Codex Thread ID（恢复时填写）")
+        self.thread_id_edit.setVisible(False)
         self.new_thread_button = QtWidgets.QPushButton("新建 Thread")
-        self.resume_thread_button = QtWidgets.QPushButton("恢复 Thread")
-        thread_row.addWidget(self.thread_id_edit, 1)
+        self.resume_thread_button = QtWidgets.QPushButton("打开")
+        thread_row.addWidget(self.history_combo, 1)
+        thread_row.addWidget(self.refresh_threads_button)
+        thread_row.addWidget(self.thread_name_edit)
+        thread_row.addWidget(self.rename_thread_button)
+        thread_row.addWidget(self.copy_thread_id_button)
         thread_row.addWidget(self.new_thread_button)
         thread_row.addWidget(self.resume_thread_button)
         root.addLayout(thread_row)
@@ -368,6 +414,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.allow_button.clicked.connect(lambda: self._resolve_approval("allow"))
         self.deny_button.clicked.connect(lambda: self._resolve_approval("deny"))
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.service_tier_combo.currentIndexChanged.connect(
+            self._on_service_tier_changed
+        )
+        self.history_combo.currentIndexChanged.connect(
+            self._on_history_index_changed
+        )
+        self.history_combo.activated.connect(self._resume_history_selection)
+        self.refresh_threads_button.clicked.connect(self._refresh_threads)
+        self.rename_thread_button.clicked.connect(self._rename_thread)
+        self.copy_thread_id_button.clicked.connect(self._copy_thread_id)
         self._refresh_controls()
 
     @staticmethod
@@ -785,8 +841,25 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         request_ready = session_enabled and not self._turn_steer_request_pending
         stopping = self._is_stopping_turn()
         steer_available = controls.stop and not stopping
+        history_record = self._selected_history_record()
+        history_available = history_record is not None
         self.new_thread_button.setEnabled(controls.new_thread and session_enabled)
-        self.resume_thread_button.setEnabled(controls.resume_thread and session_enabled)
+        self.resume_thread_button.setEnabled(
+            controls.resume_thread and session_enabled and history_available
+        )
+        self.history_combo.setEnabled(
+            self._connected and not self._turn_state.busy and session_enabled
+        )
+        self.refresh_threads_button.setEnabled(
+            self._connected and not self._session_action_pending
+        )
+        self.thread_name_edit.setEnabled(
+            history_available and not self._turn_state.busy and session_enabled
+        )
+        self.rename_thread_button.setEnabled(
+            history_available and not self._turn_state.busy and session_enabled
+        )
+        self.copy_thread_id_button.setEnabled(history_available)
         self.send_button.setEnabled(
             (controls.send or steer_available) and request_ready
         )
@@ -818,6 +891,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         self.model_combo.setEnabled(selection_enabled)
         self.effort_combo.setEnabled(selection_enabled)
+        self.service_tier_combo.setEnabled(
+            selection_enabled and self.service_tier_combo.count() > 1
+        )
         composer_enabled = stopping or (
             (not self._turn_state.busy or steer_available) and request_ready
         )
@@ -845,6 +921,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(dict)
     def _on_health(self, payload: dict[str, Any]) -> None:
+        was_reconnecting = self._reconnecting or self._reconnect_attempt > 0
+        self._reconnect_timer.stop()
+        self._reconnecting = False
+        self._reconnect_attempt = 0
+        self._reconnect_exhausted_notice_shown = False
         self._set_connection("已连接（stdio JSONL）", True)
         houdini_mcp = payload.get("houdini_mcp")
         mcp_backend = (
@@ -854,16 +935,41 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             isinstance(houdini_mcp, dict) and houdini_mcp.get("available") is True
         )
         self._set_mcp_status(mcp_backend, mcp_available)
+        session = payload.get("session", {})
         self._apply_session(
-            payload.get("session", {}),
+            session,
             token=self._turn_state.capture_token(),
             allow_followup=True,
         )
+        if not self._connected:
+            self._polling_enabled = False
+            if not self._app_server_exit_notice_shown:
+                self._app_server_exit_notice_shown = True
+                self._append_system(
+                    "Codex app-server 当前不可用，请重启 launcher；"
+                    "不会自动重放 Turn 或 Houdini 操作。"
+                )
+            self._refresh_controls()
+            return
+        self._app_server_exit_notice_shown = False
         self._polling_enabled = True
         self._schedule_poll(0)
         if not self._models_requested and self._client is not None:
             self._models_requested = True
             self._client.get_models()
+        if not self._threads_requested and self._client is not None:
+            self._threads_requested = True
+            self._client.get_threads()
+        if was_reconnecting and self._client is not None:
+            if isinstance(self._selected_thread_id, str):
+                self._initial_thread_read_requested = True
+                self._client.read_thread(
+                    self._selected_thread_id,
+                    context=f"{_THREAD_READ_CONTEXT_PREFIX}reconnect",
+                )
+            self._append_system("已重新连接；已同步会话状态，不会自动重放 Turn。")
+        else:
+            self._request_initial_thread_read()
         self._start_houdini_read_loop()
 
     @QtCore.Slot(dict)
@@ -886,6 +992,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if not self._turn_state.token_is_current(token):
             return False
 
+        was_busy = self._turn_state.busy
         stopping = self._is_stopping_turn()
         thread_id = session.get("thread_id")
         turn_id = session.get("turn_id")
@@ -940,9 +1047,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._clear_diagnostic_context()
             self._selected_thread_id = thread_id
             self.thread_id_edit.setText(thread_id)
-            self.thread_status_label.setText(f"Thread：{thread_id}")
+            self.thread_status_label.setText(
+                f"Thread：{self._history_title(thread_id)}"
+            )
         elif state_applied and not self._turn_state.busy:
             self._selected_thread_id = None
+            self.thread_id_edit.setText("")
             self.thread_status_label.setText("Thread：未选择")
             self._clear_diagnostic_context()
 
@@ -976,6 +1086,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 )
             elif stopping:
                 self._mark_turn_terminal("interrupted")
+            elif allow_followup and was_busy and not self._turn_state.busy:
+                self._mark_turn_terminal(
+                    turn_status if isinstance(turn_status, str) else None
+                )
             else:
                 self.turn_status_label.setText(
                     self._turn_status_text(
@@ -1811,6 +1925,261 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return
         self._append_system("问题报告路径已复制。")
 
+    def _selected_history_record(self) -> dict[str, Any] | None:
+        combo = getattr(self, "history_combo", None)
+        record = combo.currentData() if combo is not None else None
+        return record if isinstance(record, dict) else None
+
+    def _history_title(self, thread_id: str) -> str:
+        for record in self._thread_history:
+            if record.get("thread_id") != thread_id:
+                continue
+            for field in ("name", "preview"):
+                value = record.get(field)
+                if isinstance(value, str) and value.strip():
+                    return " ".join(value.split())[:72]
+        return (
+            f"{thread_id[:4]}…{thread_id[-4:]}"
+            if len(thread_id) > 9
+            else thread_id
+        )
+
+    @staticmethod
+    def _history_label(record: dict[str, Any]) -> str:
+        thread_id = str(record.get("thread_id") or "")
+        title = ""
+        for field in ("name", "preview"):
+            value = record.get(field)
+            if isinstance(value, str) and value.strip():
+                title = " ".join(value.split())[:72]
+                break
+        if not title:
+            title = (
+                f"{thread_id[:4]}…{thread_id[-4:]}"
+                if len(thread_id) > 9
+                else thread_id or "未命名会话"
+            )
+        updated = record.get("updated_at")
+        try:
+            updated_text = datetime.fromtimestamp(int(updated)).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except (OSError, OverflowError, TypeError, ValueError):
+            updated_text = "时间未知"
+        return f"{title}  ·  {updated_text}"
+
+    def _apply_threads(self, raw_threads: Any) -> None:
+        previous_record = self._selected_history_record()
+        previous_choice = (
+            previous_record.get("thread_id")
+            if previous_record is not None
+            else self._selected_thread_id
+        )
+        threads = raw_threads if isinstance(raw_threads, list) else []
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_record in threads[:20]:
+            if not isinstance(raw_record, dict):
+                continue
+            thread_id = raw_record.get("thread_id")
+            if not isinstance(thread_id, str) or not thread_id or thread_id in seen:
+                continue
+            seen.add(thread_id)
+            records.append(dict(raw_record))
+        self._thread_history = records
+
+        self.history_combo.blockSignals(True)
+        self.history_combo.clear()
+        selected_index = 0
+        if not records:
+            self.history_combo.addItem("暂无历史会话", None)
+        else:
+            for record in records:
+                self.history_combo.addItem(self._history_label(record), record)
+                index = self.history_combo.count() - 1
+                thread_id = record["thread_id"]
+                self.history_combo.setItemData(
+                    index,
+                    f"Codex Thread ID：{thread_id}",
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                )
+                if thread_id == previous_choice:
+                    selected_index = index
+        self.history_combo.setCurrentIndex(selected_index)
+        self.history_combo.blockSignals(False)
+        self._on_history_index_changed(selected_index)
+
+        self._maybe_auto_restore_latest()
+
+    def _maybe_auto_restore_latest(self) -> None:
+        if (
+            isinstance(self._selected_thread_id, str)
+            or not self._thread_history
+            or not self._models_resolved
+            or self._auto_restore_attempted
+        ):
+            return
+        self._auto_restore_attempted = True
+        self._request_thread_resume(
+            self._thread_history[0]["thread_id"],
+            context=_AUTO_RESUME_CONTEXT,
+        )
+
+    def _on_history_index_changed(self, _index: int = -1) -> None:
+        record = self._selected_history_record()
+        thread_id = record.get("thread_id") if record is not None else None
+        name = record.get("name") if record is not None else None
+        self.thread_id_edit.setText(thread_id if isinstance(thread_id, str) else "")
+        self.thread_name_edit.setText(name if isinstance(name, str) else "")
+        self._refresh_controls()
+
+    def _resume_history_selection(self, _index: int = -1) -> None:
+        self._resume_thread()
+
+    def _refresh_threads(self) -> None:
+        if self._client is None or not self._connected:
+            return
+        self._threads_requested = True
+        self._client.get_threads()
+
+    def _request_initial_thread_read(self) -> None:
+        if (
+            self._initial_thread_read_requested
+            or self._client is None
+            or self._turn_state.busy
+            or not isinstance(self._selected_thread_id, str)
+        ):
+            return
+        self._initial_thread_read_requested = True
+        self._client.read_thread(
+            self._selected_thread_id,
+            context=f"{_THREAD_READ_CONTEXT_PREFIX}initial",
+        )
+
+    def _request_thread_resume(self, thread_id: str, *, context: str) -> None:
+        if (
+            self._client is not None
+            and not self._turn_state.busy
+            and not self._session_action_pending
+            and not self._turn_start_request_pending
+            and not self._reconciliation_tokens
+        ):
+            self._session_action_pending = True
+            self._refresh_controls()
+            self._client.resume_thread(
+                thread_id,
+                service_tier=self._selected_service_tier(),
+                context=context,
+            )
+
+    def _rename_thread(self) -> None:
+        record = self._selected_history_record()
+        name = self.thread_name_edit.text().strip()
+        thread_id = record.get("thread_id") if record is not None else None
+        if not isinstance(thread_id, str) or not name:
+            self._append_system("请选择历史会话并输入名称。")
+            return
+        if self._client is None or self._session_action_pending:
+            return
+        self._session_action_pending = True
+        self._refresh_controls()
+        self._client.rename_thread(
+            thread_id,
+            name,
+            context=f"{_THREAD_RENAME_CONTEXT_PREFIX}{uuid.uuid4().hex}",
+        )
+
+    def _copy_thread_id(self) -> None:
+        record = self._selected_history_record()
+        thread_id = record.get("thread_id") if record is not None else None
+        if not isinstance(thread_id, str):
+            return
+        try:
+            QtWidgets.QApplication.clipboard().setText(thread_id)
+        except Exception as exc:
+            self._append_system(f"复制 Thread ID 失败：{type(exc).__name__}: {exc}")
+            return
+        self._append_system("Thread ID 已复制。")
+
+    def _update_history_name(self, thread_id: Any, name: Any) -> None:
+        if not isinstance(thread_id, str):
+            return
+        normalized_name = name if isinstance(name, str) else None
+        changed = False
+        for record in self._thread_history:
+            if record.get("thread_id") == thread_id:
+                record["name"] = normalized_name
+                changed = True
+        if changed:
+            self._apply_threads(self._thread_history)
+        if thread_id == self._selected_thread_id:
+            self.thread_status_label.setText(
+                f"Thread：{normalized_name or self._history_title(thread_id)}"
+            )
+
+    def _render_thread_read(self, payload: dict[str, Any]) -> bool:
+        if self._turn_state.busy:
+            return False
+        raw_result = payload.get("read", payload.get("result"))
+        if not isinstance(raw_result, dict):
+            return False
+        thread = raw_result.get("thread")
+        if not isinstance(thread, dict):
+            return False
+        thread_id = thread.get("id")
+        if thread_id != self._selected_thread_id:
+            return False
+        turns = thread.get("turns")
+        if not isinstance(turns, list):
+            return False
+
+        restored: list[tuple[str, Any]] = []
+        for turn in turns:
+            items = turn.get("items") if isinstance(turn, dict) else None
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type == "userMessage":
+                    texts: list[str] = []
+                    attachments: list[str] = []
+                    content = item.get("content")
+                    for entry in (content if isinstance(content, list) else []):
+                        if not isinstance(entry, dict):
+                            continue
+                        if entry.get("type") == "text" and isinstance(
+                            entry.get("text"), str
+                        ):
+                            texts.append(entry["text"])
+                        elif entry.get("type") == "localImage" and isinstance(
+                            entry.get("path"), str
+                        ):
+                            attachments.append(Path(entry["path"]).name)
+                    restored.append(
+                        ("user", ("\n".join(texts), tuple(attachments)))
+                    )
+                elif item_type == "agentMessage" and isinstance(
+                    item.get("text"), str
+                ):
+                    restored.append(("agent", item["text"]))
+        if hasattr(self.conversation, "clear_messages"):
+            self.conversation.clear_messages()
+        rendered = False
+        for role, value in restored:
+            if role == "user":
+                text, attachments = value
+                self.conversation.add_user_message(text, attachments)
+            else:
+                self.conversation.begin_codex_message()
+                self.conversation.append_codex_delta(value)
+                self.conversation.finish_codex_message()
+            rendered = True
+        if rendered:
+            self.welcome_group.setVisible(False)
+        return True
+
     def _new_thread(self) -> None:
         if (
             self._client is not None
@@ -1821,23 +2190,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         ):
             self._session_action_pending = True
             self._refresh_controls()
-            self._client.start_thread(model=self._selected_model_id())
+            self._client.start_thread(
+                model=self._selected_model_id(),
+                service_tier=self._selected_service_tier(),
+            )
 
     def _resume_thread(self) -> None:
-        thread_id = self.thread_id_edit.text().strip()
-        if not thread_id:
-            self._append_system("请先输入 Thread ID。")
+        record = self._selected_history_record()
+        thread_id = record.get("thread_id") if record is not None else None
+        if not isinstance(thread_id, str) or not thread_id:
+            self._append_system("请先选择历史会话。")
             return
-        if (
-            self._client is not None
-            and not self._turn_state.busy
-            and not self._session_action_pending
-            and not self._turn_start_request_pending
-            and not self._reconciliation_tokens
-        ):
-            self._session_action_pending = True
-            self._refresh_controls()
-            self._client.resume_thread(thread_id)
+        self._request_thread_resume(thread_id, context="session_resume")
 
     def _send(self) -> None:
         text = self.input_edit.toPlainText()
@@ -1907,6 +2271,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             request_text,
             model=self._selected_model_id(),
             effort=self._selected_effort(),
+            service_tier=self._selected_service_tier(),
             local_image_paths=list(attachment_paths),
             context=context,
         )
@@ -1990,7 +2355,26 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if self._handle_scene_action(context, payload):
             return
         if context == _MODELS_CONTEXT:
+            self._models_resolved = True
             self._apply_models(payload.get("models"))
+            self._maybe_auto_restore_latest()
+            self._refresh_controls()
+            return
+        if context == _THREADS_CONTEXT:
+            self._threads_requested = True
+            self._apply_threads(payload.get("threads"))
+            self._refresh_controls()
+            return
+        if context.startswith(_THREAD_READ_CONTEXT_PREFIX):
+            self._render_thread_read(payload)
+            self._refresh_controls()
+            return
+        if context.startswith(_THREAD_RENAME_CONTEXT_PREFIX):
+            self._session_action_pending = False
+            self._update_history_name(
+                payload.get("thread_id"), payload.get("name")
+            )
+            self._append_system("会话名称已更新。")
             self._refresh_controls()
             return
 
@@ -2030,7 +2414,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._refresh_controls()
             return
 
-        if context in {"session_start", "session_resume"}:
+        if context in {"session_start", "session_resume", _AUTO_RESUME_CONTEXT}:
             self._session_action_pending = False
             thread_id = payload.get("thread_id")
             if isinstance(thread_id, str):
@@ -2042,9 +2426,31 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self._clear_diagnostic_context()
                 self._selected_thread_id = thread_id
                 self.thread_id_edit.setText(thread_id)
-                self.thread_status_label.setText(f"Thread：{thread_id}")
-                action = "已新建" if context == "session_start" else "已恢复"
-                self._append_system(f"{action} Thread：{thread_id}")
+                for index in range(self.history_combo.count()):
+                    record = self.history_combo.itemData(index)
+                    if (
+                        isinstance(record, dict)
+                        and record.get("thread_id") == thread_id
+                    ):
+                        self.history_combo.setCurrentIndex(index)
+                        self._on_history_index_changed(index)
+                        break
+                self.thread_status_label.setText(
+                    f"Thread：{self._history_title(thread_id)}"
+                )
+                if context == "session_start":
+                    if hasattr(self.conversation, "clear_messages"):
+                        self.conversation.clear_messages()
+                    self._append_system("已新建会话。")
+                    if self._client is not None:
+                        self._client.get_threads()
+                else:
+                    self._render_thread_read(payload)
+                    self._append_system(
+                        "已自动恢复最近会话。"
+                        if context == _AUTO_RESUME_CONTEXT
+                        else "已恢复会话。"
+                    )
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
             self._accept_sent_draft(context)
             token = self._turn_start_tokens.pop(context, None)
@@ -2370,6 +2776,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._show_compaction_notice(
                     f"{thread_id or ''}:{turn_id or 'compaction'}"
                 )
+            elif method == "thread/name/updated":
+                if "threadName" in params:
+                    self._update_history_name(
+                        params.get("threadId"), params.get("threadName")
+                    )
             elif method in _PASSIVE_STATUS_NOTIFICATIONS:
                 # P1 receive-only observation.  These notifications never
                 # authorize a request, remote control, or a new MCP tool.
@@ -2382,7 +2793,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         elif event_type == "protocol_warning":
             self._show_protocol_notice(event)
         elif event_type == "process_exit":
+            self._polling_enabled = False
+            self._reconnecting = False
+            self._reconnect_timer.stop()
             if self._turn_state.busy:
+                self._freeze_codex_message()
+                self.turn_status_label.setText(
+                    "Turn：状态待确认（app-server 已退出）"
+                )
                 self._diagnostic_snapshot.update(
                     {
                         "status": "failed",
@@ -2406,6 +2824,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 )
             self._set_connection("app-server 已退出", False)
             self._set_mcp_status(self._mcp_backend, False)
+            if not self._app_server_exit_notice_shown:
+                self._app_server_exit_notice_shown = True
+                self._append_system(
+                    "Codex app-server 已退出，请重启 launcher；"
+                    "不会自动重放状态不明的 Turn 或 Houdini 操作。"
+                )
             self._refresh_controls()
 
     def _show_next_approval(self) -> None:
@@ -2483,8 +2907,20 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 )
             return
         if context == _MODELS_CONTEXT:
+            model_error = payload.get("structured_error")
+            model_error_code = (
+                model_error.get("code") if isinstance(model_error, dict) else None
+            )
             self._apply_models([])
+            if model_error_code in _RECONNECTABLE_ERROR_CODES:
+                self._models_requested = False
+                self._models_resolved = False
+                self._schedule_bridge_reconnect()
+                self._refresh_controls()
+                return
+            self._models_resolved = True
             self._append_system("模型列表暂不可用，继续使用 Codex 默认。")
+            self._maybe_auto_restore_latest()
             self._refresh_controls()
             return
 
@@ -2493,6 +2929,17 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         details = details if isinstance(details, dict) else {}
         error_code = error.get("code") if isinstance(error, dict) else None
         formatted_error = format_bridge_error(payload)
+
+        reconnect_context = (
+            context in {"health", "session", "events"}
+            or context.startswith(_SESSION_RECONCILE_CONTEXT_PREFIX)
+        )
+        if error_code in _RECONNECTABLE_ERROR_CODES and reconnect_context:
+            if context.startswith(_SESSION_RECONCILE_CONTEXT_PREFIX):
+                self._reconciliation_tokens.pop(context, None)
+            self._schedule_bridge_reconnect()
+            self._refresh_controls()
+            return
 
         if context.startswith(_INTERRUPT_CONTEXT_PREFIX):
             token = self._interrupt_tokens.pop(context, None)
@@ -2587,6 +3034,46 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 )
             self.allow_button.setEnabled(True)
             self.deny_button.setEnabled(True)
+            self._refresh_controls()
+            return
+
+        if context == _THREADS_CONTEXT:
+            if error_code in _RECONNECTABLE_ERROR_CODES:
+                self._threads_requested = False
+                self._schedule_bridge_reconnect()
+                self._refresh_controls()
+                return
+            code_text = (
+                " ".join(error_code.split())[:80]
+                if isinstance(error_code, str) and error_code.strip()
+                else "BRIDGE_REQUEST_FAILED"
+            )
+            field = details.get("field")
+            field_text = (
+                " ".join(field.split())[:80]
+                if isinstance(field, str) and field.strip()
+                else None
+            )
+            diagnostic = code_text + (
+                f"，field={field_text}" if field_text is not None else ""
+            )
+            self._append_system(
+                f"历史会话暂不可用（{diagnostic}）；可稍后手动刷新。"
+            )
+            self._refresh_controls()
+            return
+        if context.startswith(_THREAD_READ_CONTEXT_PREFIX):
+            self._append_system("会话状态已恢复，但历史内容读取失败。")
+            self._refresh_controls()
+            return
+        if context.startswith(_THREAD_RENAME_CONTEXT_PREFIX):
+            self._session_action_pending = False
+            self._append_system(f"重命名失败：{formatted_error}")
+            self._refresh_controls()
+            return
+        if context == _AUTO_RESUME_CONTEXT:
+            self._session_action_pending = False
+            self._append_system("最近会话自动恢复失败；可从历史会话列表手动打开。")
             self._refresh_controls()
             return
 
@@ -2685,7 +3172,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     @QtCore.Slot(int)
     def _on_model_changed(self, _index: int = -1) -> None:
         self._update_reasoning_efforts()
+        self._update_service_tiers()
         self._refresh_controls()
+
+    @QtCore.Slot(int)
+    def _on_service_tier_changed(self, _index: int = -1) -> None:
+        record = self.service_tier_combo.currentData()
+        description = record.get("description") if isinstance(record, dict) else None
+        self.service_tier_combo.setToolTip(
+            description
+            if isinstance(description, str) and description
+            else "标准：不覆盖服务速度；可用档位来自实时 model/list。"
+        )
 
     def _apply_models(self, raw_models: Any) -> None:
         """Replace the selector with the bounded, Bridge-filtered model catalog."""
@@ -2716,6 +3214,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.model_combo.setCurrentIndex(selected_index)
         self.model_combo.blockSignals(False)
         self._update_reasoning_efforts()
+        self._update_service_tiers()
 
     def _selected_model_record(self) -> dict[str, Any] | None:
         record = self.model_combo.currentData()
@@ -2736,6 +3235,52 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _selected_effort(self) -> str | None:
         effort = self.effort_combo.currentData()
         return effort if isinstance(effort, str) and effort else None
+
+    def _selected_service_tier(self) -> str | None:
+        record = self.service_tier_combo.currentData()
+        tier_id = record.get("id") if isinstance(record, dict) else None
+        return tier_id if isinstance(tier_id, str) and tier_id else None
+
+    def _update_service_tiers(self) -> None:
+        previous_tier = self._selected_service_tier()
+        record = self._selected_model_record()
+        raw_tiers = record.get("serviceTiers", []) if record is not None else []
+        default_tier = record.get("defaultServiceTier") if record is not None else None
+        tiers = raw_tiers if isinstance(raw_tiers, list) else []
+
+        self.service_tier_combo.blockSignals(True)
+        self.service_tier_combo.clear()
+        self.service_tier_combo.addItem(_CODEX_STANDARD_TIER_LABEL, None)
+        previous_index: int | None = None
+        default_index: int | None = None
+        seen: set[str] = set()
+        for raw_tier in tiers:
+            if not isinstance(raw_tier, dict):
+                continue
+            tier_id = raw_tier.get("id")
+            name = raw_tier.get("name")
+            if not isinstance(tier_id, str) or not tier_id or tier_id in seen:
+                continue
+            seen.add(tier_id)
+            tier_record = dict(raw_tier)
+            label = name if isinstance(name, str) and name else tier_id
+            self.service_tier_combo.addItem(label, tier_record)
+            index = self.service_tier_combo.count() - 1
+            if tier_id == previous_tier:
+                previous_index = index
+            if tier_id == default_tier:
+                default_index = index
+        selected_index = (
+            previous_index
+            if previous_index is not None
+            else default_index if default_index is not None else 0
+        )
+        self.service_tier_combo.setCurrentIndex(selected_index)
+        self.service_tier_combo.blockSignals(False)
+        available = self.service_tier_combo.count() > 1
+        self.service_tier_label.setVisible(available)
+        self.service_tier_combo.setVisible(available)
+        self._on_service_tier_changed(selected_index)
 
     def _update_reasoning_efforts(self) -> None:
         previous_effort = self._selected_effort()
@@ -2818,6 +3363,50 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         }
         return terminal_labels.get(status, "Turn：空闲")
 
+    def _schedule_bridge_reconnect(self) -> None:
+        if self._client is None:
+            return
+        timer = getattr(self, "_reconnect_timer", None)
+        if timer is None:
+            return
+        if timer.isActive():
+            return
+
+        first_attempt = not self._reconnecting
+        self._reconnecting = True
+        self._polling_enabled = False
+        self._houdini_polling_enabled = False
+        self._poll_timer.stop()
+        self._houdini_heartbeat_timer.stop()
+        self._scene_work_timer.stop()
+        self._scene_capability_pending = False
+        self._scene_work_pending = False
+        self._set_connection("Bridge 连接中断，正在重连", False)
+        self._set_mcp_status(self._mcp_backend, False)
+        if first_attempt:
+            self._append_system(
+                "Bridge 连接中断，正在有限重连；草稿、附件和当前会话已保留。"
+            )
+
+        if self._reconnect_attempt >= len(_RECONNECT_DELAYS_MS):
+            if not self._reconnect_exhausted_notice_shown:
+                self._reconnect_exhausted_notice_shown = True
+                self._append_system(
+                    "自动重连未成功，请重启 launcher；不会自动重放 Turn。"
+                )
+            return
+
+        delay_ms = _RECONNECT_DELAYS_MS[self._reconnect_attempt]
+        self._reconnect_attempt += 1
+        timer.start(delay_ms)
+
+    @QtCore.Slot()
+    def _attempt_bridge_reconnect(self) -> None:
+        if not self._reconnecting or self._client is None:
+            return
+        if self._client.get_health() is None:
+            self._schedule_bridge_reconnect()
+
     def _schedule_poll(self, delay_ms: int) -> None:
         if not self._polling_enabled or self._client is None:
             return
@@ -2861,6 +3450,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "_houdini_heartbeat_timer",
             "_scene_work_timer",
             "_stop_reconcile_timer",
+            "_reconnect_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:

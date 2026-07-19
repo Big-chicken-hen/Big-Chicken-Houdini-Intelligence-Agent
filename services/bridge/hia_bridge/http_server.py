@@ -332,6 +332,9 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/models":
             result = application.session.list_models()
             return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/threads":
+            result = application.session.list_threads()
+            return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/events":
             values = parse_qs(query, keep_blank_values=False)
             after = int(values.get("after", ["0"])[0])
@@ -396,9 +399,15 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/session":
             action = body.get("action")
             if action == "start":
-                result = application.session.start_thread(body.get("model"))
+                result = application.session.start_thread(
+                    model=body.get("model"),
+                    service_tier=body.get("service_tier"),
+                )
             elif action == "resume":
-                result = application.session.resume_thread(body.get("thread_id"))
+                result = application.session.resume_thread(
+                    thread_id=body.get("thread_id"),
+                    service_tier=body.get("service_tier"),
+                )
             elif action == "read":
                 result = application.session.read_thread(body.get("thread_id"))
             else:
@@ -409,10 +418,17 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/turn":
             result = application.session.start_turn(
-                body.get("text"),
-                body.get("model"),
-                body.get("effort"),
-                body.get("local_image_paths"),
+                text=body.get("text"),
+                model=body.get("model"),
+                effort=body.get("effort"),
+                local_image_paths=body.get("local_image_paths"),
+                service_tier=body.get("service_tier"),
+            )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/threads/name":
+            self._require_exact_fields(body, {"thread_id", "name"})
+            result = application.session.rename_thread(
+                body.get("thread_id"), body.get("name")
             )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/steer":

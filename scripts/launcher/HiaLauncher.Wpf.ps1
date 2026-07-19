@@ -49,6 +49,8 @@ $houdiniPathText = Get-RequiredControl -Name 'HoudiniPathText'
 $bridgeCombo = Get-RequiredControl -Name 'BridgePythonComboBox'
 $browseBridgeButton = Get-RequiredControl -Name 'BrowseBridgeButton'
 $bridgePathText = Get-RequiredControl -Name 'BridgePathText'
+$renderOutputTextBox = Get-RequiredControl -Name 'RenderOutputTextBox'
+$browseRenderOutputButton = Get-RequiredControl -Name 'BrowseRenderOutputButton'
 $passCountText = Get-RequiredControl -Name 'PassCountText'
 $warningCountText = Get-RequiredControl -Name 'WarningCountText'
 $blockedCountText = Get-RequiredControl -Name 'BlockedCountText'
@@ -61,6 +63,7 @@ $inlineStatusText = Get-RequiredControl -Name 'InlineStatusText'
 $reportPathTextBox = Get-RequiredControl -Name 'ReportPathTextBox'
 $rescanButton = Get-RequiredControl -Name 'RescanButton'
 $repairButton = Get-RequiredControl -Name 'RepairButton'
+$cleanupScreenshotsButton = Get-RequiredControl -Name 'CleanupScreenshotsButton'
 $copyReportButton = Get-RequiredControl -Name 'CopyReportButton'
 $launchButton = Get-RequiredControl -Name 'LaunchButton'
 
@@ -84,6 +87,12 @@ $script:preflightFailed = $false
 $script:suppressSelectionCheck = $false
 $script:isBusy = $false
 $script:initialScanStarted = $false
+$renderOutputTextBox.Text = [string]$inputs.render_output
+$renderOutputTextBox.ToolTip = if ($renderOutputTextBox.Text) {
+    $renderOutputTextBox.Text
+} else {
+    '留空时使用项目 .runtime\cache'
+}
 
 $script:inlineStatusTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:inlineStatusTimer.Interval = [TimeSpan]::FromSeconds(2.6)
@@ -183,6 +192,19 @@ function Get-ComboBackend {
     return Resolve-HiaMcpBackend -Backend ([string]$idProperty.Value)
 }
 
+function Get-RenderOutputPath {
+    return ([string]$renderOutputTextBox.Text).Trim()
+}
+
+function Format-HiaByteCount {
+    param([Parameter(Mandatory = $true)][long]$Bytes)
+
+    if ($Bytes -lt 1KB) { return "$Bytes B" }
+    if ($Bytes -lt 1MB) { return ('{0:N1} KiB' -f ($Bytes / 1KB)) }
+    if ($Bytes -lt 1GB) { return ('{0:N1} MiB' -f ($Bytes / 1MB)) }
+    return ('{0:N2} GiB' -f ($Bytes / 1GB))
+}
+
 function Update-PathSummaries {
     $houdiniPath = Get-ComboPath -Combo $houdiniCombo
     if ($houdiniPath) {
@@ -201,6 +223,13 @@ function Update-PathSummaries {
         $bridgePathText.Text = '尚未选择 Bridge python.exe'
         $bridgePathText.ToolTip = '尚未选择 Bridge python.exe'
     }
+
+    $renderOutputPath = Get-RenderOutputPath
+    $renderOutputTextBox.ToolTip = if ($renderOutputPath) {
+        $renderOutputPath
+    } else {
+        '留空时使用项目 .runtime\cache'
+    }
 }
 
 function Set-BusyState {
@@ -217,10 +246,13 @@ function Set-BusyState {
     $mcpBackendCombo.IsEnabled = -not $Busy
     $houdiniCombo.IsEnabled = -not $Busy
     $bridgeCombo.IsEnabled = -not $Busy
+    $renderOutputTextBox.IsEnabled = -not $Busy
     $browseHoudiniButton.IsEnabled = -not $Busy
     $browseBridgeButton.IsEnabled = -not $Busy
+    $browseRenderOutputButton.IsEnabled = -not $Busy
     $rescanButton.IsEnabled = -not $Busy
     $repairButton.IsEnabled = -not $Busy
+    $cleanupScreenshotsButton.IsEnabled = -not $Busy
     if ($Busy) {
         $copyReportButton.IsEnabled = $false
         $launchButton.IsEnabled = $false
@@ -475,10 +507,12 @@ function Invoke-GuiScan {
         $selectedHoudini = Get-ComboPath -Combo $houdiniCombo
         $selectedBridge = Get-ComboPath -Combo $bridgeCombo
         $selectedBackend = Get-ComboBackend
+        $selectedRenderOutput = Get-RenderOutputPath
         $script:currentResult = Invoke-PreflightAndReport `
             -SelectedHoudini $selectedHoudini `
             -SelectedBridge $selectedBridge `
             -SelectedBackend $selectedBackend `
+            -SelectedRenderOutput $selectedRenderOutput `
             -Candidates $script:currentCandidates
         Show-Result -Result $script:currentResult
     } catch {
@@ -545,6 +579,7 @@ $rescanButton.Add_Click({
 $mcpBackendCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
 $houdiniCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
 $bridgeCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
+$renderOutputTextBox.Add_TextChanged({ Mark-SelectionNeedsCheck })
 
 $browseHoudiniButton.Add_Click({
     $dialog = [Microsoft.Win32.OpenFileDialog]::new()
@@ -563,6 +598,42 @@ $browseBridgeButton.Add_Click({
     $dialog.CheckFileExists = $true
     if ($dialog.ShowDialog($window) -eq $true) {
         Add-OrSelectBridgeCandidate -Path $dialog.FileName
+    }
+})
+
+$browseRenderOutputButton.Add_Click({
+    if ($script:isBusy) { return }
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $owner = [System.Windows.Interop.WindowInteropHelper]::new($window).Handle
+        $folder = $shell.BrowseForFolder(
+            [int]$owner,
+            '选择最终渲染输出目录（可在对话框中新建文件夹）',
+            0x41,
+            0
+        )
+        if ($null -eq $folder) { return }
+        $selectedPath = [string]$folder.Self.Path
+        $resolvedPath = Resolve-HiaRenderOutputDirectory `
+            -ProjectRoot $projectRoot `
+            -Path $selectedPath `
+            -HoudiniExe (Get-ComboPath -Combo $houdiniCombo) `
+            -Create
+        $script:suppressSelectionCheck = $true
+        try {
+            $renderOutputTextBox.Text = $resolvedPath
+            $renderOutputTextBox.ToolTip = $resolvedPath
+        } finally {
+            $script:suppressSelectionCheck = $false
+        }
+        Mark-SelectionNeedsCheck
+    } catch {
+        Show-InlineStatus -Kind 'error' -Text ([string]$_.Exception.Message)
+    } finally {
+        if ($null -ne $shell) {
+            try { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) } catch { }
+        }
     }
 })
 
@@ -587,6 +658,67 @@ $repairButton.Add_Click({
     }
 })
 
+$cleanupScreenshotsButton.Add_Click({
+    if ($script:isBusy) { return }
+
+    try {
+        $preview = Invoke-HiaScreenshotCacheCleanup -ProjectRoot $projectRoot
+    } catch {
+        Show-InlineStatus -Kind 'error' -Text ("截图缓存未清理：{0}" -f $_.Exception.Message)
+        return
+    }
+
+    $previewSize = Format-HiaByteCount -Bytes ([long]$preview.matched_bytes)
+    $confirmationText = @"
+唯一允许目标：
+$($preview.target_path)
+
+匹配 PNG 文件：$($preview.matched_count) 个
+总大小：$previewSize
+当前跳过：$($preview.skipped_count) 个
+
+确认只删除该目录第一层、且仍与本次预览一致的 HIA PNG 截图吗？
+子目录、其他缓存、附件和最终渲染输出不会被清理。
+"@
+    $confirmation = [System.Windows.MessageBox]::Show(
+        $window,
+        $confirmationText,
+        '确认清理截图缓存',
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning,
+        [System.Windows.MessageBoxResult]::No
+    )
+    if ($confirmation -ne [System.Windows.MessageBoxResult]::Yes) {
+        Show-InlineStatus -Kind 'neutral' -Transient -Text '已取消截图缓存清理；未删除任何文件。'
+        return
+    }
+
+    Set-BusyState -Busy $true
+    try {
+        $cleanupResult = Invoke-HiaScreenshotCacheCleanup `
+            -ProjectRoot $projectRoot `
+            -Plan $preview `
+            -Delete
+    } catch {
+        Show-InlineStatus -Kind 'error' -Text ("截图缓存未清理：{0}" -f $_.Exception.Message)
+        return
+    } finally {
+        Set-BusyState -Busy $false
+    }
+
+    $freedSize = Format-HiaByteCount -Bytes ([long]$cleanupResult.deleted_bytes)
+    $resultKind = if ([int]$cleanupResult.failed_count -gt 0) { 'warning' } else { 'success' }
+    Show-InlineStatus `
+        -Kind $resultKind `
+        -Text (
+            '截图缓存清理完成：已删除 {0} 个，释放 {1}；跳过 {2} 个（失败 {3} 个）。' -f `
+                $cleanupResult.deleted_count,
+                $freedSize,
+                $cleanupResult.skipped_count,
+                $cleanupResult.failed_count
+        )
+})
+
 $copyReportButton.Add_Click({
     if (-not $script:lastReportPath) { return }
     try {
@@ -602,6 +734,7 @@ $launchButton.Add_Click({
     $selectedHoudini = Get-ComboPath -Combo $houdiniCombo
     $selectedBridge = Get-ComboPath -Combo $bridgeCombo
     $selectedBackend = Get-ComboBackend
+    $selectedRenderOutput = Get-RenderOutputPath
     Set-BusyState -Busy $true
     try {
         try {
@@ -609,6 +742,7 @@ $launchButton.Add_Click({
                 -SelectedHoudini $selectedHoudini `
                 -SelectedBridge $selectedBridge `
                 -SelectedBackend $selectedBackend `
+                -SelectedRenderOutput $selectedRenderOutput `
                 -Candidates $script:currentCandidates
             Show-Result -Result $script:currentResult
         } catch {
@@ -621,11 +755,13 @@ $launchButton.Add_Click({
                 -ProjectRoot $projectRoot `
                 -HoudiniExe $selectedHoudini `
                 -BridgePython $selectedBridge `
+                -RenderOutputDir $selectedRenderOutput `
                 -McpBackend $selectedBackend | Out-Null
             Start-ExistingHoudiniLauncher `
                 -SelectedHoudini $selectedHoudini `
                 -SelectedBridge $selectedBridge `
-                -SelectedBackend $selectedBackend
+                -SelectedBackend $selectedBackend `
+                -SelectedRenderOutput $selectedRenderOutput
             Show-InlineStatus `
                 -Kind 'success' `
                 -Transient `

@@ -124,6 +124,14 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("do not fan out", search_description)
         self.assertIn("blindly retry", search_description)
 
+        help_tool = next(
+            item for item in response["result"]["tools"] if item["name"] == "hia_node_help"
+        )
+        help_description = help_tool["description"].casefold()
+        self.assertIn("node_path", help_description)
+        self.assertIn("category plus a bare node_type", help_description)
+        self.assertIn('node_type="category/name"', help_description)
+
         codex_response = adapter.handle_message(
             rpc(3, "tools/list", {"_meta": {"progressToken": "inventory"}})
         )

@@ -2,9 +2,10 @@
 
 These permanent rules apply to development in this repository.
 
-- Resolve the project root from `HIA_PROJECT_ROOT` or the repository location. Project files, dependencies, virtual environments, caches, renders, jobs, logs, and temporary data must stay under that resolved root; do not assume a drive letter or fixed checkout path.
+- Resolve the project root from `HIA_PROJECT_ROOT` or the repository location; do not assume a drive letter or fixed checkout path. Plugin source and internal data, including dependencies, virtual environments, caches, automatic screenshots and previews, attachments, temporary files, diagnostics, jobs, and logs, must stay under that root.
+- A final render, EXR, video, USD, simulation cache, or export explicitly requested by the user is a user deliverable and may use the ordinary local directory the user selected outside the project. Without an explicit directory, use `HIA_RENDER_OUTPUT_DIR`, which defaults to `<project-root>/.runtime/cache`; always report the actual final path.
 - Never delete, move, overwrite, reset, clean, or otherwise discard user files or Git changes. Read files before editing them and preserve unrelated work.
-- Never modify the Houdini installation directory, Houdini user configuration, AppData, user-home directories, drive roots, or any path outside the project root.
+- Except for a user-explicit final-output target described above, never modify the Houdini installation directory, Houdini user configuration, AppData, user-home directories, drive roots, or any path outside the project root.
 - Local services must listen only on `127.0.0.1` and must use a fresh random authentication token for each launcher session.
 - Codex is the only intelligent system. Do not build a second Agent, LLM, Planner, RAG system, vector database, or custom semantic-memory system.
 - Do not control Houdini through screen takeover or Computer Use. Use the Panel, Bridge, HIA MCP V2, HOM/`hou`, launcher, and native `hython` as appropriate; FXHoudiniMCP is an explicit compatibility fallback.
