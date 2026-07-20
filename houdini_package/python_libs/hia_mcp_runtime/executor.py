@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import struct
 import threading
 import time
 import traceback
@@ -29,8 +30,19 @@ MAX_SCRIPT_CHARS = 524_288
 MAX_TEXT_CHARS = 65_536
 MAX_SNAPSHOT_NODES = 10_000
 MAX_SNAPSHOTS = 16
+MAX_TARGETED_DIFF_PATHS = 128
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
+_NODE_DIGEST_UNAVAILABLE = object()
+
+_PROJECT_HELP_DOCUMENTS = (
+    "ARCHITECTURE.md",
+    "DIAGNOSTICS.md",
+    "HIA-MCP-V2.md",
+    "ROADMAP.md",
+    "SAFETY.md",
+)
+_HELP_TEXT_SUFFIXES = frozenset({".md", ".txt", ".html", ".json", ".yaml", ".yml"})
 
 
 class HiaRuntimeError(Exception):
@@ -140,7 +152,6 @@ class HoudiniExecutor:
             "hia_execute_hom": self._execute_hom,
             "hia_scene_diff": self._scene_diff,
             "hia_capture_viewport": self._capture_viewport,
-            "hia_local_help_search": self._local_help_search,
         }
 
     @property
@@ -149,29 +160,44 @@ class HoudiniExecutor:
             return self._scene_revision
 
     def dispatch(self, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(arguments, Mapping):
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "Tool arguments must be an object")
+        copied_arguments = dict(arguments)
+        if tool_name == "hia_local_help_search":
+            return self._dispatch_local_help(copied_arguments)
         handler = self._handlers.get(tool_name)
         if handler is None:
             raise HiaRuntimeError("TOOL_NOT_FOUND", "Unknown HIA MCP V2 runtime tool", {"tool": tool_name})
-        if not isinstance(arguments, Mapping):
-            raise HiaRuntimeError("INVALID_ARGUMENTS", "Tool arguments must be an object")
+
+        dispatch_requested = time.monotonic()
+        ui_started = dispatch_requested
+        ui_finished = dispatch_requested
 
         def run() -> dict[str, Any]:
+            nonlocal ui_started, ui_finished
+            ui_started = time.monotonic()
             try:
-                value = handler(dict(arguments))
-            except HiaRuntimeError:
-                raise
-            except Exception as exc:
-                raise HiaRuntimeError(
-                    "HOUDINI_EXECUTION_ERROR",
-                    _bounded_text(_redact_text(str(exc)), 2048),
-                    {"traceback": _bounded_text(_redact_text(traceback.format_exc(limit=12)), 12_000)},
-                ) from exc
-            if not isinstance(value, dict):
-                raise HiaRuntimeError("INVALID_HANDLER_RESULT", "Houdini runtime handler returned a non-object")
-            return value
+                try:
+                    value = handler(copied_arguments)
+                except HiaRuntimeError:
+                    raise
+                except Exception as exc:
+                    raise HiaRuntimeError(
+                        "HOUDINI_EXECUTION_ERROR",
+                        _bounded_text(_redact_text(str(exc)), 2048),
+                        {"traceback": _bounded_text(_redact_text(traceback.format_exc(limit=12)), 12_000)},
+                    ) from exc
+                if not isinstance(value, dict):
+                    raise HiaRuntimeError(
+                        "INVALID_HANDLER_RESULT",
+                        "Houdini runtime handler returned a non-object",
+                    )
+                return value
+            finally:
+                ui_finished = time.monotonic()
 
         try:
-            return self._run_on_main_thread(run)
+            result = self._run_on_main_thread(run)
         except HiaRuntimeError:
             raise
         except Exception as exc:
@@ -180,6 +206,16 @@ class HoudiniExecutor:
                 "The call could not be executed on Houdini's UI main thread",
                 {"reason": _bounded_text(_redact_text(str(exc)), 1024)},
             ) from exc
+        returned = time.monotonic()
+        if tool_name == "hia_execute_hom":
+            result["phase_timings"].update(
+                {
+                    "runtime_ui_queue_seconds": _seconds(ui_started - dispatch_requested),
+                    "runtime_ui_main_thread_seconds": _seconds(ui_finished - ui_started),
+                    "runtime_ui_return_seconds": _seconds(returned - ui_finished),
+                }
+            )
+        return result
 
     def _context(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         current_network, current_node = self._current_ui_nodes()
@@ -583,24 +619,73 @@ class HoudiniExecutor:
         )
 
     def _execute_hom(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        execute_started = time.monotonic()
         script = arguments.get("script")
         if not isinstance(script, str) or not script.strip():
             raise HiaRuntimeError("INVALID_ARGUMENTS", "script must be a non-empty string")
         if len(script) > MAX_SCRIPT_CHARS:
             raise HiaRuntimeError("REQUEST_TOO_LARGE", "The HOM script exceeds the character limit", {"limit": MAX_SCRIPT_CHARS})
-        timeout_seconds = float(arguments.get("timeout_seconds", 60.0))
+        try:
+            timeout_seconds = float(arguments.get("timeout_seconds", 60.0))
+        except (TypeError, ValueError) as exc:
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "timeout_seconds must be a number") from exc
         if not 1 <= timeout_seconds <= 300:
             raise HiaRuntimeError("INVALID_ARGUMENTS", "timeout_seconds must be between 1 and 300")
+
         capture_diff = bool(arguments.get("capture_diff", True))
+        full_diff = capture_diff and "diff_root_path" in arguments
         diff_root = str(arguments.get("diff_root_path", "/"))
-        before_nodes, before_truncated = self._snapshot_map(diff_root) if capture_diff else ({}, False)
+        requested_diff_paths = arguments.get("diff_paths", [])
+        if not isinstance(requested_diff_paths, list):
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "diff_paths must be an array")
+        checkpoint_label = str(arguments.get("checkpoint_label", "")).strip()
+        if checkpoint_label and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", checkpoint_label) is None:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "checkpoint_label must use 1-128 letters, numbers, dot, underscore, or dash",
+            )
+
+        pre_diff_started = time.monotonic()
+        targeted_before: dict[str, str | None | object] = {}
+        marker_only_baselines: set[str] = set()
+        targeted_truncated = False
+
+        def add_targeted_baseline(path: str, *, marker_only: bool = False) -> None:
+            nonlocal targeted_truncated
+            if path in targeted_before:
+                return
+            if len(targeted_before) >= MAX_TARGETED_DIFF_PATHS:
+                targeted_truncated = True
+                return
+            targeted_before[path] = self._node_digest(path)
+            if marker_only:
+                marker_only_baselines.add(path)
+
+        if full_diff:
+            before_nodes, before_truncated = self._snapshot_map(diff_root)
+        elif capture_diff:
+            for value in requested_diff_paths:
+                if not isinstance(value, str) or not value.startswith("/") or len(value) > 4096:
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        "diff_paths must contain absolute Houdini node paths",
+                    )
+                add_targeted_baseline(value)
+        pre_diff_seconds = time.monotonic() - pre_diff_started
+
         dirty_before = self._dirty()
         marked: set[str] = set()
 
         def mark_changed(value: Any) -> str:
+            nonlocal targeted_truncated
             path = value if isinstance(value, str) else _safe_path(value)
             if not isinstance(path, str) or not path.startswith("/"):
                 raise ValueError("hia_mark_changed expects a Houdini node or absolute node path")
+            if capture_diff and not full_diff:
+                add_targeted_baseline(path, marker_only=True)
+            if len(marked) >= MAX_TARGETED_DIFF_PATHS and path not in marked:
+                targeted_truncated = True
+                return path
             marked.add(path)
             return path
 
@@ -614,7 +699,7 @@ class HoudiniExecutor:
         stdout = io.StringIO()
         stderr = io.StringIO()
         warning_records: list[str] = []
-        started = time.monotonic()
+        hom_started = time.monotonic()
         failure: dict[str, Any] | None = None
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), python_warnings.catch_warnings(record=True) as caught:
@@ -626,22 +711,183 @@ class HoudiniExecutor:
                 "code": "HOM_EXECUTION_FAILED",
                 "message": _bounded_text(_redact_text(str(exc)), 2048),
                 "traceback": _bounded_text(_redact_text(traceback.format_exc(limit=20)), 20_000),
+                "partial_scene_changes_possible": True,
+                "automatic_retry_safe": False,
             }
-        elapsed = time.monotonic() - started
+        hom_seconds = time.monotonic() - hom_started
         if stderr.getvalue().strip():
             warning_records.append(stderr.getvalue())
         explicit = namespace.get("hia_changed_paths", [])
+        explicitly_changed: set[str] = set()
         if isinstance(explicit, (list, tuple, set)):
             for value in explicit:
                 if isinstance(value, str) and value.startswith("/"):
-                    marked.add(value)
-        after_nodes, after_truncated = self._snapshot_map(diff_root) if capture_diff else ({}, False)
-        diff = self._diff_maps(before_nodes, after_nodes) if capture_diff else {"created": [], "deleted": [], "changed": []}
-        changed_paths = sorted(marked | set(diff["created"]) | set(diff["changed"]) | set(diff["deleted"]))
-        dirty_after = self._dirty()
-        if changed_paths or dirty_before != dirty_after:
+                    if len(explicitly_changed) >= MAX_TARGETED_DIFF_PATHS and value not in explicitly_changed:
+                        targeted_truncated = True
+                        continue
+                    explicitly_changed.add(value)
+
+        post_diff_started = time.monotonic()
+        if full_diff:
+            try:
+                after_nodes, after_truncated = self._snapshot_map(diff_root)
+            except HiaRuntimeError as exc:
+                if exc.code != "NODE_NOT_FOUND":
+                    raise
+                after_nodes, after_truncated = {}, False
+            full_delta = self._diff_maps(before_nodes, after_nodes)
+            full_verified = {
+                path
+                for key in ("created", "deleted", "changed")
+                for path in full_delta[key]
+            }
+            full_claimed = marked | explicitly_changed
+            diff: dict[str, Any] = {
+                **full_delta,
+                "mode": "full",
+                "root_path": diff_root,
+                "declared_or_touched_paths": sorted(full_claimed)[:MAX_TARGETED_DIFF_PATHS],
+                "unverified_paths": sorted(full_claimed - full_verified)[:MAX_TARGETED_DIFF_PATHS],
+                "truncated": before_truncated or after_truncated or targeted_truncated,
+            }
+        elif capture_diff:
+            candidate_paths = list(
+                dict.fromkeys(
+                    [
+                        *targeted_before,
+                        *sorted(marked),
+                        *sorted(explicitly_changed),
+                    ]
+                )
+            )
+            if len(candidate_paths) > MAX_TARGETED_DIFF_PATHS:
+                candidate_paths = candidate_paths[:MAX_TARGETED_DIFF_PATHS]
+                targeted_truncated = True
+            after_states = {
+                path: self._node_digest(path)
+                for path in candidate_paths
+            }
+            created: list[str] = []
+            deleted: list[str] = []
+            changed: list[str] = []
+            unverified: list[str] = []
+            claimed = marked | explicitly_changed
+            for path in candidate_paths:
+                if path not in targeted_before:
+                    if path in claimed:
+                        unverified.append(path)
+                    continue
+                before = targeted_before[path]
+                after = after_states[path]
+                if before is _NODE_DIGEST_UNAVAILABLE or after is _NODE_DIGEST_UNAVAILABLE:
+                    unverified.append(path)
+                    continue
+                if before is None and after is not None:
+                    created.append(path)
+                elif before is not None and after is None:
+                    deleted.append(path)
+                elif before is not None and after is not None and before != after:
+                    changed.append(path)
+                elif path in claimed and path in marker_only_baselines:
+                    # A marker may have been called after the edit.  Without an
+                    # earlier baseline, unchanged-at-return cannot be promoted
+                    # to a verified scene diff.
+                    unverified.append(path)
+            diff = {
+                "created": created,
+                "deleted": deleted,
+                "changed": changed,
+                "mode": "targeted",
+                "root_path": None,
+                "declared_or_touched_paths": sorted(set(candidate_paths)),
+                "unverified_paths": sorted(set(unverified)),
+                "truncated": targeted_truncated,
+            }
+        else:
+            diff = None
+        post_diff_seconds = time.monotonic() - post_diff_started
+
+        verified_diff_paths = (
+            {
+                str(path)
+                for key in ("created", "deleted", "changed")
+                for path in diff.get(key, [])
+            }
+            if isinstance(diff, Mapping)
+            else set()
+        )
+        changed_paths = sorted(verified_diff_paths)[:MAX_TARGETED_DIFF_PATHS]
+        dirty_after_script = self._dirty()
+        observed_change = bool(verified_diff_paths) or dirty_before != dirty_after_script
+        unverified_paths = (
+            set(str(path) for path in diff.get("unverified_paths", []))
+            if isinstance(diff, Mapping)
+            else set()
+        )
+        if observed_change:
+            scene_change_status = "changed"
+        elif failure is not None or unverified_paths or marked or explicitly_changed or not capture_diff:
+            scene_change_status = "unknown"
+        else:
+            scene_change_status = "unchanged"
+        if observed_change:
             with self._state_lock:
                 self._scene_revision += 1
+
+        checkpoint_started = time.monotonic()
+        checkpoint: dict[str, Any] = {
+            "requested": bool(checkpoint_label),
+            "label": checkpoint_label or None,
+            "created": False,
+            "path": None,
+            "error": None,
+        }
+        if checkpoint_label:
+            if failure is not None:
+                checkpoint["skipped_reason"] = "HOM_EXECUTION_FAILED"
+            elif not observed_change:
+                checkpoint["skipped_reason"] = "NO_CONFIRMED_SCENE_CHANGE"
+            else:
+                try:
+                    checkpoint_directory = self._checkpoint_directory()
+                except Exception as exc:
+                    checkpoint["skipped_reason"] = "CHECKPOINT_CONFIGURATION_INVALID"
+                    checkpoint["error"] = {
+                        "code": "CHECKPOINT_CONFIGURATION_INVALID",
+                        "message": _bounded_text(_redact_text(str(exc)), 2048),
+                    }
+                    warning_records.append(
+                        "Checkpoint was skipped after the HOM batch completed; do not retry the scene write automatically"
+                    )
+                else:
+                    try:
+                        returned_path = self._hou.hipFile.saveAsBackup()
+                        if not isinstance(returned_path, str) or not returned_path.strip():
+                            raise RuntimeError("Houdini did not return the backup path")
+                        candidate = Path(returned_path.strip())
+                        if not candidate.is_absolute():
+                            candidate = checkpoint_directory / candidate
+                        checkpoint_path = candidate.resolve(strict=True)
+                        if not checkpoint_path.is_file() or not _is_within(
+                            checkpoint_path, checkpoint_directory
+                        ):
+                            raise RuntimeError(
+                                "Houdini returned a backup path outside the configured checkpoint directory"
+                            )
+                        checkpoint["created"] = True
+                        checkpoint["path"] = str(checkpoint_path)
+                    except Exception as exc:
+                        checkpoint["error"] = {
+                            "code": "CHECKPOINT_FAILED",
+                            "message": _bounded_text(_redact_text(str(exc)), 2048),
+                        }
+                        warning_records.append(
+                            "Checkpoint failed after the HOM batch completed; do not retry the scene write automatically"
+                        )
+        checkpoint_seconds = time.monotonic() - checkpoint_started
+
+        normalization_started = time.monotonic()
+        dirty_after = self._dirty()
         redacted_stdout = _bounded_text(_redact_text(stdout.getvalue()), MAX_TEXT_CHARS)
         redacted_warnings = [_bounded_text(_redact_text(value), 4096) for value in warning_records[:100]]
         errors = [failure] if failure is not None else []
@@ -652,20 +898,30 @@ class HoudiniExecutor:
             "warnings": redacted_warnings,
             "errors": errors,
             "created_or_changed_paths": changed_paths,
+            "scene_change_status": scene_change_status,
             "revision": self.scene_revision,
             "dirty": dirty_after,
-            "elapsed_seconds": round(elapsed, 6),
-            "diff": {
-                **diff,
-                "root_path": diff_root,
-                "truncated": before_truncated or after_truncated,
-            } if capture_diff else None,
+            "elapsed_seconds": _seconds(hom_seconds),
+            "diff": diff,
+            "checkpoint": checkpoint,
             "execution_limit": {
                 "requested_timeout_seconds": timeout_seconds,
+                "timeout_kind": "client_wait_budget",
                 "cancel_before_main_thread": True,
                 "interruptible_after_main_thread_entry": False,
+                "hom_may_continue_after_client_timeout": True,
+                "automatic_retry_after_timeout": False,
             },
             "structured_error": failure,
+        }
+        normalization_seconds = time.monotonic() - normalization_started
+        result["phase_timings"] = {
+            "runtime_pre_diff_seconds": _seconds(pre_diff_seconds),
+            "runtime_hom_seconds": _seconds(hom_seconds),
+            "runtime_post_diff_seconds": _seconds(post_diff_seconds),
+            "runtime_checkpoint_seconds": _seconds(checkpoint_seconds),
+            "runtime_result_normalization_seconds": _seconds(normalization_seconds),
+            "runtime_execute_total_seconds": _seconds(time.monotonic() - execute_started),
         }
         return result
 
@@ -746,13 +1002,11 @@ class HoudiniExecutor:
             raise HiaRuntimeError("VIEWPORT_UNAVAILABLE", "No Scene Viewer pane is available")
         viewport = scene_viewer.curViewport()
         camera_path = str(arguments.get("camera_path", ""))
+        camera = None
         if camera_path:
             camera = self._hou.node(camera_path)
             if camera is None:
                 raise HiaRuntimeError("NODE_NOT_FOUND", "The viewport camera does not exist", {"path": camera_path})
-            set_camera = getattr(viewport, "setCamera", None)
-            if callable(set_camera):
-                set_camera(camera)
         capture_dir = self._screenshot_root
         capture_dir.mkdir(parents=True, exist_ok=True)
         if not _is_within(capture_dir, self._cache_root):
@@ -764,7 +1018,20 @@ class HoudiniExecutor:
         )
         frame = int(round(float(_safe_call(self._hou, "frame", 1.0))))
         output_path = capture_dir / f"viewport-{identifier}-{frame:04d}.png"
+        original_camera = viewport.camera() if camera is not None else None
+        saved_default_camera = None
+        original_camera_lock = False
+        if camera is not None:
+            if original_camera is None:
+                saved_default_camera = viewport.defaultCamera().stash()
+            original_camera_lock = bool(viewport.isCameraLockedToView())
+        original_frame = self._hou.frame() if mode != "viewport" else None
+        capture_error: Exception | None = None
+        restore_errors: list[dict[str, str]] = []
         try:
+            if camera is not None:
+                viewport.lockCameraToView(False)
+                viewport.setCamera(camera)
             if mode == "viewport" and callable(getattr(viewport, "saveViewToImage", None)):
                 viewport.saveViewToImage(str(output_path))
             else:
@@ -776,44 +1043,152 @@ class HoudiniExecutor:
                 settings.frameRange((start, end))
                 settings.output(str(pattern))
                 settings.resolution((width, height))
-                scene_viewer.flipbook(viewport, settings)
+                settings.useResolution(True)
+                settings.outputZoom(100)
+                settings.useSheetSize(False)
+                settings.outputToMPlay(False)
+                scene_viewer.flipbook(viewport, settings, open_dialog=False)
                 output_path = capture_dir / f"flipbook-{identifier}-{int(round(start)):04d}.png"
         except Exception as exc:
-            raise HiaRuntimeError("VIEWPORT_CAPTURE_FAILED", _bounded_text(_redact_text(str(exc)), 2048)) from exc
+            capture_error = exc
+        finally:
+            def restore(operation: str, callback: Callable[[], Any]) -> None:
+                try:
+                    callback()
+                except Exception as exc:
+                    restore_errors.append(
+                        {
+                            "operation": operation,
+                            "message": _bounded_text(_redact_text(str(exc)), 1024),
+                        }
+                    )
+
+            if camera is not None:
+                restore("unlock_camera", lambda: viewport.lockCameraToView(False))
+                if original_camera is None:
+                    restore("use_default_camera", viewport.useDefaultCamera)
+                    restore(
+                        "restore_default_camera",
+                        lambda: viewport.setDefaultCamera(saved_default_camera),
+                    )
+                else:
+                    restore("restore_camera", lambda: viewport.setCamera(original_camera))
+                restore(
+                    "restore_camera_lock",
+                    lambda: viewport.lockCameraToView(original_camera_lock),
+                )
+            if original_frame is not None:
+                restore("restore_frame", lambda: self._hou.setFrame(original_frame))
+        if capture_error is not None:
+            details = {"restore_errors": restore_errors} if restore_errors else None
+            raise HiaRuntimeError(
+                "VIEWPORT_CAPTURE_FAILED",
+                _bounded_text(_redact_text(str(capture_error)), 2048),
+                details,
+            ) from capture_error
+        if restore_errors:
+            raise HiaRuntimeError(
+                "VIEWPORT_STATE_RESTORE_FAILED",
+                "The viewport image was captured but the original viewer state could not be fully restored",
+                {"errors": restore_errors},
+            )
         if not output_path.is_file():
             raise HiaRuntimeError(
                 "VIEWPORT_CAPTURE_FAILED",
                 "Houdini did not produce the expected viewport image",
                 {"relative_path": output_path.relative_to(self._project_root).as_posix()},
             )
+        with output_path.open("rb") as stream:
+            actual_width, actual_height = _png_dimensions(stream.read(24))
         relative = output_path.relative_to(self._project_root).as_posix()
         result: dict[str, Any] = {
             "ok": True,
-            "result": {"path": relative, "mode": mode, "width": width, "height": height},
+            "result": {
+                "path": relative,
+                "mode": mode,
+                "width": actual_width,
+                "height": actual_height,
+            },
             "warnings": [],
             "errors": [],
             "revision": self.scene_revision,
             "dirty": self._dirty(),
         }
         if bool(arguments.get("return_image", True)):
-            raw = output_path.read_bytes()
-            if len(raw) <= 3_000_000:
+            if output_path.stat().st_size <= 3_000_000:
+                raw = output_path.read_bytes()
                 result["image"] = {"mime_type": "image/png", "data_base64": base64.b64encode(raw).decode("ascii")}
             else:
                 result["warnings"].append("Image exceeded inline MCP size; returning the project runtime path only")
         return result
 
-    def _local_help_search(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    def _dispatch_local_help(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         query = str(arguments.get("query", "")).strip()
         if len(query) < 2:
             raise HiaRuntimeError("INVALID_ARGUMENTS", "query must contain at least two characters")
+        ui_requested = time.monotonic()
+        ui_started = ui_requested
+        ui_finished = ui_requested
+
+        def snapshot_on_ui_thread() -> dict[str, Any]:
+            nonlocal ui_started, ui_finished
+            ui_started = time.monotonic()
+            try:
+                sources = set(arguments.get("sources") or ["houdini", "project"])
+                catalog = []
+                houdini_help_root = ""
+                if "houdini" in sources:
+                    catalog = self._node_type_matches(query.casefold(), set(), True)[:200]
+                    houdini_help_root = str(self._hou.expandString("$HH/help"))
+                return {
+                    "catalog": catalog,
+                    "houdini_help_root": houdini_help_root,
+                    "revision": self.scene_revision,
+                    "dirty": self._dirty(),
+                }
+            finally:
+                ui_finished = time.monotonic()
+
+        try:
+            snapshot = self._run_on_main_thread(snapshot_on_ui_thread)
+        except HiaRuntimeError:
+            raise
+        except Exception as exc:
+            raise HiaRuntimeError(
+                "UI_MAIN_THREAD_DISPATCH_FAILED",
+                "Local help metadata could not be read from Houdini's UI main thread",
+                {"reason": _bounded_text(_redact_text(str(exc)), 1024)},
+            ) from exc
+        scan_started = time.monotonic()
+        try:
+            result = self._local_help_search(arguments, snapshot)
+        except HiaRuntimeError:
+            raise
+        except Exception as exc:
+            raise HiaRuntimeError(
+                "LOCAL_HELP_SEARCH_FAILED",
+                _bounded_text(_redact_text(str(exc)), 2048),
+            ) from exc
+        result["phase_timings"] = {
+            "runtime_ui_queue_seconds": _seconds(ui_started - ui_requested),
+            "runtime_ui_snapshot_seconds": _seconds(ui_finished - ui_started),
+            "local_file_search_seconds": _seconds(time.monotonic() - scan_started),
+        }
+        return result
+
+    def _local_help_search(
+        self,
+        arguments: Mapping[str, Any],
+        snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        query = str(arguments.get("query", "")).strip()
         query_folded = query.casefold()
         sources = set(arguments.get("sources") or ["houdini", "project"])
         offset = _bounded_int(arguments.get("offset", 0), 0, 1_000_000)
         limit = _bounded_int(arguments.get("limit", 10), 1, 50)
         matches = []
         if "houdini" in sources:
-            for record in self._node_type_matches(query_folded, set(), True)[:200]:
+            for record in list(snapshot.get("catalog", []))[:200]:
                 matches.append(
                     {
                         "source": "houdini_node_catalog",
@@ -822,49 +1197,83 @@ class HoudiniExecutor:
                         "metadata": record,
                     }
                 )
-        search_roots: list[tuple[str, Path]] = []
+        search_files: list[tuple[str, Path, Path]] = []
         if "project" in sources:
-            search_roots.extend(
-                [
-                    ("project_skill", self._project_root / ".agents" / "skills"),
-                    ("project_docs", self._project_root / "docs"),
-                ]
+            skills_root = self._project_root / ".agents" / "skills"
+            if skills_root.is_dir():
+                skill_candidates = 0
+                for skill_root in skills_root.iterdir():
+                    if not skill_root.is_dir():
+                        continue
+                    skill_entry = skill_root / "SKILL.md"
+                    if skill_entry.is_file():
+                        search_files.append(("project_skill", skills_root, skill_entry))
+                        skill_candidates += 1
+                    references = skill_root / "references"
+                    if references.is_dir():
+                        for path in references.rglob("*"):
+                            if skill_candidates >= 200:
+                                break
+                            search_files.append(("project_skill", skills_root, path))
+                            skill_candidates += 1
+                    if skill_candidates >= 200:
+                        break
+            docs_root = self._project_root / "docs"
+            search_files.extend(
+                ("project_docs", docs_root, docs_root / name)
+                for name in _PROJECT_HELP_DOCUMENTS
             )
         if "houdini" in sources:
-            expanded = str(_safe_call(self._hou, "expandString", "", "$HH/help"))
-            if expanded:
-                search_roots.append(("houdini_help", Path(expanded)))
+            expanded = str(snapshot.get("houdini_help_root", ""))
+            houdini_help_root = Path(expanded) if expanded else None
+            if houdini_help_root is not None and houdini_help_root.is_dir():
+                for index, path in enumerate(houdini_help_root.rglob("*")):
+                    if index >= 400:
+                        break
+                    search_files.append(("houdini_help", houdini_help_root, path))
         scanned = 0
-        for source_name, root in search_roots:
-            if not root.is_dir():
+        seen_paths: set[str] = set()
+        for source_name, root, path in search_files:
+            if scanned >= 600 or len(matches) >= offset + limit + 200:
+                break
+            try:
+                resolved_root = root.resolve()
+                resolved_path = path.resolve()
+                relative = resolved_path.relative_to(resolved_root).as_posix()
+            except (OSError, ValueError):
                 continue
-            for path in root.rglob("*"):
-                if scanned >= 600 or len(matches) >= offset + limit + 200:
-                    break
-                if not path.is_file() or path.suffix.casefold() not in {".md", ".txt", ".html", ".json", ".yaml", ".yml"}:
+            normalized = os.path.normcase(str(resolved_path))
+            if normalized in seen_paths:
+                continue
+            seen_paths.add(normalized)
+            if (
+                not resolved_path.is_file()
+                or resolved_path.suffix.casefold() not in _HELP_TEXT_SUFFIXES
+            ):
+                continue
+            scanned += 1
+            try:
+                if resolved_path.stat().st_size > 512_000:
                     continue
-                scanned += 1
-                try:
-                    if path.stat().st_size > 512_000:
-                        continue
-                    text = path.read_text(encoding="utf-8", errors="ignore")
-                except OSError:
-                    continue
-                position = text.casefold().find(query_folded)
-                if position < 0:
-                    continue
-                start = max(0, position - 240)
-                end = min(len(text), position + len(query) + 480)
-                snippet = re.sub(r"\s+", " ", text[start:end]).strip()
-                try:
-                    relative = path.relative_to(root).as_posix()
-                except ValueError:
-                    relative = path.name
-                matches.append(
-                    {"source": source_name, "title": relative, "snippet": _bounded_text(snippet, 1000)}
-                )
-        return self._success(
-            {
+                text = resolved_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            position = text.casefold().find(query_folded)
+            if position < 0:
+                continue
+            start = max(0, position - 240)
+            end = min(len(text), position + len(query) + 480)
+            snippet = re.sub(r"\s+", " ", text[start:end]).strip()
+            matches.append(
+                {
+                    "source": source_name,
+                    "title": relative,
+                    "snippet": _bounded_text(snippet, 1000),
+                }
+            )
+        return {
+            "ok": True,
+            "result": {
                 "query": query,
                 "matches": matches[offset : offset + limit],
                 "total": len(matches),
@@ -872,8 +1281,13 @@ class HoudiniExecutor:
                 "limit": limit,
                 "files_scanned": scanned,
                 "web_searched": False,
-            }
-        )
+            },
+            "stdout": "",
+            "warnings": [],
+            "errors": [],
+            "revision": int(snapshot.get("revision", self.scene_revision)),
+            "dirty": bool(snapshot.get("dirty", False)),
+        }
 
     def _success(self, result: Any, *, warnings: list[str] | None = None) -> dict[str, Any]:
         return {
@@ -1204,6 +1618,65 @@ class HoudiniExecutor:
                     return result
         return result
 
+    def _node_digest(self, path: str) -> str | None | object:
+        try:
+            node = self._hou.node(path)
+            if node is None:
+                return None
+            return self._node_digest_value(node)
+        except Exception:
+            return _NODE_DIGEST_UNAVAILABLE
+
+    def _checkpoint_directory(self) -> Path:
+        raw_path = os.environ.get("HOUDINI_BACKUP_DIR", "").strip()
+        if not raw_path:
+            raise RuntimeError("HOUDINI_BACKUP_DIR is not configured")
+        configured = Path(raw_path)
+        if not configured.is_absolute():
+            raise RuntimeError("HOUDINI_BACKUP_DIR must be absolute")
+        try:
+            directory = configured.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError("HOUDINI_BACKUP_DIR does not exist") from exc
+        sessions_root = (self._project_root / ".runtime" / "launcher-sessions").resolve()
+        session_id = directory.parent.name
+        if (
+            not directory.is_dir()
+            or not _is_within(directory, self._project_root)
+            or directory.name.casefold() != "checkpoints"
+            or re.fullmatch(r"[0-9a-fA-F]{32}", session_id) is None
+            or directory.parent.parent != sessions_root
+        ):
+            raise RuntimeError(
+                "HOUDINI_BACKUP_DIR must be the current project launcher session checkpoints directory"
+            )
+        return directory
+
+    def _node_digest_value(self, node: Any) -> str:
+        payload = {
+            "type": self._type_record(node),
+            "inputs": [
+                _safe_path(value) if value is not None else None
+                for value in _safe_call(node, "inputs", ())
+            ],
+            "flags": {
+                "display": bool(_safe_call(node, "isDisplayFlagSet", False)),
+                "render": bool(_safe_call(node, "isRenderFlagSet", False)),
+                "bypassed": bool(_safe_call(node, "isBypassed", False)),
+            },
+            "parameters": [
+                (str(_safe_call(parm, "name", "")), _safe_unexpanded_string(parm))
+                for parm in list(_safe_call(node, "parms", ()))[:256]
+            ],
+        }
+        encoded = json.dumps(
+            _json_value(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
     def _snapshot_map(self, root_path: str) -> tuple[dict[str, str], bool]:
         root = self._hou.node(root_path)
         if root is None:
@@ -1213,21 +1686,7 @@ class HoudiniExecutor:
         result = {}
         for node in nodes[:MAX_SNAPSHOT_NODES]:
             path = _safe_path(node)
-            payload = {
-                "type": self._type_record(node),
-                "inputs": [_safe_path(value) if value is not None else None for value in _safe_call(node, "inputs", ())],
-                "flags": {
-                    "display": bool(_safe_call(node, "isDisplayFlagSet", False)),
-                    "render": bool(_safe_call(node, "isRenderFlagSet", False)),
-                    "bypassed": bool(_safe_call(node, "isBypassed", False)),
-                },
-                "parameters": [
-                    (str(_safe_call(parm, "name", "")), _safe_unexpanded_string(parm))
-                    for parm in list(_safe_call(node, "parms", ()))[:256]
-                ],
-            }
-            encoded = json.dumps(_json_value(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            result[path] = hashlib.sha256(encoded).hexdigest()
+            result[path] = self._node_digest_value(node)
         return result, truncated
 
     @staticmethod
@@ -1239,6 +1698,29 @@ class HoudiniExecutor:
             "deleted": sorted(before_paths - after_paths),
             "changed": sorted(path for path in before_paths & after_paths if before[path] != after[path]),
         }
+
+
+def _seconds(value: float) -> float:
+    return round(max(0.0, float(value)), 6)
+
+
+def _png_dimensions(raw: bytes) -> tuple[int, int]:
+    if (
+        len(raw) < 24
+        or raw[:8] != b"\x89PNG\r\n\x1a\n"
+        or raw[12:16] != b"IHDR"
+    ):
+        raise HiaRuntimeError(
+            "VIEWPORT_CAPTURE_FAILED",
+            "Houdini produced an invalid PNG viewport image",
+        )
+    width, height = struct.unpack(">II", raw[16:24])
+    if width <= 0 or height <= 0:
+        raise HiaRuntimeError(
+            "VIEWPORT_CAPTURE_FAILED",
+            "Houdini produced invalid viewport image dimensions",
+        )
+    return width, height
 
 
 def _safe_call(value: Any, name: str, default: Any, *args: Any) -> Any:

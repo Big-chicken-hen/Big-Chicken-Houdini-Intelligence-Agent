@@ -130,7 +130,10 @@ function Start-ExistingHoudiniLauncher {
         [Parameter(Mandatory = $true)][string]$SelectedHoudini,
         [Parameter(Mandatory = $true)][string]$SelectedBridge,
         [ValidateSet('hia_v2', 'fxhoudini')][string]$SelectedBackend,
-        [AllowEmptyString()][string]$SelectedRenderOutput = ''
+        [AllowEmptyString()][string]$SelectedRenderOutput = '',
+        [AllowEmptyString()][string]$RecoverySessionId = '',
+        [AllowEmptyString()][string]$RecoveryCheckpoint = '',
+        [AllowEmptyString()][string]$RecoveryDecision = ''
     )
 
     $resolvedRenderOutput = Resolve-HiaRenderOutputDirectory `
@@ -148,6 +151,15 @@ function Start-ExistingHoudiniLauncher {
         '-BridgePython', $SelectedBridge,
         '-McpBackend', $SelectedBackend
     )
+    if ($RecoveryDecision) {
+        $arguments += @(
+            '-RecoverySessionId', $RecoverySessionId,
+            '-RecoveryDecision', $RecoveryDecision
+        )
+        if ($RecoveryDecision -eq 'recover') {
+            $arguments += @('-RecoveryCheckpoint', $RecoveryCheckpoint)
+        }
+    }
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $powershellExe
     $startInfo.Arguments = (@($arguments | ForEach-Object { ConvertTo-HiaProcessArgument -Value ([string]$_) }) -join ' ')

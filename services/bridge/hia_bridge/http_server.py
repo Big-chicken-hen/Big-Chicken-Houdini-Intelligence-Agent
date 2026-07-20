@@ -335,6 +335,17 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/threads":
             result = application.session.list_threads()
             return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/goal":
+            values = parse_qs(query, keep_blank_values=True)
+            thread_ids = values.get("thread_id", [])
+            if set(values) != {"thread_id"} or len(thread_ids) != 1:
+                raise BridgeError(
+                    "INVALID_REQUEST",
+                    "Goal get requires exactly one thread_id query field",
+                    HTTPStatus.BAD_REQUEST,
+                )
+            result = application.session.get_goal(thread_ids[0])
+            return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/events":
             values = parse_qs(query, keep_blank_values=False)
             after = int(values.get("after", ["0"])[0])
@@ -430,6 +441,43 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             result = application.session.rename_thread(
                 body.get("thread_id"), body.get("name")
             )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/goal":
+            action = body.get("action")
+            if action == "clear":
+                if set(body) != {"action", "thread_id"}:
+                    raise BridgeError(
+                        "INVALID_REQUEST",
+                        "Goal clear requires action and thread_id",
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                result = application.session.clear_goal(body["thread_id"])
+            elif action == "set":
+                expected = {
+                    "action",
+                    "thread_id",
+                    "objective",
+                    "status",
+                    "token_budget",
+                }
+                if set(body) != expected:
+                    raise BridgeError(
+                        "INVALID_REQUEST",
+                        "Goal set requires objective, status, and token_budget",
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                result = application.session.set_goal(
+                    expected_thread_id=body["thread_id"],
+                    objective=body["objective"],
+                    status=body["status"],
+                    token_budget=body["token_budget"],
+                )
+            else:
+                raise BridgeError(
+                    "INVALID_GOAL_ACTION",
+                    "Goal action must be set or clear",
+                    HTTPStatus.BAD_REQUEST,
+                )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/steer":
             result = application.session.steer_turn(

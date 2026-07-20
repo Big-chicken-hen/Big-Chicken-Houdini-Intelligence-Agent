@@ -7,6 +7,7 @@ import json
 import queue
 import sys
 import threading
+import time
 from typing import Any, BinaryIO, TextIO
 
 from .adapter import HiaMcpAdapter
@@ -133,8 +134,12 @@ def run_stdio(
             try:
                 if item is _WORKER_STOP:
                     return
-                message, request_id = item
-                response = adapter.handle_message(message)
+                message, request_id, queued_at = item
+                queue_seconds = max(0.0, time.monotonic() - queued_at)
+                response = adapter.handle_message(
+                    message,
+                    stdio_queue_seconds=queue_seconds,
+                )
                 if response is not None:
                     write(response)
             finally:
@@ -191,7 +196,9 @@ def run_stdio(
                         duplicate = True
                     else:
                         try:
-                            pending_calls.put_nowait((message, request_id))
+                            pending_calls.put_nowait(
+                                (message, request_id, time.monotonic())
+                            )
                         except queue.Full:
                             queue_full = True
                             pending_count = pending_calls.qsize()

@@ -29,6 +29,17 @@ THREAD_LIST_LIMIT = 20
 THREAD_NAME_MAX_LENGTH = 512
 THREAD_PREVIEW_MAX_LENGTH = 8192
 THREAD_CWD_MAX_LENGTH = 32_767
+GOAL_OBJECTIVE_MAX_LENGTH = 4_000
+GOAL_STATUSES = frozenset(
+    {
+        "active",
+        "paused",
+        "blocked",
+        "usageLimited",
+        "budgetLimited",
+        "complete",
+    }
+)
 MAX_LOCAL_IMAGES = 16
 LOCAL_IMAGE_PATH_MAX_LENGTH = 32_767
 LOCAL_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
@@ -498,8 +509,8 @@ class BridgeSession:
                 "复杂操作优先用 hia_execute_hom 批量执行 Codex 生成的 HOM。"
                 "用 hia_context/hia_inspect 读取，再用 hia_scene_diff/hia_validate 验证；"
                 "hia_capture_viewport 仅按需视觉核对。"
-                "只有主代理可以调用当前会话的 hia_* Houdini MCP 工具；"
-                "子代理只做资料研究、技术方案、代码审查和规划，不得调用 hia_* 当前场景工具。"
+                "模型行为约束：仅主代理调用当前会话 hia_*/HOM 并写当前 HIP，"
+                "子代理只做研究、脚本草案和审阅；MCP 无 caller lineage，非代码级隔离。"
                 "hia_search_node_types/help 等同类读取由主代理串行或少量调用，不并发扇出，"
                 "遇到 QUEUE_FULL 不立即重试；hia_execute_hom 等场景写入始终由主代理执行。"
             )
@@ -509,14 +520,17 @@ class BridgeSession:
                 "复杂操作优先用 execute_python 批量执行 Codex 生成的 HOM。"
                 "细粒度工具用于读取、单项修改和最终验证，不要逐节点循环。"
                 "相同调用失败后先读真实错误再改用兼容方法；capture_screenshot 只做阶段性验证。"
+                "模型行为约束：主代理负责当前 HIP 写入，子代理只做研究、草案和审阅；"
+                "FX fallback 同样非代码级隔离。"
             )
         return backend_instructions + (
             "外部研究先定本阶段必需 URL，优先原生 web/search；没有网页工具时才把同阶段公开页合为"
             "一次 PowerShell 只读批量读取，不逐页审批；复用已取内容，不重复抓取相近页面。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
             "只有用户明确要求离线、独立 HIP、批处理或后台渲染时才用 PATH 中的 hython.exe。"
-            "普通场景请求不得先搜索 src、services、docs、contracts 或插件源码；"
-            "仅用户明确要求诊断或修改 Panel、Bridge、MCP 或项目代码时读取。"
+            "普通场景请求不先搜索项目源码/文档；仅诊断或修改 Panel、Bridge、MCP/项目代码时读取。"
+            "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，"
+            "不塞入主上下文，采纳结果由主任务公开说明。"
             "上下文仅用 app-server 自动整理，不手动 compact，不创建本地摘要或记忆。"
             "实时代码禁止 hou.hipFile.clear/load/save，不替换当前场景；新资产放入唯一新根。"
             "不要调用 request_user_input；信息不足时采用合理默认值，无法执行才报告原因。"
@@ -728,6 +742,69 @@ class BridgeSession:
             "thread/name/set", {"threadId": thread_id, "name": name}
         )
         return {"thread_id": thread_id, "name": name, "result": result}
+
+    def get_goal(self, expected_thread_id: str) -> dict[str, Any]:
+        thread_id = self._selected_thread_id(expected_thread_id)
+        result = self._client.request(
+            "thread/goal/get",
+            {"threadId": thread_id},
+        )
+        return {
+            "thread_id": thread_id,
+            "goal": self._project_goal(result, thread_id, allow_none=True),
+        }
+
+    def set_goal(
+        self,
+        *,
+        expected_thread_id: str,
+        objective: str,
+        status: str,
+        token_budget: int | None,
+    ) -> dict[str, Any]:
+        thread_id = self._selected_thread_id(expected_thread_id)
+        if (
+            not isinstance(objective, str)
+            or not objective.strip()
+            or len(objective) > GOAL_OBJECTIVE_MAX_LENGTH
+        ):
+            raise BridgeError("INVALID_GOAL", "Goal objective is invalid")
+        if status not in GOAL_STATUSES:
+            raise BridgeError("INVALID_GOAL", "Goal status is invalid")
+        if token_budget is not None and (
+            not isinstance(token_budget, int)
+            or isinstance(token_budget, bool)
+            or token_budget <= 0
+        ):
+            raise BridgeError(
+                "INVALID_GOAL",
+                "Goal token_budget must be a positive integer or null",
+            )
+        params = {
+            "threadId": thread_id,
+            "objective": objective,
+            "status": status,
+            "tokenBudget": token_budget,
+        }
+        result = self._client.request("thread/goal/set", params)
+        return {
+            "thread_id": thread_id,
+            "goal": self._project_goal(result, thread_id, allow_none=False),
+        }
+
+    def clear_goal(self, expected_thread_id: str) -> dict[str, Any]:
+        thread_id = self._selected_thread_id(expected_thread_id)
+        result = self._client.request(
+            "thread/goal/clear",
+            {"threadId": thread_id},
+        )
+        cleared = result.get("cleared") if isinstance(result, dict) else None
+        if not isinstance(cleared, bool):
+            raise self._invalid_goal_response(
+                "Goal clear response must contain a boolean cleared field",
+                field="cleared",
+            )
+        return {"thread_id": thread_id, "cleared": cleared}
 
     def list_models(self) -> dict[str, Any]:
         """Return a bounded, sanitized catalog of non-hidden Codex models."""
@@ -1240,6 +1317,78 @@ class BridgeSession:
             details=details,
         )
 
+    @staticmethod
+    def _invalid_goal_response(
+        message: str,
+        *,
+        field: str | None = None,
+    ) -> BridgeError:
+        details = {"field": field} if field is not None else None
+        return BridgeError(
+            "INVALID_GOAL_RESPONSE",
+            message,
+            http_status=502,
+            details=details,
+        )
+
+    def _selected_thread_id(self, expected_thread_id: str) -> str:
+        expected_thread_id = self._validated_identifier(
+            expected_thread_id,
+            "thread_id",
+        )
+        with self._lock:
+            thread_id = self._thread_id
+        thread_id = self._validated_identifier(thread_id, "thread_id")
+        if thread_id != expected_thread_id:
+            raise BridgeError(
+                "THREAD_SELECTION_CHANGED",
+                "The selected Thread no longer matches this Goal request",
+                http_status=409,
+                details={
+                    "expected_thread_id": expected_thread_id,
+                    "current_thread_id": thread_id,
+                },
+            )
+        return expected_thread_id
+
+    @classmethod
+    def _project_goal(
+        cls,
+        result: Any,
+        expected_thread_id: str,
+        *,
+        allow_none: bool,
+    ) -> dict[str, Any] | None:
+        if not isinstance(result, dict):
+            raise cls._invalid_goal_response("Goal response must be an object")
+        goal = result.get("goal")
+        if goal is None and allow_none:
+            return None
+        if not isinstance(goal, dict):
+            raise cls._invalid_goal_response(
+                "Goal response must contain a Goal object",
+                field="goal",
+            )
+        thread_id = goal.get("threadId")
+        if not cls._identifier_is_valid(thread_id) or thread_id != expected_thread_id:
+            raise cls._invalid_goal_response(
+                "Goal threadId does not match the selected Thread",
+                field="threadId",
+            )
+        objective = goal.get("objective")
+        if not isinstance(objective, str) or "\x00" in objective:
+            raise cls._invalid_goal_response(
+                "Goal objective is invalid",
+                field="objective",
+            )
+        status = goal.get("status")
+        if status not in GOAL_STATUSES:
+            raise cls._invalid_goal_response(
+                "Goal status is invalid",
+                field="status",
+            )
+        return dict(goal)
+
     @classmethod
     def _validated_thread_response_string(
         cls,
@@ -1667,11 +1816,7 @@ class BridgeSession:
             params = event.get("params")
             params = params if isinstance(params, dict) else {}
             with self._lock:
-                if method == "thread/started":
-                    thread = params.get("thread")
-                    if isinstance(thread, dict) and isinstance(thread.get("id"), str):
-                        self._thread_id = thread["id"]
-                elif method == "turn/started":
+                if method == "turn/started":
                     turn = params.get("turn")
                     thread_id = params.get("threadId")
                     turn_id = turn.get("id") if isinstance(turn, dict) else None

@@ -11,7 +11,6 @@ def onCreateInterface():
 
     return B4BStairsAcceptancePanel(kwargs.get("paneTab"), hou_module=hou)
 ]]></script>
-    <includeInToolbarMenu menu_position="202" create_separator="false"/>
     <help><![CDATA[Local Gate B4B acceptance only: review one stairs payload, apply once, manually Undo, then verify. No MCP graph tool is enabled.]]></help>
   </interface>
 </pythonPanelDocument>

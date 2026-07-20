@@ -34,7 +34,12 @@ class HiaMcpAdapter:
     def tool_names(self) -> frozenset[str]:
         return frozenset(TOOL_NAMES)
 
-    def handle_message(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
+    def handle_message(
+        self,
+        message: Mapping[str, Any],
+        *,
+        stdio_queue_seconds: float = 0.0,
+    ) -> dict[str, Any] | None:
         if not isinstance(message, Mapping):
             return self._rpc_error(None, -32600, "Invalid Request", "INVALID_REQUEST")
         has_id = "id" in message
@@ -49,7 +54,12 @@ class HiaMcpAdapter:
         if method not in _REQUEST_METHODS:
             return self._rpc_error(request_id, -32601, "Method not found", "METHOD_NOT_FOUND")
         try:
-            result = self._request(request_id, method, params)
+            result = self._request(
+                request_id,
+                method,
+                params,
+                stdio_queue_seconds=stdio_queue_seconds,
+            )
         except InputError as exc:
             return self._rpc_error(request_id, -32602, exc.message, exc.code, exc.details)
         except HiaMcpError as exc:
@@ -75,7 +85,14 @@ class HiaMcpAdapter:
         except Exception:
             pass
 
-    def _request(self, request_id: int | str, method: str, params: Any) -> dict[str, Any]:
+    def _request(
+        self,
+        request_id: int | str,
+        method: str,
+        params: Any,
+        *,
+        stdio_queue_seconds: float = 0.0,
+    ) -> dict[str, Any]:
         if method == "initialize":
             return self._initialize(params)
         if method == "ping":
@@ -98,7 +115,11 @@ class HiaMcpAdapter:
             ):
                 raise InputError("INVALID_PARAMS", "tools/list parameters are invalid")
             return {"tools": copy.deepcopy(self._descriptors)}
-        return self._call_tool(request_id, params)
+        return self._call_tool(
+            request_id,
+            params,
+            stdio_queue_seconds=stdio_queue_seconds,
+        )
 
     def _initialize(self, params: Any) -> dict[str, Any]:
         if not isinstance(params, Mapping):
@@ -126,7 +147,13 @@ class HiaMcpAdapter:
             ),
         }
 
-    def _call_tool(self, request_id: int | str, params: Any) -> dict[str, Any]:
+    def _call_tool(
+        self,
+        request_id: int | str,
+        params: Any,
+        *,
+        stdio_queue_seconds: float = 0.0,
+    ) -> dict[str, Any]:
         if not isinstance(params, Mapping) or set(params) - {"name", "arguments", "_meta"}:
             raise InputError("INVALID_PARAMS", "tools/call parameters are invalid")
         name = params.get("name")
@@ -139,14 +166,22 @@ class HiaMcpAdapter:
         if name == "hia_search_capabilities":
             payload = self._search_capabilities(arguments)
             return self._tool_result(payload)
-        token = CancellationToken()
+        token = CancellationToken(stdio_queue_seconds=stdio_queue_seconds)
         with self._lock:
             if request_id in self._cancelled:
                 self._cancelled.pop(request_id, None)
                 return self._tool_error(
                     "CANCELLED_BEFORE_EXECUTION",
                     "The call was cancelled before Houdini execution began",
-                    {"interruptible_after_submission": False},
+                    {
+                        "stage": "stdio_queue",
+                        "stdio_queue_seconds": token.stdio_queue_seconds,
+                        "submission_state": "not_submitted",
+                        "request_submitted": False,
+                        "hom_may_still_execute": False,
+                        "automatic_retry_safe": True,
+                        "interruptible_after_submission": False,
+                    },
                 )
             if request_id in self._active:
                 raise InputError("DUPLICATE_REQUEST_ID", "A tool call with this request id is already active")

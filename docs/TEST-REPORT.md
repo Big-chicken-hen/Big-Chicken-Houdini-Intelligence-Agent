@@ -871,3 +871,59 @@
 - 真实 strict-config + Bridge HTTP + Panel 固定 4 MiB `HttpTransport` 本地闭环：`GET /v1/threads` 为 HTTP 200，返回 20 条、36,642 字节，木屋 Thread 索引为 0；等价于点击“打开”的 `POST /v1/session` 为 HTTP 200、59,698 字节，恢复 6 Turn/172 条投影消息。无 Houdini 的 Panel 生产 renderer 实际创建 172 条用户/Codex 消息，session 仍选择原 Thread ID。
 - 修复后首轮精确测试 10/10；最终相关模块 `test_bridge_session`、`test_panel_wiring`、`test_bridge_http`、`test_bridge_client_reply`、`test_codex_stdio_client`、`test_codex_protocol_contract`、`test_bridge_main_lifecycle`、`test_hia_mcp_v2_production_integration` 合计 190/190 通过。未运行完整套件，未启动 Houdini、Turn 或 HOM，未修改原会话数据库。
 - 仍需由 launcher 再启动一次真实 Houdini 做最后 GUI 验收；新 Panel 若列表仍失败，会直接显示可继续定位的脱敏 code/field，而不是通用提示。
+
+## 长历史会话自动恢复先于 Bridge 超时（2026-07-20）
+
+### 真实根因与最小修复
+
+- 真实 GUI 中 Bridge 的 loopback health 仍能快速返回 401，但 Panel 的 `session_auto_resume/session_resume` 在 15 秒后先产生 `NETWORK_TIMEOUT`。恢复请求并非普通网络探测：Bridge 会同步等待 Codex `thread/resume` 并完成完整聊天投影后才返回。
+- 当前 launcher 路径在 `main.py` 显式把 Codex request timeout 设为 45 秒；`codex_stdio.py` 的 30 秒只是未使用的构造默认值。因此旧契约是 Panel 15 秒小于真实 Bridge/Codex 45 秒，35 秒也仍会留下同一竞态。现在只有 `POST /v1/session` 的 `start/resume/read` 使用 50 秒 Panel 上限，给 45 秒结构化 `CODEX_REQUEST_TIMEOUT` 留出返回余量；health、interrupt 仍为 15 秒，events 为 20 秒，session reconcile 为 5 秒。
+- 会话上下文的 `NETWORK_TIMEOUT/CODEX_REQUEST_TIMEOUT` 现在显示“会话恢复（或启动）超时，会话服务暂未完成”，不再把长恢复误称为 Bridge 断线；auto resume 与手动 start/resume 失败都会立即释放 session action 锁，可直接手动重试。真正的 `NETWORK_ERROR` 仍走原有网络错误显示。
+- 本轮没有改动 `BridgeSession.resume_thread/read_thread`、4 MiB HTTP 上限或历史投影规则。同一 Thread ID、全部既有可渲染用户/Codex 正文、localImage、原顺序及继续同一 Thread 的行为保持不变；没有新增截断、摘要、数据库、索引器或恢复协议。
+
+### 完整性、纯只读验证与测试
+
+- 既有真实 strict-config + Bridge HTTP 闭环基线仍为 Thread `019f7895-ab3c-7ac0-a15b-4bb48474452d`、6 Turn、172 条 Panel 可见消息、59,698 字节且低于 4 MiB。当前回归把 Bridge 投影与 Panel renderer 的无截断覆盖统一到 172 条，并继续断言同一 Thread ID、消息首尾/顺序、用户文本、localImage、Codex 回复及后续 Turn 仍使用该 ID。
+- 按本轮“真实历史闭环必须纯只读”的硬条件，没有启动可能更新 SQLite WAL/SHM 的真实 app-server，也没有备份替换、迁移、恢复或覆盖 state DB。只读检查确认目标 rollout 当前为 353,495,389 字节且末行 JSON 有效；测试前后 `state_5.sqlite`、`state_5.sqlite-wal`、`state_5.sqlite-shm` 与目标 rollout 的长度、mtime、SHA-256 完全相同。对应 SHA-256 为 `C83179F8FDED7CB70AAB6D182EB14E584EB5CB55418D292F8404215BA3917A61`、`099EC83B087DE897868E43AAFB3A1134E5E69E0DAF0F97B9937BF46CCAC20CA8`、`5D694C1311DA057919D278C26FE03E07B14FCF5DE4E19ED4769FC3DF0DA7A172`、`E57E3C1A329655942BFA9806A6803FBFB922E4F241EC2DDE10A663854402C5DB`。
+- 精确回归使用可控单调时钟，不真实等待 50 秒：推进到旧 15 秒边界之后的成功响应仍被接受；推进到 45 秒的结构化 app-server 超时仍在 Panel deadline 前准确返回；auto resume 失败后可手动打开；短请求上限不变。相关模块 161/161 通过；本轮唯一一次完整套件 670/670 通过，用时 31.302 秒。
+- 未启动 Houdini、未执行 Turn/HOM、未修改场景、会话数据库或聊天记录。真实 GUI 尚需完整退出 Houdini/Bridge 后由 launcher 启动一次：等待历史自动恢复；若未自动完成，在历史列表选择木屋会话并点击“打开”，确认最早到最新内容完整出现且可继续同一 Thread。
+
+## 原生 Goal、子任务团队与三段 Turn 用时（2026-07-20）
+
+### 根因与最小接入
+
+- Codex 0.144.3 已稳定提供 `thread/goal/set|get|clear` 与 `updated/cleared`，但严格 allowlist、Bridge 和 Panel 尚未接入。现在 Goal 只保存在真实 Codex Thread；Bridge 仅转发当前选中 Thread，Panel 可读取、保存、清除目标与状态，没有本地 Planner 或 Goal 数据库。
+- 原生子任务活动本来已通过既有 `item/started|completed` 中的 `collabAgentToolCall/subAgentActivity` 到达 Bridge，Panel 过去未识别，且其他 Thread 的 turn 事件可能误触发主任务对账。现在右栏只展示协议可观察的任务、状态、工具/错误和公开回复；选择子任务才展开详情，不进入主聊天、不切换主 Thread，也不显示或推断隐藏思维。协议没有“已采纳”字段时明确显示由主任务公开回复决定。
+- Panel 在保留现有输入、附件、审批、停止、流式消息和完整历史 renderer 的前提下改为左侧历史任务、中间聊天、右侧 Goal/团队/本 Turn 用时三栏。用单调时钟记录发送→ACK、ACK→首个文本、首个文本→完成；事件仍按既有 Thread/Turn generation 隔离。
+- HIA MCP V2 生产模式现在不会构造或启动旧 B2 heartbeat/catalog/五节点轮询；历史 B2 代码仍仅供显式 FX 兼容路径。B4B 历史验收 Panel 文件保留，但移除默认 Toolbar 菜单入口。
+- developerInstructions 明确主任务是 lead，只有主代理可调用当前会话 `hia_*`/HOM 并写当前 HIP；子任务只做研究、脚本草案和审阅建议，主任务只保留原生 Goal、决定和短摘要，继续只用 Codex 自动 compaction。
+- 根 `AGENTS.md` 新增 10 条通用网络编排规则：新图采用纵向语义主干、同阶段横向分支并向下汇入，MaterialX 同样适用；已有网络继承原方向和风格。未加入固定坐标、自动交叉检测或布局引擎。
+
+### 删减与验证
+
+- 初版曾为团队详情增加一次额外 child `thread/read`、pending 集合、投影解析和失败分支；删减审查确认实时原生事件已经覆盖本轮要求后整层移除，避免重复网络读取和未来恢复框架。另删除两个只写不读的 Goal 镜像状态、重复 completion 计时、与 dict 插入顺序重复的 `_team_order`、一个未读取字段及两项证明性重复测试，并压缩 developerInstructions；现有 helper/state 均有直接调用。
+- 首轮 42/42 通过；相关回归第一次仅因 HIA V2 developerInstructions 为 1052 字符、超过既有 1000 字符上限而失败，删减重复措辞后通过。相关协议、stdio、Bridge session/HTTP/client、Panel、P1 与 B4B 回归曾 214/214 通过；最终删减后的直接回归 45/45、AGENTS 10 条规则的 12 项语义检查全部通过，且没有残留“主干固定左到右”规则。`git diff --check` 退出码 0，仅有工作树既有 LF→CRLF 提示。未运行完整套件，未启动 Houdini GUI、Turn 或 HOM。
+- 真实 GUI 仍需 launcher 全新启动 Houdini：确认三栏可调整宽度；Goal 对当前 Thread 读写/清除；一次原生子任务的状态、工具错误和最终回复只进入团队栏；完成一个 Turn 后三段用时出现；HIA V2 下不再出现旧 Catalog/Schema/B4B 默认入口。
+
+## Goal 与原生子任务事件竞态收口（2026-07-20）
+
+- `thread/started` 同时用于主 Thread 和带 `parentThreadId` 的原生子 Thread；Bridge 过去会对两者无条件改写当前 `_thread_id`，使主任务 completion 被当成旧 Thread 丢弃并可能永久保持 active。现在 Thread 选择只由显式 start/resume 成功响应更新；子 Thread 启动仍作为团队可观察事件发布，但不再改变主 Thread、Turn 或 Goal。
+- Goal GET/SET/CLEAR 现在从 Panel 到 Bridge 显式携带 expected Thread ID；Bridge 在调用 Codex 前校验当前选择，不一致返回 `THREAD_SELECTION_CHANGED`。Goal 动作在途时禁用新建/恢复/历史切换，切换完成后失效旧响应并为新 Thread 重新读取 Goal。Goal 专用等待上限由普通 15 秒改为 50 秒，覆盖 Bridge 45 秒 RPC 上限；health、interrupt、events 等短请求未放大。
+- 团队记录绑定创建它的 root Thread，只接受当前 root 发出的 `subAgentActivity` 或其已知 descendant 的后续事件；切换主 Thread 后旧 root/child 的迟到事件不会污染新团队栏。本 Turn 三段用时同时清空。每个 child 的可见回复采用简单 64 KiB 上限，避免原先 1 MiB × 32 的最坏增长。
+- “仅主代理负责当前 HIP 写入”继续作为 developerInstructions 的明确行为约束；HIA MCP V2 与 FX fallback 当前都没有 caller lineage，因此本文档和指令不把它表述为代码级隔离或强制安全边界。
+- 精确竞态回归 15/15 通过；随后 `test_bridge_session`、`test_bridge_http`、`test_bridge_client_reply`、`test_panel_wiring` 相关模块合计 147/147 通过，用时 9.895 秒。两次中间失败均为测试期望未同步新契约（Turn 返回值形状、Goal 拉取期间控件应保持禁用），修正测试后产品回归全绿。本项未运行完整套件，未启动 Houdini GUI、Turn 或 HOM。
+- 仍需真实 GUI 验收：主 Turn active 时启动一个原生子任务并确认主 completion 正常回到 idle；在两个历史 Thread 间切换并确认 Goal 不串线、旧子任务不进入新团队栏、用时显示清空。
+
+## 整仓外部超时停在 Bridge steer 附近的顺序诊断（2026-07-20）
+
+- 两次整仓命令被外部 120/360 秒时限终止时，最后可见位置在 `BridgeHTTPTests.test_steer_endpoint_appends_to_the_same_active_turn` 附近；但当前磁盘状态下无法把它复现为 unittest 顺序依赖。目标单测、完整 HTTP 模块、紧邻前序模块以及真实 discover 前缀均正常结束。
+- 精确验证：HTTP 模块 16/16；`bridge_client_reply` + steer 19/19；全部六个 discover 前序模块 + steer 99/99；相同前序 + 完整 HTTP 114/114；按 discover 真实顺序从第 0 项执行到目标 index 109 为 110/110；先导入全部 708 项后单跑目标通过；同一进程连续 steer 40/40。完整 HTTP 模块结束后 `threading.enumerate()` 仅剩 MainThread，没有 HTTP、stdout 或 stderr reader 线程残留。
+- 每个 HTTP 用例使用独立 `LoopbackHTTPServer`、`BridgeSession` 和 fake app-server 子进程；正常 teardown 会 shutdown/close/join HTTP server，再由 `session.close()` 关闭 stdin 并回收子进程。fake 的 turn/approval/goal 模块状态只存在于该独立子进程，没有跨用例共享。当前没有证据支持修改 Bridge 业务语义或增加 watchdog。
+- 诊断期间短暂观察到外部整仓调用遗留的测试父 Python 与一个 fake app-server 子进程；它们没有监听 socket，随后由原调用方退出。由于当前权限无法读取命令行，不能把它定性为仓库泄漏；现象更符合外部 timeout/输出管道或并行测试调用留下的现场。下一次若再发生，应在终止前抓取活进程 Python 栈，确认是否卡在唯一两个理论无界点：`server.shutdown()` 或 `CodexStdioClient.close()` 获取 `_write_lock`。在没有该证据前不猜改 teardown。
+- 本项未重跑完整套件、未修改测试或生产代码，仅追加本诊断记录；没有启动 Houdini、Turn 或 HOM。
+
+### 正确 E 盘写权限下的最终结论
+
+- 独立现场进一步确认：根线程的审核沙箱把 E 盘项目视为只读，`test_steer_endpoint_appends_to_the_same_active_turn` 在 `.runtime/attachments` 创建 `TemporaryDirectory` 时收到 `WinError 5`，而 Python `tempfile` 会继续尝试随机目录名，所以外部观察表现为长时间停在该测试附近。前述两次 120/360 秒 timeout 是环境权限假象，不是 Bridge、steer、HTTP teardown 或产品顺序依赖。
+- 在允许按既有测试行为写入项目 `.runtime` 的正确权限环境中，仅运行一次最终完整命令 `python -B -m unittest discover -s tests -t .`：708/708 通过，用时 32.414 秒，无 failure、error 或 timeout。
+- 测试结束后 `.runtime/attachments` 中没有 `bridge-http-test-*` 或 `bridge-steer-test-*`，`.runtime/tmp`、`.runtime/cache/tmp` 与 `.runtime` 下也没有本次创建的近期测试临时目录；临时内容均由各测试的 `TemporaryDirectory`/cleanup 自行清理。本次没有手工删除任何文件。

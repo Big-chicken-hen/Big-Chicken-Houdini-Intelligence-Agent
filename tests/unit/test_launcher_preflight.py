@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,9 @@ EXE_PROJECT_PATH = EXE_PROJECT_ROOT / "HoudiniIntelligenceLauncher.csproj"
 EXE_APP_PATH = EXE_PROJECT_ROOT / "App.xaml.cs"
 EXE_ROOT_LOCATOR_PATH = EXE_PROJECT_ROOT / "ProjectRootLocator.cs"
 EXE_BUILD_SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "build-launcher.ps1"
+ARTWORK_PATH = REPOSITORY_ROOT / "assets" / "launcher" / "steam-winter-sale.png"
+ARTWORK_NOTICE_PATH = REPOSITORY_ROOT / "assets" / "launcher" / "NOTICE.md"
+ARTWORK_SHA256 = "54699b8d1f09b8e8889e57cbea24f89d7e12adad703c517488fe5ce065874cad"
 UI_READY_PATHS = (
     REPOSITORY_ROOT / "houdini_package" / "python3.10libs" / "uiready.py",
     REPOSITORY_ROOT / "houdini_package" / "python3.11libs" / "uiready.py",
@@ -747,12 +751,23 @@ $fxResult = Invoke-HiaPreflight `
     def test_wpf_xaml_loads_and_exposes_required_controls(self) -> None:
         ET.parse(XAML_PATH)
         required_types = {
-            "HiaLogoMark": "System.Windows.Controls.Grid",
+            "LayoutRoot": "System.Windows.Controls.Grid",
+            "RightVisualRail": "System.Windows.Controls.Border",
+            "OptionalArtworkPanel": "System.Windows.Controls.Border",
+            "OptionalArtworkImage": "System.Windows.Controls.Image",
+            "RecoveryCard": "System.Windows.Controls.Border",
+            "RecoveryCheckpointText": "System.Windows.Controls.TextBlock",
+            "RecoverCheckpointOption": "System.Windows.Controls.RadioButton",
+            "NormalLaunchOption": "System.Windows.Controls.RadioButton",
             "OverallStatusBadge": "System.Windows.Controls.Border",
+            "OverallStatusDot": "System.Windows.Shapes.Ellipse",
+            "OverallStatusText": "System.Windows.Controls.TextBlock",
             "McpBackendComboBox": "System.Windows.Controls.ComboBox",
             "HoudiniComboBox": "System.Windows.Controls.ComboBox",
+            "BrowseHoudiniButton": "System.Windows.Controls.Button",
             "HoudiniPathText": "System.Windows.Controls.TextBlock",
             "BridgePythonComboBox": "System.Windows.Controls.ComboBox",
+            "BrowseBridgeButton": "System.Windows.Controls.Button",
             "BridgePathText": "System.Windows.Controls.TextBlock",
             "RenderOutputTextBox": "System.Windows.Controls.TextBox",
             "BrowseRenderOutputButton": "System.Windows.Controls.Button",
@@ -760,7 +775,11 @@ $fxResult = Invoke-HiaPreflight `
             "WarningCountText": "System.Windows.Controls.TextBlock",
             "BlockedCountText": "System.Windows.Controls.TextBlock",
             "ChecksListBox": "System.Windows.Controls.ItemsControl",
+            "EmptyStateBorder": "System.Windows.Controls.Border",
+            "EmptyStateText": "System.Windows.Controls.TextBlock",
+            "BusyPanel": "System.Windows.Controls.Border",
             "BusyProgressBar": "System.Windows.Controls.ProgressBar",
+            "InlineStatusBorder": "System.Windows.Controls.Border",
             "InlineStatusText": "System.Windows.Controls.TextBlock",
             "ReportPathTextBox": "System.Windows.Controls.TextBox",
             "RescanButton": "System.Windows.Controls.Button",
@@ -773,18 +792,59 @@ $fxResult = Invoke-HiaPreflight `
         probe = f"""
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName PresentationFramework
 [xml]$xaml = [IO.File]::ReadAllText({_ps_literal(XAML_PATH)})
 $reader = [Xml.XmlNodeReader]::new($xaml)
 try {{
     $window = [Windows.Markup.XamlReader]::Load($reader)
+    $window.Content.Measure([Windows.Size]::new(640, 360))
+    $window.Content.Arrange([Windows.Rect]::new(0, 0, 640, 360))
     $types = [ordered]@{{}}
     foreach ($name in @({names})) {{
         $control = $window.FindName($name)
         if ($null -eq $control) {{ throw "Missing control: $name" }}
         $types[$name] = $control.GetType().FullName
     }}
+    $loadedWindow = $window
+    $layoutRoot = $loadedWindow.FindName('LayoutRoot')
+    $rightVisualRail = $loadedWindow.FindName('RightVisualRail')
+    $wpfSource = [IO.File]::ReadAllText({_ps_literal(WPF_SCRIPT_PATH)})
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput(
+        $wpfSource,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    $responsiveFunction = @($ast.FindAll({{
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Update-ResponsiveLayout'
+    }}, $true))[0]
+    . ([scriptblock]::Create($responsiveFunction.Extent.Text))
+    $script:compactLayout = $null
+    $window = [pscustomobject]@{{ ActualWidth = 640.0 }}
+    Update-ResponsiveLayout
+    if (
+        -not $script:compactLayout -or
+        [Windows.Controls.Grid]::GetColumn($rightVisualRail) -ne 0 -or
+        [Windows.Controls.Grid]::GetRow($rightVisualRail) -ne 7 -or
+        [Windows.Controls.Grid]::GetRowSpan($rightVisualRail) -ne 1 -or
+        $layoutRoot.ColumnDefinitions[2].Width.ToString() -ne '0'
+    ) {{ throw 'Compact responsive layout did not activate.' }}
+    $window.ActualWidth = 1120.0
+    Update-ResponsiveLayout
+    if (
+        $script:compactLayout -or
+        [Windows.Controls.Grid]::GetColumn($rightVisualRail) -ne 2 -or
+        [Windows.Controls.Grid]::GetRow($rightVisualRail) -ne 0 -or
+        [Windows.Controls.Grid]::GetRowSpan($rightVisualRail) -ne 8 -or
+        $layoutRoot.ColumnDefinitions[0].Width.ToString() -ne '3*' -or
+        $layoutRoot.ColumnDefinitions[2].Width.ToString() -ne '2*'
+    ) {{ throw 'Wide responsive layout did not restore.' }}
+    $window = $loadedWindow
     $types | ConvertTo-Json -Compress
 }} finally {{
     $reader.Close()
@@ -827,8 +887,9 @@ try {{
         self.assertIn('IsIndeterminate="True"', xaml_source)
         self.assertGreaterEqual(xaml_source.count('TextTrimming="CharacterEllipsis"'), 2)
         self.assertGreaterEqual(xaml_source.count("ToolTip="), 3)
-        self.assertIn('x:Name="HiaLogoMark"', xaml_source)
-        self.assertIn('x:Key="AccentPinkBrush"', xaml_source)
+        self.assertNotIn('x:Name="HiaLogoMark"', xaml_source)
+        self.assertNotIn("小助手", combined)
+        self.assertIn('x:Key="HoudiniOrangeBrush"', xaml_source)
         self.assertIn("<LinearGradientBrush", xaml_source)
         self.assertIn("<Path", xaml_source)
         self.assertIn("<Ellipse", xaml_source)
@@ -850,8 +911,6 @@ try {{
 
         forbidden = (
             "<DataGrid",
-            "<Image",
-            "BitmapImage",
             "<MediaElement",
             "<WebBrowser",
             "ResourceDictionary Source=",
@@ -871,6 +930,11 @@ try {{
         )
         for text in forbidden:
             self.assertNotIn(text, combined)
+        self.assertEqual(1, xaml_source.count("<Image"))
+        self.assertIn('Stretch="UniformToFill"', xaml_source)
+        self.assertIn('x:Name="RightVisualRail"', xaml_source)
+        self.assertIn("Update-ResponsiveLayout", wpf_source)
+        self.assertIn("[System.Windows.Media.Imaging.BitmapImage]::new()", wpf_source)
         self.assertIsNone(re.search(r"(?i)(?:^|[\"'>\s])[a-z]:\\", combined))
         self.assertNotIn(r"\\", xaml_source)
         uri_set = set(re.findall(r"(?:https?|file|pack)://[^\"\s<]+", xaml_source))
@@ -929,6 +993,8 @@ try {{
             ),
             4.5,
         )
+        self.assertGreater(contrast("#FFFFFF", resources["PickerHoverBrush"]), 7.0)
+        self.assertGreater(contrast("#FFFFFF", resources["PickerSelectedBrush"]), 7.0)
 
         styles = {
             element.attrib.get(xaml_key): ET.tostring(element, encoding="unicode")
@@ -948,6 +1014,8 @@ try {{
             "IsKeyboardFocusWithin",
             "IsDropDownOpen",
             "IsEnabled",
+            "TextElement.Foreground",
+            "12,7,44,7",
         ):
             self.assertIn(required, combo_style)
         for required in (
@@ -959,6 +1027,8 @@ try {{
             "IsSelected",
             "IsKeyboardFocusWithin",
             "IsEnabled",
+            "TextElement.Foreground",
+            "Opacity",
         ):
             self.assertIn(required, item_style)
 
@@ -992,8 +1062,204 @@ try {{
             self.assertIn("path", template)
             self.assertIn("ToolTip", template)
             self.assertIn("CharacterEllipsis", template)
+            self.assertIn("PickerTextBrush", template)
+            self.assertIn("PickerSecondaryTextBrush", template)
         self.assertIn("version", templates["HoudiniPickerItemTemplate"])
+        self.assertIn("StringFormat=Houdini {0}", templates["HoudiniPickerItemTemplate"])
         self.assertIn("source", templates["BridgePickerItemTemplate"])
+
+        tab_indices = sorted(
+            int(element.attrib["TabIndex"])
+            for element in root.iter()
+            if "TabIndex" in element.attrib
+        )
+        self.assertEqual(list(range(15)), tab_indices)
+        self.assertLessEqual(int(root.attrib["MinWidth"]), 640)
+        self.assertLessEqual(int(root.attrib["MinHeight"]), 360)
+        self.assertEqual("Cycle", root.attrib["KeyboardNavigation.TabNavigation"])
+        self.assertEqual("True", root.attrib["UseLayoutRounding"])
+        self.assertEqual("True", root.attrib["SnapsToDevicePixels"])
+        self.assertEqual("Ideal", root.attrib["TextOptions.TextFormattingMode"])
+        self.assertIsNotNone(root.find(f"{presentation}ScrollViewer"))
+        self.assertIsNotNone(next(root.iter(f"{presentation}WrapPanel"), None))
+        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn("[System.Windows.SystemParameters]::WorkArea", wpf_source)
+        self.assertIn("$window.Width = [Math]::Min", wpf_source)
+        self.assertIn("$window.Height = [Math]::Min", wpf_source)
+        self.assertIn("$script:compactLayout = $null", wpf_source)
+
+        for event_binding in (
+            "$rescanButton.Add_Click",
+            "$mcpBackendCombo.Add_SelectionChanged",
+            "$houdiniCombo.Add_SelectionChanged",
+            "$bridgeCombo.Add_SelectionChanged",
+            "$renderOutputTextBox.Add_TextChanged",
+            "$browseHoudiniButton.Add_Click",
+            "$browseBridgeButton.Add_Click",
+            "$browseRenderOutputButton.Add_Click",
+            "$repairButton.Add_Click",
+            "$cleanupScreenshotsButton.Add_Click",
+            "$copyReportButton.Add_Click",
+            "$launchButton.Add_Click",
+            "$window.Add_SizeChanged",
+            "$window.Add_ContentRendered",
+        ):
+            self.assertEqual(1, wpf_source.count(event_binding), event_binding)
+
+    def test_optional_project_artwork_and_recovery_ui_are_nonblocking_and_explicit(self) -> None:
+        fake_root = self.sandbox / "portable-artwork-project"
+        (fake_root / "scripts").mkdir(parents=True)
+        (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (fake_root / "scripts" / "launch-houdini.ps1").write_text("# marker\n")
+        expected = fake_root / "assets/launcher/steam-winter-sale.png"
+        output = self.run_powershell(
+            f"Get-HiaLauncherArtworkPath -ProjectRoot {_ps_literal(fake_root)}"
+        )
+        self.assertEqual(str(expected), output)
+        self.assertFalse(expected.exists())
+
+        tree = ET.parse(XAML_PATH)
+        root = tree.getroot()
+        presentation = "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}"
+        xaml_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
+        named = {
+            element.attrib.get(xaml_name): element
+            for element in root.iter()
+            if xaml_name in element.attrib
+        }
+        self.assertEqual("Collapsed", named["OptionalArtworkPanel"].attrib["Visibility"])
+        self.assertNotIn("Source", named["OptionalArtworkImage"].attrib)
+        self.assertEqual("UniformToFill", named["OptionalArtworkImage"].attrib["Stretch"])
+        self.assertEqual("Collapsed", named["RecoveryCard"].attrib["Visibility"])
+        self.assertEqual("True", named["RecoverCheckpointOption"].attrib["IsChecked"])
+        self.assertNotIn("IsChecked", named["NormalLaunchOption"].attrib)
+        self.assertEqual(
+            named["RecoverCheckpointOption"].attrib["GroupName"],
+            named["NormalLaunchOption"].attrib["GroupName"],
+        )
+
+        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
+        for required in (
+            "Get-HiaLauncherArtworkPath -ProjectRoot $projectRoot",
+            "Get-HiaRecoverableLauncherSession -ProjectRoot $projectRoot",
+            "$recoverCheckpointOption.IsChecked = $true",
+            "'RecoverySessionId'",
+            "'RecoveryDecision'",
+            "'RecoveryCheckpoint'",
+            "Start-ExistingHoudiniLauncher @launchParameters",
+        ):
+            self.assertIn(required, wpf_source)
+        for name in ("RecoverySessionId", "RecoveryCheckpoint", "RecoveryDecision"):
+            self.assertIn(f"[string]${name} = ''", launcher_source)
+
+    def test_recovery_discovery_selects_latest_safe_checkpoint_once(self) -> None:
+        fake_root = self.sandbox / "recovery-project"
+        sessions_root = fake_root / ".runtime" / "launcher-sessions"
+        (fake_root / "scripts").mkdir(parents=True)
+        sessions_root.mkdir(parents=True)
+        (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (fake_root / "scripts" / "launch-houdini.ps1").write_text(
+            "# lifecycle marker\n", encoding="utf-8"
+        )
+
+        def write_session(
+            session_id: str,
+            *,
+            state: str,
+            checkpoint: str | None = None,
+            timestamp: float = 1_700_000_000,
+            exit_code: int | None = None,
+            process_id: int | None = None,
+        ) -> Path:
+            session = sessions_root / session_id
+            checkpoints = session / "checkpoints"
+            checkpoints.mkdir(parents=True)
+            manifest = {
+                "schema_version": 1,
+                "session_id": session_id,
+                "state": state,
+                "selected_houdini": str(fake_root / "fake" / "houdini.exe"),
+                "hip_path": str(fake_root / "scene.hip"),
+                "started_at_utc": "2026-07-20T01:00:00.0000000Z",
+                "ended_at_utc": "2026-07-20T01:05:00Z" if exit_code is not None else None,
+                "process_exit_code": exit_code,
+                "houdini_process_id": process_id,
+            }
+            (session / "session.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            if checkpoint:
+                checkpoint_path = checkpoints / checkpoint
+                checkpoint_path.write_bytes(b"fake hip checkpoint")
+                os.utime(checkpoint_path, (timestamp, timestamp))
+                return checkpoint_path
+            return checkpoints
+
+        write_session("a" * 32, state="completed", checkpoint="complete.hip", exit_code=0)
+        corrupt = sessions_root / ("b" * 32)
+        (corrupt / "checkpoints").mkdir(parents=True)
+        (corrupt / "session.json").write_text("{not-json", encoding="utf-8")
+        (corrupt / "checkpoints" / "corrupt.hip").write_bytes(b"ignored")
+        write_session("c" * 32, state="abnormal_exit", exit_code=9)
+        write_session(
+            "d" * 32,
+            state="abnormal_exit",
+            checkpoint="older.hip_bak1",
+            timestamp=1_700_000_100,
+            exit_code=7,
+        )
+        expected = write_session(
+            "e" * 32,
+            state="launch_failed",
+            checkpoint="newest-recoverable.hiplc",
+            timestamp=1_700_000_200,
+        )
+        write_session(
+            "f" * 32,
+            state="running",
+            checkpoint="active-process.hipnc",
+            timestamp=1_700_000_300,
+            process_id=os.getpid(),
+        )
+        output = self.run_powershell(
+            f"""
+$items = @(Get-HiaRecoverableLauncherSession -ProjectRoot {_ps_literal(fake_root)})
+[pscustomobject]@{{
+    count = $items.Count
+    session_id = if ($items.Count) {{ $items[0].session_id }} else {{ '' }}
+    checkpoint_path = if ($items.Count) {{ $items[0].checkpoint_path }} else {{ '' }}
+}} | ConvertTo-Json -Compress
+"""
+        )
+        candidate = json.loads(output)
+        self.assertEqual(1, candidate["count"])
+        self.assertEqual("e" * 32, candidate["session_id"])
+        self.assertEqual(str(expected), candidate["checkpoint_path"])
+        session = sessions_root / ("e" * 32)
+        manifest_path = session / "session.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.update(api_key="must-be-removed", unexpected="must-be-removed")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        output = self.run_powershell(
+            f"""
+Set-HiaLauncherRecoveryDecision `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -SessionId '{'e' * 32}' `
+    -Decision recover | Out-Null
+$manifest = [System.IO.File]::ReadAllText({_ps_literal(manifest_path)}) | ConvertFrom-Json
+[pscustomobject]@{{
+    names = @($manifest.PSObject.Properties.Name)
+    decision = $manifest.recovery_decision
+    remaining = @(Get-HiaRecoverableLauncherSession -ProjectRoot {_ps_literal(fake_root)}).Count
+}} | ConvertTo-Json -Depth 4 -Compress
+"""
+        )
+        result = json.loads(output)
+        self.assertEqual("recover", result["decision"])
+        self.assertEqual(1, result["remaining"])
+        for forbidden in ("api_key", "unexpected"):
+            self.assertNotIn(forbidden, result["names"])
 
     def test_exe_project_root_locator_works_after_project_move(self) -> None:
         fake_root = self.sandbox / "moved-launcher-project"
@@ -1048,6 +1314,21 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertEqual("false", properties["PublishTrimmed"])
         self.assertEqual([], project.findall(".//PackageReference"))
 
+        content_items = {
+            item.attrib["Include"]: {
+                child.tag: (child.text or "").strip() for child in item
+            }
+            for item in project.findall(".//Content")
+        }
+        for include in (
+            r"..\..\assets\launcher\steam-winter-sale.png",
+            r"..\..\assets\launcher\NOTICE.md",
+        ):
+            self.assertIn(include, content_items)
+            self.assertEqual("PreserveNewest", content_items[include]["CopyToOutputDirectory"])
+            self.assertEqual("PreserveNewest", content_items[include]["CopyToPublishDirectory"])
+            self.assertEqual("true", content_items[include]["ExcludeFromSingleFile"])
+
         build_source = EXE_BUILD_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         app_source = EXE_APP_PATH.read_text(encoding="utf-8")
         locator_source = EXE_ROOT_LOCATOR_PATH.read_text(encoding="utf-8")
@@ -1089,6 +1370,15 @@ Add-Type -TypeDefinition $source -Language CSharp
             in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico", ".mp4"}
         ]
         self.assertEqual([], launcher_assets)
+        self.assertTrue(ARTWORK_PATH.is_file())
+        self.assertEqual(
+            ARTWORK_SHA256,
+            hashlib.sha256(ARTWORK_PATH.read_bytes()).hexdigest(),
+        )
+        notice = ARTWORK_NOTICE_PATH.read_text(encoding="utf-8")
+        self.assertIn("supplied by a project user as Steam seasonal artwork", notice)
+        self.assertIn("does not claim copyright or ownership", notice)
+        self.assertIn("Redistribution permission has not", notice)
 
     def test_cli_modes_do_not_load_wpf_assets(self) -> None:
         fake_root = self.sandbox / "portable-cli-no-ui"
@@ -1100,6 +1390,14 @@ Add-Type -TypeDefinition $source -Language CSharp
             "# lifecycle marker\n", encoding="utf-8"
         )
         (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        artwork = (
+            fake_root
+            / "assets"
+            / "launcher"
+            / "steam-winter-sale.png"
+        )
+        artwork.parent.mkdir(parents=True)
+        artwork.write_bytes(b"deliberately invalid image; CLI must not decode this")
         self.assertFalse((launcher_directory / "HiaLauncher.Wpf.ps1").exists())
         self.assertFalse((launcher_directory / "HiaLauncher.xaml").exists())
 
@@ -1205,6 +1503,64 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertIn("'HOUDINI_TEMP_DIR' = $sessionTemp", source)
         self.assertNotIn(r"E:\houdini-intelligence-agent", source)
         self.assertIn(".runtime/", gitignore.splitlines())
+
+    def test_lifecycle_sessions_are_portable_redacted_and_recover_by_copy(self) -> None:
+        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
+        for required in (
+            'Join-Path $ResolvedRoot ".runtime\\launcher-sessions\\$sessionId"',
+            "Join-Path $sessionRoot 'tmp'",
+            "Join-Path $sessionRoot 'checkpoints'",
+            "Join-Path $sessionRoot 'session.json'",
+            "selected_houdini = $HoudiniExe",
+            "hip_path = $knownHipPath",
+            "started_at_utc = [DateTime]::UtcNow.ToString('o')",
+            "ended_at_utc = $null",
+            "process_exit_code = $null",
+            "latest_checkpoint = $knownHipPath",
+            "Write-LauncherSessionManifest -ManifestPath $sessionManifest",
+            "Get-HiaLatestLauncherCheckpoint -CheckpointDirectory $sessionCheckpoints",
+        ):
+            self.assertIn(required, source)
+
+        writer = source[
+            source.index("function Write-LauncherSessionManifest") :
+            source.index("function Get-HoudiniCandidatePaths")
+        ]
+        self.assertIn("ConvertTo-HiaRedactedJson", writer)
+        for forbidden in (
+            "HIA_BRIDGE_TOKEN",
+            "HIA_SCENE_EXECUTOR_TOKEN",
+            "FXHOUDINIMCP_TOKEN",
+            "HIA_MCP_V2_TOKEN",
+        ):
+            self.assertNotIn(forbidden, writer)
+
+        self.assertEqual(1, source.count("'HOUDINI_BACKUP_DIR' = $sessionCheckpoints"))
+        bridge_environment = source[
+            source.index("$bridgeEnvironment = @{") :
+            source.index("$bridgeProcess = [System.Diagnostics.Process]::new()")
+        ]
+        houdini_environment = source[
+            source.index("$houdiniEnvironment = @{") :
+            source.index(
+                "foreach ($entry in $houdiniBackendEnvironment.GetEnumerator())"
+            )
+        ]
+        self.assertNotIn("HOUDINI_BACKUP_DIR", bridge_environment)
+        self.assertIn("'HOUDINI_BACKUP_DIR' = $sessionCheckpoints", houdini_environment)
+
+        self.assertIn("[AllowEmptyString()][string]$RecoverySessionId = ''", source)
+        self.assertIn("[AllowEmptyString()][string]$RecoveryCheckpoint = ''", source)
+        self.assertIn("[AllowEmptyString()][string]$RecoveryDecision = ''", source)
+        self.assertIn("$sourceFile -isnot [System.IO.FileInfo]", source)
+        self.assertIn("$sourceParent", source)
+        self.assertIn("$sourceSessionCheckpoints", source)
+        self.assertIn(
+            "[System.IO.File]::Copy($recoverySourceCheckpoint, $knownHipPath, $false)",
+            source,
+        )
+        self.assertNotIn("Copy-Item", source)
+        self.assertNotIn("Move-Item", source)
 
     def test_lifecycle_selects_mutually_exclusive_backend_paths_and_environment(self) -> None:
         source = LIFECYCLE_PATH.read_text(encoding="utf-8")

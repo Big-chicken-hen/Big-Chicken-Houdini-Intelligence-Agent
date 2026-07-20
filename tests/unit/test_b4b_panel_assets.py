@@ -114,6 +114,7 @@ class B4BPanelAssetTests(unittest.TestCase):
         self.assertEqual(
             "HIA Gate B4B Stairs Acceptance", interface.attrib["label"]
         )
+        self.assertIsNone(interface.find("includeInToolbarMenu"))
 
         embedded = interface.find("script").text
         tree = ast.parse(embedded)

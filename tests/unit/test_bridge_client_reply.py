@@ -8,6 +8,7 @@ import types
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -315,6 +316,100 @@ class BridgeClientQueueTests(unittest.TestCase):
             transport.submissions[-1]["payload"],
         )
 
+    def test_session_actions_outwait_bridge_without_widening_controls(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.start_thread(model=None, service_tier=None)
+        client.resume_thread(
+            "thread-a",
+            service_tier=None,
+            context="session_auto_resume",
+        )
+        client.read_thread("thread-a", context="thread_read:initial")
+        client.get_health()
+        client.interrupt(context="interrupt:test")
+        client.poll_events(0)
+        client.get_session(context="session_reconcile:1:1:test")
+
+        by_context = {
+            submission["context"]: submission
+            for submission in transport.submissions
+        }
+        for context in (
+            "session_start",
+            "session_auto_resume",
+            "thread_read:initial",
+        ):
+            self.assertEqual(50_000, by_context[context]["timeout_ms"])
+        self.assertEqual(15_000, by_context["health"]["timeout_ms"])
+        self.assertEqual(15_000, by_context["interrupt:test"]["timeout_ms"])
+        self.assertEqual(20_000, by_context["events"]["timeout_ms"])
+        self.assertEqual(
+            5_000,
+            by_context["session_reconcile:1:1:test"]["timeout_ms"],
+        )
+
+        timed_client, timed_transport = _load_transport_bridge_client()
+        client_time = timed_client._request.__globals__["time"]
+        with mock.patch.object(
+            client_time,
+            "monotonic",
+            side_effect=(100.0, 116.0),
+        ):
+            timed_client.resume_thread(
+                "thread-a",
+                service_tier=None,
+                context="session_auto_resume",
+            )
+            resume = timed_transport.submissions[-1]
+            timed_client._result_queue.put(
+                _result_for(
+                    resume,
+                    raw=b'{"ok":true,"thread_id":"thread-a","read":{}}',
+                )
+            )
+            timed_client._drain_results()
+
+        self.assertEqual(
+            [("session_auto_resume", {"ok": True, "thread_id": "thread-a", "read": {}})],
+            timed_client.actionCompleted.emissions,
+        )
+        self.assertEqual([], timed_client.requestFailed.emissions)
+
+    def test_structured_codex_timeout_arrives_before_session_deadline(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        client_time = client._request.__globals__["time"]
+        with mock.patch.object(
+            client_time,
+            "monotonic",
+            side_effect=(200.0, 245.0),
+        ):
+            client.resume_thread("thread-a", context="session_resume")
+            submission = transport.submissions[-1]
+            client._result_queue.put(
+                _result_for(
+                    submission,
+                    raw=(
+                        b'{"ok":false,"structured_error":{"code":'
+                        b'"CODEX_REQUEST_TIMEOUT","message":'
+                        b'"Codex request timed out"}}'
+                    ),
+                    http_status=504,
+                )
+            )
+            client._drain_results()
+
+        self.assertEqual(50_000, submission["timeout_ms"])
+        self.assertGreater(submission["timeout_ms"], 45_000)
+        self.assertEqual(1, len(client.requestFailed.emissions))
+        context, payload = client.requestFailed.emissions[0]
+        self.assertEqual("session_resume", context)
+        self.assertEqual(
+            "CODEX_REQUEST_TIMEOUT",
+            payload["structured_error"]["code"],
+        )
+        self.assertEqual([], client.actionCompleted.emissions)
+
     def test_thread_history_requests_preserve_paths_payloads_and_contexts(self) -> None:
         client, transport = _load_transport_bridge_client()
 
@@ -366,6 +461,54 @@ class BridgeClientQueueTests(unittest.TestCase):
                 )
                 for submission in transport.submissions
             ],
+        )
+
+    def test_goal_requests_are_thin_control_calls(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.get_goal("thread-a")
+        client.set_goal(
+            "完成当前场景",
+            "active",
+            thread_id="thread-a",
+            token_budget=12_000,
+        )
+        client.clear_goal("thread-a")
+
+        self.assertEqual(
+            [
+                ("GET", "/v1/goal?thread_id=thread-a", None, "goal_get"),
+                (
+                    "POST",
+                    "/v1/goal",
+                    {
+                        "action": "set",
+                        "thread_id": "thread-a",
+                        "objective": "完成当前场景",
+                        "status": "active",
+                        "token_budget": 12_000,
+                    },
+                    "goal_set",
+                ),
+                (
+                    "POST",
+                    "/v1/goal",
+                    {"action": "clear", "thread_id": "thread-a"},
+                    "goal_clear",
+                ),
+            ],
+            [
+                (
+                    submission["method"],
+                    submission["path"],
+                    submission["payload"],
+                    submission["context"],
+                )
+                for submission in transport.submissions
+            ],
+        )
+        self.assertTrue(
+            all(submission["timeout_ms"] == 50_000 for submission in transport.submissions)
         )
 
     def test_turn_steer_forwards_text_and_local_images_without_starting_turn(self) -> None:

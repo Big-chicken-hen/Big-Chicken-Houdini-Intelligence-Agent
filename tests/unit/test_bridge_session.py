@@ -126,6 +126,40 @@ class _RecordingClient(_ClientStub):
         return super().request(method, params)
 
 
+class _GoalClient(_RecordingClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.goal: dict[str, Any] | None = None
+
+    @staticmethod
+    def make_goal(thread_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "threadId": thread_id,
+            "objective": params.get("objective", "Build the current scene"),
+            "status": params.get("status", "active"),
+            "tokenBudget": params.get("tokenBudget"),
+            "tokensUsed": 120,
+            "timeUsedSeconds": 8,
+            "createdAt": 100,
+            "updatedAt": 101,
+        }
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "thread/goal/get":
+            self.requests.append((method, dict(params)))
+            return {"goal": self.goal}
+        if method == "thread/goal/set":
+            self.requests.append((method, dict(params)))
+            self.goal = self.make_goal(params["threadId"], params)
+            return {"goal": self.goal}
+        if method == "thread/goal/clear":
+            self.requests.append((method, dict(params)))
+            cleared = self.goal is not None
+            self.goal = None
+            return {"cleared": cleared}
+        return super().request(method, params)
+
+
 class _ApprovalClient(_RecordingClient):
     def __init__(self, *, fail_response: bool = False) -> None:
         super().__init__()
@@ -750,6 +784,8 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
 
         self.assertEqual(["thread/resume"], [method for method, _ in client.requests])
         self.assertNotIn("resume", result)
+        self.assertEqual("thread-current", result["thread_id"])
+        self.assertEqual("thread-current", result["read"]["thread"]["id"])
         self.assertEqual(
             [
                 "userMessage",
@@ -781,7 +817,7 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
     def test_read_projects_all_chat_messages_in_original_order(self) -> None:
         messages = [
             {"type": "agentMessage", "text": f"message-{index}"}
-            for index in range(105)
+            for index in range(172)
         ]
         client = _ThreadContentClient(
             {
@@ -796,9 +832,9 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
         result = session.read_thread("thread-current")
 
         projected = result["result"]["thread"]["turns"][0]["items"]
-        self.assertEqual(105, len(projected))
+        self.assertEqual(172, len(projected))
         self.assertEqual("message-0", projected[0]["text"])
-        self.assertEqual("message-104", projected[-1]["text"])
+        self.assertEqual("message-171", projected[-1]["text"])
 
     def test_list_threads_filters_response_after_dual_cwd_query(self) -> None:
         client = _ThreadHistoryClient(
@@ -861,7 +897,6 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
             },
             result,
         )
-
     @unittest.skipUnless(os.name == "nt", "Windows extended paths only")
     def test_list_threads_accepts_windows_extended_cwd(self) -> None:
         client = _ThreadHistoryClient(
@@ -913,6 +948,70 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
             result,
         )
 
+
+class BridgeSessionGoalTests(unittest.TestCase):
+    def make_session(self) -> tuple[BridgeSession, _GoalClient]:
+        client = _GoalClient()
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+        session.start_thread()
+        client.requests.clear()
+        return session, client
+
+    def test_goal_round_trip_uses_selected_native_thread(self) -> None:
+        session, client = self.make_session()
+
+        empty = session.get_goal("thread-test")
+        saved = session.set_goal(
+            expected_thread_id="thread-test",
+            objective="完成木屋材质与灯光",
+            status="active",
+            token_budget=50_000,
+        )
+        fetched = session.get_goal("thread-test")
+        cleared = session.clear_goal("thread-test")
+
+        self.assertIsNone(empty["goal"])
+        self.assertEqual("thread-test", saved["thread_id"])
+        self.assertEqual("完成木屋材质与灯光", saved["goal"]["objective"])
+        self.assertEqual(50_000, fetched["goal"]["tokenBudget"])
+        self.assertTrue(cleared["cleared"])
+        self.assertEqual(
+            [
+                ("thread/goal/get", {"threadId": "thread-test"}),
+                (
+                    "thread/goal/set",
+                    {
+                        "threadId": "thread-test",
+                        "objective": "完成木屋材质与灯光",
+                        "status": "active",
+                        "tokenBudget": 50_000,
+                    },
+                ),
+                ("thread/goal/get", {"threadId": "thread-test"}),
+                ("thread/goal/clear", {"threadId": "thread-test"}),
+            ],
+            client.requests,
+        )
+
+    def test_goal_rejects_missing_thread_and_mismatched_response(self) -> None:
+        client = _GoalClient()
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+        with self.assertRaises(BridgeError) as missing:
+            session.get_goal("thread-test")
+        self.assertEqual("MISSING_IDENTIFIER", missing.exception.code)
+
+        session.start_thread()
+        client.requests.clear()
+        with self.assertRaises(BridgeError) as changed:
+            session.get_goal("thread-other")
+        self.assertEqual("THREAD_SELECTION_CHANGED", changed.exception.code)
+        self.assertEqual([], client.requests)
+
+        client.goal = client.make_goal("different-thread", {})
+        with self.assertRaises(BridgeError) as mismatched:
+            session.get_goal("thread-test")
+        self.assertEqual("INVALID_GOAL_RESPONSE", mismatched.exception.code)
+        self.assertEqual("threadId", mismatched.exception.details["field"])
 
 class BridgeSessionModelCatalogTests(unittest.TestCase):
     def make_session(self, responses: list[Any]) -> tuple[BridgeSession, _ScriptedModelClient]:
@@ -1267,6 +1366,45 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         session.start_thread()
         return session
 
+    def test_child_thread_started_never_replaces_the_active_main_thread(self) -> None:
+        client = _RecordingClient()
+        session = self.make_session(client)
+        turn_id = session.start_turn("main task")["turn_id"]
+
+        client.emit_notification(
+            "thread/started",
+            {
+                "thread": {
+                    "id": "thread-child",
+                    "parentThreadId": "thread-test",
+                }
+            },
+        )
+
+        active = session.snapshot()
+        self.assertEqual("thread-test", active["thread_id"])
+        self.assertEqual(turn_id, active["turn_id"])
+        self.assertTrue(active["turn_active"])
+        self.assertTrue(
+            any(
+                event.get("method") == "thread/started"
+                for event in session._events.poll(0, timeout=0)["events"]
+            )
+        )
+
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-test",
+                "turn": {"id": turn_id, "status": "completed"},
+            },
+        )
+
+        completed = session.snapshot()
+        self.assertEqual("thread-test", completed["thread_id"])
+        self.assertEqual("completed", completed["turn_status"])
+        self.assertFalse(completed["turn_active"])
+
     def test_turn_start_claim_is_atomic_and_completion_must_match(self) -> None:
         client = _BlockingTurnClient()
         session = self.make_session(client)
@@ -1471,13 +1609,15 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "不要逐节点循环",
             "相同调用失败后先读真实错误再改用兼容方法",
             "capture_screenshot 只做阶段性验证",
+            "主代理负责当前 HIP 写入",
+            "子代理只做研究、草案和审阅",
+            "FX fallback 同样非代码级隔离",
             "实时 MCP 不可用时直接说明",
             "不得改成离线 HIP",
             "只有用户明确要求离线",
             "PATH 中的 hython.exe",
-            "普通场景请求不得先搜索 src、services、docs、contracts",
-            "或插件源码",
-            "仅用户明确要求诊断或修改 Panel、Bridge、MCP 或项目代码时读取",
+            "普通场景请求不先搜索项目源码/文档",
+            "仅诊断或修改 Panel、Bridge、MCP/项目代码时读取",
             "上下文仅用 app-server 自动整理",
             "不手动 compact",
             "不创建本地摘要或记忆",
@@ -1521,13 +1661,17 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "hia_context/hia_inspect",
             "hia_scene_diff/hia_validate",
             "hia_capture_viewport 仅按需视觉核对",
-            "只有主代理可以调用当前会话的 hia_* Houdini MCP 工具",
-            "子代理只做资料研究、技术方案、代码审查和规划",
-            "不得调用 hia_* 当前场景工具",
+            "仅主代理调用当前会话 hia_*/HOM 并写当前 HIP",
+            "子代理只做研究、脚本草案和审阅",
+            "MCP 无 caller lineage",
+            "非代码级隔离",
             "hia_search_node_types/help 等同类读取由主代理串行或少量调用",
             "不并发扇出",
             "遇到 QUEUE_FULL 不立即重试",
             "hia_execute_hom 等场景写入始终由主代理执行",
+            "主任务只保留原生 Goal、决定和子任务短摘要",
+            "子任务详情按需查看",
+            "不塞入主上下文",
         ):
             self.assertIn(required_text, instructions)
         for forbidden_text in (

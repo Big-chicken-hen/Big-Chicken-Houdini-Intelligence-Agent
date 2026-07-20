@@ -3,10 +3,10 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     x:Name="LauncherWindow"
     Title="Houdini Intelligence Launcher"
-    Width="1100"
+    Width="1120"
     Height="800"
-    MinWidth="920"
-    MinHeight="680"
+    MinWidth="640"
+    MinHeight="360"
     WindowStartupLocation="CenterScreen"
     ResizeMode="CanResize"
     Background="#0B0D18"
@@ -14,61 +14,62 @@
     FontFamily="Segoe UI"
     FontSize="13"
     Language="zh-CN"
+    KeyboardNavigation.TabNavigation="Cycle"
     UseLayoutRounding="True"
     SnapsToDevicePixels="True"
-    TextOptions.TextFormattingMode="Display">
+    TextOptions.TextFormattingMode="Ideal">
     <Window.Resources>
-        <SolidColorBrush x:Key="PageBrush" Color="#0B0D18" />
-        <SolidColorBrush x:Key="CardBrush" Color="#141827" />
-        <SolidColorBrush x:Key="CardRaisedBrush" Color="#191E31" />
-        <SolidColorBrush x:Key="BorderBrush" Color="#343B59" />
-        <SolidColorBrush x:Key="BorderSoftBrush" Color="#262C43" />
-        <SolidColorBrush x:Key="TextPrimaryBrush" Color="#EDF1FF" />
-        <SolidColorBrush x:Key="TextSecondaryBrush" Color="#AEB7D3" />
-        <SolidColorBrush x:Key="TextMutedBrush" Color="#77819E" />
-        <SolidColorBrush x:Key="PickerBackgroundBrush" Color="#11172A" />
-        <SolidColorBrush x:Key="PickerPopupBrush" Color="#0D1324" />
+        <SolidColorBrush x:Key="PageBrush" Color="#080C14" />
+        <SolidColorBrush x:Key="CardBrush" Color="#111722" />
+        <SolidColorBrush x:Key="CardRaisedBrush" Color="#161D2A" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#344157" />
+        <SolidColorBrush x:Key="BorderSoftBrush" Color="#242E3F" />
+        <SolidColorBrush x:Key="TextPrimaryBrush" Color="#F1F4FA" />
+        <SolidColorBrush x:Key="TextSecondaryBrush" Color="#B5BED0" />
+        <SolidColorBrush x:Key="TextMutedBrush" Color="#7E8A9F" />
+        <SolidColorBrush x:Key="PickerBackgroundBrush" Color="#0D1420" />
+        <SolidColorBrush x:Key="PickerPopupBrush" Color="#0B111C" />
         <SolidColorBrush x:Key="PickerTextBrush" Color="#F4F7FF" />
         <SolidColorBrush x:Key="PickerSecondaryTextBrush" Color="#B8C3E0" />
         <SolidColorBrush x:Key="PickerDisabledTextBrush" Color="#95A0C2" />
         <SolidColorBrush x:Key="PickerDisabledBackgroundBrush" Color="#101420" />
-        <SolidColorBrush x:Key="PickerHoverBrush" Color="#263559" />
-        <SolidColorBrush x:Key="PickerSelectedBrush" Color="#3B3264" />
-        <SolidColorBrush x:Key="PickerBorderBrush" Color="#526084" />
-        <SolidColorBrush x:Key="PickerFocusBrush" Color="#5EE4EF" />
-        <SolidColorBrush x:Key="AccentPurpleBrush" Color="#8A6CFF" />
-        <SolidColorBrush x:Key="AccentCyanBrush" Color="#4DDBE8" />
-        <SolidColorBrush x:Key="AccentPinkBrush" Color="#FF79B8" />
-        <SolidColorBrush x:Key="StatusGreenBrush" Color="#58D68D" />
-        <SolidColorBrush x:Key="StatusYellowBrush" Color="#F5B94C" />
-        <SolidColorBrush x:Key="StatusRedBrush" Color="#FF6F7D" />
-        <SolidColorBrush x:Key="StatusNeutralBrush" Color="#8190B8" />
-        <SolidColorBrush x:Key="GreenSurfaceBrush" Color="#182B28" />
-        <SolidColorBrush x:Key="YellowSurfaceBrush" Color="#302719" />
-        <SolidColorBrush x:Key="RedSurfaceBrush" Color="#321C26" />
-        <SolidColorBrush x:Key="NeutralSurfaceBrush" Color="#1D2235" />
+        <SolidColorBrush x:Key="PickerHoverBrush" Color="#1B2A40" />
+        <SolidColorBrush x:Key="PickerSelectedBrush" Color="#3A281B" />
+        <SolidColorBrush x:Key="PickerBorderBrush" Color="#44536B" />
+        <SolidColorBrush x:Key="PickerFocusBrush" Color="#F49A45" />
+        <SolidColorBrush x:Key="AccentPurpleBrush" Color="#8D79E8" />
+        <SolidColorBrush x:Key="AccentCyanBrush" Color="#66D7DF" />
+        <SolidColorBrush x:Key="HoudiniOrangeBrush" Color="#F28C32" />
+        <SolidColorBrush x:Key="HoudiniOrangeHoverBrush" Color="#FFA24E" />
+        <SolidColorBrush x:Key="StatusGreenBrush" Color="#62C991" />
+        <SolidColorBrush x:Key="StatusYellowBrush" Color="#E7B45E" />
+        <SolidColorBrush x:Key="StatusRedBrush" Color="#E97982" />
+        <SolidColorBrush x:Key="StatusNeutralBrush" Color="#8491A8" />
+        <SolidColorBrush x:Key="GreenSurfaceBrush" Color="#172824" />
+        <SolidColorBrush x:Key="YellowSurfaceBrush" Color="#2D261B" />
+        <SolidColorBrush x:Key="RedSurfaceBrush" Color="#2E1C23" />
+        <SolidColorBrush x:Key="NeutralSurfaceBrush" Color="#192130" />
 
         <LinearGradientBrush x:Key="AccentGradientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#9B6CFF" Offset="0" />
-            <GradientStop Color="#637DFF" Offset="0.5" />
-            <GradientStop Color="#42DCE8" Offset="1" />
+            <GradientStop Color="#F6A34D" Offset="0" />
+            <GradientStop Color="#E97727" Offset="1" />
         </LinearGradientBrush>
         <LinearGradientBrush x:Key="HeaderGradientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#1D1934" Offset="0" />
-            <GradientStop Color="#151B31" Offset="0.58" />
-            <GradientStop Color="#11262D" Offset="1" />
+            <GradientStop Color="#141B2A" Offset="0" />
+            <GradientStop Color="#171A32" Offset="0.55" />
+            <GradientStop Color="#10252B" Offset="1" />
         </LinearGradientBrush>
         <LinearGradientBrush x:Key="CardGradientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#171B2C" Offset="0" />
-            <GradientStop Color="#121724" Offset="1" />
+            <GradientStop Color="#131A26" Offset="0" />
+            <GradientStop Color="#0F151F" Offset="1" />
         </LinearGradientBrush>
 
         <Style x:Key="SectionCardStyle" TargetType="Border">
             <Setter Property="Background" Value="{StaticResource CardGradientBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderSoftBrush}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="14" />
-            <Setter Property="Padding" Value="18" />
+            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="Padding" Value="15" />
         </Style>
 
         <Style x:Key="PickerChromeStyle" TargetType="Border">
@@ -100,6 +101,7 @@
                             <ContentPresenter
                                 HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                 VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                TextElement.Foreground="{TemplateBinding Foreground}"
                                 SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
                         </Border>
                         <ControlTemplate.Triggers>
@@ -111,7 +113,7 @@
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter Property="Foreground" Value="#FFFFFF" />
                                 <Setter TargetName="ItemChrome" Property="Background" Value="{StaticResource PickerSelectedBrush}" />
-                                <Setter TargetName="ItemChrome" Property="BorderBrush" Value="#A88CFF" />
+                                <Setter TargetName="ItemChrome" Property="BorderBrush" Value="{StaticResource HoudiniOrangeBrush}" />
                             </Trigger>
                             <Trigger Property="IsKeyboardFocusWithin" Value="True">
                                 <Setter Property="Foreground" Value="#FFFFFF" />
@@ -122,6 +124,7 @@
                                 <Setter Property="Foreground" Value="{StaticResource PickerDisabledTextBrush}" />
                                 <Setter TargetName="ItemChrome" Property="Background" Value="{StaticResource PickerDisabledBackgroundBrush}" />
                                 <Setter TargetName="ItemChrome" Property="BorderBrush" Value="#2B3147" />
+                                <Setter TargetName="ItemChrome" Property="Opacity" Value="0.65" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -134,7 +137,7 @@
             <Setter Property="Background" Value="{StaticResource PickerBackgroundBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource PickerBorderBrush}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Padding" Value="12,7" />
+            <Setter Property="Padding" Value="12,7,44,7" />
             <Setter Property="MinHeight" Value="50" />
             <Setter Property="MaxDropDownHeight" Value="320" />
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
@@ -162,6 +165,7 @@
                                         ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
                                         ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
                                         IsHitTestVisible="False"
+                                        TextElement.Foreground="{TemplateBinding Foreground}"
                                         SnapsToDevicePixels="True" />
                                     <ToggleButton
                                         x:Name="DropDownToggle"
@@ -239,8 +243,8 @@
                                 <Setter TargetName="PickerBorder" Property="BorderThickness" Value="2" />
                             </Trigger>
                             <Trigger Property="IsDropDownOpen" Value="True">
-                                <Setter TargetName="PickerBorder" Property="Background" Value="#1C2744" />
-                                <Setter TargetName="PickerBorder" Property="BorderBrush" Value="#A88CFF" />
+                                <Setter TargetName="PickerBorder" Property="Background" Value="#2A211A" />
+                                <Setter TargetName="PickerBorder" Property="BorderBrush" Value="{StaticResource HoudiniOrangeBrush}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Foreground" Value="{StaticResource PickerDisabledTextBrush}" />
@@ -261,6 +265,7 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <TextBlock
+                    Foreground="{StaticResource PickerTextBrush}"
                     FontSize="13"
                     FontWeight="SemiBold"
                     Text="{Binding version, StringFormat=Houdini {0}}"
@@ -282,6 +287,7 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <TextBlock
+                    Foreground="{StaticResource PickerTextBrush}"
                     FontSize="13"
                     FontWeight="SemiBold"
                     Text="{Binding source, StringFormat=Bridge Python · {0}}"
@@ -303,6 +309,7 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <TextBlock
+                    Foreground="{StaticResource PickerTextBrush}"
                     FontSize="13"
                     FontWeight="SemiBold"
                     Text="{Binding display}"
@@ -370,9 +377,9 @@
 
         <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ActionButtonStyle}">
             <Setter Property="Background" Value="{StaticResource AccentGradientBrush}" />
-            <Setter Property="BorderBrush" Value="#A9EAF3" />
+            <Setter Property="BorderBrush" Value="#FFB66D" />
             <Setter Property="Foreground" Value="White" />
-            <Setter Property="Padding" Value="21,10" />
+            <Setter Property="Padding" Value="24,11" />
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
                     <Setter Property="Opacity" Value="0.94" />
@@ -381,195 +388,152 @@
         </Style>
 
         <Style x:Key="CountCardStyle" TargetType="Border">
-            <Setter Property="Background" Value="#171B2A" />
-            <Setter Property="BorderBrush" Value="{StaticResource BorderSoftBrush}" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="11" />
-            <Setter Property="Padding" Value="13,9" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="7" />
+            <Setter Property="Padding" Value="8,6" />
         </Style>
 
         <DataTemplate x:Key="CheckResultTemplate">
             <Border
-                Margin="0,0,0,9"
-                Padding="14,12"
-                Background="#151A29"
+                Padding="8,7,2,7"
                 BorderBrush="{Binding BorderBrush}"
-                BorderThickness="1"
-                CornerRadius="11">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="18" />
-                        <ColumnDefinition Width="80" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <Ellipse
-                        Width="9"
-                        Height="9"
-                        Margin="0,5,0,0"
-                        HorizontalAlignment="Left"
-                        VerticalAlignment="Top"
-                        Fill="{Binding StatusBrush}"
-                        Focusable="False"
-                        IsHitTestVisible="False" />
-                    <TextBlock
-                        Grid.Column="1"
-                        Margin="0,1,10,0"
-                        Foreground="{Binding StatusBrush}"
-                        FontSize="12"
-                        FontWeight="SemiBold"
-                        Text="{Binding StatusText}" />
-                    <StackPanel Grid.Column="2">
+                BorderThickness="2,0,0,0">
+                <Expander
+                    Background="Transparent"
+                    Foreground="{StaticResource TextPrimaryBrush}"
+                    HorizontalContentAlignment="Stretch"
+                    IsExpanded="False">
+                    <Expander.Header>
+                        <Grid Margin="0,1,5,1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="18" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Ellipse
+                                Width="8"
+                                Height="8"
+                                HorizontalAlignment="Left"
+                                VerticalAlignment="Center"
+                                Fill="{Binding StatusBrush}"
+                                Focusable="False"
+                                IsHitTestVisible="False" />
+                            <TextBlock
+                                Grid.Column="1"
+                                Margin="0,0,12,0"
+                                Foreground="{StaticResource TextPrimaryBrush}"
+                                FontWeight="SemiBold"
+                                Text="{Binding CheckName}"
+                                TextTrimming="CharacterEllipsis" />
+                            <TextBlock
+                                Grid.Column="2"
+                                Foreground="{Binding StatusBrush}"
+                                FontSize="11"
+                                FontWeight="SemiBold"
+                                Text="{Binding StatusText}" />
+                        </Grid>
+                    </Expander.Header>
+                    <StackPanel Margin="18,7,8,5">
                         <TextBlock
-                            Foreground="{StaticResource TextPrimaryBrush}"
-                            FontSize="14"
-                            FontWeight="SemiBold"
-                            Text="{Binding CheckName}"
-                            TextWrapping="Wrap" />
-                        <TextBlock
-                            Margin="0,4,0,0"
                             Foreground="{StaticResource TextSecondaryBrush}"
-                            LineHeight="19"
+                            LineHeight="18"
                             Text="{Binding ResultText}"
                             TextWrapping="Wrap" />
                         <TextBlock
                             Margin="0,5,0,0"
                             Foreground="{Binding AdviceBrush}"
-                            LineHeight="19"
+                            LineHeight="18"
                             Text="{Binding AdviceText}"
                             TextWrapping="Wrap" />
                     </StackPanel>
-                </Grid>
+                </Expander>
             </Border>
         </DataTemplate>
     </Window.Resources>
 
-    <Grid Background="{StaticResource PageBrush}">
+    <ScrollViewer
+        HorizontalScrollBarVisibility="Disabled"
+        PanningMode="VerticalOnly"
+        VerticalScrollBarVisibility="Auto">
+    <Grid
+        x:Name="LayoutRoot"
+        MinHeight="{Binding RelativeSource={RelativeSource AncestorType={x:Type ScrollViewer}}, Path=ViewportHeight}"
+        Background="{StaticResource PageBrush}">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="3*" />
+            <ColumnDefinition Width="16" />
+            <ColumnDefinition Width="2*" />
+        </Grid.ColumnDefinitions>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <Border
             Grid.Row="0"
-            Margin="22,20,22,10"
-            Padding="20,17"
-            Background="{StaticResource HeaderGradientBrush}"
-            BorderBrush="#4A416D"
-            BorderThickness="1"
-            CornerRadius="16">
-            <Border.Effect>
-                <DropShadowEffect BlurRadius="22" Color="#7259D9" Opacity="0.2" ShadowDepth="0" />
-            </Border.Effect>
+            Grid.Column="0"
+            Margin="20,18,8,12"
+            Padding="0,2"
+            Background="Transparent"
+            BorderThickness="0">
             <Grid>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="80" />
+                    <ColumnDefinition Width="4" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <Grid
-                    x:Name="HiaLogoMark"
-                    Width="64"
-                    Height="64"
+                <Border
+                    Width="3"
+                    Height="42"
                     HorizontalAlignment="Left"
                     VerticalAlignment="Center"
-                    Focusable="False"
-                    IsHitTestVisible="False">
-                    <Ellipse Fill="#181B32" Stroke="{StaticResource AccentGradientBrush}" StrokeThickness="2" />
-                    <Ellipse Width="48" Height="48" Fill="#242A45" Stroke="#5B6DAB" StrokeThickness="1" />
-                    <Viewbox Width="42" Height="42">
-                        <Grid Width="48" Height="48">
-                            <Path
-                                Data="M 10,19 L 14,8 L 23,15 C 27,13 32,13 36,15 L 43,9 L 42,30 C 40,39 34,43 25,43 C 16,43 10,38 8,30 Z"
-                                Fill="#171A2B"
-                                Stroke="#8F7CFF"
-                                StrokeThickness="2" />
-                            <Ellipse Width="4" Height="5" Margin="-12,2,0,0" Fill="#4DE2EA" />
-                            <Ellipse Width="4" Height="5" Margin="12,2,0,0" Fill="#FF7DBD" />
-                            <Path
-                                Data="M 20,31 Q 25,35 30,31"
-                                Fill="Transparent"
-                                Stroke="#DCE7FF"
-                                StrokeThickness="1.5" />
-                            <Path
-                                Data="M 25,13 L 27,9 L 29,13 L 27,17 Z"
-                                Fill="#54E5EA" />
-                        </Grid>
-                    </Viewbox>
-                    <Path
-                        Width="9"
-                        Height="9"
-                        Margin="50,2,0,0"
-                        HorizontalAlignment="Left"
-                        VerticalAlignment="Top"
-                        Data="M 5,0 L 10,5 L 5,10 L 0,5 Z"
-                        Fill="{StaticResource AccentPinkBrush}" />
-                </Grid>
-
-                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    Background="{StaticResource HoudiniOrangeBrush}"
+                    CornerRadius="2" />
+                <StackPanel Grid.Column="1" Margin="12,0,12,0" VerticalAlignment="Center">
                     <TextBlock
                         x:Name="BrandTitleText"
                         Foreground="{StaticResource TextPrimaryBrush}"
-                        FontSize="24"
+                        FontSize="22"
                         FontWeight="SemiBold"
                         Text="Houdini Intelligence" />
                     <TextBlock
                         x:Name="BrandSubtitleText"
                         Margin="0,5,0,0"
                         Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="13"
-                        Text="HIA 小助手正在守护 Houdini、Bridge、Codex 与 MCP 的启动环境" />
+                        FontSize="12"
+                        Text="检查 Houdini、Bridge、Codex 与 MCP 的启动环境"
+                        TextWrapping="Wrap" />
                 </StackPanel>
-
                 <Border
-                    x:Name="OverallStatusBadge"
                     Grid.Column="2"
-                    Margin="18,0,0,0"
-                    Padding="13,8"
-                    VerticalAlignment="Center"
-                    Background="{StaticResource NeutralSurfaceBrush}"
-                    BorderBrush="{StaticResource StatusNeutralBrush}"
-                    BorderThickness="1"
-                    CornerRadius="18">
-                    <StackPanel Orientation="Horizontal">
-                        <Ellipse
-                            x:Name="OverallStatusDot"
-                            Width="8"
-                            Height="8"
-                            Margin="0,0,8,0"
-                            VerticalAlignment="Center"
-                            Fill="{StaticResource StatusNeutralBrush}" />
-                        <TextBlock
-                            x:Name="OverallStatusText"
-                            VerticalAlignment="Center"
-                            Foreground="{StaticResource TextPrimaryBrush}"
-                            FontWeight="SemiBold"
-                            Text="小助手：等待检查" />
-                    </StackPanel>
-                </Border>
-
-                <Path
-                    Grid.Column="2"
-                    Width="14"
-                    Height="14"
-                    Margin="0,-13,-7,0"
+                    Padding="9,5"
                     HorizontalAlignment="Right"
-                    VerticalAlignment="Top"
-                    Data="M 7,0 L 9,5 L 14,7 L 9,9 L 7,14 L 5,9 L 0,7 L 5,5 Z"
-                    Fill="#7EEAF0"
-                    Opacity="0.72"
-                    Focusable="False"
-                    IsHitTestVisible="False" />
+                    VerticalAlignment="Center"
+                    Background="#111A27"
+                    BorderBrush="{StaticResource BorderSoftBrush}"
+                    BorderThickness="1"
+                    CornerRadius="7">
+                    <TextBlock
+                        Foreground="{StaticResource TextMutedBrush}"
+                        FontSize="10"
+                        FontWeight="SemiBold"
+                        Text="LOCAL · LOOPBACK" />
+                </Border>
             </Grid>
         </Border>
 
         <Border
             Grid.Row="1"
-            Margin="22,0,22,10"
+            Grid.Column="0"
+            Margin="20,0,8,10"
             Style="{StaticResource SectionCardStyle}">
             <Grid>
                 <Grid.RowDefinitions>
@@ -583,36 +547,36 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="150" />
+                    <ColumnDefinition Width="98" />
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="112" />
+                    <ColumnDefinition Width="78" />
                 </Grid.ColumnDefinitions>
 
-                <StackPanel Grid.Row="0" Grid.ColumnSpan="3" Margin="0,0,0,13">
-                    <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="15" FontWeight="SemiBold" Text="环境选择" />
-                    <TextBlock Margin="0,3,0,0" Foreground="{StaticResource TextMutedBrush}" Text="多版本时请明确选择；更改后需要重新检查。" />
+                <StackPanel Grid.Row="0" Grid.ColumnSpan="3" Margin="0,0,0,11">
+                    <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="环境配置" />
+                    <TextBlock Margin="0,2,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="11" Text="多版本必须明确选择；变更后重新检查。" />
                 </StackPanel>
 
                 <TextBlock Grid.Row="1" VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" Text="MCP backend" />
-                <Border Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,12" Style="{StaticResource PickerChromeStyle}">
+                <Border Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,10" Style="{StaticResource PickerChromeStyle}">
                     <ComboBox
                         x:Name="McpBackendComboBox"
                         AutomationProperties.Name="MCP backend"
                         IsEditable="False"
                         ItemTemplate="{StaticResource BackendPickerItemTemplate}"
                         Style="{StaticResource DarkPickerComboBoxStyle}"
-                        TabIndex="0" />
+                        TabIndex="2" />
                 </Border>
 
                 <TextBlock Grid.Row="2" VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" Text="Houdini 版本" />
-                <Border Grid.Row="2" Grid.Column="1" Margin="0,0,10,0" Style="{StaticResource PickerChromeStyle}">
+                <Border Grid.Row="2" Grid.Column="1" Margin="0,0,8,0" Style="{StaticResource PickerChromeStyle}">
                     <ComboBox
                         x:Name="HoudiniComboBox"
                         AutomationProperties.Name="Houdini 版本"
                         IsEditable="False"
                         ItemTemplate="{StaticResource HoudiniPickerItemTemplate}"
                         Style="{StaticResource DarkPickerComboBoxStyle}"
-                        TabIndex="1" />
+                        TabIndex="3" />
                 </Border>
                 <Button
                     x:Name="BrowseHoudiniButton"
@@ -621,29 +585,29 @@
                     AutomationProperties.Name="浏览 houdini.exe"
                     Content="浏览…"
                     Style="{StaticResource CompactButtonStyle}"
-                    TabIndex="2" />
+                    TabIndex="4" />
 
                 <TextBlock
                     Grid.Row="3"
                     Grid.Column="1"
                     Grid.ColumnSpan="2"
                     x:Name="HoudiniPathText"
-                    Margin="3,6,0,12"
+                    Margin="3,4,0,9"
                     Foreground="{StaticResource TextMutedBrush}"
-                    FontSize="12"
+                    FontSize="11"
                     Text="尚未选择 houdini.exe"
                     TextTrimming="CharacterEllipsis"
                     ToolTip="尚未选择 houdini.exe" />
 
                 <TextBlock Grid.Row="4" VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" Text="Bridge Python" />
-                <Border Grid.Row="4" Grid.Column="1" Margin="0,0,10,0" Style="{StaticResource PickerChromeStyle}">
+                <Border Grid.Row="4" Grid.Column="1" Margin="0,0,8,0" Style="{StaticResource PickerChromeStyle}">
                     <ComboBox
                         x:Name="BridgePythonComboBox"
                         AutomationProperties.Name="Bridge Python"
                         IsEditable="False"
                         ItemTemplate="{StaticResource BridgePickerItemTemplate}"
                         Style="{StaticResource DarkPickerComboBoxStyle}"
-                        TabIndex="3" />
+                        TabIndex="5" />
                 </Border>
                 <Button
                     x:Name="BrowseBridgeButton"
@@ -652,16 +616,16 @@
                     AutomationProperties.Name="浏览 Bridge python.exe"
                     Content="浏览…"
                     Style="{StaticResource CompactButtonStyle}"
-                    TabIndex="4" />
+                    TabIndex="6" />
 
                 <TextBlock
                     Grid.Row="5"
                     Grid.Column="1"
                     Grid.ColumnSpan="2"
                     x:Name="BridgePathText"
-                    Margin="3,6,0,0"
+                    Margin="3,4,0,0"
                     Foreground="{StaticResource TextMutedBrush}"
-                    FontSize="12"
+                    FontSize="11"
                     Text="尚未选择 Bridge python.exe"
                     TextTrimming="CharacterEllipsis"
                     ToolTip="尚未选择 Bridge python.exe" />
@@ -671,11 +635,11 @@
                     Margin="0,4,0,0"
                     VerticalAlignment="Center"
                     Foreground="{StaticResource TextSecondaryBrush}"
-                    Text="最终渲染输出目录" />
+                    Text="最终输出" />
                 <Border
                     Grid.Row="6"
                     Grid.Column="1"
-                    Margin="0,4,10,0"
+                    Margin="0,4,8,0"
                     Background="{StaticResource PickerBackgroundBrush}"
                     BorderBrush="{StaticResource PickerBorderBrush}"
                     BorderThickness="1"
@@ -688,7 +652,7 @@
                         BorderThickness="0"
                         CaretBrush="{StaticResource AccentCyanBrush}"
                         Foreground="{StaticResource PickerTextBrush}"
-                        TabIndex="5"
+                        TabIndex="7"
                         ToolTip="留空时使用项目 .runtime/cache"
                         VerticalContentAlignment="Center" />
                 </Border>
@@ -700,12 +664,12 @@
                     AutomationProperties.Name="选择最终渲染输出目录"
                     Content="选择…"
                     Style="{StaticResource CompactButtonStyle}"
-                    TabIndex="6" />
+                    TabIndex="8" />
                 <TextBlock
                     Grid.Row="7"
                     Grid.Column="1"
                     Grid.ColumnSpan="2"
-                    Margin="3,6,0,0"
+                    Margin="3,5,0,0"
                     Foreground="{StaticResource TextMutedBrush}"
                     FontSize="11"
                     Text="最终 EXR、图片、视频、USD、导出和模拟缓存可放在这里；留空时使用项目 .runtime/cache。它与内部截图、预览和临时缓存目录不同。"
@@ -713,73 +677,126 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="2" Margin="22,0,22,10">
+        <Border
+            x:Name="RecoveryCard"
+            Grid.Row="2"
+            Grid.Column="0"
+            Margin="20,0,8,10"
+            Padding="14,11"
+            Background="{StaticResource YellowSurfaceBrush}"
+            BorderBrush="{StaticResource StatusYellowBrush}"
+            BorderThickness="1"
+            CornerRadius="13"
+            Visibility="Collapsed">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <StackPanel>
+                    <TextBlock
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        FontSize="14"
+                        FontWeight="SemiBold"
+                        Text="检测到可恢复副本" />
+                    <TextBlock
+                        Margin="0,3,0,0"
+                        Foreground="{StaticResource TextSecondaryBrush}"
+                        Text="上次 Houdini 未正常结束。恢复会在新 session 中打开 checkpoint 副本，绝不覆盖原 HIP。"
+                        TextWrapping="Wrap" />
+                    <TextBlock
+                        x:Name="RecoveryCheckpointText"
+                        Margin="0,4,0,0"
+                        Foreground="{StaticResource PickerSecondaryTextBrush}"
+                        FontSize="11"
+                        TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+                <WrapPanel Grid.Row="1" Margin="0,9,0,0">
+                    <RadioButton
+                        x:Name="RecoverCheckpointOption"
+                        AutomationProperties.Name="恢复副本"
+                        Content="恢复副本（推荐）"
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        GroupName="RecoveryChoice"
+                        IsChecked="True"
+                        TabIndex="0" />
+                    <RadioButton
+                        x:Name="NormalLaunchOption"
+                        Margin="18,0,0,0"
+                        AutomationProperties.Name="正常启动"
+                        Content="正常启动"
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        GroupName="RecoveryChoice"
+                        TabIndex="1" />
+                </WrapPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="3" Grid.Column="0" Margin="20,0,8,8">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="10" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="10" />
-                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel VerticalAlignment="Center">
-                <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="15" FontWeight="SemiBold" Text="自检摘要" />
-                <TextBlock Margin="0,3,22,0" Foreground="{StaticResource TextMutedBrush}" Text="颜色与文字共同标识结果" />
+                <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="自检状态" />
+                <TextBlock Margin="0,2,16,0" Foreground="{StaticResource TextMutedBrush}" FontSize="11" Text="颜色与文字共同标识" />
             </StackPanel>
-            <Border Grid.Column="2" Style="{StaticResource CountCardStyle}">
-                <StackPanel Orientation="Horizontal">
-                    <Ellipse Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource StatusGreenBrush}" />
-                    <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="通过 " />
-                    <TextBlock x:Name="PassCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
-                </StackPanel>
-            </Border>
-            <Border Grid.Column="4" Style="{StaticResource CountCardStyle}">
-                <StackPanel Orientation="Horizontal">
-                    <Ellipse Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource StatusYellowBrush}" />
-                    <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="警告 " />
-                    <TextBlock x:Name="WarningCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
-                </StackPanel>
-            </Border>
-            <Border Grid.Column="6" Style="{StaticResource CountCardStyle}">
-                <StackPanel Orientation="Horizontal">
-                    <Ellipse Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource StatusRedBrush}" />
-                    <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="阻断 " />
-                    <TextBlock x:Name="BlockedCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
-                </StackPanel>
-            </Border>
+            <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
+                <Border Style="{StaticResource CountCardStyle}">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="8" Height="8" Margin="0,0,7,0" VerticalAlignment="Center" Fill="{StaticResource StatusGreenBrush}" />
+                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="通过 " />
+                        <TextBlock x:Name="PassCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource CountCardStyle}">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="8" Height="8" Margin="0,0,7,0" VerticalAlignment="Center" Fill="{StaticResource StatusYellowBrush}" />
+                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="警告 " />
+                        <TextBlock x:Name="WarningCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource CountCardStyle}">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="8" Height="8" Margin="0,0,7,0" VerticalAlignment="Center" Fill="{StaticResource StatusRedBrush}" />
+                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="阻断 " />
+                        <TextBlock x:Name="BlockedCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
+                    </StackPanel>
+                </Border>
+            </WrapPanel>
         </Grid>
 
         <Border
-            Grid.Row="3"
-            Margin="22,0,22,10"
-            Padding="14,14,8,6"
-            Background="#10131F"
+            Grid.Row="4"
+            Grid.Column="0"
+            Height="216"
+            Margin="20,0,8,8"
+            Padding="12,11,7,5"
+            Background="#0F151F"
             BorderBrush="{StaticResource BorderSoftBrush}"
             BorderThickness="1"
-            CornerRadius="14">
+            CornerRadius="11">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
                 <TextBlock
-                    Margin="2,0,0,11"
+                    Margin="2,0,0,8"
                     Foreground="{StaticResource TextPrimaryBrush}"
-                    FontSize="15"
+                    FontSize="14"
                     FontWeight="SemiBold"
-                    Text="自检详情" />
+                    Text="问题与检查结果" />
                 <Border
                     x:Name="EmptyStateBorder"
                     Grid.Row="1"
-                    Margin="0,12,6,12"
-                    Padding="18"
+                    Margin="0,8,5,8"
+                    Padding="14"
                     HorizontalAlignment="Stretch"
                     VerticalAlignment="Center"
-                    Background="{StaticResource NeutralSurfaceBrush}"
-                    BorderBrush="{StaticResource BorderSoftBrush}"
-                    BorderThickness="1"
-                    CornerRadius="10">
+                    Background="#121B28"
+                    BorderThickness="0"
+                    CornerRadius="8">
                     <TextBlock
                         x:Name="EmptyStateText"
                         HorizontalAlignment="Center"
@@ -801,7 +818,7 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="4" Margin="22,0,22,10">
+        <Grid Grid.Row="5" Grid.Column="0" Margin="20,0,8,8">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -817,7 +834,7 @@
                 Visibility="Collapsed">
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="150" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontWeight="SemiBold" Text="正在扫描并检查环境…" />
@@ -850,17 +867,20 @@
         </Grid>
 
         <Border
-            Grid.Row="5"
-            Margin="22,0,22,20"
-            Padding="15"
-            Background="#121622"
+            Grid.Row="6"
+            Grid.Column="0"
+            Margin="20,0,8,18"
+            Padding="13"
+            Background="#101722"
             BorderBrush="{StaticResource BorderSoftBrush}"
             BorderThickness="1"
-            CornerRadius="14">
+            CornerRadius="11">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
-                    <RowDefinition Height="12" />
+                    <RowDefinition Height="10" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="8" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <Grid Grid.Row="0">
@@ -879,65 +899,219 @@
                             CaretBrush="{StaticResource AccentCyanBrush}"
                             Foreground="{StaticResource TextSecondaryBrush}"
                             IsReadOnly="True"
+                            TabIndex="9"
                             Text="尚未生成报告"
                             TextWrapping="NoWrap"
                             ToolTip="尚未生成报告" />
                     </Border>
                 </Grid>
-                <Grid Grid.Row="2">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="10" />
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="10" />
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="10" />
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <Button
-                        x:Name="RescanButton"
-                        Grid.Column="0"
-                        AutomationProperties.Name="重新扫描"
-                        Content="重新扫描"
-                        Style="{StaticResource ActionButtonStyle}"
-                        TabIndex="7" />
-                    <Button
-                        x:Name="RepairButton"
-                        Grid.Column="2"
-                        AutomationProperties.Name="修复安全项目"
-                        Content="修复安全项目"
-                        Style="{StaticResource ActionButtonStyle}"
-                        TabIndex="8" />
-                    <Button
-                        x:Name="CleanupScreenshotsButton"
-                        Grid.Column="4"
-                        AutomationProperties.Name="清理截图缓存"
-                        Content="清理截图缓存"
-                        Style="{StaticResource ActionButtonStyle}"
-                        TabIndex="9"
-                        ToolTip="只清理项目 .runtime\cache\screenshots 第一层的 HIA PNG 截图" />
-                    <Button
-                        x:Name="CopyReportButton"
-                        Grid.Column="6"
-                        AutomationProperties.Name="复制报告路径"
-                        Content="复制报告路径"
-                        IsEnabled="False"
-                        Style="{StaticResource ActionButtonStyle}"
-                        TabIndex="10" />
-                    <Button
-                        x:Name="LaunchButton"
-                        Grid.Column="8"
-                        MinWidth="172"
-                        AutomationProperties.Name="启动 Houdini"
-                        Content="启动 Houdini  ✦"
-                        IsDefault="True"
-                        IsEnabled="False"
-                        Style="{StaticResource PrimaryButtonStyle}"
-                        TabIndex="11" />
+                <WrapPanel Grid.Row="2" Margin="0,0,0,-8" VerticalAlignment="Top">
+                        <Button
+                            x:Name="RescanButton"
+                            Margin="0,0,10,8"
+                            AutomationProperties.Name="重新扫描"
+                            Content="重新扫描"
+                            Style="{StaticResource ActionButtonStyle}"
+                            TabIndex="10" />
+                        <Button
+                            x:Name="RepairButton"
+                            Margin="0,0,10,8"
+                            AutomationProperties.Name="修复安全项目"
+                            Content="修复安全项目"
+                            Style="{StaticResource ActionButtonStyle}"
+                            TabIndex="11" />
+                        <Button
+                            x:Name="CleanupScreenshotsButton"
+                            Margin="0,0,10,8"
+                            AutomationProperties.Name="清理截图缓存"
+                            Content="清理截图缓存"
+                            Style="{StaticResource ActionButtonStyle}"
+                            TabIndex="12"
+                            ToolTip="只清理项目 .runtime\cache\screenshots 第一层的 HIA PNG 截图" />
+                        <Button
+                            x:Name="CopyReportButton"
+                            Margin="0,0,10,8"
+                            AutomationProperties.Name="复制报告路径"
+                            Content="复制报告路径"
+                            IsEnabled="False"
+                            Style="{StaticResource ActionButtonStyle}"
+                            TabIndex="13" />
+                </WrapPanel>
+                <Button
+                    x:Name="LaunchButton"
+                    Grid.Row="4"
+                    MinWidth="196"
+                    HorizontalAlignment="Right"
+                    AutomationProperties.Name="启动 Houdini"
+                    Content="启动 Houdini  ✦"
+                    IsDefault="True"
+                    IsEnabled="False"
+                    Style="{StaticResource PrimaryButtonStyle}"
+                    TabIndex="14" />
+            </Grid>
+        </Border>
+
+        <Border
+            x:Name="RightVisualRail"
+            Grid.Row="0"
+            Grid.RowSpan="8"
+            Grid.Column="2"
+            Margin="8,18,20,18"
+            Padding="18"
+            Background="{StaticResource HeaderGradientBrush}"
+            BorderBrush="#2E3A50"
+            BorderThickness="1"
+            CornerRadius="16"
+            ClipToBounds="True">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="14" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="16" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <StackPanel>
+                    <TextBlock
+                        Foreground="{StaticResource AccentCyanBrush}"
+                        FontSize="10"
+                        FontWeight="SemiBold"
+                        Text="CREATIVE SYSTEM · LOCAL" />
+                    <TextBlock
+                        Margin="0,6,0,0"
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        FontSize="20"
+                        FontWeight="SemiBold"
+                        Text="创作环境总览" />
+                    <TextBlock
+                        Margin="0,5,0,0"
+                        Foreground="{StaticResource TextSecondaryBrush}"
+                        LineHeight="19"
+                        Text="从一处确认版本、运行环境与恢复副本，再进入 Houdini。"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+
+                <Border
+                    x:Name="OverallStatusBadge"
+                    Grid.Row="2"
+                    Padding="12,10"
+                    HorizontalAlignment="Stretch"
+                    Background="{StaticResource NeutralSurfaceBrush}"
+                    BorderBrush="{StaticResource StatusNeutralBrush}"
+                    BorderThickness="1"
+                    CornerRadius="9">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Ellipse
+                            x:Name="OverallStatusDot"
+                            Width="9"
+                            Height="9"
+                            Margin="0,0,9,0"
+                            VerticalAlignment="Center"
+                            Fill="{StaticResource StatusNeutralBrush}" />
+                        <TextBlock
+                            x:Name="OverallStatusText"
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource TextPrimaryBrush}"
+                            FontWeight="SemiBold"
+                            Text="等待检查" />
+                        <TextBlock
+                            Grid.Column="2"
+                            Margin="10,0,0,0"
+                            VerticalAlignment="Center"
+                            Foreground="{StaticResource TextMutedBrush}"
+                            FontSize="10"
+                            Text="PREFLIGHT" />
+                    </Grid>
+                </Border>
+
+                <Grid Grid.Row="4" Height="230" ClipToBounds="True">
+                    <Border
+                        Background="#0D1723"
+                        BorderBrush="#35445C"
+                        BorderThickness="1"
+                        CornerRadius="12">
+                        <Grid ClipToBounds="True">
+                            <Path
+                                Margin="28"
+                                Data="M 0,150 L 78,104 L 136,126 L 220,58 L 310,92"
+                                Stroke="#27455D"
+                                StrokeThickness="1"
+                                Stretch="Fill" />
+                            <Ellipse Width="7" Height="7" Margin="44,62,0,0" HorizontalAlignment="Left" VerticalAlignment="Top" Fill="#456A87" />
+                            <Ellipse Width="5" Height="5" Margin="0,0,58,52" HorizontalAlignment="Right" VerticalAlignment="Bottom" Fill="#7B6BB4" />
+                            <TextBlock
+                                Margin="18"
+                                HorizontalAlignment="Left"
+                                VerticalAlignment="Bottom"
+                                Foreground="{StaticResource TextMutedBrush}"
+                                FontSize="10"
+                                Text="WINTER WORKSPACE" />
+                        </Grid>
+                    </Border>
+                    <Border
+                        x:Name="OptionalArtworkPanel"
+                        Background="#0D1723"
+                        BorderBrush="#35445C"
+                        BorderThickness="1"
+                        CornerRadius="12"
+                        ClipToBounds="True"
+                        ToolTip="Steam winter seasonal artwork"
+                        Visibility="Collapsed">
+                        <Grid ClipToBounds="True">
+                            <Image
+                                x:Name="OptionalArtworkImage"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Stretch"
+                                Focusable="False"
+                                IsHitTestVisible="False"
+                                RenderOptions.BitmapScalingMode="HighQuality"
+                                Stretch="UniformToFill" />
+                            <Border IsHitTestVisible="False">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                        <GradientStop Color="#05070B0F" Offset="0" />
+                                        <GradientStop Color="#12080C14" Offset="0.58" />
+                                        <GradientStop Color="#E6080C14" Offset="1" />
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                            </Border>
+                            <TextBlock
+                                Margin="16,0,16,13"
+                                HorizontalAlignment="Left"
+                                VerticalAlignment="Bottom"
+                                Foreground="#E8EDF7"
+                                FontSize="10"
+                                FontWeight="SemiBold"
+                                Text="STEAM WINTER WORKSPACE" />
+                        </Grid>
+                    </Border>
                 </Grid>
+
+                <StackPanel Grid.Row="6">
+                    <Border Height="1" Margin="0,0,0,13" Background="#334157" />
+                    <TextBlock
+                        Foreground="{StaticResource TextSecondaryBrush}"
+                        FontSize="11"
+                        Text="自检与启动仅使用项目本地环境"
+                        TextWrapping="Wrap" />
+                    <TextBlock
+                        Margin="0,4,0,0"
+                        Foreground="{StaticResource TextMutedBrush}"
+                        FontSize="10"
+                        Text="127.0.0.1 · portable project root"
+                        TextWrapping="Wrap" />
+                </StackPanel>
             </Grid>
         </Border>
     </Grid>
+    </ScrollViewer>
 </Window>

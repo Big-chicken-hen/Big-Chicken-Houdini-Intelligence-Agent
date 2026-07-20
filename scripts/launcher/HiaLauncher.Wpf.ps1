@@ -31,6 +31,14 @@ try {
     exit 1
 }
 
+$workArea = [System.Windows.SystemParameters]::WorkArea
+$availableWidth = [Math]::Max(320, [Math]::Floor($workArea.Width - 32))
+$availableHeight = [Math]::Max(240, [Math]::Floor($workArea.Height - 32))
+$window.MinWidth = [Math]::Min($window.MinWidth, $availableWidth)
+$window.MinHeight = [Math]::Min($window.MinHeight, $availableHeight)
+$window.Width = [Math]::Min($window.Width, $availableWidth)
+$window.Height = [Math]::Min($window.Height, $availableHeight)
+
 function Get-RequiredControl {
     param([Parameter(Mandatory = $true)][string]$Name)
 
@@ -66,6 +74,14 @@ $repairButton = Get-RequiredControl -Name 'RepairButton'
 $cleanupScreenshotsButton = Get-RequiredControl -Name 'CleanupScreenshotsButton'
 $copyReportButton = Get-RequiredControl -Name 'CopyReportButton'
 $launchButton = Get-RequiredControl -Name 'LaunchButton'
+$optionalArtworkPanel = Get-RequiredControl -Name 'OptionalArtworkPanel'
+$optionalArtworkImage = Get-RequiredControl -Name 'OptionalArtworkImage'
+$recoveryCard = Get-RequiredControl -Name 'RecoveryCard'
+$recoveryCheckpointText = Get-RequiredControl -Name 'RecoveryCheckpointText'
+$recoverCheckpointOption = Get-RequiredControl -Name 'RecoverCheckpointOption'
+$normalLaunchOption = Get-RequiredControl -Name 'NormalLaunchOption'
+$layoutRoot = Get-RequiredControl -Name 'LayoutRoot'
+$rightVisualRail = Get-RequiredControl -Name 'RightVisualRail'
 
 $brushGreen = $window.FindResource('StatusGreenBrush')
 $brushYellow = $window.FindResource('StatusYellowBrush')
@@ -87,6 +103,8 @@ $script:preflightFailed = $false
 $script:suppressSelectionCheck = $false
 $script:isBusy = $false
 $script:initialScanStarted = $false
+$script:pendingRecovery = $null
+$script:compactLayout = $null
 $renderOutputTextBox.Text = [string]$inputs.render_output
 $renderOutputTextBox.ToolTip = if ($renderOutputTextBox.Text) {
     $renderOutputTextBox.Text
@@ -106,35 +124,122 @@ function Set-OverallState {
 
     switch ($State) {
         'green' {
-            $overallStatusText.Text = '小助手：可以启动'
+            $overallStatusText.Text = '可以启动'
             $overallStatusDot.Fill = $brushGreen
             $overallStatusBadge.BorderBrush = $brushGreen
             $overallStatusBadge.Background = $surfaceGreen
         }
         'yellow' {
-            $overallStatusText.Text = '小助手：存在警告'
+            $overallStatusText.Text = '存在警告'
             $overallStatusDot.Fill = $brushYellow
             $overallStatusBadge.BorderBrush = $brushYellow
             $overallStatusBadge.Background = $surfaceYellow
         }
         'red' {
-            $overallStatusText.Text = '小助手：需要处理'
+            $overallStatusText.Text = '需要处理'
             $overallStatusDot.Fill = $brushRed
             $overallStatusBadge.BorderBrush = $brushRed
             $overallStatusBadge.Background = $surfaceRed
         }
         'busy' {
-            $overallStatusText.Text = '小助手：正在检查'
+            $overallStatusText.Text = '正在检查'
             $overallStatusDot.Fill = $brushCyan
             $overallStatusBadge.BorderBrush = $brushPurple
             $overallStatusBadge.Background = $surfaceNeutral
         }
         default {
-            $overallStatusText.Text = '小助手：等待检查'
+            $overallStatusText.Text = '等待检查'
             $overallStatusDot.Fill = $brushNeutral
             $overallStatusBadge.BorderBrush = $brushNeutral
             $overallStatusBadge.Background = $surfaceNeutral
         }
+    }
+}
+
+function Initialize-OptionalArtwork {
+    $optionalArtworkImage.Source = $null
+    $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Collapsed
+    try {
+        $artworkPath = Get-HiaLauncherArtworkPath -ProjectRoot $projectRoot
+        if (-not (Test-Path -LiteralPath $artworkPath -PathType Leaf)) { return }
+        $artworkFile = Get-Item -LiteralPath $artworkPath -Force -ErrorAction Stop
+        if (
+            $artworkFile -isnot [System.IO.FileInfo] -or
+            [long]$artworkFile.Length -le 0 -or
+            [long]$artworkFile.Length -gt 33554432
+        ) {
+            return
+        }
+
+        $stream = [System.IO.File]::Open(
+            $artworkPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        try {
+            $bitmap = [System.Windows.Media.Imaging.BitmapImage]::new()
+            $bitmap.BeginInit()
+            $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
+            $bitmap.DecodePixelHeight = 640
+            $bitmap.StreamSource = $stream
+            $bitmap.EndInit()
+            $bitmap.Freeze()
+        } finally {
+            $stream.Dispose()
+        }
+        $optionalArtworkImage.Source = $bitmap
+        $optionalArtworkPanel.ToolTip = $artworkPath
+        $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Visible
+    } catch {
+        # Optional project artwork never changes preflight or launch eligibility.
+        $optionalArtworkImage.Source = $null
+        $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Collapsed
+    }
+}
+
+function Update-ResponsiveLayout {
+    $compact = $window.ActualWidth -gt 0 -and $window.ActualWidth -lt 900
+    if ($script:compactLayout -eq $compact) { return }
+    $script:compactLayout = $compact
+
+    if ($compact) {
+        $layoutRoot.ColumnDefinitions[0].Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        $layoutRoot.ColumnDefinitions[1].Width = [System.Windows.GridLength]::new(0)
+        $layoutRoot.ColumnDefinitions[2].Width = [System.Windows.GridLength]::new(0)
+        [System.Windows.Controls.Grid]::SetColumn($rightVisualRail, 0)
+        [System.Windows.Controls.Grid]::SetRow($rightVisualRail, 7)
+        [System.Windows.Controls.Grid]::SetRowSpan($rightVisualRail, 1)
+        $rightVisualRail.Margin = [System.Windows.Thickness]::new(20, 0, 20, 18)
+        return
+    }
+
+    $layoutRoot.ColumnDefinitions[0].Width = [System.Windows.GridLength]::new(3, [System.Windows.GridUnitType]::Star)
+    $layoutRoot.ColumnDefinitions[1].Width = [System.Windows.GridLength]::new(16)
+    $layoutRoot.ColumnDefinitions[2].Width = [System.Windows.GridLength]::new(2, [System.Windows.GridUnitType]::Star)
+    [System.Windows.Controls.Grid]::SetColumn($rightVisualRail, 2)
+    [System.Windows.Controls.Grid]::SetRow($rightVisualRail, 0)
+    [System.Windows.Controls.Grid]::SetRowSpan($rightVisualRail, 8)
+    $rightVisualRail.Margin = [System.Windows.Thickness]::new(8, 18, 20, 18)
+}
+
+function Initialize-RecoveryPrompt {
+    $script:pendingRecovery = $null
+    $recoveryCard.Visibility = [System.Windows.Visibility]::Collapsed
+    try {
+        $candidates = @(Get-HiaRecoverableLauncherSession -ProjectRoot $projectRoot)
+        if ($candidates.Count -eq 0) { return }
+        $script:pendingRecovery = $candidates[0]
+        $recoveryCheckpointText.Text = [string]$script:pendingRecovery.checkpoint_path
+        $recoveryCheckpointText.ToolTip = [string]$script:pendingRecovery.checkpoint_path
+        $recoverCheckpointOption.IsChecked = $true
+        $normalLaunchOption.IsChecked = $false
+        $recoveryCard.Visibility = [System.Windows.Visibility]::Visible
+    } catch {
+        # Recovery discovery is fail-closed; a malformed old session cannot block a normal launch.
+        $script:pendingRecovery = $null
+        $recoveryCard.Visibility = [System.Windows.Visibility]::Collapsed
     }
 }
 
@@ -250,6 +355,8 @@ function Set-BusyState {
     $browseHoudiniButton.IsEnabled = -not $Busy
     $browseBridgeButton.IsEnabled = -not $Busy
     $browseRenderOutputButton.IsEnabled = -not $Busy
+    $recoverCheckpointOption.IsEnabled = -not $Busy
+    $normalLaunchOption.IsEnabled = -not $Busy
     $rescanButton.IsEnabled = -not $Busy
     $repairButton.IsEnabled = -not $Busy
     $cleanupScreenshotsButton.IsEnabled = -not $Busy
@@ -757,11 +864,25 @@ $launchButton.Add_Click({
                 -BridgePython $selectedBridge `
                 -RenderOutputDir $selectedRenderOutput `
                 -McpBackend $selectedBackend | Out-Null
-            Start-ExistingHoudiniLauncher `
-                -SelectedHoudini $selectedHoudini `
-                -SelectedBridge $selectedBridge `
-                -SelectedBackend $selectedBackend `
-                -SelectedRenderOutput $selectedRenderOutput
+            $launchParameters = @{
+                SelectedHoudini = $selectedHoudini
+                SelectedBridge = $selectedBridge
+                SelectedBackend = $selectedBackend
+                SelectedRenderOutput = $selectedRenderOutput
+            }
+            if ($null -ne $script:pendingRecovery) {
+                $recoveryDecision = if ($recoverCheckpointOption.IsChecked) { 'recover' } else { 'normal' }
+                $launchParameters['RecoverySessionId'] = [string]$script:pendingRecovery.session_id
+                $launchParameters['RecoveryDecision'] = $recoveryDecision
+                if ($recoveryDecision -eq 'recover') {
+                    $launchParameters['RecoveryCheckpoint'] = [string]$script:pendingRecovery.checkpoint_path
+                }
+            }
+            Start-ExistingHoudiniLauncher @launchParameters
+            if ($null -ne $script:pendingRecovery) {
+                $script:pendingRecovery = $null
+                $recoveryCard.Visibility = [System.Windows.Visibility]::Collapsed
+            }
             Show-InlineStatus `
                 -Kind 'success' `
                 -Transient `
@@ -774,7 +895,12 @@ $launchButton.Add_Click({
     }
 })
 
+Initialize-OptionalArtwork
+Initialize-RecoveryPrompt
+
+$window.Add_SizeChanged({ Update-ResponsiveLayout })
 $window.Add_ContentRendered({
+    Update-ResponsiveLayout
     if ($script:initialScanStarted) { return }
     $script:initialScanStarted = $true
     Invoke-GuiScan -PreferredHoudini $inputs.houdini -PreferredBridge $inputs.bridge -PreferredBackend $inputs.backend

@@ -2,7 +2,10 @@
 param(
     [string]$BridgePython = '',
     [string]$HoudiniExe = '',
-    [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2'
+    [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2',
+    [AllowEmptyString()][string]$RecoverySessionId = '',
+    [AllowEmptyString()][string]$RecoveryCheckpoint = '',
+    [AllowEmptyString()][string]$RecoveryDecision = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,6 +13,44 @@ Set-StrictMode -Version Latest
 
 $launcherCore = Join-Path $PSScriptRoot 'launcher\HiaLauncher.Core.psm1'
 Import-Module -Force -DisableNameChecking $launcherCore
+
+if ($RecoveryDecision -notin @('', 'recover', 'normal')) {
+    throw 'RecoveryDecision must be empty, recover, or normal.'
+}
+if (
+    ($RecoveryDecision -eq '' -and ($RecoverySessionId -or $RecoveryCheckpoint)) -or
+    ($RecoveryDecision -eq 'normal' -and (-not $RecoverySessionId -or $RecoveryCheckpoint)) -or
+    ($RecoveryDecision -eq 'recover' -and (-not $RecoverySessionId -or -not $RecoveryCheckpoint))
+) {
+    throw 'Recovery session, checkpoint, and decision arguments are inconsistent.'
+}
+
+function Write-LauncherSessionManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$ManifestPath,
+        [Parameter(Mandatory = $true)]$State
+    )
+
+    $safeState = [ordered]@{
+        schema_version = 1
+        session_id = $State.session_id
+        state = $State.state
+        selected_houdini = $State.selected_houdini
+        hip_path = $State.hip_path
+        started_at_utc = $State.started_at_utc
+        ended_at_utc = $State.ended_at_utc
+        process_exit_code = $State.process_exit_code
+        latest_checkpoint = $State.latest_checkpoint
+        launcher_process_id = $State.launcher_process_id
+        houdini_process_id = $State.houdini_process_id
+    }
+    $json = ConvertTo-HiaRedactedJson -Value $safeState -Depth 4
+    [System.IO.File]::WriteAllText(
+        $ManifestPath,
+        $json + [Environment]::NewLine,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
 
 function Get-HoudiniCandidatePaths {
     param([string]$RequestedPath)
@@ -430,6 +471,14 @@ $sessionTemp = Assert-OrdinaryProjectPath `
     -Path (Join-Path $sessionRoot 'tmp') `
     -Root $ResolvedRoot `
     -AllowMissingLeaf
+$sessionCheckpoints = Assert-OrdinaryProjectPath `
+    -Path (Join-Path $sessionRoot 'checkpoints') `
+    -Root $ResolvedRoot `
+    -AllowMissingLeaf
+$sessionManifest = Assert-OrdinaryProjectPath `
+    -Path (Join-Path $sessionRoot 'session.json') `
+    -Root $ResolvedRoot `
+    -AllowMissingLeaf
 $houdiniPreferences = Assert-OrdinaryProjectPath `
     -Path (Join-Path $sessionRoot 'houdini-user-pref') `
     -Root $ResolvedRoot `
@@ -456,10 +505,77 @@ $shortTermCache = Assert-OrdinaryProjectPath `
     -Root $ResolvedRoot `
     -AllowMissingLeaf
 [System.IO.Directory]::CreateDirectory($sessionTemp) | Out-Null
+[System.IO.Directory]::CreateDirectory($sessionCheckpoints) | Out-Null
 [System.IO.Directory]::CreateDirectory($houdiniPreferences) | Out-Null
 foreach ($cacheDirectory in @($cacheRoot, $screenshotCache, $previewCache, $shortTermCache)) {
     [System.IO.Directory]::CreateDirectory($cacheDirectory) | Out-Null
 }
+
+$knownHipPath = $null
+$recoverySourceCheckpoint = $null
+if ($RecoveryDecision -eq 'recover') {
+    if ($RecoverySessionId -notmatch '^[0-9a-fA-F]{32}$') {
+        throw 'Recovery session ID is invalid.'
+    }
+    $sourceSessionCheckpoints = Assert-OrdinaryProjectPath `
+        -Path (Join-Path $ResolvedRoot ".runtime\launcher-sessions\$RecoverySessionId\checkpoints") `
+        -Root $ResolvedRoot
+    $recoverySourceCheckpoint = Assert-OrdinaryProjectPath `
+        -Path $RecoveryCheckpoint `
+        -Root $ResolvedRoot
+    $sourceParent = [System.IO.Path]::GetDirectoryName($recoverySourceCheckpoint).TrimEnd('\')
+    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+        $sourceParent,
+        $sourceSessionCheckpoints.TrimEnd('\')
+    )) {
+        throw 'Recovery checkpoint is not a top-level file in the selected launcher session.'
+    }
+    $sourceFile = Get-Item -LiteralPath $recoverySourceCheckpoint -Force -ErrorAction Stop
+    $recoveryMatch = [regex]::Match(
+        $sourceFile.Name,
+        '(\.hip(?:lc|nc)?(?:_bak\d*)?)$',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if (
+        $sourceFile -isnot [System.IO.FileInfo] -or
+        ([int]$sourceFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        -not $recoveryMatch.Success
+    ) {
+        throw 'Recovery checkpoint is not an ordinary supported Houdini HIP backup.'
+    }
+    $recoverySuffix = [string]$recoveryMatch.Groups[1].Value
+    $knownHipPath = Join-Path `
+        $sessionCheckpoints `
+        ("recovery-{0}{1}" -f [Guid]::NewGuid().ToString('N'), $recoverySuffix)
+    [System.IO.File]::Copy($recoverySourceCheckpoint, $knownHipPath, $false)
+}
+
+$sessionState = [ordered]@{
+    session_id = $sessionId
+    state = 'starting'
+    selected_houdini = $HoudiniExe
+    hip_path = $knownHipPath
+    started_at_utc = [DateTime]::UtcNow.ToString('o')
+    ended_at_utc = $null
+    process_exit_code = $null
+    latest_checkpoint = $knownHipPath
+    launcher_process_id = [int]$PID
+    houdini_process_id = $null
+}
+Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
+if ($RecoveryDecision) {
+    try {
+        Set-HiaLauncherRecoveryDecision `
+            -ProjectRoot $ResolvedRoot `
+            -SessionId $RecoverySessionId `
+            -Decision $RecoveryDecision | Out-Null
+    } catch {
+        Write-Warning 'The previous launcher session could not be marked with the recovery decision.'
+    }
+}
+
+$houdiniProcess = $null
+try {
 
 $bridgePythonPath = Join-Path $ResolvedRoot 'services\bridge'
 $projectSourcePath = Join-Path $ResolvedRoot 'src'
@@ -658,8 +774,12 @@ try {
     $houdiniInfo.WorkingDirectory = $ResolvedRoot
     $houdiniInfo.UseShellExecute = $false
     $houdiniInfo.CreateNoWindow = $false
+    if ($knownHipPath) {
+        $houdiniInfo.Arguments = ConvertTo-HiaProcessArgument -Value $knownHipPath
+    }
     $houdiniEnvironment = @{
         'HOUDINI_PACKAGE_DIR' = $packageDirectory
+        'HOUDINI_BACKUP_DIR' = $sessionCheckpoints
         'HOUDINI_TEMP_DIR' = $sessionTemp
         'HOUDINI_USER_PREF_DIR' = $houdiniPreferences
         'PYTHONPATH' = $houdiniProcessPythonPath -join ';'
@@ -691,9 +811,18 @@ try {
         throw 'Houdini process did not start'
     }
     $houdiniStarted = $true
+    $sessionState['state'] = 'running'
+    $sessionState['houdini_process_id'] = [int]$houdiniProcess.Id
+    Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
     $houdiniProcess.WaitForExit()
     $houdiniExited = $houdiniProcess.HasExited
     $houdiniExitCode = $houdiniProcess.ExitCode
+    $latestCheckpoint = Get-HiaLatestLauncherCheckpoint -CheckpointDirectory $sessionCheckpoints
+    $sessionState['state'] = if ($houdiniExitCode -eq 0) { 'completed' } else { 'abnormal_exit' }
+    $sessionState['ended_at_utc'] = [DateTime]::UtcNow.ToString('o')
+    $sessionState['process_exit_code'] = [int]$houdiniExitCode
+    $sessionState['latest_checkpoint'] = if ($null -eq $latestCheckpoint) { $null } else { [string]$latestCheckpoint.path }
+    Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
 } finally {
     $bridgeCleanupAllowed = (-not $houdiniStarted) -or (
         $houdiniExited -and
@@ -739,6 +868,27 @@ try {
             Write-Warning 'Forced cleanup was refused or failed; no unverified process was targeted.'
         }
     }
+}
+} catch {
+    if ($sessionState['state'] -ne 'completed') {
+        $sessionState['state'] = if ($sessionState['state'] -eq 'running') {
+            'abnormal_exit'
+        } else {
+            'launch_failed'
+        }
+        $sessionState['ended_at_utc'] = [DateTime]::UtcNow.ToString('o')
+        if ($null -ne $houdiniProcess -and $houdiniProcess.HasExited) {
+            try { $sessionState['process_exit_code'] = [int]$houdiniProcess.ExitCode } catch { }
+        }
+        $latestCheckpoint = Get-HiaLatestLauncherCheckpoint -CheckpointDirectory $sessionCheckpoints
+        $sessionState['latest_checkpoint'] = if ($null -eq $latestCheckpoint) { $null } else { [string]$latestCheckpoint.path }
+        try {
+            Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
+        } catch {
+            Write-Warning 'Launcher session failure metadata could not be updated.'
+        }
+    }
+    throw
 }
 
 exit $houdiniExitCode

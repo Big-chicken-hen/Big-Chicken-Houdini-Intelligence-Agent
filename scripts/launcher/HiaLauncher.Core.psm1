@@ -75,6 +75,32 @@ function Get-HiaProjectRoot {
     throw "Unable to derive the project root from launcher path: $StartingPath"
 }
 
+function Get-HiaLauncherArtworkPath {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $suppliedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $resolvedRoot = Get-HiaProjectRoot -StartingPath $suppliedRoot
+    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($suppliedRoot, $resolvedRoot)) {
+        throw 'The artwork path requires the exact launcher project root.'
+    }
+    $artworkPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $resolvedRoot 'assets\launcher\steam-winter-sale.png')
+    )
+    foreach ($pathToCheck in @(
+        $resolvedRoot,
+        (Join-Path $resolvedRoot 'assets'),
+        (Join-Path $resolvedRoot 'assets\launcher'),
+        $artworkPath
+    )) {
+        if (-not (Test-Path -LiteralPath $pathToCheck)) { continue }
+        $item = Get-Item -LiteralPath $pathToCheck -Force -ErrorAction Stop
+        if (([int]$item.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The optional launcher artwork path contains a reparse point.'
+        }
+    }
+    return $artworkPath
+}
+
 function Get-HiaVersionText {
     param(
         [AllowEmptyString()][string]$Text,
@@ -1247,6 +1273,197 @@ function Write-HiaPreflightReport {
     return $Result.report
 }
 
+function Get-HiaLatestLauncherCheckpoint {
+    param([Parameter(Mandatory = $true)][string]$CheckpointDirectory)
+
+    if (-not (Test-Path -LiteralPath $CheckpointDirectory -PathType Container)) { return $null }
+    try {
+        $directory = Get-Item -LiteralPath $CheckpointDirectory -Force -ErrorAction Stop
+        if (
+            ([int]$directory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+        ) {
+            return $null
+        }
+        $candidates = [System.Collections.Generic.List[object]]::new()
+        foreach ($file in @($directory.GetFiles())) {
+            if (
+                ([int]$file.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $file.Name -notmatch '(?i)\.hip(?:lc|nc)?(?:_bak\d*)?$'
+            ) {
+                continue
+            }
+            $candidates.Add([pscustomobject]@{
+                path = $file.FullName
+                last_write_utc_ticks = [long]$file.LastWriteTimeUtc.Ticks
+            })
+        }
+        return @($candidates | Sort-Object -Property last_write_utc_ticks -Descending | Select-Object -First 1)
+    } catch {
+        return $null
+    }
+}
+
+function Get-HiaRecoverableLauncherSession {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $suppliedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $root = Get-HiaProjectRoot -StartingPath $suppliedRoot
+    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($suppliedRoot, $root)) {
+        throw 'Recovery discovery requires the exact launcher project root.'
+    }
+    $sessionsRoot = Join-Path $root '.runtime\launcher-sessions'
+    if (-not (Test-Path -LiteralPath $sessionsRoot -PathType Container)) { return $null }
+
+    try {
+        foreach ($pathToCheck in @($root, (Join-Path $root '.runtime'), $sessionsRoot)) {
+            $item = Get-Item -LiteralPath $pathToCheck -Force -ErrorAction Stop
+            if (([int]$item.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $null
+            }
+        }
+        $sessionsDirectory = Get-Item -LiteralPath $sessionsRoot -Force -ErrorAction Stop
+        $recoverable = [System.Collections.Generic.List[object]]::new()
+        foreach ($sessionDirectory in @($sessionsDirectory.GetDirectories())) {
+            if (
+                $sessionDirectory.Name -notmatch '^[0-9a-fA-F]{32}$' -or
+                ([int]$sessionDirectory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+            ) {
+                continue
+            }
+            $manifestPath = Join-Path $sessionDirectory.FullName 'session.json'
+            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { continue }
+            $manifestFile = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+            if (
+                $null -eq $manifestFile -or
+                ([int]$manifestFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [long]$manifestFile.Length -gt 65536
+            ) {
+                continue
+            }
+            try {
+                $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+            } catch {
+                continue
+            }
+            $idProperty = $manifest.PSObject.Properties['session_id']
+            if (
+                $null -eq $idProperty -or
+                -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                    [string]$idProperty.Value,
+                    $sessionDirectory.Name
+                )
+            ) {
+                continue
+            }
+            $decisionProperty = $manifest.PSObject.Properties['recovery_decision']
+            if ($null -ne $decisionProperty -and -not [string]::IsNullOrWhiteSpace([string]$decisionProperty.Value)) {
+                continue
+            }
+            $stateProperty = $manifest.PSObject.Properties['state']
+            $state = if ($null -eq $stateProperty) { '' } else { [string]$stateProperty.Value }
+            $exitProperty = $manifest.PSObject.Properties['process_exit_code']
+            $exitKnown = ($null -ne $exitProperty -and $null -ne $exitProperty.Value)
+            try { $exitCode = if ($exitKnown) { [int]$exitProperty.Value } else { $null } } catch { continue }
+            if ($state -eq 'completed' -or ($exitKnown -and $exitCode -eq 0)) { continue }
+            if ($state -notin @('starting', 'running', 'abnormal_exit', 'launch_failed') -and -not ($exitKnown -and $exitCode -ne 0)) {
+                continue
+            }
+            if ($state -in @('starting', 'running')) {
+                $recordedProcessIsActive = $false
+                foreach ($processField in @('launcher_process_id', 'houdini_process_id')) {
+                    $processProperty = $manifest.PSObject.Properties[$processField]
+                    if ($null -eq $processProperty -or $null -eq $processProperty.Value) { continue }
+                    try {
+                        $recordedProcess = Get-Process -Id ([int]$processProperty.Value) -ErrorAction Stop
+                        if (-not $recordedProcess.HasExited) {
+                            $recordedProcessIsActive = $true
+                            break
+                        }
+                    } catch { }
+                }
+                if ($recordedProcessIsActive) { continue }
+            }
+            $checkpoint = Get-HiaLatestLauncherCheckpoint `
+                -CheckpointDirectory (Join-Path $sessionDirectory.FullName 'checkpoints')
+            if ($null -eq $checkpoint) { continue }
+
+            $recoverable.Add([pscustomobject]@{
+                session_id = $sessionDirectory.Name
+                checkpoint_path = [string]$checkpoint.path
+                checkpoint_last_write_utc_ticks = [long]$checkpoint.last_write_utc_ticks
+            })
+        }
+        return @(
+            $recoverable |
+                Sort-Object -Property checkpoint_last_write_utc_ticks -Descending |
+                Select-Object -First 1
+        )
+    } catch {
+        return $null
+    }
+}
+
+function Set-HiaLauncherRecoveryDecision {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{32}$')][string]$SessionId,
+        [Parameter(Mandatory = $true)][ValidateSet('recover', 'normal')][string]$Decision
+    )
+
+    $suppliedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $root = Get-HiaProjectRoot -StartingPath $suppliedRoot
+    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($suppliedRoot, $root)) {
+        throw 'Recovery decision requires the exact launcher project root.'
+    }
+    $runtimeRoot = Join-Path $root '.runtime'
+    $sessionsRoot = Join-Path $runtimeRoot 'launcher-sessions'
+    $sessionRoot = Join-Path $sessionsRoot $SessionId
+    $manifestPath = Join-Path $sessionRoot 'session.json'
+    foreach ($pathToCheck in @($root, $runtimeRoot, $sessionsRoot, $sessionRoot, $manifestPath)) {
+        $item = Get-Item -LiteralPath $pathToCheck -Force -ErrorAction Stop
+        if (([int]$item.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Recovery decision path contains a reparse point.'
+        }
+    }
+    $manifestFile = Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
+    if ([long]$manifestFile.Length -gt 65536) { throw 'Recovery session manifest is too large.' }
+    $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+    $idProperty = $manifest.PSObject.Properties['session_id']
+    if (
+        $null -eq $idProperty -or
+        -not [System.StringComparer]::OrdinalIgnoreCase.Equals([string]$idProperty.Value, $SessionId)
+    ) {
+        throw 'Recovery session manifest identity does not match its directory.'
+    }
+
+    $allowedFields = @(
+        'schema_version',
+        'session_id',
+        'state',
+        'selected_houdini',
+        'hip_path',
+        'started_at_utc',
+        'ended_at_utc',
+        'process_exit_code',
+        'latest_checkpoint',
+        'launcher_process_id',
+        'houdini_process_id'
+    )
+    $updated = [ordered]@{}
+    foreach ($field in $allowedFields) {
+        $property = $manifest.PSObject.Properties[$field]
+        if ($null -ne $property) { $updated[$field] = $property.Value }
+    }
+    $updated['recovery_decision'] = $Decision
+    $json = ConvertTo-HiaRedactedJson -Value $updated -Depth 4
+    [System.IO.File]::WriteAllText(
+        $manifestPath,
+        $json + [Environment]::NewLine,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    return $manifestPath
+}
+
 function Read-HiaLauncherSettings {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
@@ -1404,11 +1621,14 @@ Export-ModuleMember -Function @(
     'ConvertTo-HiaRedactedJson',
     'Get-HiaBridgePythonCandidates',
     'Get-HiaHoudiniCandidates',
+    'Get-HiaLauncherArtworkPath',
+    'Get-HiaLatestLauncherCheckpoint',
     'Get-HiaMcpBackendChoices',
     'Get-HiaOverallLevel',
     'Get-HiaPinnedCodexExecutable',
     'Get-HiaProjectRoot',
     'Get-HiaProbePayload',
+    'Get-HiaRecoverableLauncherSession',
     'Invoke-HiaScreenshotCacheCleanup',
     'Invoke-HiaPreflight',
     'Invoke-HiaProcess',
@@ -1416,6 +1636,7 @@ Export-ModuleMember -Function @(
     'Repair-HiaSafeProject',
     'Resolve-HiaRenderOutputDirectory',
     'Resolve-HiaMcpBackend',
+    'Set-HiaLauncherRecoveryDecision',
     'Test-HiaHoudiniProbeConsistency',
     'Test-HiaLoopbackPorts',
     'Test-HiaRuntimeWritable',

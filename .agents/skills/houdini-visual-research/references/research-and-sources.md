@@ -4,6 +4,14 @@ Use external research when it materially affects technique or visual fidelity. F
 
 Research is required when the user names or links a ShaderToy, GLSL example, paper, tutorial, website, artist, project, named effect, or reference image, and when current Houdini/version limitations could change the decision.
 
+## Research depth
+
+- `none`: Use for a simple, deterministic operation or a known parameter read when external evidence would not change the result.
+- `light`: Use focused current sources for a familiar visual task when a small technique, renderer, or version check can improve the implementation.
+- `deep`: Search iteratively and cross-check multiple high-quality sources for ShaderToy/GLSL, papers, unfamiliar techniques, ambiguous references, or uncertain Houdini/version behavior.
+
+Treat these as semantic reasoning labels, not fixed search counts, time budgets, or approval gates. Change depth as evidence develops.
+
 ## Source order
 
 1. Current SideFX documentation and official SideFX tutorials for Houdini behavior.

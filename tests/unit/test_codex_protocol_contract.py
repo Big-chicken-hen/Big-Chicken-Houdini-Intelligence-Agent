@@ -233,6 +233,73 @@ class CodexProtocolContractTests(unittest.TestCase):
             with self.subTest(method=notification, category=category):
                 self.assertNotIn(notification, self.allowed_methods(category))
 
+    def test_native_thread_goal_methods_and_notifications_are_exact(self) -> None:
+        requests = {
+            entry["method"]: entry
+            for entry in self.allowlist["allowed"]["client_requests"]
+        }
+        expected_requests = {
+            "thread/goal/get": (
+                "ThreadGoalGetParams",
+                "v2/ThreadGoalGetResponse.json",
+            ),
+            "thread/goal/set": (
+                "ThreadGoalSetParams",
+                "v2/ThreadGoalSetResponse.json",
+            ),
+            "thread/goal/clear": (
+                "ThreadGoalClearParams",
+                "v2/ThreadGoalClearResponse.json",
+            ),
+        }
+        inventory_requests = {
+            entry["method"]: entry
+            for entry in self.inventory["aggregates"]["client_requests"]["methods"]
+        }
+        for method, (params_definition, response_schema) in expected_requests.items():
+            self.assertEqual(params_definition, requests[method]["params_definition"])
+            self.assertEqual(response_schema, requests[method]["response_schema"])
+            self.assertEqual("thread-goal", requests[method]["purpose"])
+            self.assertFalse(inventory_requests[method]["declared_experimental"])
+
+        notifications = {
+            entry["method"]: entry
+            for entry in self.allowlist["allowed"]["server_notifications"]
+        }
+        expected_notifications = {
+            "thread/goal/updated": "ThreadGoalUpdatedNotification",
+            "thread/goal/cleared": "ThreadGoalClearedNotification",
+        }
+        inventory_notifications = {
+            entry["method"]: entry
+            for entry in self.inventory["aggregates"]["server_notifications"]["methods"]
+        }
+        for method, params_definition in expected_notifications.items():
+            self.assertEqual(
+                params_definition, notifications[method]["params_definition"]
+            )
+            self.assertEqual("thread-goal", notifications[method]["purpose"])
+            self.assertFalse(inventory_notifications[method]["declared_experimental"])
+
+        schema_root = REPOSITORY_ROOT / "schemas" / "codex-app-server" / "0.144.3"
+        set_params = json.loads(
+            (schema_root / "v2" / "ThreadGoalSetParams.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(["threadId"], set_params["required"])
+        self.assertEqual(
+            {
+                "active",
+                "paused",
+                "blocked",
+                "usageLimited",
+                "budgetLimited",
+                "complete",
+            },
+            set(set_params["definitions"]["ThreadGoalStatus"]["enum"]),
+        )
+
     def test_initialized_notification_is_exact(self) -> None:
         self.assertEqual(
             CORE_CLIENT_NOTIFICATIONS,

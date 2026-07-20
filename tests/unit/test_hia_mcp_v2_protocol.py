@@ -132,6 +132,17 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("category plus a bare node_type", help_description)
         self.assertIn('node_type="category/name"', help_description)
 
+        execute_tool = next(
+            item for item in response["result"]["tools"] if item["name"] == "hia_execute_hom"
+        )
+        execute_description = execute_tool["description"].casefold()
+        execute_properties = execute_tool["inputSchema"]["properties"]
+        self.assertIn("targeted", execute_description)
+        self.assertIn("must not be retried automatically", execute_description)
+        self.assertIn("checkpoint", execute_description)
+        self.assertIn("diff_paths", execute_properties)
+        self.assertIn("checkpoint_label", execute_properties)
+
         codex_response = adapter.handle_message(
             rpc(3, "tools/list", {"_meta": {"progressToken": "inventory"}})
         )

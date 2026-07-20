@@ -61,6 +61,7 @@ class RecordingTransport:
             self.release.set()
         self._condition = threading.Condition()
         self.calls: list[int | str] = []
+        self.queue_seconds: dict[int | str, float] = {}
         self.cancelled: list[int | str] = []
         self.active = 0
         self.peak_active = 0
@@ -76,6 +77,7 @@ class RecordingTransport:
     ) -> Mapping[str, Any]:
         with self._condition:
             self.calls.append(request_id)
+            self.queue_seconds[request_id] = cancellation.stdio_queue_seconds
             self.active += 1
             self.peak_active = max(self.peak_active, self.active)
             self._condition.notify_all()
@@ -259,6 +261,7 @@ class HiaMcpV2StdioQueueTests(unittest.TestCase):
         )
 
     def test_burst_sixteen_calls_drains_at_eof_with_two_worker_peak(self) -> None:
+        self.assertEqual(2, MAX_CALL_WORKERS)
         transport = RecordingTransport(delay=0.02)
         transcript = [
             initialize_message(),
@@ -279,6 +282,7 @@ class HiaMcpV2StdioQueueTests(unittest.TestCase):
         self.assertTrue(all("error" not in message for message in calls))
         self.assertEqual(16, len(transport.calls))
         self.assertLessEqual(transport.peak_active, MAX_CALL_WORKERS)
+        self.assertGreater(transport.queue_seconds[102], 0.0)
         self.assertTrue(transport.closed)
         self.assertFalse(
             any(thread.name.startswith("hia-mcp-v2-call-") for thread in threading.enumerate())
@@ -307,14 +311,23 @@ class HiaMcpV2StdioQueueTests(unittest.TestCase):
         transport.release.set()
         session.finish()
         cancelled = next(message for message in session.output.messages() if message.get("id") == 12)
+        structured_error = cancelled["result"]["structuredContent"]["structured_error"]
         self.assertEqual(
             "CANCELLED_BEFORE_EXECUTION",
-            cancelled["result"]["structuredContent"]["structured_error"]["code"],
+            structured_error["code"],
         )
+        self.assertEqual("stdio_queue", structured_error["details"]["stage"])
+        self.assertFalse(structured_error["details"]["request_submitted"])
+        self.assertEqual(
+            "not_submitted",
+            structured_error["details"]["submission_state"],
+        )
+        self.assertFalse(structured_error["details"]["hom_may_still_execute"])
         self.assertNotIn(12, transport.calls)
         self.assertIn(12, transport.cancelled)
 
     def test_pending_capacity_rejects_only_the_request_beyond_the_real_queue(self) -> None:
+        self.assertEqual(32, MAX_PENDING_CALLS)
         transport = RecordingTransport(gated=True)
         session = LiveStdioSession(transport)
         self.addCleanup(transport.release.set)

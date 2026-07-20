@@ -225,13 +225,15 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_execute_hom",
         "hom_execution",
-        "Execute one Codex-generated Python/HOM batch in the current Houdini UI main thread. Use this for complete modeling, materials, animation, Solaris, Karma, rendering, or cache networks instead of many micro tool calls. Set hia_result and call hia_mark_changed(path) for richer structured output.",
+        "Execute one Codex-generated Python/HOM batch in the current Houdini UI main thread. Default diffing is targeted: predeclare exact diff_paths or call hia_mark_changed(path) before the first edit; only an explicit diff_root_path expands to a bounded network scan. timeout_seconds is a client wait budget, not a HOM kill deadline; a timeout after network I/O begins may have unknown execution state and must not be retried automatically. An optional checkpoint_label saves one Houdini backup only after a confirmed successful change.",
         _object(
             {
                 "script": {"type": "string", "minLength": 1, "maxLength": 524_288},
                 "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300, "default": 60},
                 "capture_diff": {"type": "boolean", "default": True},
+                "diff_paths": PATHS,
                 "diff_root_path": PATH,
+                "checkpoint_label": {"type": "string", "maxLength": 128},
             },
             required=("script",),
         ),
@@ -254,7 +256,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_capture_viewport",
         "visual_feedback",
-        "Capture the current viewport or a bounded flipbook only when visual verification is needed. Returns MCP image content when small enough, otherwise a path under HIA_CACHE_DIR/screenshots.",
+        "Capture the current viewport or a bounded flipbook only when visual verification is needed. Restores the original camera/view state, does not open MPlay or take focus, and returns dimensions read from the produced PNG. Images stay under HIA_CACHE_DIR/screenshots.",
         _object(
             {
                 "mode": {"type": "string", "enum": ["viewport", "flipbook"], "default": "viewport"},
@@ -274,7 +276,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_local_help_search",
         "local_documentation",
-        "Search high-signal snippets from the installed Houdini node catalog/help and project Houdini skills/references. This is local-only; web research remains Codex's responsibility.",
+        "Search high-signal snippets from the current installed Houdini catalog/help and published project skills, references, and current docs. Heavy file scanning runs outside the Houdini UI thread; historical Gate material and test reports are excluded by default. This is local-only; web research remains Codex's responsibility.",
         _object(
             {
                 "query": {"type": "string", "minLength": 2, "maxLength": 256},

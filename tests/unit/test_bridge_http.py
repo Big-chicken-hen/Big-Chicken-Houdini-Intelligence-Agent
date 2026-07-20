@@ -259,6 +259,33 @@ class BridgeHTTPTests(unittest.TestCase):
             renamed["result"]["receivedParams"],
         )
 
+    def test_native_goal_routes_use_the_selected_thread(self) -> None:
+        self.request("POST", "/v1/session", {"action": "start"})
+
+        empty = self.request("GET", "/v1/goal?thread_id=thread-fake")
+        saved = self.request(
+            "POST",
+            "/v1/goal",
+            {
+                "action": "set",
+                "thread_id": "thread-fake",
+                "objective": "完成当前木屋任务",
+                "status": "active",
+                "token_budget": 25_000,
+            },
+        )
+        cleared = self.request(
+            "POST",
+            "/v1/goal",
+            {"action": "clear", "thread_id": "thread-fake"},
+        )
+
+        self.assertIsNone(empty["goal"])
+        self.assertEqual("thread-fake", saved["thread_id"])
+        self.assertEqual("完成当前木屋任务", saved["goal"]["objective"])
+        self.assertEqual(25_000, saved["goal"]["tokenBudget"])
+        self.assertTrue(cleared["cleared"])
+
     def test_unicode_model_effort_and_service_tier_are_forwarded_without_loss(
         self,
     ) -> None:

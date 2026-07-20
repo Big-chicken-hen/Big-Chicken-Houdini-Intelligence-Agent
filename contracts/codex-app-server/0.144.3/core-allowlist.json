@@ -52,6 +52,24 @@
         "purpose": "thread-history"
       },
       {
+        "method": "thread/goal/get",
+        "params_definition": "ThreadGoalGetParams",
+        "response_schema": "v2/ThreadGoalGetResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/set",
+        "params_definition": "ThreadGoalSetParams",
+        "response_schema": "v2/ThreadGoalSetResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/clear",
+        "params_definition": "ThreadGoalClearParams",
+        "response_schema": "v2/ThreadGoalClearResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
         "method": "thread/start",
         "params_definition": "ThreadStartParams",
         "response_schema": "v2/ThreadStartResponse.json"
@@ -148,6 +166,16 @@
         "method": "thread/name/updated",
         "params_definition": "ThreadNameUpdatedNotification",
         "purpose": "thread-history"
+      },
+      {
+        "method": "thread/goal/updated",
+        "params_definition": "ThreadGoalUpdatedNotification",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/cleared",
+        "params_definition": "ThreadGoalClearedNotification",
+        "purpose": "thread-goal"
       },
       {
         "method": "thread/status/changed",

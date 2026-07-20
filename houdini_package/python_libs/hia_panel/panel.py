@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 import sys
+import time
 import uuid
 from collections import deque
 from datetime import datetime
@@ -40,6 +41,9 @@ _MODELS_CONTEXT = "models"
 _THREADS_CONTEXT = "threads"
 _THREAD_READ_CONTEXT_PREFIX = "thread_read:"
 _THREAD_RENAME_CONTEXT_PREFIX = "thread_rename:"
+_GOAL_GET_CONTEXT = "goal_get"
+_GOAL_SET_CONTEXT = "goal_set"
+_GOAL_CLEAR_CONTEXT = "goal_clear"
 _AUTO_RESUME_CONTEXT = "session_auto_resume"
 _CODEX_DEFAULT_LABEL = "Codex 默认"
 _CODEX_STANDARD_TIER_LABEL = "标准"
@@ -51,12 +55,27 @@ _SCENE_IDLE_POLL_MS = 100
 _STOP_RECONCILE_DELAY_MS = 2_500
 _RECONNECT_DELAYS_MS = (500, 1_000, 2_000, 4_000, 8_000)
 _RECONNECTABLE_ERROR_CODES = frozenset({"NETWORK_ERROR", "NETWORK_TIMEOUT"})
+_SESSION_WAIT_TIMEOUT_CODES = frozenset(
+    {"NETWORK_TIMEOUT", "CODEX_REQUEST_TIMEOUT"}
+)
 _MAX_TURN_IMAGES = 16
 _LONG_THREAD_WARNING = (
     "当前对话较长，早期细节可能逐渐减少。开始不同任务时建议新建 Thread。"
 )
 _COMPACTION_NOTICE = "Codex 已自动整理较早的对话内容。"
 _DEFAULT_MCP_BACKEND = "hia_v2"
+_GOAL_OBJECTIVE_MAX_LENGTH = 4_000
+_GOAL_STATUSES = (
+    ("进行中", "active"),
+    ("已暂停", "paused"),
+    ("已阻塞", "blocked"),
+    ("用量受限", "usageLimited"),
+    ("预算受限", "budgetLimited"),
+    ("已完成", "complete"),
+)
+_TEAM_RECORD_LIMIT = 32
+_TEAM_EVENT_LIMIT = 24
+_TEAM_TEXT_LIMIT = 65_536
 _MCP_BACKEND_PRESENTATION = {
     "hia_v2": ("HIA MCP V2", "HIA MCP V2 当前 Houdini 会话状态"),
     "fxhoudini": (
@@ -110,6 +129,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._thread_history: list[dict[str, Any]] = []
         self._auto_restore_attempted = False
         self._initial_thread_read_requested = False
+        self._goal_action_context: str | None = None
+        self._team_records: dict[str, dict[str, Any]] = {}
+        self._turn_performance_token: TurnStateToken | None = None
+        self._turn_performance_marks: dict[str, float] = {}
         self._reconnect_attempt = 0
         self._reconnecting = False
         self._reconnect_exhausted_notice_shown = False
@@ -263,30 +286,49 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         session_row.addWidget(self.service_tier_combo)
         root.addLayout(session_row)
 
-        thread_row = QtWidgets.QHBoxLayout()
-        thread_row.addWidget(QtWidgets.QLabel("历史会话"))
+        self.main_splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Horizontal, self
+        )
+        self.main_splitter.setObjectName("mainThreeColumnSplitter")
+        left_column = QtWidgets.QWidget(self.main_splitter)
+        left_layout = QtWidgets.QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(QtWidgets.QLabel("历史任务"))
         self.history_combo = QtWidgets.QComboBox()
         self.history_combo.addItem("暂无历史会话", None)
-        self.history_combo.setMinimumWidth(280)
+        self.history_combo.setMinimumWidth(210)
         self.history_combo.setToolTip("当前项目最近 20 条未归档 Codex 会话")
+        left_layout.addWidget(self.history_combo)
+        history_action_row = QtWidgets.QHBoxLayout()
         self.refresh_threads_button = QtWidgets.QPushButton("刷新")
+        self.new_thread_button = QtWidgets.QPushButton("新建")
+        self.resume_thread_button = QtWidgets.QPushButton("打开")
+        history_action_row.addWidget(self.refresh_threads_button)
+        history_action_row.addWidget(self.new_thread_button)
+        history_action_row.addWidget(self.resume_thread_button)
+        left_layout.addLayout(history_action_row)
         self.thread_name_edit = QtWidgets.QLineEdit()
         self.thread_name_edit.setPlaceholderText("会话名称")
-        self.thread_name_edit.setMaximumWidth(180)
+        left_layout.addWidget(self.thread_name_edit)
+        history_name_row = QtWidgets.QHBoxLayout()
         self.rename_thread_button = QtWidgets.QPushButton("重命名")
         self.copy_thread_id_button = QtWidgets.QPushButton("复制 ID")
+        history_name_row.addWidget(self.rename_thread_button)
+        history_name_row.addWidget(self.copy_thread_id_button)
+        left_layout.addLayout(history_name_row)
         self.thread_id_edit = QtWidgets.QLineEdit()
         self.thread_id_edit.setVisible(False)
-        self.new_thread_button = QtWidgets.QPushButton("新建 Thread")
-        self.resume_thread_button = QtWidgets.QPushButton("打开")
-        thread_row.addWidget(self.history_combo, 1)
-        thread_row.addWidget(self.refresh_threads_button)
-        thread_row.addWidget(self.thread_name_edit)
-        thread_row.addWidget(self.rename_thread_button)
-        thread_row.addWidget(self.copy_thread_id_button)
-        thread_row.addWidget(self.new_thread_button)
-        thread_row.addWidget(self.resume_thread_button)
-        root.addLayout(thread_row)
+        left_layout.addWidget(self.thread_id_edit)
+        left_layout.addStretch(1)
+
+        center_column = QtWidgets.QWidget(self.main_splitter)
+        center_layout = QtWidgets.QVBoxLayout(center_column)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+
+        right_column = QtWidgets.QWidget(self.main_splitter)
+        right_column.setMinimumWidth(260)
+        right_layout = QtWidgets.QVBoxLayout(right_column)
+        right_layout.setContentsMargins(0, 0, 0, 0)
 
         self.welcome_group = QtWidgets.QFrame()
         self.welcome_group.setObjectName("welcomeCard")
@@ -322,12 +364,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             prompt_grid.addWidget(button, index // 3, index % 3)
             self._welcome_buttons.append(button)
         welcome_layout.addLayout(prompt_grid)
-        root.addWidget(self.welcome_group)
+        center_layout.addWidget(self.welcome_group)
 
         self.conversation = ConversationView(self)
         if hasattr(self.conversation, "newThreadRequested"):
             self.conversation.newThreadRequested.connect(self._new_thread)
-        root.addWidget(self.conversation, 1)
+        center_layout.addWidget(self.conversation, 1)
 
         self.approval_group = QtWidgets.QGroupBox("审批请求")
         approval_layout = QtWidgets.QVBoxLayout(self.approval_group)
@@ -363,7 +405,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         approval_buttons.addWidget(self.deny_button)
         approval_layout.addLayout(approval_buttons)
         self.approval_group.setVisible(False)
-        root.addWidget(self.approval_group)
+        center_layout.addWidget(self.approval_group)
 
         selection_row = QtWidgets.QHBoxLayout()
         self.selection_label = QtWidgets.QLabel("当前选择：无")
@@ -372,16 +414,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.include_selection_checkbox.setChecked(False)
         selection_row.addWidget(self.selection_label, 1)
         selection_row.addWidget(self.include_selection_checkbox)
-        root.addLayout(selection_row)
+        center_layout.addLayout(selection_row)
 
         self.attachment_strip = AttachmentStrip(self)
-        root.addWidget(self.attachment_strip)
+        center_layout.addWidget(self.attachment_strip)
 
         self.input_edit = ExpandableTextEdit(self)
         self.input_edit.setPlaceholderText(
             "输入自然语言请求；Enter 换行，Ctrl+Enter 发送。"
         )
-        root.addWidget(self.input_edit)
+        center_layout.addWidget(self.input_edit)
 
         action_row = QtWidgets.QHBoxLayout()
         self.add_image_button = QtWidgets.QPushButton("添加图片")
@@ -396,7 +438,68 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         action_row.addStretch(1)
         action_row.addWidget(self.send_button)
         action_row.addWidget(self.stop_button)
-        root.addLayout(action_row)
+        center_layout.addLayout(action_row)
+
+        self.goal_group = QtWidgets.QGroupBox("Goal")
+        goal_layout = QtWidgets.QVBoxLayout(self.goal_group)
+        self.goal_objective_edit = QtWidgets.QPlainTextEdit()
+        self.goal_objective_edit.setPlaceholderText("当前任务的原生 Codex Goal")
+        self.goal_objective_edit.setMaximumHeight(110)
+        goal_layout.addWidget(self.goal_objective_edit)
+        goal_state_row = QtWidgets.QHBoxLayout()
+        goal_state_row.addWidget(QtWidgets.QLabel("状态"))
+        self.goal_status_combo = QtWidgets.QComboBox()
+        for label, value in _GOAL_STATUSES:
+            self.goal_status_combo.addItem(label, value)
+        goal_state_row.addWidget(self.goal_status_combo, 1)
+        self.goal_budget_edit = QtWidgets.QLineEdit()
+        self.goal_budget_edit.setPlaceholderText("Token 预算（可选）")
+        goal_state_row.addWidget(self.goal_budget_edit)
+        goal_layout.addLayout(goal_state_row)
+        self.goal_metrics_label = QtWidgets.QLabel("尚未读取 Goal")
+        self.goal_metrics_label.setWordWrap(True)
+        goal_layout.addWidget(self.goal_metrics_label)
+        goal_button_row = QtWidgets.QHBoxLayout()
+        self.goal_refresh_button = QtWidgets.QPushButton("刷新")
+        self.goal_save_button = QtWidgets.QPushButton("保存")
+        self.goal_clear_button = QtWidgets.QPushButton("清除")
+        goal_button_row.addWidget(self.goal_refresh_button)
+        goal_button_row.addWidget(self.goal_save_button)
+        goal_button_row.addWidget(self.goal_clear_button)
+        goal_layout.addLayout(goal_button_row)
+        right_layout.addWidget(self.goal_group)
+
+        self.team_group = QtWidgets.QGroupBox("团队")
+        team_layout = QtWidgets.QVBoxLayout(self.team_group)
+        self.team_combo = QtWidgets.QComboBox()
+        self.team_combo.addItem("暂无子任务", None)
+        self.team_combo.setToolTip("仅显示原生子任务的可观察事件")
+        team_layout.addWidget(self.team_combo)
+        self.team_details_text = QtWidgets.QPlainTextEdit()
+        self.team_details_text.setReadOnly(True)
+        self.team_details_text.setPlaceholderText(
+            "选择子任务后查看任务、状态、工具、错误与公开回复。"
+        )
+        team_layout.addWidget(self.team_details_text, 1)
+        right_layout.addWidget(self.team_group, 1)
+
+        self.performance_group = QtWidgets.QGroupBox("本次 Turn 用时")
+        performance_layout = QtWidgets.QVBoxLayout(self.performance_group)
+        self.performance_label = QtWidgets.QLabel(
+            "发送 → ACK：—\nACK → 首个文本：—\n首个文本 → 完成：—"
+        )
+        self.performance_label.setWordWrap(True)
+        performance_layout.addWidget(self.performance_label)
+        right_layout.addWidget(self.performance_group)
+
+        self.main_splitter.addWidget(left_column)
+        self.main_splitter.addWidget(center_column)
+        self.main_splitter.addWidget(right_column)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setStretchFactor(2, 0)
+        self.main_splitter.setSizes([230, 720, 300])
+        root.addWidget(self.main_splitter, 1)
 
         self.new_thread_button.clicked.connect(self._new_thread)
         self.resume_thread_button.clicked.connect(self._resume_thread)
@@ -420,6 +523,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.history_combo.currentIndexChanged.connect(
             self._on_history_index_changed
         )
+        self.goal_refresh_button.clicked.connect(self._request_goal)
+        self.goal_save_button.clicked.connect(self._save_goal)
+        self.goal_clear_button.clicked.connect(self._clear_goal)
+        self.team_combo.currentIndexChanged.connect(self._on_team_selected)
         self.history_combo.activated.connect(self._resume_history_selection)
         self.refresh_threads_button.clicked.connect(self._refresh_threads)
         self.rename_thread_button.clicked.connect(self._rename_thread)
@@ -490,6 +597,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         label = getattr(self, "houdini_connection_label", None)
         if label is not None:
             self._set_status_indicator(label, "Houdini", "已连接", True)
+        if self._mcp_backend != "fxhoudini":
+            return
         profile = os.environ.get("HIA_SCENE_PROFILE", "")
         launch_id = os.environ.get("HIA_BRIDGE_LAUNCH_ID", "")
         generation = os.environ.get("HIA_BRIDGE_GENERATION", "")
@@ -619,7 +728,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _start_houdini_read_loop(self) -> None:
         if (
-            self._houdini_polling_enabled
+            self._mcp_backend != "fxhoudini"
+            or self._houdini_polling_enabled
             or self._houdini_adapter is None
             or self._client is None
         ):
@@ -838,17 +948,24 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             or self._turn_start_request_pending
             or bool(self._reconciliation_tokens)
         )
+        thread_switch_enabled = (
+            session_enabled and self._goal_action_context is None
+        )
         request_ready = session_enabled and not self._turn_steer_request_pending
         stopping = self._is_stopping_turn()
         steer_available = controls.stop and not stopping
         history_record = self._selected_history_record()
         history_available = history_record is not None
-        self.new_thread_button.setEnabled(controls.new_thread and session_enabled)
+        self.new_thread_button.setEnabled(
+            controls.new_thread and thread_switch_enabled
+        )
         self.resume_thread_button.setEnabled(
-            controls.resume_thread and session_enabled and history_available
+            controls.resume_thread and thread_switch_enabled and history_available
         )
         self.history_combo.setEnabled(
-            self._connected and not self._turn_state.busy and session_enabled
+            self._connected
+            and not self._turn_state.busy
+            and thread_switch_enabled
         )
         self.refresh_threads_button.setEnabled(
             self._connected and not self._session_action_pending
@@ -883,7 +1000,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 )
             )
         )
-        self.thread_id_edit.setEnabled(not self._turn_state.busy and session_enabled)
+        self.thread_id_edit.setEnabled(
+            not self._turn_state.busy and thread_switch_enabled
+        )
         selection_enabled = (
             self._connected
             and not self._turn_state.busy
@@ -918,6 +1037,24 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         attachment_strip = getattr(self, "attachment_strip", None)
         if attachment_strip is not None:
             attachment_strip.setEnabled(composer_enabled)
+        goal_enabled = (
+            self._connected
+            and isinstance(self._selected_thread_id, str)
+            and self._goal_action_context is None
+            and not self._session_action_pending
+            and not self._turn_state.busy
+        )
+        for name in (
+            "goal_objective_edit",
+            "goal_status_combo",
+            "goal_budget_edit",
+            "goal_refresh_button",
+            "goal_save_button",
+            "goal_clear_button",
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(goal_enabled)
 
     @QtCore.Slot(dict)
     def _on_health(self, payload: dict[str, Any]) -> None:
@@ -970,6 +1107,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._append_system("已重新连接；已同步会话状态，不会自动重放 Turn。")
         else:
             self._request_initial_thread_read()
+        if isinstance(self._selected_thread_id, str):
+            self._request_goal()
         self._start_houdini_read_loop()
 
     @QtCore.Slot(dict)
@@ -998,6 +1137,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         turn_id = session.get("turn_id")
         turn_status = session.get("turn_status")
         turn_active = session.get("turn_active")
+        previous_thread_id = self._selected_thread_id
+        selected_thread_changed = False
         state_applied = True
         if isinstance(turn_active, bool):
             if isinstance(thread_id, str) and thread_id:
@@ -1045,16 +1186,30 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._stream_thread_id = None
                 self._stream_turn_id = None
                 self._clear_diagnostic_context()
+            if previous_thread_id != thread_id:
+                selected_thread_changed = True
+                self._goal_action_context = None
+                self._clear_goal_display()
+                self._team_records.clear()
+                self._refresh_team_combo()
+                self._clear_turn_performance()
             self._selected_thread_id = thread_id
             self.thread_id_edit.setText(thread_id)
             self.thread_status_label.setText(
                 f"Thread：{self._history_title(thread_id)}"
             )
         elif state_applied and not self._turn_state.busy:
+            selected_thread_changed = previous_thread_id is not None
+            self._goal_action_context = None
             self._selected_thread_id = None
+            self._clear_goal_display()
+            self._team_records.clear()
+            self._refresh_team_combo()
             self.thread_id_edit.setText("")
             self.thread_status_label.setText("Thread：未选择")
             self._clear_diagnostic_context()
+            if selected_thread_changed:
+                self._clear_turn_performance()
 
         if (
             state_applied
@@ -1099,6 +1254,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 )
         elif not state_applied and allow_followup:
             self._request_session_reconciliation("session_conflict")
+        if selected_thread_changed and isinstance(self._selected_thread_id, str):
+            self._request_goal()
         self._refresh_controls()
         return state_applied
 
@@ -2060,6 +2217,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if (
             self._client is not None
             and not self._turn_state.busy
+            and self._goal_action_context is None
             and not self._session_action_pending
             and not self._turn_start_request_pending
             and not self._reconciliation_tokens
@@ -2116,6 +2274,350 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self.thread_status_label.setText(
                 f"Thread：{normalized_name or self._history_title(thread_id)}"
             )
+
+    def _request_goal(self) -> None:
+        thread_id = self._selected_thread_id
+        if (
+            self._client is None
+            or not self._connected
+            or self._session_action_pending
+            or self._goal_action_context is not None
+            or not isinstance(thread_id, str)
+        ):
+            return
+        self._goal_action_context = _GOAL_GET_CONTEXT
+        self._refresh_controls()
+        self._client.get_goal(thread_id)
+
+    def _clear_goal_display(self, text: str = "尚未读取 Goal") -> None:
+        objective = getattr(self, "goal_objective_edit", None)
+        if objective is not None:
+            objective.setPlainText("")
+        budget = getattr(self, "goal_budget_edit", None)
+        if budget is not None:
+            budget.setText("")
+        metrics = getattr(self, "goal_metrics_label", None)
+        if metrics is not None:
+            metrics.setText(text)
+
+    def _save_goal(self) -> None:
+        thread_id = self._selected_thread_id
+        if (
+            self._client is None
+            or self._session_action_pending
+            or self._goal_action_context is not None
+            or not isinstance(thread_id, str)
+        ):
+            return
+        objective = self.goal_objective_edit.toPlainText().strip()
+        if not objective:
+            self._append_system("Goal 目标不能为空；如需移除请使用“清除”。")
+            return
+        if len(objective) > _GOAL_OBJECTIVE_MAX_LENGTH:
+            self._append_system(
+                f"Goal 目标不能超过 {_GOAL_OBJECTIVE_MAX_LENGTH} 个字符。"
+            )
+            return
+        status = self.goal_status_combo.currentData()
+        if not isinstance(status, str):
+            return
+        budget_text = self.goal_budget_edit.text().strip()
+        token_budget: int | None = None
+        if budget_text:
+            try:
+                token_budget = int(budget_text)
+            except ValueError:
+                self._append_system("Goal Token 预算必须是正整数。")
+                return
+            if token_budget <= 0:
+                self._append_system("Goal Token 预算必须是正整数。")
+                return
+        self._goal_action_context = _GOAL_SET_CONTEXT
+        self._refresh_controls()
+        self._client.set_goal(
+            objective,
+            status,
+            thread_id=thread_id,
+            token_budget=token_budget,
+        )
+
+    def _clear_goal(self) -> None:
+        thread_id = self._selected_thread_id
+        if (
+            self._client is None
+            or self._session_action_pending
+            or self._goal_action_context is not None
+            or not isinstance(thread_id, str)
+        ):
+            return
+        self._goal_action_context = _GOAL_CLEAR_CONTEXT
+        self._refresh_controls()
+        self._client.clear_goal(thread_id)
+
+    def _apply_goal(self, thread_id: Any, raw_goal: Any) -> bool:
+        if thread_id != self._selected_thread_id:
+            return False
+        if raw_goal is None:
+            self._clear_goal_display("当前 Thread 未设置 Goal")
+            return True
+        if not isinstance(raw_goal, dict):
+            return False
+        goal_thread_id = raw_goal.get("threadId")
+        objective = raw_goal.get("objective")
+        status = raw_goal.get("status")
+        if (
+            goal_thread_id != thread_id
+            or not isinstance(objective, str)
+            or not isinstance(status, str)
+        ):
+            return False
+        status_index = self.goal_status_combo.findData(status)
+        if status_index < 0:
+            return False
+        self.goal_objective_edit.setPlainText(objective)
+        self.goal_status_combo.setCurrentIndex(status_index)
+        token_budget = raw_goal.get("tokenBudget")
+        self.goal_budget_edit.setText(
+            str(token_budget) if isinstance(token_budget, int) else ""
+        )
+        tokens_used = raw_goal.get("tokensUsed")
+        time_used = raw_goal.get("timeUsedSeconds")
+        metrics = []
+        if isinstance(tokens_used, int):
+            metrics.append(f"已用 {tokens_used:,} tokens")
+        if isinstance(time_used, int):
+            metrics.append(f"已用 {time_used}s")
+        self.goal_metrics_label.setText(" · ".join(metrics) or "Codex 原生 Goal")
+        return True
+
+    @staticmethod
+    def _bounded_team_text(value: Any, limit: int = _TEAM_TEXT_LIMIT) -> str:
+        if not isinstance(value, str):
+            return ""
+        cleaned = "".join(
+            " " if ord(character) < 32 and character not in "\n\t" else character
+            for character in value
+        ).strip()
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[:limit] + "\n[…内容过长，已截断显示…]"
+
+    def _team_source_is_current(self, thread_id: Any) -> bool:
+        root_thread_id = self._selected_thread_id
+        if not isinstance(root_thread_id, str) or not root_thread_id:
+            return False
+        if thread_id == root_thread_id:
+            return True
+        record = self._team_records.get(thread_id)
+        return (
+            isinstance(record, dict)
+            and record.get("root_thread_id") == root_thread_id
+        )
+
+    def _team_record(
+        self,
+        thread_id: Any,
+        *,
+        source_thread_id: Any,
+    ) -> dict[str, Any] | None:
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id
+            or thread_id == self._selected_thread_id
+            or not self._team_source_is_current(source_thread_id)
+        ):
+            return None
+        record = self._team_records.get(thread_id)
+        if record is not None:
+            return (
+                record
+                if record.get("root_thread_id") == self._selected_thread_id
+                else None
+            )
+        if len(self._team_records) >= _TEAM_RECORD_LIMIT:
+            stale_id = next(iter(self._team_records))
+            self._team_records.pop(stale_id, None)
+        record = {
+            "root_thread_id": self._selected_thread_id,
+            "task": "",
+            "status": "pendingInit",
+            "path": "",
+            "message": "",
+            "events": [],
+        }
+        self._team_records[thread_id] = record
+        return record
+
+    def _team_note(self, record: dict[str, Any], text: Any) -> None:
+        rendered = self._bounded_team_text(text, 2_000)
+        if rendered:
+            record["events"] = (record.get("events", []) + [rendered])[
+                -_TEAM_EVENT_LIMIT:
+            ]
+
+    def _refresh_team_combo(self) -> None:
+        combo = getattr(self, "team_combo", None)
+        if combo is None:
+            return
+        selected = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        selected_index = 0
+        if not self._team_records:
+            combo.addItem("暂无子任务", None)
+        else:
+            for thread_id in self._team_records:
+                record = self._team_records.get(thread_id, {})
+                status = record.get("status") or "unknown"
+                title = record.get("path") or record.get("task")
+                title = self._bounded_team_text(title, 48) or thread_id[-8:]
+                combo.addItem(f"{title} · {status}", thread_id)
+                if thread_id == selected:
+                    selected_index = combo.count() - 1
+        combo.setCurrentIndex(selected_index)
+        combo.blockSignals(False)
+        self._render_team_details(combo.currentData())
+
+    def _render_team_details(self, thread_id: Any) -> None:
+        details = getattr(self, "team_details_text", None)
+        if details is None:
+            return
+        record = self._team_records.get(thread_id)
+        if not isinstance(record, dict):
+            details.setPlainText("")
+            return
+        lines = [
+            f"任务：{record.get('task') or '协议未提供'}",
+            f"状态：{record.get('status') or 'unknown'}",
+            f"路径：{record.get('path') or '未提供'}",
+        ]
+        events = record.get("events")
+        if isinstance(events, list) and events:
+            lines.extend(("", "工具 / 活动：", *[f"- {item}" for item in events]))
+        message = record.get("message")
+        if isinstance(message, str) and message:
+            lines.extend(("", "最终回复 / 审阅发现 / 错误：", message))
+        lines.extend(
+            (
+                "",
+                "主任务采纳：协议未单独报告；以主任务公开回复为准。",
+            )
+        )
+        details.setPlainText("\n".join(str(line) for line in lines))
+
+    def _on_team_selected(self, _index: int = -1) -> None:
+        self._render_team_details(self.team_combo.currentData())
+
+    def _update_team_item(self, method: str, params: dict[str, Any]) -> bool:
+        item = params.get("item")
+        if not isinstance(item, dict):
+            return False
+        source_thread_id = params.get("threadId")
+        if not self._team_source_is_current(source_thread_id):
+            return False
+        item_type = item.get("type")
+        if item_type == "collabAgentToolCall":
+            sender = item.get("senderThreadId")
+            if sender != source_thread_id:
+                return False
+            receiver_ids = item.get("receiverThreadIds")
+            receiver_ids = receiver_ids if isinstance(receiver_ids, list) else []
+            states = item.get("agentsStates")
+            states = states if isinstance(states, dict) else {}
+            for thread_id in dict.fromkeys([*receiver_ids, *states.keys()]):
+                record = self._team_record(
+                    thread_id,
+                    source_thread_id=source_thread_id,
+                )
+                if record is None:
+                    continue
+                prompt = self._bounded_team_text(item.get("prompt"))
+                if prompt:
+                    record["task"] = prompt
+                state = states.get(thread_id)
+                if isinstance(state, dict):
+                    status = state.get("status")
+                    if isinstance(status, str):
+                        record["status"] = status
+                    message = self._bounded_team_text(state.get("message"))
+                    if message:
+                        record["message"] = message
+                self._team_note(
+                    record,
+                    f"{item.get('tool') or '协作'}："
+                    f"{item.get('status') or method.rsplit('/', 1)[-1]}",
+                )
+            self._refresh_team_combo()
+            return True
+        if item_type == "subAgentActivity":
+            record = self._team_record(
+                item.get("agentThreadId"),
+                source_thread_id=source_thread_id,
+            )
+            if record is None:
+                return False
+            path = self._bounded_team_text(item.get("agentPath"), 512)
+            if path:
+                record["path"] = path
+            kind = item.get("kind")
+            if isinstance(kind, str):
+                if kind == "started":
+                    record["status"] = "running"
+                elif kind == "interrupted":
+                    record["status"] = "interrupted"
+                self._team_note(record, f"子任务活动：{kind}")
+            self._refresh_team_combo()
+            return True
+        return False
+
+    def _handle_child_thread_event(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> bool:
+        thread_id = params.get("threadId")
+        record = self._team_records.get(thread_id)
+        if (
+            not isinstance(record, dict)
+            or record.get("root_thread_id") != self._selected_thread_id
+        ):
+            return False
+        if method == "item/agentMessage/delta":
+            delta = params.get("delta")
+            if isinstance(delta, str):
+                record["message"] = self._bounded_team_text(
+                    str(record.get("message") or "") + delta
+                )
+            return True
+        elif method in {"item/started", "item/completed"}:
+            item = params.get("item")
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type not in {
+                    "reasoning",
+                    "contextCompaction",
+                    "collabAgentToolCall",
+                    "subAgentActivity",
+                }:
+                    label = item.get("tool") or item.get("command") or item_type
+                    status = item.get("status") or method.rsplit("/", 1)[-1]
+                    self._team_note(
+                        record,
+                        f"{self._bounded_team_text(label, 512) or '工具'}：{status}",
+                    )
+                    error = self._notice_text(item.get("error"))
+                    if error:
+                        self._team_note(record, f"错误：{error}")
+        elif method == "turn/started":
+            record["status"] = "running"
+        elif method == "turn/completed":
+            turn = params.get("turn")
+            status = turn.get("status") if isinstance(turn, dict) else None
+            record["status"] = status if isinstance(status, str) else "completed"
+        else:
+            return False
+        self._refresh_team_combo()
+        return True
 
     def _render_thread_read(self, payload: dict[str, Any]) -> bool:
         if self._turn_state.busy:
@@ -2184,6 +2686,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if (
             self._client is not None
             and not self._turn_state.busy
+            and self._goal_action_context is None
             and not self._session_action_pending
             and not self._turn_start_request_pending
             and not self._reconciliation_tokens
@@ -2250,6 +2753,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             welcome_group.setVisible(False)
         self.turn_status_label.setText("Turn：正在创建")
         token = self._turn_state.capture_token()
+        self._begin_turn_performance(token)
         context = (
             f"{_TURN_START_CONTEXT_PREFIX}{token.generation}:{token.revision}"
         )
@@ -2365,6 +2869,24 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._apply_threads(payload.get("threads"))
             self._refresh_controls()
             return
+        if context in {_GOAL_GET_CONTEXT, _GOAL_SET_CONTEXT, _GOAL_CLEAR_CONTEXT}:
+            if context != self._goal_action_context:
+                return
+            self._goal_action_context = None
+            thread_id = payload.get("thread_id")
+            if thread_id != self._selected_thread_id:
+                self._request_goal()
+                self._refresh_controls()
+                return
+            if context == _GOAL_CLEAR_CONTEXT:
+                if payload.get("cleared") is True:
+                    self._apply_goal(thread_id, None)
+                    self._append_system("Goal 已清除。")
+            elif self._apply_goal(thread_id, payload.get("goal")):
+                if context == _GOAL_SET_CONTEXT:
+                    self._append_system("Goal 已保存到当前 Codex Thread。")
+            self._refresh_controls()
+            return
         if context.startswith(_THREAD_READ_CONTEXT_PREFIX):
             self._render_thread_read(payload)
             self._refresh_controls()
@@ -2418,12 +2940,19 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._session_action_pending = False
             thread_id = payload.get("thread_id")
             if isinstance(thread_id, str):
+                previous_thread_id = self._selected_thread_id
                 if (
                     isinstance(self._selected_thread_id, str)
                     and self._selected_thread_id != thread_id
                 ):
                     self.attachment_strip.clear()
                     self._clear_diagnostic_context()
+                if previous_thread_id != thread_id:
+                    self._goal_action_context = None
+                    self._clear_goal_display()
+                    self._team_records.clear()
+                    self._refresh_team_combo()
+                    self._clear_turn_performance()
                 self._selected_thread_id = thread_id
                 self.thread_id_edit.setText(thread_id)
                 for index in range(self.history_combo.count()):
@@ -2451,6 +2980,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         if context == _AUTO_RESUME_CONTEXT
                         else "已恢复会话。"
                     )
+                self._request_goal()
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
             self._accept_sent_draft(context)
             token = self._turn_start_tokens.pop(context, None)
@@ -2488,6 +3018,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         thread_id,
                         turn_id,
                     )
+                if thread_id == token.thread_id:
+                    self._record_turn_performance("ack", token=token)
             if state_changed:
                 self._bind_diagnostic_turn(thread_id, turn_id)
                 if self._turn_state.busy:
@@ -2658,11 +3190,44 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             method = event.get("method")
             raw_params = event.get("params")
             params = raw_params if isinstance(raw_params, dict) else {}
+            if method == "thread/goal/updated":
+                self._apply_goal(params.get("threadId"), params.get("goal"))
+                return
+            if method == "thread/goal/cleared":
+                self._apply_goal(params.get("threadId"), None)
+                return
+            if method in {"item/started", "item/completed"} and self._update_team_item(
+                method, params
+            ):
+                return
+            if isinstance(method, str) and self._handle_child_thread_event(
+                method, params
+            ):
+                return
+            thread_id = params.get("threadId")
+            if (
+                isinstance(thread_id, str)
+                and isinstance(self._selected_thread_id, str)
+                and thread_id != self._selected_thread_id
+                and method
+                in {
+                    "item/started",
+                    "item/completed",
+                    "item/agentMessage/delta",
+                    "item/mcpToolCall/progress",
+                    "turn/started",
+                    "turn/completed",
+                    "turn/plan/updated",
+                    "thread/compacted",
+                }
+            ):
+                return
             if method == "item/agentMessage/delta":
                 delta = params.get("delta")
                 if isinstance(delta, str) and self._event_matches_active_stream(
                     params, require_item_id=True
                 ):
+                    self._record_turn_performance("first_delta")
                     self._append_codex_delta(delta)
             elif method == "turn/plan/updated":
                 if self._event_matches_active_stream(params):
@@ -2930,6 +3495,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         error_code = error.get("code") if isinstance(error, dict) else None
         formatted_error = format_bridge_error(payload)
 
+        if context in {_GOAL_GET_CONTEXT, _GOAL_SET_CONTEXT, _GOAL_CLEAR_CONTEXT}:
+            if context != self._goal_action_context:
+                return
+            self._goal_action_context = None
+            self._append_system(f"Goal 操作失败：{formatted_error}")
+            self._refresh_controls()
+            return
         reconnect_context = (
             context in {"health", "session", "events"}
             or context.startswith(_SESSION_RECONCILE_CONTEXT_PREFIX)
@@ -3063,7 +3635,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._refresh_controls()
             return
         if context.startswith(_THREAD_READ_CONTEXT_PREFIX):
-            self._append_system("会话状态已恢复，但历史内容读取失败。")
+            if error_code in _SESSION_WAIT_TIMEOUT_CODES:
+                self._append_system(
+                    f"会话恢复超时（{error_code}）：会话服务暂未完成；可稍后重试。"
+                )
+            else:
+                self._append_system("会话状态已恢复，但历史内容读取失败。")
             self._refresh_controls()
             return
         if context.startswith(_THREAD_RENAME_CONTEXT_PREFIX):
@@ -3073,7 +3650,27 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return
         if context == _AUTO_RESUME_CONTEXT:
             self._session_action_pending = False
-            self._append_system("最近会话自动恢复失败；可从历史会话列表手动打开。")
+            if error_code in _SESSION_WAIT_TIMEOUT_CODES:
+                self._append_system(
+                    f"会话恢复超时（{error_code}）：会话服务暂未完成；"
+                    "可从历史会话列表手动重试。"
+                )
+            else:
+                self._append_system(
+                    "最近会话自动恢复失败；可从历史会话列表手动打开。"
+                )
+            self._refresh_controls()
+            return
+
+        if (
+            context in {"session_start", "session_resume"}
+            and error_code in _SESSION_WAIT_TIMEOUT_CODES
+        ):
+            self._session_action_pending = False
+            action_label = "会话启动" if context == "session_start" else "会话恢复"
+            self._append_system(
+                f"{action_label}超时（{error_code}）：会话服务暂未完成；可稍后重试。"
+            )
             self._refresh_controls()
             return
 
@@ -3320,9 +3917,72 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.effort_combo.setCurrentIndex(selected_index)
         self.effort_combo.blockSignals(False)
 
+    def _begin_turn_performance(self, token: TurnStateToken) -> None:
+        self._turn_performance_token = token
+        self._turn_performance_marks = {"sent": time.monotonic()}
+        self._render_turn_performance()
+
+    def _clear_turn_performance(self) -> None:
+        self._turn_performance_token = None
+        self._turn_performance_marks = {}
+        self._render_turn_performance()
+
+    def _record_turn_performance(
+        self,
+        stage: str,
+        *,
+        token: TurnStateToken | None = None,
+    ) -> None:
+        active_token = self._turn_performance_token
+        if not isinstance(active_token, TurnStateToken):
+            return
+        if token is not None and token != active_token:
+            return
+        if active_token.thread_id != self._selected_thread_id:
+            return
+        if stage not in {"ack", "first_delta", "completed"}:
+            return
+        if stage not in self._turn_performance_marks:
+            self._turn_performance_marks[stage] = time.monotonic()
+        self._render_turn_performance()
+
+    @staticmethod
+    def _duration_text(start: Any, end: Any, *, early_text: str) -> str:
+        if not isinstance(start, float) or not isinstance(end, float):
+            return "—"
+        delta = end - start
+        if delta < 0:
+            return early_text
+        return f"{delta:.2f}s"
+
+    def _render_turn_performance(self) -> None:
+        label = getattr(self, "performance_label", None)
+        if label is None:
+            return
+        marks = self._turn_performance_marks
+        label.setText(
+            "发送 → ACK："
+            + self._duration_text(
+                marks.get("sent"), marks.get("ack"), early_text="—"
+            )
+            + "\nACK → 首个文本："
+            + self._duration_text(
+                marks.get("ack"),
+                marks.get("first_delta"),
+                early_text="首个文本先于 ACK 到达",
+            )
+            + "\n首个文本 → 完成："
+            + self._duration_text(
+                marks.get("first_delta"),
+                marks.get("completed"),
+                early_text="—",
+            )
+        )
+
     def _mark_turn_terminal(self, status: str | None) -> None:
         """Clear request-only UI locks after an authoritative terminal state."""
 
+        self._record_turn_performance("completed")
         self._finalize_diagnostic_turn(status)
         self._turn_start_request_pending = False
         self._active_turn_start_context = None

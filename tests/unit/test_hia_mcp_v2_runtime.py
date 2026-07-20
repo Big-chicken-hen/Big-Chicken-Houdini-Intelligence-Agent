@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,10 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "houdini_package" / "python_libs"))
 
 from hia_mcp_runtime.executor import HoudiniExecutor, HiaRuntimeError  # noqa: E402
+
+
+def fake_png(width: int = 640, height: int = 360) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", width, height)
 
 
 class FakeHipFile:
@@ -102,7 +107,7 @@ class FakeRoot:
 
 class FakeViewport:
     def saveViewToImage(self, path: str) -> None:  # noqa: N802
-        Path(path).write_bytes(b"fake-png")
+        Path(path).write_bytes(fake_png())
 
 
 class FakeSceneViewer:
@@ -201,8 +206,10 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual({"frame": 12.0}, response["result"])
         self.assertEqual("hello\n", response["stdout"])
-        self.assertEqual(["/obj/test"], response["created_or_changed_paths"])
-        self.assertEqual(1, response["revision"])
+        self.assertEqual([], response["created_or_changed_paths"])
+        self.assertEqual(["/obj/test"], response["diff"]["unverified_paths"])
+        self.assertEqual("unknown", response["scene_change_status"])
+        self.assertEqual(0, response["revision"])
         self.assertIn("interruptible_after_main_thread_entry", response["execution_limit"])
         self.assertFalse(response["execution_limit"]["interruptible_after_main_thread_entry"])
 

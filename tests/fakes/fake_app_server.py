@@ -21,6 +21,7 @@ SYSTEM_DRIVE = (
 
 _turn_counter = 0
 _pending_approvals: dict[str, tuple[str, str]] = {}
+_goals: dict[str, dict[str, Any]] = {}
 
 
 def emit(message: dict[str, Any]) -> None:
@@ -36,6 +37,20 @@ def result(request_id: Any, value: Any) -> None:
 
 def thread_payload(thread_id: str = THREAD_ID) -> dict[str, Any]:
     return {"thread": {"id": thread_id, "turns": [], "preview": "fake thread"}}
+
+
+def goal_payload(thread_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    previous = _goals.get(thread_id, {})
+    return {
+        "threadId": thread_id,
+        "objective": params.get("objective", previous.get("objective", "Fake Goal")),
+        "status": params.get("status", previous.get("status", "active")),
+        "tokenBudget": params.get("tokenBudget", previous.get("tokenBudget")),
+        "tokensUsed": previous.get("tokensUsed", 12),
+        "timeUsedSeconds": previous.get("timeUsedSeconds", 3),
+        "createdAt": previous.get("createdAt", 1_720_000_000),
+        "updatedAt": previous.get("updatedAt", 1_720_000_001) + 1,
+    }
 
 
 def turn_payload(
@@ -164,6 +179,31 @@ def handle_request(message: dict[str, Any]) -> None:
                 },
             }
         )
+    elif method == "thread/goal/get":
+        thread_id = params.get("threadId", THREAD_ID)
+        result(request_id, {"goal": _goals.get(thread_id)})
+    elif method == "thread/goal/set":
+        thread_id = params.get("threadId", THREAD_ID)
+        goal = goal_payload(thread_id, params)
+        _goals[thread_id] = goal
+        result(request_id, {"goal": goal})
+        emit(
+            {
+                "method": "thread/goal/updated",
+                "params": {"threadId": thread_id, "goal": goal, "turnId": None},
+            }
+        )
+    elif method == "thread/goal/clear":
+        thread_id = params.get("threadId", THREAD_ID)
+        cleared = _goals.pop(thread_id, None) is not None
+        result(request_id, {"cleared": cleared})
+        if cleared:
+            emit(
+                {
+                    "method": "thread/goal/cleared",
+                    "params": {"threadId": thread_id},
+                }
+            )
     elif method == "thread/start":
         response = thread_payload()
         response["receivedParams"] = params
