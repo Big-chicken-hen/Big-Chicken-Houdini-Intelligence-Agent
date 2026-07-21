@@ -896,9 +896,9 @@ class ConversationView(QtWidgets.QWidget):
         row_layout.setSpacing(0)
         if alignment == QtCore.Qt.AlignmentFlag.AlignRight:
             row_layout.addStretch(1)
-            row_layout.addWidget(widget, 4, alignment)
+            row_layout.addWidget(widget, 4)
         else:
-            row_layout.addWidget(widget, 4, alignment)
+            row_layout.addWidget(widget, 4)
             row_layout.addStretch(1)
         self._insert_before_stretch(row)
 

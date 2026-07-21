@@ -975,3 +975,9 @@
 - 真实 GUI 中 Goal 仍显示“正在跟进/正在推进”，但当前 Turn 已经 idle，底部按钮退回“发送”，用户必须手动发消息才能继续。根因是既有逻辑只收口 completion 和保留 active Goal 元数据，没有把“active Goal + 专注开启 + 权威 idle”连接到下一轮 `turn/start`。
 - Panel 现在用单一 completion boundary 在全部安全条件满足时为同一 Thread 恰好启动一次内部续轮，继续沿用当前模型、推理强度和速度，不重放上一轮文字、工具或 Houdini 操作。内部短指令不显示为用户气泡，历史恢复也精确隐藏；Stop、断线、审批、Goal 非 active 或无有效文字/工具进展会暂停续轮，用户明确继续后才恢复。Goal 更新也不能把正在运行的普通/自动 Turn 误绑定成原生 Goal Turn。
 - Stop、stale steer、历史、Goal、IME/composer、附件与 Bridge Turn 相邻回归 215/215 通过；最终完整套件 763/763 通过。仍需真实 Houdini GUI 验证：手动打开一个 active 且专注开启的 Goal Thread，确认每轮完成后仅续一次、按钮进入“追加指令”、内部续轮不产生用户气泡或 System 刷屏；Stop 后保持暂停，明确继续后再恢复。
+
+## 消息气泡实际宽度回归（2026-07-21）
+
+- 真实 GUI 中约 800px 的会话 viewport 仍把长 Codex 与用户消息卡压在约 280px，造成严重窄列换行。根因不是 0.82/0.68 上限计算，而是 `QHBoxLayout.addWidget(..., alignment)` 的水平 alignment 让 Expanding 卡按窄 `sizeHint` 留在已分配槽内；旧测试只检查 `maximumWidth`，因此未发现实际几何错误。
+- 最小修复仅移除消息行两处 `addWidget` 的水平 alignment 参数，继续用原左右 stretch 对齐：Codex 实际约占可用宽度 80%，用户卡受既有 68% maximum 限制；未改 ratio、composer、Goal、Bridge 或其他布局。新增近真实布局回归直接验证 actual width、viewport resize、长 Markdown 高度重排和短用户消息不越界。
+- ConversationView 精确回归 13/13、Panel/IME/composer/附件相邻回归 145/145 通过；本轮唯一一次完整套件 764/764 通过，用时 34.283 秒。仍需在真实 Houdini GUI 验证宽/窄 Pane 拖动时两类气泡实际比例、长 Markdown 重排高度及短消息视觉效果。

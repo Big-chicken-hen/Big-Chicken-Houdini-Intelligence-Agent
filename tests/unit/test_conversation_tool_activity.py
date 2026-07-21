@@ -147,6 +147,70 @@ class _HeadlessMessageCard:
         return None
 
 
+class _LayoutMessageCard(_HeadlessMessageCard):
+    def __init__(self, role: str, text: str) -> None:
+        super().__init__(role)
+        self.text = text
+        self.size_hint_width = 280
+        self.actual_width = 0
+        self.markdown_height = 0
+
+    def apply_layout_width(self, width: int) -> None:
+        self.actual_width = max(
+            self.minimum_width,
+            min(self.maximum_width, int(width)),
+        )
+        content_width = max(1, self.actual_width - 22)
+        characters_per_line = max(1, content_width // 7)
+        lines = max(1, (len(self.text) + characters_per_line - 1) // characters_per_line)
+        self.markdown_height = lines * 18
+
+
+class _LayoutRow:
+    def __init__(self) -> None:
+        self.layout: _SimulatedHBoxLayout | None = None
+
+    def setObjectName(self, _name: str) -> None:  # noqa: N802
+        pass
+
+
+class _SimulatedHBoxLayout:
+    """Small Qt-layout analogue that preserves alignment sizing semantics."""
+
+    def __init__(self, row: _LayoutRow) -> None:
+        self.items: list[tuple[str, object | None, int, object | None]] = []
+        row.layout = self
+
+    def setContentsMargins(self, *_margins: int) -> None:  # noqa: N802
+        pass
+
+    def setSpacing(self, _spacing: int) -> None:  # noqa: N802
+        pass
+
+    def addStretch(self, stretch: int) -> None:  # noqa: N802
+        self.items.append(("stretch", None, stretch, None))
+
+    def addWidget(  # noqa: N802
+        self,
+        widget: _LayoutMessageCard,
+        stretch: int = 0,
+        alignment: object | None = None,
+    ) -> None:
+        self.items.append(("widget", widget, stretch, alignment))
+
+    def activate(self, width: int) -> None:
+        total_stretch = sum(item[2] for item in self.items)
+        for kind, raw_widget, stretch, alignment in self.items:
+            if kind != "widget" or not isinstance(raw_widget, _LayoutMessageCard):
+                continue
+            allocated = (
+                raw_widget.size_hint_width
+                if alignment is not None
+                else int(width * stretch / max(1, total_stretch))
+            )
+            raw_widget.apply_layout_width(allocated)
+
+
 class _HeadlessTimer:
     def __init__(self) -> None:
         self.active = False
@@ -493,6 +557,67 @@ class ConversationToolActivityTests(unittest.TestCase):
         self.assertLessEqual(user_card.maximum_width, 20)
         self.assertLess(codex_card.maximum_width, wide_codex_width)
         self.assertLess(user_card.maximum_width, wide_user_width)
+
+    def test_message_rows_allocate_real_width_and_reflow_after_resize(self) -> None:
+        view = object.__new__(conversation_module.ConversationView)
+        view.scroll_area = _ScrollArea(800)
+        rows: list[_LayoutRow] = []
+        view._insert_before_stretch = rows.append
+        codex_card = _LayoutMessageCard("codex", "**阶段结果**\n\n" + "长文本 " * 240)
+        user_card = _LayoutMessageCard("user", "请继续")
+
+        with (
+            mock.patch.object(
+                conversation_module.QtWidgets,
+                "QWidget",
+                _LayoutRow,
+                create=True,
+            ),
+            mock.patch.object(
+                conversation_module.QtWidgets,
+                "QHBoxLayout",
+                _SimulatedHBoxLayout,
+                create=True,
+            ),
+        ):
+            view._update_message_card_width(codex_card)
+            view._add_aligned_widget(
+                codex_card,
+                conversation_module.QtCore.Qt.AlignmentFlag.AlignLeft,
+            )
+            view._update_message_card_width(user_card)
+            view._add_aligned_widget(
+                user_card,
+                conversation_module.QtCore.Qt.AlignmentFlag.AlignRight,
+            )
+
+        available_width = 800 - conversation_module._CONTENT_HORIZONTAL_MARGIN
+        codex_layout = rows[0].layout
+        user_layout = rows[1].layout
+        self.assertIsNotNone(codex_layout)
+        self.assertIsNotNone(user_layout)
+        codex_layout.activate(available_width)
+        user_layout.activate(available_width)
+
+        self.assertIsNone(codex_layout.items[0][3])
+        self.assertIsNone(user_layout.items[-1][3])
+        self.assertGreaterEqual(codex_card.actual_width / available_width, 0.79)
+        self.assertLessEqual(codex_card.actual_width / available_width, 0.82)
+        self.assertGreater(codex_card.actual_width, codex_card.size_hint_width * 2)
+        self.assertLessEqual(user_card.actual_width, int(available_width * 0.68))
+        self.assertGreater(user_card.actual_width, user_card.size_hint_width)
+        wide_markdown_height = codex_card.markdown_height
+
+        view.scroll_area.viewport().current_width = 440
+        view._update_message_card_width(codex_card)
+        view._update_message_card_width(user_card)
+        narrow_width = 440 - conversation_module._CONTENT_HORIZONTAL_MARGIN
+        codex_layout.activate(narrow_width)
+        user_layout.activate(narrow_width)
+
+        self.assertLess(codex_card.actual_width, available_width * 0.5)
+        self.assertGreater(codex_card.markdown_height, wide_markdown_height)
+        self.assertLessEqual(user_card.actual_width, int(narrow_width * 0.68))
 
     def test_compaction_notice_deduplicates_without_touching_active_turn_state(self) -> None:
         view = object.__new__(conversation_module.ConversationView)
