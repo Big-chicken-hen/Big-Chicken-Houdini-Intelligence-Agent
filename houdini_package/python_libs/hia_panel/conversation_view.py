@@ -12,6 +12,10 @@ _CODEX_CARD_WIDTH_RATIO = 0.82
 _USER_CARD_WIDTH_RATIO = 0.68
 _CONTENT_HORIZONTAL_MARGIN = 14
 _STREAM_FLUSH_INTERVAL_MS = 40
+_CODEX_PENDING_TEXT = (
+    "Codex 正在处理；当前尚无文字输出。进度可在计划、工具和团队区域查看。"
+)
+_CODEX_NO_TEXT_REPLY = "本轮未返回文字回复。"
 _COMPACTION_NOTICE_TEXT = "Codex 已自动整理较早的对话内容。"
 _LONG_THREAD_WARNING_TEXT = (
     "当前对话较长，早期细节可能逐渐减少。开始不同任务时建议新建 Thread。"
@@ -545,7 +549,7 @@ class ConversationView(QtWidgets.QWidget):
             border="#3a424c",
             foreground="#e9edf2",
         )
-        card.body.set_markdown("")
+        card.body.set_markdown(_CODEX_PENDING_TEXT)
         self._register_message_card(card)
         self._add_aligned_widget(card, QtCore.Qt.AlignmentFlag.AlignLeft)
         entry: dict[str, Any] = {"role": "codex", "title": "Codex", "text": ""}
@@ -559,19 +563,32 @@ class ConversationView(QtWidgets.QWidget):
     def append_codex_delta(self, delta: str) -> None:
         if self._codex_stream_frozen:
             return
+        delta_text = str(delta)
+        if not delta_text:
+            return
         self._reset_protocol_streak()
         if self._active_codex_card is None:
             self.begin_codex_message()
-        self._active_codex_text += str(delta)
+        first_delta = not self._active_codex_text
+        self._active_codex_text += delta_text
         if self._active_codex_entry is not None:
             self._active_codex_entry["text"] = self._active_codex_text
-        if not self._stream_flush_timer.isActive():
+        if first_delta:
+            self._active_codex_card.body.set_markdown(self._active_codex_text)
+            self._rendered_codex_text = self._active_codex_text
+            self._scroll_to_bottom()
+        elif not self._stream_flush_timer.isActive():
             self._stream_flush_timer.start()
 
     def finish_codex_message(self) -> None:
         if self._stream_flush_timer.isActive():
             self._stream_flush_timer.stop()
-        self._flush_codex_markdown()
+        if self._active_codex_card is not None and not self._active_codex_text:
+            self._active_codex_card.body.set_markdown(_CODEX_NO_TEXT_REPLY)
+            if self._active_codex_entry is not None:
+                self._active_codex_entry["text"] = _CODEX_NO_TEXT_REPLY
+        else:
+            self._flush_codex_markdown()
         self._active_codex_card = None
         self._active_codex_text = ""
         self._rendered_codex_text = ""
@@ -586,7 +603,17 @@ class ConversationView(QtWidgets.QWidget):
         if self._stream_flush_timer.isActive():
             self._stream_flush_timer.stop()
         card = self._active_codex_card
-        if card is not None and self._rendered_codex_text != self._active_codex_text:
+        if card is not None and not self._active_codex_text:
+            entry = self._active_codex_entry
+            if entry in self._transcript:
+                self._transcript.remove(entry)
+            if card in self._message_cards:
+                self._message_cards.remove(card)
+            row = card.parentWidget()
+            if row is not None:
+                self._layout.removeWidget(row)
+                row.deleteLater()
+        elif card is not None and self._rendered_codex_text != self._active_codex_text:
             card.body.set_markdown(self._active_codex_text)
             self._rendered_codex_text = self._active_codex_text
         self._active_codex_card = None
@@ -824,7 +851,7 @@ class ConversationView(QtWidgets.QWidget):
             else _CODEX_CARD_WIDTH_RATIO
         )
         target_width = max(1, int(available_width * ratio))
-        card.setMinimumWidth(target_width)
+        card.setMinimumWidth(0)
         card.setMaximumWidth(target_width)
 
     def _flush_codex_markdown(self) -> None:

@@ -1274,7 +1274,11 @@ function Write-HiaPreflightReport {
 }
 
 function Get-HiaLatestLauncherCheckpoint {
-    param([Parameter(Mandatory = $true)][string]$CheckpointDirectory)
+    param(
+        [Parameter(Mandatory = $true)][string]$CheckpointDirectory,
+        [AllowEmptyString()][string]$ThreadId = '',
+        [AllowEmptyString()][string]$GoalBinding = ''
+    )
 
     if (-not (Test-Path -LiteralPath $CheckpointDirectory -PathType Container)) { return $null }
     try {
@@ -1283,6 +1287,49 @@ function Get-HiaLatestLauncherCheckpoint {
             ([int]$directory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
         ) {
             return $null
+        }
+        if ($ThreadId) {
+            if ($ThreadId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$') { return $null }
+            if ($GoalBinding -notmatch '^[0-9a-f]{64}$') { return $null }
+            $markerPath = Join-Path $directory.FullName '.hia-stage-checkpoint.json'
+            if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $null }
+            $markerFile = Get-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+            if (
+                ([int]$markerFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [long]$markerFile.Length -le 0 -or
+                [long]$markerFile.Length -gt 65536
+            ) {
+                return $null
+            }
+            $marker = [System.IO.File]::ReadAllText($markerFile.FullName) | ConvertFrom-Json
+            $checkpointName = [string]$marker.checkpoint_file
+            if (
+                [int]$marker.version -ne 1 -or
+                -not [System.StringComparer]::Ordinal.Equals([string]$marker.thread_id, $ThreadId) -or
+                -not [System.StringComparer]::Ordinal.Equals([string]$marker.goal_binding, $GoalBinding) -or
+                -not $checkpointName -or
+                $checkpointName -ne [System.IO.Path]::GetFileName($checkpointName) -or
+                $checkpointName -notmatch '(?i)\.hip(?:lc|nc)?(?:_bak\d*)?$'
+            ) {
+                return $null
+            }
+            $checkpoint = Get-Item `
+                -LiteralPath (Join-Path $directory.FullName $checkpointName) `
+                -Force `
+                -ErrorAction Stop
+            if (
+                $checkpoint -isnot [System.IO.FileInfo] -or
+                ([int]$checkpoint.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [long]$checkpoint.Length -le 0
+            ) {
+                return $null
+            }
+            return [pscustomobject]@{
+                path = $checkpoint.FullName
+                last_write_utc_ticks = [long]$checkpoint.LastWriteTimeUtc.Ticks
+                thread_id = $ThreadId
+                goal_binding = $GoalBinding
+            }
         }
         $candidates = [System.Collections.Generic.List[object]]::new()
         foreach ($file in @($directory.GetFiles())) {
@@ -1300,6 +1347,152 @@ function Get-HiaLatestLauncherCheckpoint {
         return @($candidates | Sort-Object -Property last_write_utc_ticks -Descending | Select-Object -First 1)
     } catch {
         return $null
+    }
+}
+
+function Get-HiaCrashRecoveryDecision {
+    param(
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [Parameter(Mandatory = $true)][bool]$FocusVerified,
+        [Parameter(Mandatory = $true)][bool]$ThreadIdle,
+        [ValidateRange(0, 1000)][int]$ConsecutiveCrashCount = 0,
+        [ValidateRange(0, 1000)][int]$AutomaticRestartCount = 0,
+        [ValidateRange(1, 1000)][int]$MaxConsecutiveCrashes = 3,
+        [ValidateRange(1, 1000)][int]$MaxAutomaticRestarts = 6
+    )
+
+    if ($ExitCode -eq 0) {
+        return [pscustomobject]@{ recover = $false; reason = 'normal_exit' }
+    }
+    if (-not $FocusVerified) {
+        return [pscustomobject]@{ recover = $false; reason = 'focus_not_verified' }
+    }
+    if (-not $ThreadIdle) {
+        return [pscustomobject]@{ recover = $false; reason = 'thread_not_idle' }
+    }
+    if (
+        $ConsecutiveCrashCount -gt $MaxConsecutiveCrashes -or
+        $AutomaticRestartCount -ge $MaxAutomaticRestarts
+    ) {
+        return [pscustomobject]@{ recover = $false; reason = 'bounded_limit' }
+    }
+    return [pscustomobject]@{ recover = $true; reason = 'recover' }
+}
+
+function Get-HiaLatestLauncherCrashHip {
+    param(
+        [Parameter(Mandatory = $true)][string]$TempDirectory,
+        [Parameter(Mandatory = $true)][int]$HoudiniProcessId,
+        [Parameter(Mandatory = $true)][long]$StartedAtUtcTicks,
+        [Parameter(Mandatory = $true)][long]$EndedAtUtcTicks
+    )
+
+    if (
+        $HoudiniProcessId -le 0 -or
+        $StartedAtUtcTicks -le 0 -or
+        $EndedAtUtcTicks -lt $StartedAtUtcTicks -or
+        -not (Test-Path -LiteralPath $TempDirectory -PathType Container)
+    ) {
+        return $null
+    }
+    try {
+        $directory = Get-Item -LiteralPath $TempDirectory -Force -ErrorAction Stop
+        if (
+            $directory.Name -ne 'tmp' -or
+            $directory.Parent.Name -notmatch '^[0-9a-fA-F]{32}$' -or
+            $directory.Parent.Parent.Name -ne 'launcher-sessions' -or
+            ([int]$directory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+        ) {
+            return $null
+        }
+        $earliest = $StartedAtUtcTicks - [TimeSpan]::FromSeconds(5).Ticks
+        $latest = $EndedAtUtcTicks + [TimeSpan]::FromSeconds(60).Ticks
+        $namePattern = '(?i)^crash\..+_' + [regex]::Escape([string]$HoudiniProcessId) + '\.hip(?:lc|nc)?$'
+        $candidates = [System.Collections.Generic.List[object]]::new()
+        foreach ($file in @($directory.GetFiles())) {
+            $ticks = [long]$file.LastWriteTimeUtc.Ticks
+            if (
+                ([int]$file.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [long]$file.Length -le 0 -or
+                $file.Name -notmatch $namePattern -or
+                $ticks -lt $earliest -or
+                $ticks -gt $latest
+            ) {
+                continue
+            }
+            $candidates.Add([pscustomobject]@{
+                path = $file.FullName
+                last_write_utc_ticks = $ticks
+                houdini_process_id = $HoudiniProcessId
+            })
+        }
+        return @(
+            $candidates |
+                Sort-Object -Property last_write_utc_ticks -Descending |
+                Select-Object -First 1
+        )
+    } catch {
+        return $null
+    }
+}
+
+function Copy-HiaLauncherRecoveryHip {
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionRoot,
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 99)][int]$Attempt
+    )
+
+    $session = Get-Item -LiteralPath $SessionRoot -Force -ErrorAction Stop
+    if (
+        $session -isnot [System.IO.DirectoryInfo] -or
+        $session.Name -notmatch '^[0-9a-fA-F]{32}$' -or
+        $session.Parent.Name -ne 'launcher-sessions' -or
+        ([int]$session.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
+        throw 'Recovery requires an ordinary launcher session directory.'
+    }
+    $source = Get-Item -LiteralPath $SourcePath -Force -ErrorAction Stop
+    $checkpoints = Join-Path $session.FullName 'checkpoints'
+    $temp = Join-Path $session.FullName 'tmp'
+    $sourceParent = $source.Directory.FullName.TrimEnd('\')
+    if (
+        $source -isnot [System.IO.FileInfo] -or
+        ([int]$source.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        [long]$source.Length -le 0 -or
+        -not (
+            [System.StringComparer]::OrdinalIgnoreCase.Equals($sourceParent, $checkpoints.TrimEnd('\')) -or
+            [System.StringComparer]::OrdinalIgnoreCase.Equals($sourceParent, $temp.TrimEnd('\'))
+        )
+    ) {
+        throw 'Recovery source must be one ordinary top-level HIP in this launcher session.'
+    }
+    $suffixMatch = [regex]::Match(
+        $source.Name,
+        '(\.hip(?:lc|nc)?(?:_bak\d*)?)$',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if (-not $suffixMatch.Success) {
+        throw 'Recovery source is not a supported Houdini HIP file.'
+    }
+    $recoveryDirectory = Join-Path $session.FullName 'recovery'
+    [System.IO.Directory]::CreateDirectory($recoveryDirectory) | Out-Null
+    $recoveryItem = Get-Item -LiteralPath $recoveryDirectory -Force -ErrorAction Stop
+    if (
+        ([int]$recoveryItem.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
+        throw 'Recovery destination is a reparse point.'
+    }
+    $destination = Join-Path $recoveryDirectory (
+        'recovery-{0}-{1}{2}' -f `
+            $Attempt,
+            [Guid]::NewGuid().ToString('N'),
+            [string]$suffixMatch.Groups[1].Value
+    )
+    [System.IO.File]::Copy($source.FullName, $destination, $false)
+    return [pscustomobject]@{
+        path = $destination
+        source_path = $source.FullName
     }
 }
 
@@ -1619,10 +1812,13 @@ function Repair-HiaSafeProject {
 Export-ModuleMember -Function @(
     'ConvertTo-HiaProcessArgument',
     'ConvertTo-HiaRedactedJson',
+    'Copy-HiaLauncherRecoveryHip',
     'Get-HiaBridgePythonCandidates',
+    'Get-HiaCrashRecoveryDecision',
     'Get-HiaHoudiniCandidates',
     'Get-HiaLauncherArtworkPath',
     'Get-HiaLatestLauncherCheckpoint',
+    'Get-HiaLatestLauncherCrashHip',
     'Get-HiaMcpBackendChoices',
     'Get-HiaOverallLevel',
     'Get-HiaPinnedCodexExecutable',

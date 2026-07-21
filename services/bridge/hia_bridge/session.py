@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import ntpath
 import os
 import re
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +34,8 @@ THREAD_NAME_MAX_LENGTH = 512
 THREAD_PREVIEW_MAX_LENGTH = 8192
 THREAD_CWD_MAX_LENGTH = 32_767
 GOAL_OBJECTIVE_MAX_LENGTH = 4_000
+FOCUS_STATE_MAX_BYTES = 1_048_576
+GOAL_BINDING_PATTERN = re.compile(r"[0-9a-f]{64}")
 GOAL_STATUSES = frozenset(
     {
         "active",
@@ -45,6 +51,10 @@ LOCAL_IMAGE_PATH_MAX_LENGTH = 32_767
 LOCAL_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 HIA_MCP_V2_BACKEND = "hia_v2"
 FXHOUDINI_MCP_BACKEND = "fxhoudini"
+STOP_INTERRUPT_GRACE_SECONDS = 1.0
+STOP_RECOVERY_TOTAL_SECONDS = 50.0
+STOP_RESTART_GRACE_SECONDS = 0.25
+STOP_REINITIALIZE_MAX_SECONDS = 10.0
 
 _COMMAND_WRITE_PATTERN = re.compile(
     r"(?i)(?:"
@@ -424,14 +434,21 @@ class BridgeSession:
         events: EventBuffer,
         *,
         mcp_backend: str = HIA_MCP_V2_BACKEND,
+        focus_state_path: Path | None = None,
     ) -> None:
         if mcp_backend not in {HIA_MCP_V2_BACKEND, FXHOUDINI_MCP_BACKEND}:
             raise ValueError(f"Unsupported Houdini MCP backend: {mcp_backend}")
         self._project_root = project_root
+        self._focus_state_path = focus_state_path
+        (
+            self._focus_enabled_threads,
+            self._focus_goal_bindings,
+        ) = self._load_focus_state()
         self._client = client
         self._events = events
         self._mcp_backend = mcp_backend
         self._lock = threading.RLock()
+        self._turn_condition = threading.Condition(self._lock)
         self._connected = False
         self._initialize_result: Any = None
         self._account_result: dict[str, Any] | None = None
@@ -442,6 +459,10 @@ class BridgeSession:
         self._turn_active = False
         self._turn_created = False
         self._turn_generation = 0
+        self._start_source_turn_id: str | None = None
+        self._last_tool_name: str | None = None
+        self._last_tool_status: str | None = None
+        self._stop_recovery_thread: threading.Thread | None = None
         self._closed = False
         self._client.set_event_sink(self._on_client_event)
 
@@ -456,6 +477,8 @@ class BridgeSession:
             with self._lock:
                 self._initialize_result = initialize_result
                 self._connected = True
+                self._thread_id = None
+                self._write_focus_state_locked()
             try:
                 account = self._client.request(
                     "account/read",
@@ -500,19 +523,146 @@ class BridgeSession:
                 "turn_id": self._turn_id,
                 "turn_status": self._turn_status,
                 "turn_active": self._turn_active,
+                "focus_mode": self._focus_mode_locked(),
+                "last_tool_name": self._last_tool_name,
+                "last_tool_status": self._last_tool_status,
             }
+
+    def _load_focus_state(self) -> tuple[set[str], dict[str, str]]:
+        path = self._focus_state_path
+        if path is None or not path.is_file():
+            return set(), {}
+        try:
+            if path.stat().st_size > FOCUS_STATE_MAX_BYTES:
+                return set(), {}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return set(), {}
+        values = payload.get("enabled_thread_ids") if isinstance(payload, dict) else None
+        raw_bindings = payload.get("goal_bindings") if isinstance(payload, dict) else None
+        if not isinstance(values, list) or not isinstance(raw_bindings, dict):
+            return set(), {}
+        bindings = {
+            thread_id: binding
+            for thread_id, binding in raw_bindings.items()
+            if (
+                isinstance(thread_id, str)
+                and self._identifier_is_valid(thread_id)
+                and self._goal_binding_is_valid(binding)
+                and thread_id in values
+            )
+        }
+        return set(bindings), bindings
+
+    def _focus_mode_locked(self, thread_id: str | None = None) -> bool:
+        selected = thread_id if thread_id is not None else self._thread_id
+        return (
+            isinstance(selected, str)
+            and selected in self._focus_enabled_threads
+            and selected in self._focus_goal_bindings
+        )
+
+    @staticmethod
+    def _goal_binding_is_valid(value: Any) -> bool:
+        return isinstance(value, str) and GOAL_BINDING_PATTERN.fullmatch(value) is not None
+
+    @classmethod
+    def _goal_binding(cls, goal: dict[str, Any]) -> str | None:
+        objective = goal.get("objective")
+        token_budget = goal.get("tokenBudget")
+        if (
+            not isinstance(objective, str)
+            or not objective.strip()
+            or "\x00" in objective
+            or len(objective) > GOAL_OBJECTIVE_MAX_LENGTH
+            or (
+                token_budget is not None
+                and (
+                    not isinstance(token_budget, int)
+                    or isinstance(token_budget, bool)
+                    or token_budget <= 0
+                )
+            )
+        ):
+            return None
+        normalized = {
+            "objective": objective.replace("\r\n", "\n").replace("\r", "\n").strip(),
+            "token_budget": token_budget,
+        }
+        encoded = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _disable_focus_locked(self, thread_id: str) -> bool:
+        changed = (
+            thread_id in self._focus_enabled_threads
+            or thread_id in self._focus_goal_bindings
+        )
+        if changed:
+            self._focus_enabled_threads.discard(thread_id)
+            self._focus_goal_bindings.pop(thread_id, None)
+            self._write_focus_state_locked()
+        return changed
+
+    def _reconcile_focus_goal(self, thread_id: str, goal: dict[str, Any] | None) -> bool:
+        with self._lock:
+            if not self._focus_mode_locked(thread_id):
+                return False
+            binding = (
+                self._goal_binding(goal)
+                if isinstance(goal, dict) and goal.get("status") == "active"
+                else None
+            )
+            if binding != self._focus_goal_bindings.get(thread_id):
+                self._disable_focus_locked(thread_id)
+                return False
+            return True
+
+    def _write_focus_state_locked(self) -> None:
+        path = self._focus_state_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        payload = {
+            "version": 1,
+            "active_thread_id": self._thread_id,
+            "enabled_thread_ids": sorted(self._focus_enabled_threads),
+            "goal_bindings": {
+                thread_id: self._focus_goal_bindings[thread_id]
+                for thread_id in sorted(self._focus_enabled_threads)
+                if thread_id in self._focus_goal_bindings
+            },
+        }
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, path)
+        except OSError as exc:
+            raise BridgeError(
+                "FOCUS_STATE_UNAVAILABLE",
+                "Target focus mode could not be persisted inside the project",
+                http_status=503,
+            ) from exc
 
     def _developer_instructions(self) -> str:
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             backend_instructions = (
-                "当前场景的创建、修改、连接、材质、动画、Solaris 和 Karma 默认使用已注册的 HIA MCP V2 与 HOM；"
-                "复杂操作优先用 hia_execute_hom 批量执行 Codex 生成的 HOM。"
-                "用 hia_context/hia_inspect 读取，再用 hia_scene_diff/hia_validate 验证；"
+                "场景默认用 HIA MCP V2 与 HOM；hia_execute_hom 批量执行。"
+                "hia_context/hia_inspect 读取，hia_scene_diff/hia_validate 验证；"
                 "hia_capture_viewport 仅按需视觉核对。"
-                "模型行为约束：仅主代理调用当前会话 hia_*/HOM 并写当前 HIP，"
-                "子代理只做研究、脚本草案和审阅；MCP 无 caller lineage，非代码级隔离。"
-                "hia_search_node_types/help 等同类读取由主代理串行或少量调用，不并发扇出，"
-                "遇到 QUEUE_FULL 不立即重试；hia_execute_hom 等场景写入始终由主代理执行。"
+                "仅主代理调用当前会话 hia_*/HOM 并写当前 HIP；子代理只做研究、脚本草案和审阅；"
+                "MCP 无 caller lineage，非代码级隔离。"
+                "hia_search_node_types/help 等同类读取由主代理串行或少量调用；不并发扇出，"
+                "遇到 QUEUE_FULL 不立即重试。hia_execute_hom 等场景写入始终由主代理执行。"
+                "goal_focus_mode=true 且有意义阶段成功才设一次 checkpoint_label；"
+                "普通聊天、专注关闭或逐节点/参数不设。"
             )
         else:
             backend_instructions = (
@@ -604,8 +754,13 @@ class BridgeSession:
         with self._lock:
             self._thread_id = thread_id
             self._reset_turn_locked()
+            self._write_focus_state_locked()
         self._events.publish("thread_selected", action="start", thread_id=thread_id)
-        return {"thread_id": thread_id, "result": result}
+        return {
+            "thread_id": thread_id,
+            "focus_mode": False,
+            "result": result,
+        }
 
     def resume_thread(
         self,
@@ -636,9 +791,11 @@ class BridgeSession:
         with self._lock:
             self._thread_id = resolved_id
             self._reset_turn_locked()
+            self._write_focus_state_locked()
         self._events.publish("thread_selected", action="resume", thread_id=resolved_id)
         return {
             "thread_id": resolved_id,
+            "focus_mode": self._focus_mode_locked(resolved_id),
             "read": read_result,
         }
 
@@ -749,9 +906,18 @@ class BridgeSession:
             "thread/goal/get",
             {"threadId": thread_id},
         )
+        self._selected_thread_id(thread_id)
+        goal = self._project_goal(result, thread_id, allow_none=True)
+        focused = self._reconcile_focus_goal(thread_id, goal)
+        with self._lock:
+            goal_binding = (
+                self._focus_goal_bindings.get(thread_id) if focused else None
+            )
         return {
             "thread_id": thread_id,
-            "goal": self._project_goal(result, thread_id, allow_none=True),
+            "goal": goal,
+            "focus_mode": focused,
+            "goal_binding": goal_binding,
         }
 
     def set_goal(
@@ -787,9 +953,13 @@ class BridgeSession:
             "tokenBudget": token_budget,
         }
         result = self._client.request("thread/goal/set", params)
+        self._selected_thread_id(thread_id)
+        goal = self._project_goal(result, thread_id, allow_none=False)
+        self._reconcile_focus_goal(thread_id, goal)
         return {
             "thread_id": thread_id,
-            "goal": self._project_goal(result, thread_id, allow_none=False),
+            "goal": goal,
+            "focus_mode": self._focus_mode_for_thread(thread_id),
         }
 
     def clear_goal(self, expected_thread_id: str) -> dict[str, Any]:
@@ -804,7 +974,62 @@ class BridgeSession:
                 "Goal clear response must contain a boolean cleared field",
                 field="cleared",
             )
-        return {"thread_id": thread_id, "cleared": cleared}
+        self._selected_thread_id(thread_id)
+        if cleared:
+            with self._lock:
+                self._disable_focus_locked(thread_id)
+        return {
+            "thread_id": thread_id,
+            "cleared": cleared,
+            "focus_mode": self._focus_mode_for_thread(thread_id),
+        }
+
+    def _focus_mode_for_thread(self, thread_id: str) -> bool:
+        with self._lock:
+            return self._focus_mode_locked(thread_id)
+
+    def set_focus_mode(
+        self,
+        expected_thread_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        if not isinstance(enabled, bool):
+            raise BridgeError(
+                "INVALID_FOCUS_MODE",
+                "Target focus mode enabled must be a boolean",
+            )
+        thread_id = self._selected_thread_id(expected_thread_id)
+        if enabled:
+            result = self._client.request(
+                "thread/goal/get",
+                {"threadId": thread_id},
+            )
+            goal = self._project_goal(result, thread_id, allow_none=True)
+            if goal is None or goal.get("status") != "active":
+                raise BridgeError(
+                    "ACTIVE_GOAL_REQUIRED",
+                    "Target focus mode requires an active Codex Goal",
+                    http_status=409,
+                )
+            goal_binding = self._goal_binding(goal)
+            if goal_binding is None:
+                raise self._invalid_goal_response(
+                    "Goal stable fields are invalid",
+                    field="tokenBudget",
+                )
+        self._selected_thread_id(thread_id)
+        with self._lock:
+            if enabled:
+                self._focus_enabled_threads.add(thread_id)
+                self._focus_goal_bindings[thread_id] = goal_binding
+            else:
+                self._focus_enabled_threads.discard(thread_id)
+                self._focus_goal_bindings.pop(thread_id, None)
+            self._write_focus_state_locked()
+        return {
+            "thread_id": thread_id,
+            "focus_mode": enabled,
+        }
 
     def list_models(self) -> dict[str, Any]:
         """Return a bounded, sanitized catalog of non-hidden Codex models."""
@@ -918,6 +1143,7 @@ class BridgeSession:
             self._require_no_active_turn_locked()
             self._turn_generation += 1
             generation = self._turn_generation
+            self._start_source_turn_id = self._turn_id or self._start_source_turn_id
             self._turn_id = None
             self._turn_status = "starting"
             self._turn_active = True
@@ -964,6 +1190,7 @@ class BridgeSession:
                     self._turn_active = False
                     self._turn_id = None
                     self._turn_status = None
+                    self._start_source_turn_id = None
                     confirmed_not_created = True
             if confirmed_not_created:
                 details = dict(exc.details or {})
@@ -1010,6 +1237,7 @@ class BridgeSession:
                     )
                 self._turn_created = True
                 self._turn_id = turn_id
+                self._start_source_turn_id = None
                 if self._turn_active and self._turn_status == "starting":
                     self._turn_status = "inProgress"
                 publish_selection = True
@@ -1094,6 +1322,71 @@ class BridgeSession:
                         "turn_id": turn_id,
                     },
                 ) from exc
+            active_turn_mismatch = self._rpc_active_turn_mismatch(exc.details)
+            if (
+                active_turn_mismatch is not None
+                and active_turn_mismatch[0] == turn_id
+            ):
+                expected_turn_id, found_turn_id = active_turn_mismatch
+                with self._turn_condition:
+                    same_turn = (
+                        generation == self._turn_generation
+                        and self._thread_id == thread_id
+                        and self._turn_id == expected_turn_id
+                        and self._turn_active
+                    )
+                    if same_turn:
+                        self._turn_generation += 1
+                        self._start_source_turn_id = expected_turn_id
+                        self._turn_id = found_turn_id
+                        self._turn_status = "inProgress"
+                        self._turn_active = True
+                        self._turn_created = True
+                        self._turn_condition.notify_all()
+                    details = {
+                        "thread_id": thread_id,
+                        "expected_turn_id": expected_turn_id,
+                        "active_turn_id": found_turn_id,
+                        "turn_active": True if same_turn else None,
+                        "turn_status": "inProgress" if same_turn else "changed",
+                    }
+                raise BridgeError(
+                    "STALE_ACTIVE_TURN",
+                    "The active Turn changed before appended input was accepted",
+                    http_status=409,
+                    details=details,
+                ) from exc
+            if self._rpc_reports_no_active_steer(exc.details):
+                with self._turn_condition:
+                    same_turn = (
+                        generation == self._turn_generation
+                        and self._thread_id == thread_id
+                        and self._turn_id == turn_id
+                    )
+                    if same_turn and self._turn_active:
+                        self._turn_status = "completed"
+                        self._turn_active = False
+                        self._turn_created = True
+                        self._turn_condition.notify_all()
+                    details = {
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "turn_active": (
+                            self._turn_active if same_turn else None
+                        ),
+                        "turn_status": (
+                            self._turn_status if same_turn else "changed"
+                        ),
+                    }
+                    snapshot = self.snapshot() if same_turn else None
+                if snapshot is not None:
+                    self._events.publish("session_state", session=snapshot)
+                raise BridgeError(
+                    "NO_ACTIVE_TURN",
+                    "The previous Turn ended before appended input was accepted",
+                    http_status=409,
+                    details=details,
+                ) from exc
             raise
 
         acknowledged_turn_id = self._extract_steer_turn_id(result)
@@ -1107,24 +1400,6 @@ class BridgeSession:
                     "acknowledged_turn_id": acknowledged_turn_id,
                 },
             )
-        with self._lock:
-            if (
-                generation != self._turn_generation
-                or not self._turn_active
-                or self._thread_id != thread_id
-                or self._turn_id != acknowledged_turn_id
-            ):
-                raise BridgeError(
-                    "TURN_CHANGED_DURING_STEER",
-                    "The active Turn changed before turn/steer was acknowledged",
-                    http_status=409,
-                    details={
-                        "expected_turn_id": turn_id,
-                        "acknowledged_turn_id": acknowledged_turn_id,
-                        "current_turn_id": self._turn_id,
-                        "turn_active": self._turn_active,
-                    },
-                )
         return {
             "thread_id": thread_id,
             "turn_id": turn_id,
@@ -1195,6 +1470,7 @@ class BridgeSession:
         return validated
 
     def interrupt_turn(self) -> dict[str, Any]:
+        interrupt_deadline = time.monotonic() + STOP_INTERRUPT_GRACE_SECONDS
         with self._lock:
             thread_id = self._thread_id
             turn_id = self._turn_id
@@ -1202,11 +1478,271 @@ class BridgeSession:
                 self._identifier_is_valid(value) for value in (thread_id, turn_id)
             ):
                 raise self._no_active_turn_error_locked()
-        result = self._client.request(
-            "turn/interrupt",
-            {"threadId": thread_id, "turnId": turn_id},
+            if self._turn_status == "stopRequested":
+                snapshot = self.snapshot()
+                return {
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "result": None,
+                    "restarted_app_server": False,
+                    "recovery_pending": False,
+                    "houdini_may_still_be_finishing": self._tool_may_still_be_running_locked(),
+                    "session": snapshot,
+                }
+            generation = self._turn_generation
+            self._turn_status = "stopRequested"
+            houdini_may_still_be_finishing = (
+                self._tool_may_still_be_running_locked()
+            )
+
+        self._events.publish("session_state", session=self.snapshot())
+        result: Any = None
+        request_with_timeout = getattr(self._client, "request_with_timeout", None)
+        try:
+            if callable(request_with_timeout):
+                result = request_with_timeout(
+                    "turn/interrupt",
+                    {"threadId": thread_id, "turnId": turn_id},
+                    timeout_seconds=STOP_INTERRUPT_GRACE_SECONDS,
+                )
+            else:  # Test doubles and older in-process clients remain compatible.
+                result = self._client.request(
+                    "turn/interrupt",
+                    {"threadId": thread_id, "turnId": turn_id},
+                )
+        except (BridgeError, CodexRPCError):
+            # A lost/late interrupt acknowledgement is not terminal evidence.
+            # The exact Turn is checked below before any process replacement.
+            pass
+
+        with self._turn_condition:
+            while (
+                generation == self._turn_generation
+                and self._thread_id == thread_id
+                and self._turn_id == turn_id
+                and self._turn_active
+            ):
+                remaining = interrupt_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._turn_condition.wait(remaining)
+            if (
+                generation != self._turn_generation
+                or self._thread_id != thread_id
+                or self._turn_id != turn_id
+                or not self._turn_active
+            ):
+                snapshot = self.snapshot()
+                return {
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "result": result,
+                    "restarted_app_server": False,
+                    "recovery_pending": False,
+                    "houdini_may_still_be_finishing": False,
+                    "session": snapshot,
+                }
+
+        snapshot = self._start_app_server_recovery_after_stop(
+            thread_id,
+            turn_id,
+            generation,
         )
-        return {"thread_id": thread_id, "turn_id": turn_id, "result": result}
+        return {
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "result": result,
+            "restarted_app_server": False,
+            "recovery_pending": snapshot.get("turn_status") == "stopRecovering",
+            "houdini_may_still_be_finishing": houdini_may_still_be_finishing,
+            "session": snapshot,
+        }
+
+    def _start_app_server_recovery_after_stop(
+        self,
+        thread_id: str,
+        turn_id: str,
+        generation: int,
+    ) -> dict[str, Any]:
+        """Release the stopped Turn and recover its exact Thread once in background."""
+
+        with self._turn_condition:
+            if not (
+                generation == self._turn_generation
+                and self._thread_id == thread_id
+                and self._turn_id == turn_id
+                and self._turn_active
+                and self._turn_status == "stopRequested"
+            ):
+                return self.snapshot()
+            existing = self._stop_recovery_thread
+            if existing is not None and existing.is_alive():
+                return self.snapshot()
+            self._connected = False
+            self._initialize_result = None
+            self._turn_generation += 1
+            recovery_generation = self._turn_generation
+            self._start_source_turn_id = turn_id
+            self._turn_id = None
+            self._turn_status = "stopRecovering"
+            self._turn_active = False
+            self._turn_created = True
+            self._turn_condition.notify_all()
+            worker = threading.Thread(
+                target=self._recover_app_server_after_stop,
+                args=(thread_id, recovery_generation),
+                name="hia-stop-recovery",
+                daemon=True,
+            )
+            self._stop_recovery_thread = worker
+            snapshot = self.snapshot()
+
+        self._events.publish("session_state", session=snapshot)
+        try:
+            worker.start()
+        except RuntimeError:
+            with self._turn_condition:
+                if (
+                    recovery_generation == self._turn_generation
+                    and self._thread_id == thread_id
+                    and self._turn_status == "stopRecovering"
+                ):
+                    self._turn_status = "stopRecoveryFailed"
+                    self._stop_recovery_thread = None
+                    failed_snapshot = self.snapshot()
+                else:
+                    failed_snapshot = snapshot
+            self._events.publish("session_state", session=failed_snapshot)
+            return failed_snapshot
+        return snapshot
+
+    def _recover_app_server_after_stop(
+        self,
+        thread_id: str,
+        recovery_generation: int,
+    ) -> None:
+        """Replace Codex, resume one exact Thread, and never replay its Turn."""
+
+        deadline = time.monotonic() + STOP_RECOVERY_TOTAL_SECONDS
+
+        try:
+            with self._lock:
+                if self._closed:
+                    self._clear_stop_recovery_worker()
+                    return
+            restart = getattr(self._client, "restart", None)
+            initialize_with_timeout = getattr(
+                self._client,
+                "initialize_with_timeout",
+                None,
+            )
+            request_with_timeout = getattr(
+                self._client,
+                "request_with_timeout",
+                None,
+            )
+            if not all(
+                callable(value)
+                for value in (restart, initialize_with_timeout, request_with_timeout)
+            ):
+                raise BridgeError(
+                    "CODEX_RESTART_UNAVAILABLE",
+                    "Codex app-server restart is unavailable",
+                    http_status=503,
+                )
+            restart(
+                grace_seconds=STOP_RESTART_GRACE_SECONDS,
+                deadline=deadline,
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BridgeError(
+                    "CODEX_STOP_RECOVERY_TIMEOUT",
+                    "Codex app-server stop recovery timed out",
+                    http_status=504,
+                )
+            initialize_result = initialize_with_timeout(
+                min(STOP_REINITIALIZE_MAX_SECONDS, remaining)
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BridgeError(
+                    "CODEX_STOP_RECOVERY_TIMEOUT",
+                    "Codex app-server stop recovery timed out",
+                    http_status=504,
+                )
+            resumed = request_with_timeout(
+                "thread/resume",
+                {
+                    "threadId": thread_id,
+                    "cwd": str(self._project_root),
+                    "approvalPolicy": "on-request",
+                    "sandbox": "workspace-write",
+                    "developerInstructions": self._developer_instructions(),
+                    "serviceTier": None,
+                },
+                timeout_seconds=remaining,
+            )
+            if self._extract_thread_id(resumed) != thread_id:
+                raise BridgeError(
+                    "INVALID_CODEX_RESPONSE",
+                    "Restarted Codex resumed a different Thread",
+                    http_status=502,
+                )
+        except Exception:
+            with self._turn_condition:
+                if (
+                    not self._closed
+                    and recovery_generation == self._turn_generation
+                    and self._thread_id == thread_id
+                    and self._turn_status == "stopRecovering"
+                ):
+                    self._connected = False
+                    self._initialize_result = None
+                    self._turn_status = "stopRecoveryFailed"
+                    self._turn_active = False
+                    self._turn_condition.notify_all()
+                    failed_snapshot = self.snapshot()
+                else:
+                    failed_snapshot = None
+            if failed_snapshot is not None:
+                self._events.publish("session_state", session=failed_snapshot)
+            self._clear_stop_recovery_worker()
+            return
+
+        with self._turn_condition:
+            if not (
+                not self._closed
+                and recovery_generation == self._turn_generation
+                and self._thread_id == thread_id
+                and self._turn_status == "stopRecovering"
+            ):
+                self._clear_stop_recovery_worker()
+                return
+            self._initialize_result = initialize_result
+            self._connected = True
+            self._turn_generation += 1
+            self._turn_id = None
+            self._turn_status = "interrupted"
+            self._turn_active = False
+            self._turn_created = True
+            self._turn_condition.notify_all()
+            recovered_snapshot = self.snapshot()
+        self._events.publish("session_state", session=recovered_snapshot)
+
+        self._clear_stop_recovery_worker()
+
+    def _clear_stop_recovery_worker(self) -> None:
+        with self._lock:
+            if self._stop_recovery_thread is threading.current_thread():
+                self._stop_recovery_thread = None
+
+    def _tool_may_still_be_running_locked(self) -> bool:
+        return (
+            isinstance(self._last_tool_name, str)
+            and bool(self._last_tool_name)
+            and self._last_tool_status not in {"completed", "failed"}
+        )
 
     def resolve_approval(self, request_id: RequestId, decision: str) -> dict[str, Any]:
         if decision not in {"allow", "deny", "allow_rule"}:
@@ -1675,6 +2211,9 @@ class BridgeSession:
         self._turn_status = None
         self._turn_active = False
         self._turn_created = False
+        self._start_source_turn_id = None
+        self._last_tool_name = None
+        self._last_tool_status = None
 
     @staticmethod
     def _extract_thread_id(result: Any) -> str:
@@ -1793,6 +2332,52 @@ class BridgeSession:
                 pending.extend(value)
         return None
 
+    @staticmethod
+    def _rpc_reports_no_active_steer(error: Any) -> bool:
+        if not isinstance(error, dict):
+            return False
+        rpc_error = error.get("rpc_error")
+        message = rpc_error.get("message") if isinstance(rpc_error, dict) else None
+        if (
+            not isinstance(rpc_error, dict)
+            or rpc_error.get("code") != -32600
+            or not isinstance(message, str)
+        ):
+            return False
+        normalized = " ".join(message.casefold().split())
+        return normalized.rstrip(".") == "no active turn to steer"
+
+    @staticmethod
+    def _rpc_active_turn_mismatch(error: Any) -> tuple[str, str] | None:
+        if not isinstance(error, dict):
+            return None
+        rpc_error = error.get("rpc_error")
+        message = rpc_error.get("message") if isinstance(rpc_error, dict) else None
+        if (
+            not isinstance(rpc_error, dict)
+            or rpc_error.get("code") != -32600
+            or not isinstance(message, str)
+        ):
+            return None
+        normalized = " ".join(message.split()).rstrip(".")
+        match = re.fullmatch(
+            r"expected active turn id (.+?) but found (.+)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        identifiers = tuple(
+            value.strip().strip("`'\"") for value in match.groups()
+        )
+        if any(
+            not BridgeSession._identifier_is_valid(value)
+            or any(character.isspace() for character in value)
+            for value in identifiers
+        ):
+            return None
+        return identifiers[0], identifiers[1]
+
     def _on_client_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
         if event_type == "server_request":
@@ -1824,11 +2409,14 @@ class BridgeSession:
                         self._turn_active
                         and thread_id == self._thread_id
                         and self._identifier_is_valid(turn_id)
+                        and turn_id != self._start_source_turn_id
                         and self._turn_id in {None, turn_id}
                     ):
                         self._turn_id = turn_id
                         self._turn_status = "inProgress"
                         self._turn_created = True
+                        self._last_tool_name = None
+                        self._last_tool_status = None
                 elif method == "turn/completed":
                     turn = params.get("turn")
                     thread_id = params.get("threadId")
@@ -1837,6 +2425,7 @@ class BridgeSession:
                         isinstance(turn, dict)
                         and thread_id == self._thread_id
                         and self._identifier_is_valid(turn_id)
+                        and turn_id != self._start_source_turn_id
                         and turn_id == self._turn_id
                     ):
                         status = turn.get("status")
@@ -1847,8 +2436,62 @@ class BridgeSession:
                         )
                         self._turn_active = False
                         self._turn_created = True
+                        self._turn_condition.notify_all()
+                elif method in {"item/started", "item/completed"}:
+                    item = params.get("item")
+                    thread_id = params.get("threadId")
+                    turn_id = params.get("turnId")
+                    if (
+                        isinstance(item, dict)
+                        and thread_id == self._thread_id
+                        and turn_id == self._turn_id
+                        and item.get("type") == "mcpToolCall"
+                    ):
+                        tool_name = item.get("tool")
+                        if isinstance(tool_name, str) and tool_name:
+                            self._last_tool_name = " ".join(tool_name.split())[:128]
+                            status = item.get("status")
+                            self._last_tool_status = (
+                                " ".join(status.split())[:64]
+                                if isinstance(status, str) and status
+                                else (
+                                    "started"
+                                    if method == "item/started"
+                                    else "completed"
+                                )
+                            )
+                elif method in {"thread/goal/updated", "thread/goal/cleared"}:
+                    thread_id = params.get("threadId")
+                    goal = params.get("goal")
+                    if (
+                        isinstance(thread_id, str)
+                        and self._focus_mode_locked(thread_id)
+                    ):
+                        should_disable = method == "thread/goal/cleared"
+                        if isinstance(goal, dict):
+                            if "status" in goal and goal.get("status") != "active":
+                                should_disable = True
+                            stable_fields = {
+                                key for key in ("objective", "tokenBudget") if key in goal
+                            }
+                            if stable_fields:
+                                binding = (
+                                    self._goal_binding(goal)
+                                    if stable_fields == {"objective", "tokenBudget"}
+                                    else None
+                                )
+                                should_disable = should_disable or (
+                                    binding
+                                    != self._focus_goal_bindings.get(thread_id)
+                                )
+                        if should_disable:
+                            try:
+                                self._disable_focus_locked(thread_id)
+                            except BridgeError:
+                                pass
         elif event_type == "process_exit":
-            with self._lock:
+            with self._turn_condition:
                 self._connected = False
+                self._turn_condition.notify_all()
         fields = {key: value for key, value in event.items() if key != "type"}
         self._events.publish(str(event_type), **fields)

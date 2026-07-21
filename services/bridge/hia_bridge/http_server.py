@@ -165,6 +165,8 @@ class BridgeApplication:
             "display_name": display_name,
             "available": False,
         }
+        if backend == HIA_MCP_V2_BACKEND:
+            status["scene_revision"] = None
         port = self._houdini_mcp_port
         token = self._houdini_mcp_token
         if port is None or token is None:
@@ -196,6 +198,8 @@ class BridgeApplication:
                 and not isinstance(result.get("scene_revision"), bool)
                 and result["scene_revision"] >= 0
             )
+            if status["available"]:
+                status["scene_revision"] = result["scene_revision"]
             return status
 
         body = urllib_parse.urlencode(
@@ -478,6 +482,13 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     "Goal action must be set or clear",
                     HTTPStatus.BAD_REQUEST,
                 )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/focus":
+            self._require_exact_fields(body, {"thread_id", "enabled"})
+            result = application.session.set_focus_mode(
+                body["thread_id"],
+                body["enabled"],
+            )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/steer":
             result = application.session.steer_turn(

@@ -76,7 +76,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_context",
         "scene_perception",
-        "Read the live Houdini build, HIP, frame/FPS, take, dirty state, current network/node, selection, scene revision, installed contexts, and an optional bounded graph overview.",
+        "Read the live Houdini build, HIP, frame/FPS, take, dirty state, current network/node, selection, scene revision, Goal focus recovery mode, installed contexts, and an optional bounded graph overview.",
         _object(
             {
                 "include_graph": {"type": "boolean", "default": False},

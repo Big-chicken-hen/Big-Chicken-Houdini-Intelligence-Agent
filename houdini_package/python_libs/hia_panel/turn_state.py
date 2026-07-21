@@ -277,6 +277,38 @@ class PanelTurnState:
             turn_active=False,
         )
 
+    def reconcile_steer_snapshot(
+        self,
+        token: TurnStateToken,
+        thread_id: str,
+        turn_id: str | None,
+        *,
+        turn_active: bool,
+    ) -> bool:
+        """Apply the one authoritative snapshot requested after a stale steer."""
+
+        normalized_thread_id = self._identifier(thread_id)
+        normalized_turn_id = self._identifier(turn_id)
+        if (
+            not self.token_is_current(token)
+            or self._phase is not TurnPhase.IN_PROGRESS
+            or normalized_thread_id != self._thread_id
+        ):
+            return False
+        if not turn_active:
+            self._phase = TurnPhase.IDLE
+            self._turn_id = None
+            self._touch()
+            return True
+        if normalized_turn_id is None:
+            return False
+        if normalized_turn_id != self._turn_id:
+            self._generation += 1
+            self._reconciliation_claims.clear()
+            self._turn_id = normalized_turn_id
+            self._touch()
+        return True
+
     def derive_controls(
         self,
         *,

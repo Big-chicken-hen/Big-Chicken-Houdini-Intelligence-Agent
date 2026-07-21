@@ -170,6 +170,7 @@ class BridgeHTTPTests(unittest.TestCase):
                 "server_id": "hia_mcp_v2",
                 "display_name": "HIA MCP V2",
                 "available": True,
+                "scene_revision": 4,
             },
             status,
         )
@@ -190,6 +191,7 @@ class BridgeHTTPTests(unittest.TestCase):
             unavailable = application.houdini_mcp_status()
         self.assertFalse(unavailable["available"])
         self.assertEqual("hia_v2", unavailable["backend"])
+        self.assertIsNone(unavailable["scene_revision"])
 
     def test_bad_token_is_rejected(self) -> None:
         with self.assertRaises(HTTPError) as raised:
@@ -274,6 +276,12 @@ class BridgeHTTPTests(unittest.TestCase):
                 "token_budget": 25_000,
             },
         )
+        focused = self.request(
+            "POST",
+            "/v1/focus",
+            {"thread_id": "thread-fake", "enabled": True},
+        )
+        session = self.request("GET", "/v1/session")
         cleared = self.request(
             "POST",
             "/v1/goal",
@@ -284,7 +292,10 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual("thread-fake", saved["thread_id"])
         self.assertEqual("完成当前木屋任务", saved["goal"]["objective"])
         self.assertEqual(25_000, saved["goal"]["tokenBudget"])
+        self.assertTrue(focused["focus_mode"])
+        self.assertTrue(session["session"]["focus_mode"])
         self.assertTrue(cleared["cleared"])
+        self.assertFalse(cleared["focus_mode"])
 
     def test_unicode_model_effort_and_service_tier_are_forwarded_without_loss(
         self,

@@ -8,6 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -21,6 +22,8 @@ from hia_bridge.session import (  # noqa: E402
     MODEL_LIST_MAX_PAGES,
     MODEL_LIST_PAGE_SIZE,
     MAX_LOCAL_IMAGES,
+    STOP_INTERRUPT_GRACE_SECONDS,
+    STOP_RECOVERY_TOTAL_SECONDS,
     THREAD_PREVIEW_MAX_LENGTH,
     BridgeSession,
     _requires_system_drive_approval,
@@ -124,6 +127,111 @@ class _RecordingClient(_ClientStub):
         if method == "turn/steer":
             return {"turnId": params["expectedTurnId"]}
         return super().request(method, params)
+
+
+class _AdvancingClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def monotonic(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += float(seconds)
+
+
+class _StopRecoveryClient(_RecordingClient):
+    def __init__(
+        self,
+        *,
+        complete_during_interrupt: bool,
+        complete_during_resume: bool = False,
+        timeout_during_resume: bool = False,
+        resume_gate: threading.Event | None = None,
+        clock: Any = None,
+    ) -> None:
+        super().__init__()
+        self.complete_during_interrupt = complete_during_interrupt
+        self.complete_during_resume = complete_during_resume
+        self.timeout_during_resume = timeout_during_resume
+        self.resume_gate = resume_gate
+        self.clock = clock
+        self.restart_count = 0
+        self.restart_deadlines: list[float | None] = []
+        self.initialize_timeouts: list[float] = []
+        self.timed_requests: list[tuple[str, dict[str, Any], float]] = []
+        self.resume_entered = threading.Event()
+        self.resume_finished = threading.Event()
+
+    def request_with_timeout(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        self.timed_requests.append((method, dict(params), timeout_seconds))
+        if method == "turn/interrupt":
+            if self.complete_during_interrupt:
+                self.emit_notification(
+                    "turn/completed",
+                    {
+                        "threadId": params["threadId"],
+                        "turn": {
+                            "id": params["turnId"],
+                            "status": "interrupted",
+                        },
+                    },
+                )
+                return {}
+            if self.clock is not None:
+                self.clock.advance(timeout_seconds)
+            raise BridgeError(
+                "CODEX_REQUEST_TIMEOUT",
+                "interrupt timed out",
+                http_status=504,
+            )
+        if method == "thread/resume":
+            self.resume_entered.set()
+            try:
+                if self.resume_gate is not None and not self.resume_gate.wait(2.0):
+                    raise AssertionError("resume gate was not released")
+                if self.timeout_during_resume:
+                    if self.clock is not None:
+                        self.clock.advance(timeout_seconds)
+                    raise BridgeError(
+                        "CODEX_REQUEST_TIMEOUT",
+                        "resume timed out",
+                        http_status=504,
+                    )
+                if self.complete_during_resume:
+                    self.emit_notification(
+                        "turn/completed",
+                        {
+                            "threadId": params["threadId"],
+                            "turn": {
+                                "id": "turn-recorded",
+                                "status": "completed",
+                            },
+                        },
+                    )
+                return {"thread": {"id": params["threadId"], "turns": []}}
+            finally:
+                self.resume_finished.set()
+        raise AssertionError(f"Unexpected timed request: {method}")
+
+    def restart(
+        self,
+        grace_seconds: float = 1.0,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        self.restart_count += 1
+        self.restart_deadlines.append(deadline)
+
+    def initialize_with_timeout(self, timeout_seconds: float) -> dict[str, Any]:
+        self.initialize_timeouts.append(timeout_seconds)
+        return {"userAgent": "fake-codex/0.144.3"}
 
 
 class _GoalClient(_RecordingClient):
@@ -230,6 +338,35 @@ class _CompletingSteerClient(_RecordingClient):
             },
         )
         return {"turnId": params["expectedTurnId"]}
+
+
+class _LateOldTurnStartClient(_RecordingClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_count = 0
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method != "turn/start":
+            return super().request(method, params)
+        self.requests.append((method, dict(params)))
+        self.start_count += 1
+        if self.start_count == 1:
+            return {"turn": {"id": "turn-old", "status": "inProgress"}}
+        self.emit_notification(
+            "turn/started",
+            {
+                "threadId": params["threadId"],
+                "turn": {"id": "turn-old", "status": "inProgress"},
+            },
+        )
+        self.emit_notification(
+            "turn/completed",
+            {
+                "threadId": params["threadId"],
+                "turn": {"id": "turn-old", "status": "completed"},
+            },
+        )
+        return {"turn": {"id": "turn-new", "status": "inProgress"}}
 
 
 def _model_entry(
@@ -1013,6 +1150,157 @@ class BridgeSessionGoalTests(unittest.TestCase):
         self.assertEqual("INVALID_GOAL_RESPONSE", mismatched.exception.code)
         self.assertEqual("threadId", mismatched.exception.details["field"])
 
+    def test_focus_mode_requires_active_goal_and_persists_per_thread(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=REPOSITORY_ROOT / ".runtime" / "tmp"
+        ) as directory:
+            focus_path = Path(directory) / "focus-mode.json"
+            client = _GoalClient()
+            session = BridgeSession(
+                REPOSITORY_ROOT,
+                client,
+                EventBuffer(),
+                focus_state_path=focus_path,
+            )
+            session.start_thread()
+
+            with self.assertRaises(BridgeError) as missing_goal:
+                session.set_focus_mode("thread-test", True)
+            self.assertEqual("ACTIVE_GOAL_REQUIRED", missing_goal.exception.code)
+            self.assertFalse(session.snapshot()["focus_mode"])
+
+            session.set_goal(
+                expected_thread_id="thread-test",
+                objective="完成木屋",
+                status="active",
+                token_budget=None,
+            )
+            enabled = session.set_focus_mode("thread-test", True)
+            self.assertTrue(enabled["focus_mode"])
+            self.assertTrue(session.snapshot()["focus_mode"])
+            focused_goal = dict(client.goal or {})
+
+            persisted = json.loads(focus_path.read_text(encoding="utf-8"))
+            self.assertEqual("thread-test", persisted["active_thread_id"])
+            self.assertEqual(["thread-test"], persisted["enabled_thread_ids"])
+            self.assertRegex(
+                persisted["goal_bindings"]["thread-test"], r"^[0-9a-f]{64}$"
+            )
+            self.assertNotIn(
+                str(focused_goal["objective"]),
+                focus_path.read_text(encoding="utf-8"),
+            )
+
+            resumed_client = _GoalClient()
+            resumed_client.goal = focused_goal
+            resumed = BridgeSession(
+                REPOSITORY_ROOT,
+                resumed_client,
+                EventBuffer(),
+                focus_state_path=focus_path,
+            )
+            result = resumed.resume_thread("thread-test")
+            self.assertTrue(result["focus_mode"])
+            self.assertTrue(resumed.snapshot()["focus_mode"])
+
+            cleared = resumed.clear_goal("thread-test")
+            self.assertTrue(cleared["cleared"])
+            self.assertFalse(cleared["focus_mode"])
+            self.assertEqual(
+                [],
+                json.loads(focus_path.read_text(encoding="utf-8"))[
+                    "enabled_thread_ids"
+                ],
+            )
+
+    def test_focus_binding_closes_on_goal_content_change_not_progress(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=REPOSITORY_ROOT / ".runtime" / "tmp"
+        ) as directory:
+            focus_path = Path(directory) / "focus-mode.json"
+            client = _GoalClient()
+            session = BridgeSession(
+                REPOSITORY_ROOT,
+                client,
+                EventBuffer(),
+                focus_state_path=focus_path,
+            )
+            session.start_thread()
+            session.set_goal(
+                expected_thread_id="thread-test",
+                objective="Build cabin A",
+                status="active",
+                token_budget=25_000,
+            )
+            session.set_focus_mode("thread-test", True)
+            original_binding = session.get_goal("thread-test")["goal_binding"]
+
+            client.emit_notification(
+                "thread/goal/updated",
+                {
+                    "threadId": "thread-test",
+                    "goal": {
+                        "status": "active",
+                        "tokensUsed": 500,
+                        "timeUsedSeconds": 12,
+                    },
+                },
+            )
+            self.assertTrue(session.snapshot()["focus_mode"])
+            self.assertEqual(
+                original_binding,
+                session.get_goal("thread-test")["goal_binding"],
+            )
+
+            changed = session.set_goal(
+                expected_thread_id="thread-test",
+                objective="Build cabin B",
+                status="active",
+                token_budget=25_000,
+            )
+            self.assertFalse(changed["focus_mode"])
+            self.assertNotIn(
+                "thread-test",
+                json.loads(focus_path.read_text(encoding="utf-8"))["goal_bindings"],
+            )
+
+            session.set_focus_mode("thread-test", True)
+            client.emit_notification(
+                "thread/goal/updated",
+                {
+                    "threadId": "thread-test",
+                    "goal": {
+                        "threadId": "thread-test",
+                        "objective": "Build cabin B",
+                        "status": "active",
+                        "tokenBudget": 30_000,
+                        "tokensUsed": 0,
+                    },
+                },
+            )
+            self.assertFalse(session.snapshot()["focus_mode"])
+
+            session.set_focus_mode("thread-test", True)
+            client.emit_notification(
+                "thread/goal/updated",
+                {
+                    "threadId": "thread-test",
+                    "goal": {
+                        "threadId": "thread-test",
+                        "objective": "Build cabin B",
+                        "status": "blocked",
+                        "tokenBudget": 25_000,
+                    },
+                },
+            )
+            self.assertFalse(session.snapshot()["focus_mode"])
+            self.assertNotIn(
+                "thread-test",
+                json.loads(focus_path.read_text(encoding="utf-8"))[
+                    "enabled_thread_ids"
+                ],
+            )
+
 class BridgeSessionModelCatalogTests(unittest.TestCase):
     def make_session(self, responses: list[Any]) -> tuple[BridgeSession, _ScriptedModelClient]:
         client = _ScriptedModelClient(responses)
@@ -1307,16 +1595,209 @@ class BridgeSessionSteerTests(unittest.TestCase):
         self.assertEqual("INVALID_CODEX_RESPONSE", raised.exception.code)
         self.assertEqual(before, session.snapshot())
 
-    def test_ack_is_rejected_if_the_turn_completed_before_it_arrived(self) -> None:
+    def test_same_turn_ack_is_accepted_if_completion_arrives_first(self) -> None:
         session, _ = self.make_active_session(_CompletingSteerClient())
+
+        result = session.steer_turn("追加要求")
+
+        self.assertEqual("turn-recorded", result["turn_id"])
+        snapshot = session.snapshot()
+        self.assertFalse(snapshot["turn_active"])
+        self.assertEqual("completed", snapshot["turn_status"])
+
+    def test_matching_ack_remains_accepted_after_local_lifecycle_changes(self) -> None:
+        client = _SteerClient({"turnId": "turn-recorded"})
+        session, _ = self.make_active_session(client)
+
+        def changed_lifecycle(_method: str, params: dict[str, Any]) -> dict[str, Any]:
+            with session._lock:
+                session._turn_generation += 1
+                session._thread_id = "thread-other"
+                session._turn_id = "turn-other"
+            return {"turnId": params["expectedTurnId"]}
+
+        with mock.patch.object(client, "request", side_effect=changed_lifecycle):
+            result = session.steer_turn("追加要求")
+
+        self.assertEqual("thread-test", result["thread_id"])
+        self.assertEqual("turn-recorded", result["turn_id"])
+
+    def test_canonical_no_active_steer_is_a_terminal_conflict(self) -> None:
+        messages = (
+            "no active turn to steer",
+            "  NO   ACTIVE TURN TO STEER.  ",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                client = _SteerClient(
+                    CodexRPCError(
+                        "turn/steer",
+                        {"code": -32600, "message": message},
+                    )
+                )
+                session, _ = self.make_active_session(client)
+
+                with self.assertRaises(BridgeError) as raised:
+                    session.steer_turn("追加要求")
+
+                self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
+                self.assertEqual(409, raised.exception.http_status)
+                self.assertFalse(raised.exception.details["turn_active"])
+                self.assertEqual(
+                    "thread-test", raised.exception.details["thread_id"]
+                )
+                self.assertEqual(
+                    "turn-recorded", raised.exception.details["turn_id"]
+                )
+                self.assertFalse(session.snapshot()["turn_active"])
+
+    def test_no_active_steer_matcher_rejects_nearby_rpc_errors(self) -> None:
+        errors = (
+            {"code": -32001, "message": "no active turn to steer"},
+            {"code": -32600, "message": "no active turn available to steer"},
+            {"code": -32600, "message": "turn/steer timed out"},
+        )
+        for error in errors:
+            with self.subTest(error=error):
+                client = _SteerClient(CodexRPCError("turn/steer", error))
+                session, _ = self.make_active_session(client)
+                before = session.snapshot()
+
+                with self.assertRaises(CodexRPCError):
+                    session.steer_turn("追加要求")
+
+                self.assertEqual(before, session.snapshot())
+
+        timeout = BridgeError(
+            "CODEX_REQUEST_TIMEOUT",
+            "turn/steer timed out",
+            http_status=504,
+        )
+        session, _ = self.make_active_session(_SteerClient(timeout))
+        before = session.snapshot()
+        with self.assertRaises(BridgeError) as raised:
+            session.steer_turn("追加要求")
+        self.assertEqual("CODEX_REQUEST_TIMEOUT", raised.exception.code)
+        self.assertEqual(before, session.snapshot())
+
+    def test_no_active_rpc_does_not_end_a_newer_turn_generation(self) -> None:
+        client = _SteerClient({"turnId": "turn-recorded"})
+        session, _ = self.make_active_session(client)
+
+        def newer_turn_then_error(
+            _method: str,
+            _params: dict[str, Any],
+        ) -> dict[str, Any]:
+            with session._lock:
+                session._turn_generation += 1
+                session._turn_id = "turn-newer"
+                session._turn_status = "inProgress"
+                session._turn_active = True
+            raise CodexRPCError(
+                "turn/steer",
+                {"code": -32600, "message": "no active turn to steer"},
+            )
+
+        with mock.patch.object(client, "request", side_effect=newer_turn_then_error):
+            with self.assertRaises(BridgeError) as raised:
+                session.steer_turn("追加要求")
+
+        self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
+        self.assertIsNone(raised.exception.details["turn_active"])
+        self.assertEqual("changed", raised.exception.details["turn_status"])
+        snapshot = session.snapshot()
+        self.assertTrue(snapshot["turn_active"])
+        self.assertEqual("turn-newer", snapshot["turn_id"])
+
+    def test_stale_active_turn_rpc_updates_the_authoritative_snapshot(self) -> None:
+        client = _SteerClient(
+            CodexRPCError(
+                "turn/steer",
+                {
+                    "code": -32600,
+                    "message": (
+                        "expected active turn id `turn-recorded` "
+                        "but found `turn-authoritative`"
+                    ),
+                },
+            )
+        )
+        session, _ = self.make_active_session(client)
+        generation = session._turn_generation
 
         with self.assertRaises(BridgeError) as raised:
             session.steer_turn("追加要求")
 
-        self.assertEqual("TURN_CHANGED_DURING_STEER", raised.exception.code)
+        self.assertEqual("STALE_ACTIVE_TURN", raised.exception.code)
+        self.assertEqual(409, raised.exception.http_status)
+        self.assertEqual("turn-recorded", raised.exception.details["expected_turn_id"])
+        self.assertEqual(
+            "turn-authoritative",
+            raised.exception.details["active_turn_id"],
+        )
+        self.assertTrue(raised.exception.details["turn_active"])
         snapshot = session.snapshot()
-        self.assertFalse(snapshot["turn_active"])
-        self.assertEqual("completed", snapshot["turn_status"])
+        self.assertEqual("turn-authoritative", snapshot["turn_id"])
+        self.assertTrue(snapshot["turn_active"])
+        self.assertEqual(generation + 1, session._turn_generation)
+        self.assertEqual("turn-recorded", session._start_source_turn_id)
+
+    def test_stale_active_turn_rpc_cas_never_overwrites_a_newer_turn(self) -> None:
+        client = _SteerClient({"turnId": "turn-recorded"})
+        session, _ = self.make_active_session(client)
+
+        def newer_turn_then_stale_error(
+            _method: str,
+            _params: dict[str, Any],
+        ) -> dict[str, Any]:
+            with session._lock:
+                session._turn_generation += 1
+                session._turn_id = "turn-newer"
+                session._turn_status = "inProgress"
+                session._turn_active = True
+            raise CodexRPCError(
+                "turn/steer",
+                {
+                    "code": -32600,
+                    "message": (
+                        "expected active turn id `turn-recorded` "
+                        "but found `turn-reported`"
+                    ),
+                },
+            )
+
+        with mock.patch.object(client, "request", side_effect=newer_turn_then_stale_error):
+            with self.assertRaises(BridgeError) as raised:
+                session.steer_turn("追加要求")
+
+        self.assertEqual("STALE_ACTIVE_TURN", raised.exception.code)
+        self.assertIsNone(raised.exception.details["turn_active"])
+        self.assertEqual("changed", raised.exception.details["turn_status"])
+        self.assertEqual("turn-newer", session.snapshot()["turn_id"])
+
+    def test_stale_active_turn_matcher_rejects_other_codes_and_nearby_text(self) -> None:
+        errors = (
+            {
+                "code": -32001,
+                "message": (
+                    "expected active turn id `turn-recorded` "
+                    "but found `turn-other`"
+                ),
+            },
+            {
+                "code": -32600,
+                "message": "expected turn id `turn-recorded` but found `turn-other`",
+            },
+        )
+        for error in errors:
+            with self.subTest(error=error):
+                session, _ = self.make_active_session(
+                    _SteerClient(CodexRPCError("turn/steer", error))
+                )
+                before = session.snapshot()
+                with self.assertRaises(CodexRPCError):
+                    session.steer_turn("追加要求")
+                self.assertEqual(before, session.snapshot())
 
     def test_review_and_compact_rejections_are_short_structured_conflicts(self) -> None:
         for turn_kind in ("review", "compact"):
@@ -1359,12 +1840,52 @@ class BridgeSessionSteerTests(unittest.TestCase):
         self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
         self.assertEqual([], client.requests)
 
+    def test_local_terminal_steer_rejection_never_calls_app_server(self) -> None:
+        session, client = self.make_active_session()
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-test",
+                "turn": {"id": "turn-recorded", "status": "completed"},
+            },
+        )
+        client.requests.clear()
+
+        with self.assertRaises(BridgeError) as raised:
+            session.steer_turn("作为下一轮发送")
+
+        self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
+        self.assertEqual(False, raised.exception.details["turn_active"])
+        self.assertEqual("turn-recorded", raised.exception.details["turn_id"])
+        self.assertEqual([], client.requests)
+
 
 class BridgeSessionTurnStateTests(unittest.TestCase):
     def make_session(self, client: _ClientStub) -> BridgeSession:
         session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
         session.start_thread()
         return session
+
+    def test_new_start_ignores_late_started_and_completed_from_terminal_turn(self) -> None:
+        client = _LateOldTurnStartClient()
+        session = self.make_session(client)
+        first_turn_id = session.start_turn("first")["turn_id"]
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-test",
+                "turn": {"id": first_turn_id, "status": "completed"},
+            },
+        )
+
+        result = session.start_turn("second")
+
+        self.assertEqual("turn-new", result["turn_id"])
+        snapshot = session.snapshot()
+        self.assertTrue(snapshot["turn_active"])
+        self.assertEqual("turn-new", snapshot["turn_id"])
+        self.assertEqual("inProgress", snapshot["turn_status"])
+        self.assertIsNone(session._start_source_turn_id)
 
     def test_child_thread_started_never_replaces_the_active_main_thread(self) -> None:
         client = _RecordingClient()
@@ -1404,6 +1925,230 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertEqual("thread-test", completed["thread_id"])
         self.assertEqual("completed", completed["turn_status"])
         self.assertFalse(completed["turn_active"])
+
+    def test_last_tool_tracks_only_mcp_tool_calls(self) -> None:
+        client = _RecordingClient()
+        session = self.make_session(client)
+        turn_id = session.start_turn("build")["turn_id"]
+
+        for item_type in ("reasoning", "agentMessage", "commandExecution"):
+            client.emit_notification(
+                "item/started",
+                {
+                    "threadId": "thread-test",
+                    "turnId": turn_id,
+                    "item": {"type": item_type, "status": "inProgress"},
+                },
+            )
+        self.assertIsNone(session.snapshot()["last_tool_name"])
+
+        client.emit_notification(
+            "item/started",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "tool": "hia_execute_hom",
+                    "status": "inProgress",
+                },
+            },
+        )
+        client.emit_notification(
+            "item/completed",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {"type": "agentMessage", "status": "completed"},
+            },
+        )
+        snapshot = session.snapshot()
+        self.assertEqual("hia_execute_hom", snapshot["last_tool_name"])
+        self.assertEqual("inProgress", snapshot["last_tool_status"])
+
+    def test_interrupt_completion_within_grace_does_not_restart_codex(self) -> None:
+        client = _StopRecoveryClient(complete_during_interrupt=True)
+        events = EventBuffer()
+        session = BridgeSession(REPOSITORY_ROOT, client, events)
+        session.start_thread()
+        turn_id = session.start_turn("stop quickly")["turn_id"]
+
+        result = session.interrupt_turn()
+
+        self.assertFalse(result["restarted_app_server"])
+        self.assertEqual(0, client.restart_count)
+        self.assertEqual("thread-test", result["thread_id"])
+        self.assertEqual(turn_id, result["turn_id"])
+        self.assertFalse(result["session"]["turn_active"])
+        self.assertEqual("interrupted", result["session"]["turn_status"])
+        self.assertEqual(STOP_INTERRUPT_GRACE_SECONDS, client.timed_requests[0][2])
+
+    def test_interrupt_timeout_restarts_and_resumes_exact_thread_without_replay(self) -> None:
+        client = _StopRecoveryClient(
+            complete_during_interrupt=False,
+        )
+        events = EventBuffer()
+        session = BridgeSession(REPOSITORY_ROOT, client, events)
+        session.start_thread()
+        turn_id = session.start_turn("stop and recover")["turn_id"]
+        client.emit_notification(
+            "item/started",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "tool": "hia_execute_hom",
+                    "status": "inProgress",
+                },
+            },
+        )
+
+        with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
+            result = session.interrupt_turn()
+
+        self.assertTrue(result["recovery_pending"])
+        self.assertFalse(result["restarted_app_server"])
+        self.assertTrue(result["houdini_may_still_be_finishing"])
+        self.assertEqual("stopRecovering", result["session"]["turn_status"])
+        self.assertFalse(result["session"]["turn_active"])
+        self.assertTrue(client.resume_finished.wait(2.0))
+        worker = session._stop_recovery_thread
+        if worker is not None:
+            worker.join(2.0)
+        self.assertEqual(1, client.restart_count)
+        self.assertEqual(1, len(client.restart_deadlines))
+        self.assertIsNotNone(client.restart_deadlines[0])
+        self.assertEqual(1, len(client.initialize_timeouts))
+        timed_methods = [method for method, _params, _timeout in client.timed_requests]
+        self.assertEqual(["turn/interrupt", "thread/resume"], timed_methods)
+        resume_params = client.timed_requests[1][1]
+        self.assertEqual("thread-test", resume_params["threadId"])
+        self.assertEqual(
+            1,
+            sum(method == "turn/start" for method, _params in client.requests),
+        )
+        snapshot = session.snapshot()
+        self.assertEqual("thread-test", snapshot["thread_id"])
+        self.assertIsNone(snapshot["turn_id"])
+        self.assertTrue(snapshot["connected"])
+        self.assertFalse(snapshot["turn_active"])
+        self.assertEqual("interrupted", snapshot["turn_status"])
+        session_states = [
+            event["session"]
+            for event in events.poll(0, timeout=0)["events"]
+            if event.get("type") == "session_state"
+        ]
+        self.assertEqual("stopRequested", session_states[0]["turn_status"])
+        self.assertIn(
+            "stopRecovering",
+            [state["turn_status"] for state in session_states],
+        )
+        self.assertEqual("interrupted", session_states[-1]["turn_status"])
+
+    def test_stop_background_recovery_failure_is_bounded_and_releases_the_turn(self) -> None:
+        client = _StopRecoveryClient(
+            complete_during_interrupt=False,
+            timeout_during_resume=True,
+        )
+        events = EventBuffer()
+        session = BridgeSession(REPOSITORY_ROOT, client, events)
+        session.start_thread()
+        turn_id = session.start_turn("resume must stay bounded")["turn_id"]
+
+        with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
+            result = session.interrupt_turn()
+
+        self.assertTrue(result["recovery_pending"])
+        self.assertTrue(client.resume_finished.wait(2.0))
+        worker = session._stop_recovery_thread
+        if worker is not None:
+            worker.join(2.0)
+        self.assertEqual(50.0, STOP_RECOVERY_TOTAL_SECONDS)
+        self.assertEqual(1.0, STOP_INTERRUPT_GRACE_SECONDS)
+        self.assertEqual(1, client.restart_count)
+        resume_timeout = next(
+            timeout
+            for method, _params, timeout in client.timed_requests
+            if method == "thread/resume"
+        )
+        self.assertLessEqual(resume_timeout, STOP_RECOVERY_TOTAL_SECONDS)
+        snapshot = session.snapshot()
+        self.assertFalse(snapshot["connected"])
+        self.assertFalse(snapshot["turn_active"])
+        self.assertEqual("stopRecoveryFailed", snapshot["turn_status"])
+        self.assertIsNone(snapshot["turn_id"])
+        self.assertIsNone(session._stop_recovery_thread)
+        session_states = [
+            event["session"]
+            for event in events.poll(0, timeout=0)["events"]
+            if event.get("type") == "session_state"
+        ]
+        self.assertFalse(session_states[-1]["connected"])
+        self.assertFalse(session_states[-1]["turn_active"])
+
+    def test_old_completion_during_restart_cannot_revive_the_stopped_turn(self) -> None:
+        client = _StopRecoveryClient(
+            complete_during_interrupt=False,
+            complete_during_resume=True,
+        )
+        session = self.make_session(client)
+        turn_id = session.start_turn("complete while restarting")["turn_id"]
+
+        with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
+            result = session.interrupt_turn()
+
+        self.assertTrue(result["recovery_pending"])
+        self.assertTrue(client.resume_finished.wait(2.0))
+        worker = session._stop_recovery_thread
+        if worker is not None:
+            worker.join(2.0)
+        snapshot = session.snapshot()
+        self.assertIsNone(snapshot["turn_id"])
+        self.assertFalse(snapshot["turn_active"])
+        self.assertEqual("interrupted", snapshot["turn_status"])
+
+    def test_slow_stop_recovery_has_one_worker_and_one_exact_resume(self) -> None:
+        resume_gate = threading.Event()
+        client = _StopRecoveryClient(
+            complete_during_interrupt=False,
+            resume_gate=resume_gate,
+        )
+        session = self.make_session(client)
+        session.start_turn("recover once")
+
+        try:
+            with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
+                result = session.interrupt_turn()
+            self.assertTrue(result["recovery_pending"])
+            self.assertTrue(client.resume_entered.wait(2.0))
+            recovering = session.snapshot()
+            self.assertFalse(recovering["connected"])
+            self.assertFalse(recovering["turn_active"])
+            self.assertEqual("stopRecovering", recovering["turn_status"])
+            with self.assertRaises(BridgeError) as raised:
+                session.interrupt_turn()
+            self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
+            self.assertEqual(1, client.restart_count)
+        finally:
+            resume_gate.set()
+        self.assertTrue(client.resume_finished.wait(2.0))
+        worker = session._stop_recovery_thread
+        if worker is not None:
+            worker.join(2.0)
+        self.assertEqual(1, client.restart_count)
+        self.assertEqual(
+            ["thread-test"],
+            [
+                params["threadId"]
+                for method, params, _timeout in client.timed_requests
+                if method == "thread/resume"
+            ],
+        )
+        self.assertEqual(
+            1,
+            sum(method == "turn/start" for method, _params in client.requests),
+        )
 
     def test_turn_start_claim_is_atomic_and_completion_must_match(self) -> None:
         client = _BlockingTurnClient()
@@ -1669,6 +2414,8 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "不并发扇出",
             "遇到 QUEUE_FULL 不立即重试",
             "hia_execute_hom 等场景写入始终由主代理执行",
+            "goal_focus_mode=true 且有意义阶段成功才设一次 checkpoint_label",
+            "普通聊天、专注关闭或逐节点/参数不设",
             "主任务只保留原生 Goal、决定和子任务短摘要",
             "子任务详情按需查看",
             "不塞入主上下文",

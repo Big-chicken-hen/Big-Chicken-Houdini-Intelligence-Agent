@@ -1261,6 +1261,187 @@ $manifest = [System.IO.File]::ReadAllText({_ps_literal(manifest_path)}) | Conver
         for forbidden in ("api_key", "unexpected"):
             self.assertNotIn(forbidden, result["names"])
 
+    def test_current_session_crash_hip_is_pid_bound_and_copied_read_only(self) -> None:
+        session = (
+            self.sandbox
+            / "portable-project"
+            / ".runtime"
+            / "launcher-sessions"
+            / ("d" * 32)
+        )
+        temporary = session / "tmp"
+        checkpoints = session / "checkpoints"
+        temporary.mkdir(parents=True)
+        checkpoints.mkdir()
+        expected = temporary / "crash.asset.Developer_4321.hip"
+        expected.write_bytes(b"crash hip remains unchanged")
+        (temporary / "crash.asset.Developer_9999.hip").write_bytes(b"wrong pid")
+        (temporary / "crash.asset.Developer_4321_log.txt").write_bytes(b"log")
+        (temporary / "crash.empty.Developer_4321.hip").write_bytes(b"")
+        nested = temporary / "nested"
+        nested.mkdir()
+        (nested / "crash.nested.Developer_4321.hip").write_bytes(b"nested")
+
+        output = self.run_powershell(
+            f"""
+$file = Get-Item -LiteralPath {_ps_literal(expected)} -Force
+$candidate = Get-HiaLatestLauncherCrashHip `
+    -TempDirectory {_ps_literal(temporary)} `
+    -HoudiniProcessId 4321 `
+    -StartedAtUtcTicks ($file.LastWriteTimeUtc.Ticks - 1) `
+    -EndedAtUtcTicks ($file.LastWriteTimeUtc.Ticks + 1)
+$copy = Copy-HiaLauncherRecoveryHip `
+    -SessionRoot {_ps_literal(session)} `
+    -SourcePath $candidate.path `
+    -Attempt 2
+[pscustomobject]@{{
+    candidate = $candidate.path
+    copied = $copy.path
+    source = $copy.source_path
+}} | ConvertTo-Json -Compress
+"""
+        )
+        result = json.loads(output)
+        self.assertEqual(str(expected), result["candidate"])
+        self.assertEqual(str(expected), result["source"])
+        copied = Path(result["copied"])
+        self.assertEqual(session / "recovery", copied.parent)
+        self.assertEqual(expected.read_bytes(), copied.read_bytes())
+        self.assertEqual(b"crash hip remains unchanged", expected.read_bytes())
+
+    def test_ai_checkpoint_sidecar_requires_the_exact_thread(self) -> None:
+        goal_binding = "b" * 64
+        checkpoints = (
+            self.sandbox
+            / "portable-project"
+            / ".runtime"
+            / "launcher-sessions"
+            / ("c" * 32)
+            / "checkpoints"
+        )
+        checkpoints.mkdir(parents=True)
+        checkpoint = checkpoints / "stage-1.hip"
+        checkpoint.write_bytes(b"stage checkpoint")
+        (checkpoints / ".hia-stage-checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "thread_id": "thread-exact",
+                    "goal_binding": goal_binding,
+                    "checkpoint_file": checkpoint.name,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        output = self.run_powershell(
+            f"""
+$matching = Get-HiaLatestLauncherCheckpoint `
+    -CheckpointDirectory {_ps_literal(checkpoints)} `
+    -ThreadId 'thread-exact' `
+    -GoalBinding '{goal_binding}'
+$foreign = Get-HiaLatestLauncherCheckpoint `
+    -CheckpointDirectory {_ps_literal(checkpoints)} `
+    -ThreadId 'thread-other' `
+    -GoalBinding '{goal_binding}'
+$staleGoal = Get-HiaLatestLauncherCheckpoint `
+    -CheckpointDirectory {_ps_literal(checkpoints)} `
+    -ThreadId 'thread-exact' `
+    -GoalBinding '{"c" * 64}'
+[pscustomobject]@{{
+    matching_path = $matching.path
+    matching_thread = $matching.thread_id
+    matching_goal = $matching.goal_binding
+    foreign_missing = $null -eq $foreign
+    stale_goal_missing = $null -eq $staleGoal
+}} | ConvertTo-Json -Compress
+"""
+        )
+        result = json.loads(output)
+        self.assertEqual(str(checkpoint), result["matching_path"])
+        self.assertEqual("thread-exact", result["matching_thread"])
+        self.assertEqual(goal_binding, result["matching_goal"])
+        self.assertTrue(result["foreign_missing"])
+        self.assertTrue(result["stale_goal_missing"])
+
+        checkpoint.write_bytes(b"")
+        output = self.run_powershell(
+            f"""
+$candidate = Get-HiaLatestLauncherCheckpoint `
+    -CheckpointDirectory {_ps_literal(checkpoints)} `
+    -ThreadId 'thread-exact' `
+    -GoalBinding '{goal_binding}'
+$null -eq $candidate
+"""
+        )
+        self.assertEqual("True", output)
+
+    def test_crash_recovery_policy_is_bounded_and_requires_focus_and_idle(self) -> None:
+        output = self.run_powershell(
+            """
+$normal = Get-HiaCrashRecoveryDecision -ExitCode 0 -FocusVerified $false -ThreadIdle $false
+$off = Get-HiaCrashRecoveryDecision -ExitCode 9 -FocusVerified $false -ThreadIdle $true
+$busy = Get-HiaCrashRecoveryDecision -ExitCode 9 -FocusVerified $true -ThreadIdle $false
+$recoveries = 0
+$stops = 0
+$lastReason = ''
+foreach ($count in 1..4) {
+    $decision = Get-HiaCrashRecoveryDecision `
+        -ExitCode 9 `
+        -FocusVerified $true `
+        -ThreadIdle $true `
+        -ConsecutiveCrashCount $count `
+        -AutomaticRestartCount ([Math]::Min($count - 1, 3))
+    if ($decision.recover) { $recoveries += 1 } else { $stops += 1 }
+    $lastReason = $decision.reason
+}
+[pscustomobject]@{
+    normal = $normal.reason
+    off = $off.reason
+    busy = $busy.reason
+    recoveries = $recoveries
+    stops = $stops
+    final = $lastReason
+} | ConvertTo-Json -Compress
+"""
+        )
+        result = json.loads(output)
+        self.assertEqual("normal_exit", result["normal"])
+        self.assertEqual("focus_not_verified", result["off"])
+        self.assertEqual("thread_not_idle", result["busy"])
+        self.assertEqual(3, result["recoveries"])
+        self.assertEqual(1, result["stops"])
+        self.assertEqual("bounded_limit", result["final"])
+
+    def test_lifecycle_focus_gate_and_bounded_crash_recovery_are_explicit(self) -> None:
+        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
+        self.assertIn("$exitDecision = Get-HiaCrashRecoveryDecision", source)
+        self.assertIn("$maxConsecutiveCrashes = 3", source)
+        self.assertIn("$maxAutomaticRestarts = 6", source)
+        self.assertIn("$session.focus_mode -ne $true", source)
+        self.assertIn("[string]$goal.status -ne 'active'", source)
+        self.assertIn("-Path '/v1/interrupt'", source)
+        self.assertIn("-Path '/v1/turn'", source)
+        self.assertIn("Wait-FocusedThreadIdle", source)
+        self.assertIn("Wait-FocusedRecoveryReady", source)
+        self.assertIn("Test-RecoveryHipWithHython", source)
+        self.assertIn("did not reset the crash counter", source)
+        self.assertLess(
+            source.index("$idleContext = Wait-FocusedThreadIdle"),
+            source.index("$progressCopy = Copy-HiaLauncherRecoveryHip"),
+        )
+        probe = source.index("$progressCopy = Copy-HiaLauncherRecoveryHip")
+        self.assertLess(
+            source.index("Test-RecoveryHipWithHython", probe),
+            source.index("$consecutiveCrashCount = 0", probe),
+        )
+        self.assertIn("-ThreadId $recoveryThreadId", source)
+        self.assertIn("-GoalBinding $recoveryGoalBinding", source)
+        self.assertIn("-ExpectedGoalBinding $recoveryGoalBinding", source)
+        self.assertIn("Do not replay the old write or its arguments", source)
+        self.assertIn("$attemptedRecoveryPrompts.Add", source)
+        self.assertNotIn("Stop-Process", source)
+
     def test_exe_project_root_locator_works_after_project_move(self) -> None:
         fake_root = self.sandbox / "moved-launcher-project"
         nested_launcher = fake_root / ".runtime" / "dist" / "launcher"

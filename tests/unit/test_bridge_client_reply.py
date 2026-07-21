@@ -316,7 +316,9 @@ class BridgeClientQueueTests(unittest.TestCase):
             transport.submissions[-1]["payload"],
         )
 
-    def test_session_actions_outwait_bridge_without_widening_controls(self) -> None:
+    def test_long_session_and_bounded_interrupt_keep_other_control_timeouts(
+        self,
+    ) -> None:
         client, transport = _load_transport_bridge_client()
 
         client.start_thread(model=None, service_tier=None)
@@ -342,7 +344,7 @@ class BridgeClientQueueTests(unittest.TestCase):
         ):
             self.assertEqual(50_000, by_context[context]["timeout_ms"])
         self.assertEqual(15_000, by_context["health"]["timeout_ms"])
-        self.assertEqual(15_000, by_context["interrupt:test"]["timeout_ms"])
+        self.assertEqual(7_000, by_context["interrupt:test"]["timeout_ms"])
         self.assertEqual(20_000, by_context["events"]["timeout_ms"])
         self.assertEqual(
             5_000,
@@ -474,6 +476,7 @@ class BridgeClientQueueTests(unittest.TestCase):
             token_budget=12_000,
         )
         client.clear_goal("thread-a")
+        client.set_focus_mode("thread-a", True)
 
         self.assertEqual(
             [
@@ -495,6 +498,12 @@ class BridgeClientQueueTests(unittest.TestCase):
                     "/v1/goal",
                     {"action": "clear", "thread_id": "thread-a"},
                     "goal_clear",
+                ),
+                (
+                    "POST",
+                    "/v1/focus",
+                    {"thread_id": "thread-a", "enabled": True},
+                    "focus_set",
                 ),
             ],
             [

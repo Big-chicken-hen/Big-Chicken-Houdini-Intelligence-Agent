@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -13,6 +14,8 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "houdini_package" / "python_libs"))
 
 from hia_mcp_runtime.executor import HoudiniExecutor, HiaRuntimeError  # noqa: E402
 from tests.unit.test_hia_mcp_v2_runtime import FakeHou  # noqa: E402
+
+GOAL_BINDING = "a" * 64
 
 
 class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
@@ -47,6 +50,22 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         )
         directory.mkdir(parents=True, exist_ok=True)
         return directory
+
+    def enabled_focus_environment(self) -> dict[str, str]:
+        path = self.project_root / ".runtime" / "bridge" / "focus-mode.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "active_thread_id": "thread-test",
+                    "enabled_thread_ids": ["thread-test"],
+                    "goal_bindings": {"thread-test": GOAL_BINDING},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {"HIA_FOCUS_STATE_PATH": str(path)}
 
     def test_default_diff_is_targeted_and_never_walks_the_scene(self) -> None:
         self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
@@ -209,7 +228,10 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         with mock.patch.dict(
             os.environ,
-            {"HOUDINI_BACKUP_DIR": str(checkpoint_directory)},
+            {
+                "HOUDINI_BACKUP_DIR": str(checkpoint_directory),
+                **self.enabled_focus_environment(),
+            },
             clear=False,
         ):
             response = self.executor.dispatch(
@@ -234,6 +256,69 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
             },
             response["checkpoint"],
         )
+        marker = json.loads(
+            (checkpoint_directory / ".hia-stage-checkpoint.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual("thread-test", marker["thread_id"])
+        self.assertEqual(GOAL_BINDING, marker["goal_binding"])
+        self.assertEqual(backup_path.name, marker["checkpoint_file"])
+        self.assertEqual(
+            {"version", "thread_id", "goal_binding", "checkpoint_file"},
+            set(marker),
+        )
+
+    def test_focus_mode_off_never_creates_a_recovery_checkpoint(self) -> None:
+        checkpoint_directory = self.checkpoint_directory()
+        legacy_focus_path = (
+            self.project_root / ".runtime" / "bridge" / "focus-mode.json"
+        )
+        legacy_focus_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_focus_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "active_thread_id": "thread-test",
+                    "enabled_thread_ids": ["thread-test"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.hou.hipFile.saveAsBackup = mock.Mock(  # type: ignore[attr-defined]
+            side_effect=AssertionError("focus mode off must not save a backup")
+        )
+        self.executor._node_digest = mock.Mock(  # type: ignore[method-assign]
+            side_effect=["before", "after"]
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOUDINI_BACKUP_DIR": str(checkpoint_directory),
+                "HIA_FOCUS_STATE_PATH": str(legacy_focus_path),
+            },
+            clear=False,
+        ):
+            context = self.executor.dispatch("hia_context", {})
+            response = self.executor.dispatch(
+                "hia_execute_hom",
+                {
+                    "script": "hia_result = 'stage complete'",
+                    "diff_paths": ["/obj/asset"],
+                    "checkpoint_label": "stage-complete",
+                },
+            )
+
+        self.assertFalse(context["result"]["goal_focus_mode"])
+        self.assertEqual(
+            "FOCUS_MODE_DISABLED",
+            response["checkpoint"]["skipped_reason"],
+        )
+        self.hou.hipFile.saveAsBackup.assert_not_called()
+        self.assertFalse(
+            (checkpoint_directory / ".hia-stage-checkpoint.json").exists()
+        )
 
     def test_valid_checkpoint_path_bypasses_user_profile_text_redaction(self) -> None:
         checkpoint_directory = self.checkpoint_directory()
@@ -248,7 +333,10 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         with (
             mock.patch.dict(
                 os.environ,
-                {"HOUDINI_BACKUP_DIR": str(checkpoint_directory)},
+                {
+                    "HOUDINI_BACKUP_DIR": str(checkpoint_directory),
+                    **self.enabled_focus_environment(),
+                },
                 clear=False,
             ),
             mock.patch(
@@ -314,7 +402,10 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         with mock.patch.dict(
             os.environ,
-            {"HOUDINI_BACKUP_DIR": str(checkpoint_directory)},
+            {
+                "HOUDINI_BACKUP_DIR": str(checkpoint_directory),
+                **self.enabled_focus_environment(),
+            },
             clear=False,
         ):
             response = self.executor.dispatch(
@@ -330,11 +421,58 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         self.assertEqual("CHECKPOINT_FAILED", response["checkpoint"]["error"]["code"])
         self.assertTrue(any("do not retry" in item for item in response["warnings"]))
 
+    def test_checkpoint_marker_failure_does_not_retry_the_completed_scene_write(self) -> None:
+        checkpoint_directory = self.checkpoint_directory()
+        backup_path = checkpoint_directory / "completed-stage.hip"
+
+        def save_backup() -> str:
+            backup_path.write_bytes(b"hip")
+            return str(backup_path)
+
+        self.hou.hipFile.saveAsBackup = mock.Mock(side_effect=save_backup)  # type: ignore[attr-defined]
+        self.executor._node_digest = mock.Mock(side_effect=["before", "after"])  # type: ignore[method-assign]
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "HOUDINI_BACKUP_DIR": str(checkpoint_directory),
+                    **self.enabled_focus_environment(),
+                },
+                clear=False,
+            ),
+            mock.patch.object(
+                self.executor,
+                "_write_stage_checkpoint_marker",
+                side_effect=OSError("marker unavailable"),
+            ),
+        ):
+            response = self.executor.dispatch(
+                "hia_execute_hom",
+                {
+                    "script": "hia_result = 'write completed'",
+                    "diff_paths": ["/obj/asset"],
+                    "checkpoint_label": "completed-stage",
+                },
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(backup_path.is_file())
+        self.hou.hipFile.saveAsBackup.assert_called_once_with()
+        self.assertEqual("CHECKPOINT_FAILED", response["checkpoint"]["error"]["code"])
+        self.assertTrue(any("do not retry" in item for item in response["warnings"]))
+
     def test_checkpoint_is_skipped_when_backup_directory_is_unconfigured(self) -> None:
         self.hou.hipFile.saveAsBackup = mock.Mock()  # type: ignore[attr-defined]
         self.executor._node_digest = mock.Mock(side_effect=["before", "after"])  # type: ignore[method-assign]
 
-        with mock.patch.dict(os.environ, {"HOUDINI_BACKUP_DIR": ""}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOUDINI_BACKUP_DIR": "",
+                **self.enabled_focus_environment(),
+            },
+            clear=False,
+        ):
             response = self.executor.dispatch(
                 "hia_execute_hom",
                 {
@@ -365,7 +503,10 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
                 self.executor._node_digest = mock.Mock(side_effect=["before", "after"])  # type: ignore[method-assign]
                 with mock.patch.dict(
                     os.environ,
-                    {"HOUDINI_BACKUP_DIR": str(checkpoint_directory)},
+                    {
+                        "HOUDINI_BACKUP_DIR": str(checkpoint_directory),
+                        **self.enabled_focus_environment(),
+                    },
                     clear=False,
                 ):
                     response = self.executor.dispatch(

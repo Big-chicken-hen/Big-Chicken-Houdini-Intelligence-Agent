@@ -15,7 +15,8 @@ class ExpandableTextEdit(QtWidgets.QTextEdit):
     sendRequested = QtCore.Signal()
     imagePasted = QtCore.Signal(object)
 
-    _MIN_HEIGHT = 72
+    _MIN_VISIBLE_LINES = 4
+    _MIN_HEIGHT = 96
     _MAX_HEIGHT = 180
 
     def __init__(self, parent: QtWidgets.QWidget | None = None):
@@ -23,7 +24,7 @@ class ExpandableTextEdit(QtWidgets.QTextEdit):
         self.setAcceptRichText(False)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Preferred,
         )
         self._send_shortcuts: list[QtGui.QShortcut] = []
         for sequence in ("Ctrl+Return", "Ctrl+Enter"):
@@ -52,12 +53,24 @@ class ExpandableTextEdit(QtWidgets.QTextEdit):
         self._update_height()
 
     def _update_height(self) -> None:
+        minimum_height = min(
+            self._MAX_HEIGHT,
+            max(
+                self._MIN_HEIGHT,
+                (self.fontMetrics().lineSpacing() * self._MIN_VISIBLE_LINES)
+                + (self.frameWidth() * 2)
+                + 12,
+            ),
+        )
         document_height = self.document().documentLayout().documentSize().height()
         content_height = math.ceil(document_height) + (self.frameWidth() * 2) + 10
-        target = max(self._MIN_HEIGHT, min(self._MAX_HEIGHT, content_height))
-        if self.minimumHeight() == target and self.maximumHeight() == target:
+        target = max(minimum_height, min(self._MAX_HEIGHT, content_height))
+        if (
+            self.minimumHeight() == minimum_height
+            and self.maximumHeight() == target
+        ):
             return
-        self.setMinimumHeight(target)
+        self.setMinimumHeight(minimum_height)
         self.setMaximumHeight(target)
         self.updateGeometry()
 

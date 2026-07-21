@@ -927,3 +927,45 @@
 - 独立现场进一步确认：根线程的审核沙箱把 E 盘项目视为只读，`test_steer_endpoint_appends_to_the_same_active_turn` 在 `.runtime/attachments` 创建 `TemporaryDirectory` 时收到 `WinError 5`，而 Python `tempfile` 会继续尝试随机目录名，所以外部观察表现为长时间停在该测试附近。前述两次 120/360 秒 timeout 是环境权限假象，不是 Bridge、steer、HTTP teardown 或产品顺序依赖。
 - 在允许按既有测试行为写入项目 `.runtime` 的正确权限环境中，仅运行一次最终完整命令 `python -B -m unittest discover -s tests -t .`：708/708 通过，用时 32.414 秒，无 failure、error 或 timeout。
 - 测试结束后 `.runtime/attachments` 中没有 `bridge-http-test-*` 或 `bridge-steer-test-*`，`.runtime/tmp`、`.runtime/cache/tmp` 与 `.runtime` 下也没有本次创建的近期测试临时目录；临时内容均由各测试的 `TemporaryDirectory`/cleanup 自行清理。本次没有手工删除任何文件。
+
+## 目标专注模式与最小崩溃恢复（2026-07-21）
+
+- “目标专注模式”默认关闭：普通聊天不创建自动恢复 checkpoint，Houdini 异常退出也不自动重启或续做。开启时必须绑定当前 exact Thread 且原生 Goal 为 active；状态以项目内最小 JSON 随 Thread 持久化，关闭开关不会删除 Goal。
+- 连续异常退出的恢复优先级为：第一次 AI 阶段 checkpoint，第二次当前 launcher session/当前 Houdini PID 的 crash HIP，第三次稳定 checkpoint 并要求改用替代或降级方案；下一次停止。每个候选都复制到当前 session 的 `recovery` 后用所选 Houdini 的 hython 有界 load probe；总自动重启另有 6 次上限，退出码 0 不重启。
+- AI checkpoint 仅在专注开启且有意义阶段成功时创建；同目录 sidecar 只记录版本、exact Thread ID、Goal 绑定哈希和 HIP 文件名。`focus-mode.json` 与 sidecar 都不保存 Goal objective、HOM 或参数。Goal 绑定只对规范化后的 `objective + tokenBudget` 计算 SHA-256，status/usage 不参与；这两个稳定字段变化会立即关闭专注并要求用户重新开启，旧 Goal 的 marker 不能再作为专注恢复候选。sidecar 写入失败不会重试已完成的场景写入。异常退出后先 interrupt，再在启动恢复 Houdini 前有界等待同一 Thread 权威 idle；未确认 idle、Goal 非 active、Thread/Goal 不匹配或候选无效均停止并保留文件。只有通过 probe 的新 checkpoint 才重置连续崩溃计数，恢复 Turn 每次只发送一次且不保存或重放 HOM/参数。
+- 首次相关回归的唯一失败是 HIA V2 developerInstructions 增至 1136 字符、超过既有 1000 字符上限；删去重复措辞并保留专注规则后为 991 字符。最终 Bridge/Panel/HIA runtime/launcher 回归 224/224 通过，用时 22.405 秒；覆盖 OFF/ON 持久化、active Goal 门控、exact Thread/Goal sidecar、Goal 内容变化失效、status/usage 更新不误关、零字节拒绝、正常退出、未 idle 停止、连续失败有限停止和 MCP-only last-tool 记录。未运行完整套件，未启动真实 Houdini GUI。仍需人工验证真实崩溃、checkpoint/crash HIP 实际加载、同一 Thread/Goal 续做、Goal 修改后专注立即关闭，以及正常关闭绝不重启；第一版不支持进程仍存活的界面假死、断电或 launcher 自身死亡。
+
+## Stop 后状态长期未确认（2026-07-21）
+
+- 真实 GUI 中点击停止后会长期保留“停止请求未确认；正在同步 Turn 状态”。根因是该文字被永久追加为普通 System 行、2.5 秒对账要等 interrupt 返回后才启动、固定 reason 每代只能查询一次，而且 Panel 的 interrupt 15 秒上限早于 Bridge/Codex 45 秒 RPC 上限。
+- Stop 现在立即冻结可见流并启动现有 2.5 秒 QTimer；interrupt 单独使用 50 秒上限。session 对账在约 30 秒/最多 12 次内使用唯一 reason 有限重试，覆盖占用、active、失败和 timeout。权威 idle/completion 才解锁；达到上限仍 active 时停止轮询、保留安全锁，并静态显示“停止已请求；Houdini 工具仍在结束”。过程状态不再永久写入聊天历史，真实终态只追加一次“Turn 已停止/已结束”。
+- 定向运行 BridgeClient、Panel wiring 与 ConversationView 回归 110/110 通过，用时 0.076 秒；未运行完整套件、未启动 Houdini。真实 GUI 仍需验证长时间 HOM 返回、Bridge 重连与 completion 丢失后的最终收口。
+
+## Stop 单一路径、本地 Houdini 状态与手动历史打开（2026-07-21）
+
+- 本节取代上一节的多次 Stop 对账方案。真实卡住的直接原因是 Panel 最多 12 次读取同一份 Bridge 内存快照，而快照仍只能由 `turn/completed` 改变；轮询耗尽后又永久保留 stopping token 和发送锁。点击 Stop 现在立即冻结文本/工具流并显示“已停止”，同一 Turn 只发一次 interrupt，不再显示持续思考、同步或重复轮询。
+- Bridge 给 interrupt 固定 1 秒宽限，并把关闭、重建、初始化和 resume 原 exact Thread 全部限制在同一个 6 秒总 deadline 内；Panel 的 `/v1/interrupt` 单独使用 7 秒 HTTP 上限。预算内成功则恢复同一 Thread；超时则快速返回结构化可恢复错误、清除 stopping token 并显示未连接，不再用 42/50 秒占住发送锁。全过程不启动新 Turn、不重放 HOM，也不终止 Houdini；迟到 ACK、delta、工具进度和旧 completion 由原 Turn token/stream 归属隔离。已进入 Houdini UI 主线程的操作无法安全强杀，Panel 只显示一次“Codex 已停止；已发出的 Houdini 操作可能仍在收尾”。
+- HIA MCP V2 过去仍被 FX/B2 门槛挡住本地刷新：选择和 dirty 只在构造时读取，revision 也没有进入 Panel。现在复用唯一的 Houdini UI QTimer，在 UI 主线程直接刷新 `selectedNodes()` 与 `hipFile.hasUnsavedChanges()`；场景版本复用现有 `/v1/health` 中的真实 `scene_revision`，未新增 endpoint、线程或缓存。Goal 变为 blocked/complete 等非 active 状态时，Bridge 持久化和 Panel checkbox 都关闭专注；重新变回 active 不会自动开启。
+- Panel 新建或重开后对话区保持空白：历史列表可以自动刷新，但下拉保持“未选择历史会话”；只有用户选择记录并点击“打开”才 resume、读取并渲染，同一 Thread 的历史数据没有删除或改写。
+- 最终定向运行 Bridge session、Codex stdio、BridgeClient 和 Panel wiring 回归 153/153 通过，用时 0.777 秒；覆盖 1/6/7 秒常量、deadline 贯穿、恢复卡到 deadline 后解锁并转为未连接，以及既有 Stop/本地 Houdini 状态/Goal/手动历史行为。未运行完整套件，未启动真实 Houdini GUI。仍需人工验证真实 Stop 丢 ACK/长 HOM 时的 6 秒内 app-server 恢复或明确断线、选择 none/one/many 与 dirty/revision 实时刷新、blocked Goal 关闭专注，以及重开 Panel 空白且手动“打开”才载入历史。
+- 启动验收补充：新建或重开 Panel 时，Bridge 当前 Thread、后台专注 Turn、Goal、团队事件、协议提示和断网重连都不再改变“Thread：未选择”或向空白聊天区写入内容；历史刷新与下拉选择只处理索引，点击“打开”后才恢复、渲染并请求该 Thread 的 Goal。Panel/Conversation/BridgeClient/Bridge session 定向回归 150/150 通过，用时 0.100 秒；真实 Houdini 中关闭再重开 Panel、后台专注任务并行和手动打开仍需人工验收。
+
+## steer 终态竞态与 Goal 只读状态（2026-07-21）
+
+- 真实 GUI 的 `no active turn to steer` 发生在旧 Turn 已结束但 `turn/steer` 尚未返回的窗口；旧实现把 Codex `-32600` 泄漏为 `CODEX_RPC_ERROR/502`，Panel 又丢弃已点击的文字/图片快照。Bridge 现在只把 code=`-32600` 且规范化文案精确为 `no active turn to steer` 的响应转换为 `409/NO_ACTIVE_TURN`，不透明创建 Turn；匹配的正 ACK 即视为输入已接收，completion 先到不再误报失败。Panel 以同一 generation/thread/turn 的结构化 terminal 证据收口旧 Turn，并把原 request text、图片和当时的 Houdini 选择上下文作为普通新 Turn 至多发送一次。Stop、超时、近似 RPC 文案、ID 不匹配和普通错误均不触发 fallback；迟到响应不重发，另一调用者抢先开始 Turn 时保留 composer 且清理已终止 pending context。
+- Goal 的 `blocked` 经现场数据库与 rollout 证明是原生 Goal 在连续等待用户保存 HIP 后作出的权威更新，与 steer 竞态无关，因此没有自动改回 active。Goal 状态下拉已改为只读文本：未设置、正在跟进、已完成、等待你处理；blocked 原因只取权威 payload，缺失时显示“未提供原因”。blocked 时按钮显示“继续跟进”，只有用户主动保存才显式发送 `status=active`；关闭专注、Stop、steer、网络或 RPC 失败都不修改 Goal。原生 Goal chain 在 selected Thread 的 goal-set/active Goal 范围内关联其 Turn，活动摘要优先显示 in-progress、再显示 pending；全部完成或 Turn 结束后恢复为等待下一轮，不接纳 child、其他 Thread 或普通聊天 Turn。
+- 定向运行 Bridge session、Bridge HTTP、BridgeClient、Panel wiring 与 ConversationView 回归 180/180 通过，用时 9.823 秒；另有精确 Bridge steer/Turn lifecycle + Panel 回归 106/106 通过，用时 0.028 秒。未运行完整套件、未启动 Houdini。仍需在真实 GUI 验证：旧 Turn 恰好结束时点击“追加指令”只生成一个新 Turn且图片/选择上下文不丢；Stop 与迟到错误竞争不复活 Turn；Goal blocked 的原因、继续跟进按钮及原生 Goal 多轮活动文案符合实际通知顺序。
+
+## Codex 空白消息与 stale Turn 追加同步（2026-07-21）
+
+- 真实 GUI 中，Stop 后继续 Goal 时出现空白 Codex 卡，但计划、工具与团队仍更新。只读日志确认该轮只有 reasoning、工具和 item 生命周期事件，没有 `output_text`/`item/agentMessage/delta`；旧 UI 在开始时先创建空正文卡，且原生 Goal Turn 不属于普通可见 stream，所以无文字终态会留下空卡，未来真实 Goal delta 也会被忽略。现在卡片在首段文字前显示低调占位，首 delta 在同一卡原位替换；无文字正常终态显示“本轮未返回文字回复”，首 delta 前 Stop 则移除占位卡并继续隔离迟到事件。精确匹配当前 Thread/Goal Turn 的 agent delta 与 completion 可进入并收口主对话，child 仍只进入团队栏；reasoning 和工具原始 JSON 不进入聊天。
+- 另一个真实错误是 Panel 仍用旧 Turn ID 追加，而 app-server 已报告 `expected active turn id ... but found ...`。Bridge 仅把 RPC code=`-32600` 且完整匹配该结构的响应规范化为 `409/STALE_ACTIVE_TURN`，用 generation/thread/turn CAS 更新权威快照；近似文案或其他错误码不触发恢复。Panel 随后只做一次既有 `/v1/session` 同步：同一 Thread 仍有新的 active Turn 时改绑并重试 steer 一次；已 idle 时复用现有新 Turn fallback 一次；再次冲突或同步失败即停止，保留文字与图片。原 Turn 的迟到 ACK/delta/completion 由 source token 和新 generation 隔离，Goal Turn 不会被普通追加抢绑。
+- 定向运行 `test_bridge_session`、`test_bridge_http`、`test_bridge_client_reply`、`test_conversation_tool_activity` 与 `test_panel_wiring`：187/187 通过，用时 10.445 秒；Markdown/IME/焦点静态回归 `test_p1_assets`：23/23 通过，用时 1.176 秒。未运行完整套件，也未启动、停止或重启 Houdini、Bridge、Codex。仍需真实 GUI 验证无文本 Goal 的占位/终态、首 delta 原位替换，以及 stale old ID→同步到新 active ID→恰好一次 steer 重试时草稿和图片不丢。
+- 后续只读审查发现两项迟到竞态：Goal 正文已出现后，stale-steer session 响应仍会无条件冻结并新建占位卡；同步失败或单次 retry 再冲突时，代码又会直接丢弃 pending 快照，若用户期间改写 composer，原文字或图片可能实际丢失。修正后只在 Goal 对账成功且可见流确实需要切换时换卡；失败收口把尚未包含的原文字置于当前新草稿之前，并只补回缺失附件，Stop/cancel 明确不恢复。相关 Panel/Bridge/ConversationView 回归 189/189 通过，用时 9.754 秒；仍需真实 GUI 验证 Goal 已输出正文时的迟到对账，以及同步失败/二次冲突期间继续编辑草稿的结果。
+
+## Stop 后 Codex 后台恢复（2026-07-21）
+
+- 真实 GUI 中 Stop 的 6 秒同步 restart/init/resume 预算不足以恢复长 Thread；Bridge 超时后把会话永久置为 `stopRecoveryFailed`，Panel 又无条件清除连接与认证，因此模型、推理强度、速度和发送全部锁死。Goal Turn 关联未清理，右栏同时错误显示“正在推进”；超时移除的 `thread/resume` 请求若稍后返回，还会产生 `UNKNOWN_RESPONSE_ID`。
+- 本节取代前述“6 秒内成功，否则永久断线”的 Stop 收口。Stop 仍只发送一次 interrupt，并在约 1 秒宽限内接受正常 completion；超过宽限后立即把旧 Turn 本地终结并隔离，HTTP 返回 `stopRecovering`。Bridge 同时最多启动一个后台 worker，在 50 秒总上限内只执行 Codex app-server restart、initialize 和原 exact Thread resume，不调用 `turn/start`，不重放 Turn、HOM 或 Houdini 操作。成功或最终失败都只通过既有 `session_state` 发布；旧进程 reader、旧 Turn 通知和已知恢复请求的迟到响应不能污染新 generation。
+- Panel 点击 Stop 后立即冻结可见流、显示“已停止”并保持 composer 可编辑；恢复期间发送/新建/切会话禁用，但模型、推理强度和速度可为下一 Turn 本地调整。active Goal 只显示恢复暂停，不改 Goal 或专注模式；恢复成功后同一 Thread 自动恢复连接与发送，最终失败则保留草稿/附件并只提示一次重启 launcher。普通未知 response 仍保留协议警告。
+- 定向运行 Bridge session、Codex stdio、Bridge HTTP、BridgeClient、ConversationView 与 Panel wiring 回归 210/210 通过，用时 10.849 秒；未运行完整套件，也未启动、停止或重启真实 Houdini、Bridge 或 Codex。仍需真实 GUI 验证长 Thread Stop 后恢复中状态、自动恢复模型控件与发送、Goal 暂停文案，以及已进入 Houdini UI 主线程的 HOM 最终收尾行为。

@@ -21,6 +21,7 @@ _RECONCILIATION_TIMEOUT_MS = 5_000
 _EVENT_POLL_TIMEOUT_MS = 20_000
 _DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 _SESSION_ACTION_TIMEOUT_MS = 50_000
+_INTERRUPT_TIMEOUT_MS = 7_000
 _RESULT_DRAIN_INTERVAL_MS = 25
 _MAX_RESULTS_PER_TICK = 128
 _RESULT_QUEUE_LIMIT = 256
@@ -28,7 +29,9 @@ _SCENE_CONTROL_TIMEOUT_MS = 5_000
 _SCENE_POLL_TIMEOUT_MS = 3_000
 _SCENE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _LONG_SESSION_ACTIONS = frozenset({"start", "resume", "read"})
-_GOAL_ACTION_CONTEXTS = frozenset({"goal_get", "goal_set", "goal_clear"})
+_GOAL_ACTION_CONTEXTS = frozenset(
+    {"goal_get", "goal_set", "goal_clear", "focus_set"}
+)
 
 
 class BridgeClient(QtCore.QObject):
@@ -81,6 +84,11 @@ class BridgeClient(QtCore.QObject):
     def get_health(self) -> str | None:
         return self._request("GET", "/v1/health", context="health")
 
+    def get_houdini_status(self) -> str | None:
+        """Refresh only the Panel's local Houdini status from the health route."""
+
+        return self._request("GET", "/v1/health", context="houdini_status")
+
     def get_session(self, *, context: str = "session") -> str | None:
         """Read Bridge session state with a caller-supplied correlation context."""
 
@@ -128,6 +136,14 @@ class BridgeClient(QtCore.QObject):
             "/v1/goal",
             {"action": "clear", "thread_id": thread_id},
             context="goal_clear",
+        )
+
+    def set_focus_mode(self, thread_id: str, enabled: bool) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/focus",
+            {"thread_id": thread_id, "enabled": enabled},
+            context="focus_set",
         )
 
     def read_thread(
@@ -377,6 +393,8 @@ class BridgeClient(QtCore.QObject):
     ) -> str | None:
         if context.startswith("session_reconcile:"):
             timeout_ms = _RECONCILIATION_TIMEOUT_MS
+        elif method == "POST" and path == "/v1/interrupt":
+            timeout_ms = _INTERRUPT_TIMEOUT_MS
         elif context in _GOAL_ACTION_CONTEXTS:
             timeout_ms = _SESSION_ACTION_TIMEOUT_MS
         elif (

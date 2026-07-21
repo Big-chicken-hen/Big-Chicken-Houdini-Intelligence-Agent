@@ -102,6 +102,9 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                     "HIA_RENDER_OUTPUT_DIR": str(
                         REPOSITORY_ROOT / ".runtime" / "cache"
                     ),
+                    "HIA_FOCUS_STATE_PATH": str(
+                        REPOSITORY_ROOT / ".runtime" / "bridge" / "focus-mode.json"
+                    ),
                     "UNREVIEWED_API_KEY": "must_not_reach_codex_child",
                 },
                 clear=False,

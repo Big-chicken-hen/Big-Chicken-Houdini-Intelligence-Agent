@@ -31,6 +31,8 @@ MAX_TEXT_CHARS = 65_536
 MAX_SNAPSHOT_NODES = 10_000
 MAX_SNAPSHOTS = 16
 MAX_TARGETED_DIFF_PATHS = 128
+FOCUS_STATE_MAX_BYTES = 1_048_576
+STAGE_CHECKPOINT_MARKER = ".hia-stage-checkpoint.json"
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
 _NODE_DIGEST_UNAVAILABLE = object()
@@ -238,6 +240,7 @@ class HoudiniExecutor:
             "current_node": _safe_path(current_node),
             "selection": [_safe_path(node) for node in _safe_call(self._hou, "selectedNodes", ())],
             "scene_revision": self.scene_revision,
+            "goal_focus_mode": self._goal_focus_mode(),
             "available_contexts": contexts,
             "ui_available": bool(_safe_call(self._hou, "isUIAvailable", True)),
         }
@@ -835,6 +838,7 @@ class HoudiniExecutor:
                 self._scene_revision += 1
 
         checkpoint_started = time.monotonic()
+        focus_target = self._goal_focus_target() if checkpoint_label else None
         checkpoint: dict[str, Any] = {
             "requested": bool(checkpoint_label),
             "label": checkpoint_label or None,
@@ -847,6 +851,8 @@ class HoudiniExecutor:
                 checkpoint["skipped_reason"] = "HOM_EXECUTION_FAILED"
             elif not observed_change:
                 checkpoint["skipped_reason"] = "NO_CONFIRMED_SCENE_CHANGE"
+            elif focus_target is None:
+                checkpoint["skipped_reason"] = "FOCUS_MODE_DISABLED"
             else:
                 try:
                     checkpoint_directory = self._checkpoint_directory()
@@ -874,6 +880,17 @@ class HoudiniExecutor:
                             raise RuntimeError(
                                 "Houdini returned a backup path outside the configured checkpoint directory"
                             )
+                        if self._goal_focus_target() != focus_target:
+                            raise RuntimeError(
+                                "Target focus mode, active Thread, or Goal changed before the checkpoint completed"
+                            )
+                        focus_thread_id, goal_binding = focus_target
+                        self._write_stage_checkpoint_marker(
+                            checkpoint_directory,
+                            checkpoint_path,
+                            focus_thread_id,
+                            goal_binding,
+                        )
                         checkpoint["created"] = True
                         checkpoint["path"] = str(checkpoint_path)
                     except Exception as exc:
@@ -1651,6 +1668,66 @@ class HoudiniExecutor:
                 "HOUDINI_BACKUP_DIR must be the current project launcher session checkpoints directory"
             )
         return directory
+
+    def _goal_focus_mode(self) -> bool:
+        return self._goal_focus_target() is not None
+
+    def _goal_focus_target(self) -> tuple[str, str] | None:
+        raw_path = os.environ.get("HIA_FOCUS_STATE_PATH", "").strip()
+        if not raw_path:
+            return None
+        configured = Path(raw_path)
+        expected = self._project_root / ".runtime" / "bridge" / "focus-mode.json"
+        try:
+            resolved = configured.resolve(strict=True)
+            if (
+                not configured.is_absolute()
+                or configured.is_symlink()
+                or resolved != expected
+                or not resolved.is_file()
+                or resolved.stat().st_size > FOCUS_STATE_MAX_BYTES
+            ):
+                return None
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return None
+        thread_id = payload.get("active_thread_id")
+        enabled = payload.get("enabled_thread_ids")
+        bindings = payload.get("goal_bindings")
+        goal_binding = bindings.get(thread_id) if isinstance(bindings, dict) else None
+        if (
+            not isinstance(thread_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", thread_id) is None
+            or not isinstance(enabled, list)
+            or thread_id not in enabled
+            or not isinstance(goal_binding, str)
+            or re.fullmatch(r"[0-9a-f]{64}", goal_binding) is None
+        ):
+            return None
+        return thread_id, goal_binding
+
+    @staticmethod
+    def _write_stage_checkpoint_marker(
+        checkpoint_directory: Path,
+        checkpoint_path: Path,
+        thread_id: str,
+        goal_binding: str,
+    ) -> None:
+        marker = checkpoint_directory / STAGE_CHECKPOINT_MARKER
+        temporary = marker.with_name(f".{marker.name}.{uuid.uuid4().hex}.tmp")
+        payload = {
+            "version": 1,
+            "thread_id": thread_id,
+            "goal_binding": goal_binding,
+            "checkpoint_file": checkpoint_path.name,
+        }
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, marker)
 
     def _node_digest_value(self, node: Any) -> str:
         payload = {

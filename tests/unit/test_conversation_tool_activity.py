@@ -143,6 +143,9 @@ class _HeadlessMessageCard:
     def setMaximumWidth(self, width: int) -> None:  # noqa: N802
         self.maximum_width = width
 
+    def parentWidget(self) -> None:  # noqa: N802
+        return None
+
 
 class _HeadlessTimer:
     def __init__(self) -> None:
@@ -176,6 +179,27 @@ class _ScrollArea:
 
     def viewport(self) -> _Viewport:
         return self._viewport
+
+
+def _make_stream_view() -> object:
+    view = object.__new__(conversation_module.ConversationView)
+    view._active_codex_card = None
+    view._active_codex_text = ""
+    view._rendered_codex_text = ""
+    view._active_codex_entry = None
+    view._codex_stream_frozen = False
+    view._tool_activity_card = None
+    view._protocol_streak_key = None
+    view._protocol_streak_widget = None
+    view._protocol_streak_entry = None
+    view._message_cards = []
+    view._transcript = []
+    view._stream_flush_timer = _HeadlessTimer()
+    view._scroll_timer = _HeadlessTimer()
+    view.scroll_area = _ScrollArea(1000)
+    view._add_aligned_widget = lambda *_args: None
+    view._scroll_to_bottom = lambda: None
+    return view
 
 
 class _Label:
@@ -326,36 +350,76 @@ class ConversationToolActivityTests(unittest.TestCase):
         self.assertFalse(any(entry.get("role") == "system" for entry in tool_entries))
 
     def test_stream_deltas_are_throttled_and_finish_flushes_every_character(self) -> None:
-        view = object.__new__(conversation_module.ConversationView)
-        card = _HeadlessMessageCard("codex")
-        entry = {"role": "codex", "text": ""}
-        timer = _HeadlessTimer()
+        view = _make_stream_view()
         scrolls: list[bool] = []
-        view._active_codex_card = card
-        view._active_codex_text = ""
-        view._rendered_codex_text = ""
-        view._active_codex_entry = entry
-        view._codex_stream_frozen = False
-        view._tool_activity_card = None
-        view._protocol_streak_key = None
-        view._protocol_streak_widget = None
-        view._protocol_streak_entry = None
-        view._stream_flush_timer = timer
         view._scroll_to_bottom = lambda: scrolls.append(True)
 
-        view.append_codex_delta("自动")
-        view.append_codex_delta("整理")
+        with mock.patch.object(
+            conversation_module,
+            "_MessageCard",
+            _HeadlessMessageCard,
+        ):
+            view.begin_codex_message()
+            card = view._active_codex_card
+            entry = view._active_codex_entry
+            self.assertIsNotNone(card)
+            self.assertIsNotNone(entry)
+            self.assertEqual(
+                [conversation_module._CODEX_PENDING_TEXT],
+                card.body.markdown_updates,
+            )
+            self.assertEqual("", entry["text"])
+
+            view.append_codex_delta("自动")
+            self.assertIs(card, view._active_codex_card)
+            self.assertEqual(
+                [conversation_module._CODEX_PENDING_TEXT, "自动"],
+                card.body.markdown_updates,
+            )
+            view.append_codex_delta("整理")
 
         self.assertEqual("自动整理", entry["text"])
-        self.assertEqual([], card.body.markdown_updates)
-        self.assertEqual(1, timer.start_calls)
+        self.assertEqual(1, view._stream_flush_timer.start_calls)
 
         view.finish_codex_message()
 
-        self.assertEqual(["自动整理"], card.body.markdown_updates)
-        self.assertEqual([True], scrolls)
-        self.assertEqual(1, timer.stop_calls)
+        self.assertEqual(
+            [conversation_module._CODEX_PENDING_TEXT, "自动", "自动整理"],
+            card.body.markdown_updates,
+        )
+        self.assertEqual([True, True, True], scrolls)
+        self.assertEqual(1, view._stream_flush_timer.stop_calls)
         self.assertIsNone(view._active_codex_card)
+
+    def test_no_delta_finish_is_honest_and_freeze_removes_placeholder(self) -> None:
+        with mock.patch.object(
+            conversation_module,
+            "_MessageCard",
+            _HeadlessMessageCard,
+        ):
+            completed_view = _make_stream_view()
+            completed_view.begin_codex_message()
+            completed_card = completed_view._active_codex_card
+            completed_view.finish_codex_message()
+            self.assertEqual(
+                [
+                    conversation_module._CODEX_PENDING_TEXT,
+                    conversation_module._CODEX_NO_TEXT_REPLY,
+                ],
+                completed_card.body.markdown_updates,
+            )
+            self.assertEqual(
+                conversation_module._CODEX_NO_TEXT_REPLY,
+                completed_view._transcript[-1]["text"],
+            )
+
+            stopped_view = _make_stream_view()
+            stopped_view.begin_codex_message()
+            stopped_view.freeze_codex_message()
+            stopped_view.append_codex_delta("迟到文本")
+            self.assertEqual([], stopped_view._transcript)
+            self.assertEqual([], stopped_view._message_cards)
+            self.assertTrue(stopped_view._codex_stream_frozen)
 
     def test_freeze_flushes_without_scroll_and_blocks_late_delta(self) -> None:
         view = object.__new__(conversation_module.ConversationView)
@@ -405,20 +469,30 @@ class ConversationToolActivityTests(unittest.TestCase):
         view.scroll_area = _ScrollArea(1000)
         codex_card = _HeadlessMessageCard("codex")
         user_card = _HeadlessMessageCard("user")
+        codex_card.minimum_width = 900
+        user_card.minimum_width = 700
 
         view._update_message_card_width(codex_card)
         view._update_message_card_width(user_card)
 
+        self.assertEqual(0, codex_card.minimum_width)
+        self.assertEqual(0, user_card.minimum_width)
         self.assertGreaterEqual(codex_card.maximum_width / 1000, 0.75)
         self.assertLessEqual(codex_card.maximum_width / 1000, 0.85)
         self.assertGreaterEqual(user_card.maximum_width / 1000, 0.60)
         self.assertLessEqual(user_card.maximum_width / 1000, 0.70)
+        wide_codex_width = codex_card.maximum_width
+        wide_user_width = user_card.maximum_width
 
         view.scroll_area.viewport().current_width = 20
         view._update_message_card_width(codex_card)
         view._update_message_card_width(user_card)
+        self.assertEqual(0, codex_card.minimum_width)
+        self.assertEqual(0, user_card.minimum_width)
         self.assertLessEqual(codex_card.maximum_width, 20)
         self.assertLessEqual(user_card.maximum_width, 20)
+        self.assertLess(codex_card.maximum_width, wide_codex_width)
+        self.assertLess(user_card.maximum_width, wide_user_width)
 
     def test_compaction_notice_deduplicates_without_touching_active_turn_state(self) -> None:
         view = object.__new__(conversation_module.ConversationView)

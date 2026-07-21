@@ -7,6 +7,8 @@ import os
 import re
 import subprocess
 import threading
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -17,6 +19,12 @@ from .protocol import ProtocolPolicy
 
 EventSink = Callable[[dict[str, Any]], None]
 RequestId = int | str
+
+
+_LATE_RESPONSE_TOMBSTONE_METHODS = frozenset(
+    {"initialize", "thread/resume", "turn/interrupt"}
+)
+_MAX_LATE_RESPONSE_TOMBSTONES = 16
 
 
 _SENSITIVE_ENVIRONMENT_MARKERS = (
@@ -106,10 +114,14 @@ class CodexStdioClient:
         self._process: subprocess.Popen[str] | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
+        self._lifecycle_lock = threading.RLock()
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._pending_lock = threading.Lock()
         self._pending: dict[RequestId, _PendingResponse] = {}
+        self._late_response_tombstones: deque[RequestId] = deque(
+            maxlen=_MAX_LATE_RESPONSE_TOMBSTONES
+        )
         self._server_requests: dict[RequestId, dict[str, Any]] = {}
         self._next_request_id = 1
         self._closing = False
@@ -165,51 +177,55 @@ class CodexStdioClient:
         return process is not None and process.poll() is None
 
     def start(self) -> None:
-        with self._state_lock:
-            if self._process is not None:
-                raise BridgeError("ALREADY_STARTED", "Codex app-server is already started")
-            self._closing = False
-            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            try:
-                process = subprocess.Popen(
-                    list(self._command),
-                    cwd=str(self._cwd),
-                    env=self._environment,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
-                    shell=False,
-                    creationflags=creationflags,
-                )
-            except OSError as exc:
-                raise BridgeError(
-                    "CODEX_START_FAILED",
-                    "Unable to start Codex app-server: "
-                    f"{self._redact_text(str(exc))}",
-                    http_status=502,
-                ) from exc
-            self._process = process
+        with self._lifecycle_lock:
+            with self._state_lock:
+                if self._process is not None:
+                    raise BridgeError("ALREADY_STARTED", "Codex app-server is already started")
+                self._closing = False
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                try:
+                    process = subprocess.Popen(
+                        list(self._command),
+                        cwd=str(self._cwd),
+                        env=self._environment,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                        shell=False,
+                        creationflags=creationflags,
+                    )
+                except OSError as exc:
+                    raise BridgeError(
+                        "CODEX_START_FAILED",
+                        "Unable to start Codex app-server: "
+                        f"{self._redact_text(str(exc))}",
+                        http_status=502,
+                    ) from exc
+                self._process = process
 
-        self._stdout_thread = threading.Thread(
-            target=self._read_stdout,
-            name="hia-codex-stdout",
-            daemon=True,
-        )
-        self._stderr_thread = threading.Thread(
-            target=self._read_stderr,
-            name="hia-codex-stderr",
-            daemon=True,
-        )
-        self._stdout_thread.start()
-        self._stderr_thread.start()
-        self._emit("process_started", pid=process.pid)
+            self._stdout_thread = threading.Thread(
+                target=self._read_stdout,
+                name="hia-codex-stdout",
+                daemon=True,
+            )
+            self._stderr_thread = threading.Thread(
+                target=self._read_stderr,
+                name="hia-codex-stderr",
+                daemon=True,
+            )
+            self._stdout_thread.start()
+            self._stderr_thread.start()
+            self._emit("process_started", pid=process.pid)
 
     def initialize(self) -> Any:
-        result = self.request(
+        return self.initialize_with_timeout(self._request_timeout)
+
+    def initialize_with_timeout(self, timeout_seconds: float) -> Any:
+        result = self.request_with_timeout(
             "initialize",
             {
                 "clientInfo": {
@@ -219,14 +235,36 @@ class CodexStdioClient:
                 },
                 "capabilities": {"experimentalApi": False},
             },
+            timeout_seconds=timeout_seconds,
         )
         self.notify("initialized")
         return result
 
     def request(self, method: str, params: Mapping[str, Any]) -> Any:
+        return self.request_with_timeout(
+            method,
+            params,
+            timeout_seconds=self._request_timeout,
+        )
+
+    def request_with_timeout(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        timeout_seconds: float,
+    ) -> Any:
+        """Send one request with a caller-bounded wait without changing defaults."""
+
         self._policy.require_client_request(method)
         if not isinstance(params, Mapping):
             raise BridgeError("INVALID_PARAMS", "Request params must be an object")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a positive number")
         if not self.is_running:
             raise BridgeError(
                 "CODEX_NOT_RUNNING",
@@ -253,9 +291,11 @@ class CodexStdioClient:
                 self._pending.pop(request_id, None)
             raise
 
-        if not pending.event.wait(self._request_timeout):
+        if not pending.event.wait(float(timeout_seconds)):
             with self._pending_lock:
                 self._pending.pop(request_id, None)
+                if method in _LATE_RESPONSE_TOMBSTONE_METHODS:
+                    self._late_response_tombstones.append(request_id)
             raise BridgeError(
                 "CODEX_REQUEST_TIMEOUT",
                 f"Codex request timed out: {method}",
@@ -301,45 +341,93 @@ class CodexStdioClient:
             self._server_requests.pop(request_id, None)
         return request["method"]
 
-    def close(self, grace_seconds: float = 5.0) -> None:
-        with self._state_lock:
-            if self._closing:
-                return
-            self._closing = True
-            process = self._process
-        if process is None:
-            return
+    def close(
+        self,
+        grace_seconds: float = 5.0,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        def remaining(maximum: float) -> float:
+            if deadline is None:
+                return maximum
+            return max(0.0, min(maximum, deadline - time.monotonic()))
 
-        with self._write_lock:
-            if process.stdin is not None and not process.stdin.closed:
-                try:
-                    process.stdin.close()
-                except OSError:
-                    pass
-        try:
-            process.wait(timeout=grace_seconds)
-        except subprocess.TimeoutExpired:
-            process.terminate()
+        with self._lifecycle_lock:
+            with self._state_lock:
+                if self._closing:
+                    return
+                process = self._process
+                if process is None:
+                    return
+                self._closing = True
+
+            with self._write_lock:
+                if process.stdin is not None and not process.stdin.closed:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
             try:
-                process.wait(timeout=2.0)
+                process.wait(timeout=remaining(grace_seconds))
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2.0)
+                process.terminate()
+                try:
+                    process.wait(timeout=remaining(2.0))
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=remaining(2.0))
+                    except subprocess.TimeoutExpired:
+                        pass
 
-        self._fail_pending(
-            BridgeError(
-                "CODEX_PROCESS_CLOSED",
-                "Codex app-server closed before the request completed",
-                http_status=503,
+            self._fail_pending(
+                BridgeError(
+                    "CODEX_PROCESS_CLOSED",
+                    "Codex app-server closed before the request completed",
+                    http_status=503,
+                )
             )
-        )
-        for thread in (self._stdout_thread, self._stderr_thread):
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=1.0)
-        for stream in (process.stdout, process.stderr):
-            if stream is not None and not stream.closed:
-                stream.close()
-        self._emit("process_stopped", returncode=process.returncode)
+            with self._pending_lock:
+                self._server_requests.clear()
+            for thread in (self._stdout_thread, self._stderr_thread):
+                if thread is not None and thread is not threading.current_thread():
+                    thread.join(timeout=remaining(1.0))
+            stopped = process.poll() is not None
+            if stopped:
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None and not stream.closed:
+                        stream.close()
+                self._emit("process_stopped", returncode=process.returncode)
+            with self._state_lock:
+                if stopped and self._process is process:
+                    self._process = None
+                    self._stdout_thread = None
+                    self._stderr_thread = None
+                self._closing = False
+            if not stopped:
+                raise BridgeError(
+                    "CODEX_PROCESS_CLOSE_TIMEOUT",
+                    "Codex app-server did not stop before the recovery deadline",
+                    http_status=504,
+                )
+
+    def restart(
+        self,
+        grace_seconds: float = 1.0,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        """Replace only the owned app-server process; Houdini is untouched."""
+
+        with self._lifecycle_lock:
+            self.close(grace_seconds=grace_seconds, deadline=deadline)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BridgeError(
+                    "CODEX_STOP_RECOVERY_TIMEOUT",
+                    "Codex app-server restart exceeded the recovery deadline",
+                    http_status=504,
+                )
+            self.start()
 
     def _send_json(self, message: Mapping[str, Any]) -> None:
         encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
@@ -389,7 +477,9 @@ class CodexStdioClient:
                     continue
                 self._handle_message(message)
         finally:
-            if not self._closing:
+            with self._state_lock:
+                report_exit = self._process is process and not self._closing
+            if report_exit:
                 returncode = process.poll()
                 self._emit("process_exit", returncode=returncode)
                 self._fail_pending(
@@ -431,7 +521,10 @@ class CodexStdioClient:
         request_id = message.get("id")
         with self._pending_lock:
             pending = self._pending.get(request_id)
+            is_late_response = request_id in self._late_response_tombstones
         if pending is None:
+            if is_late_response:
+                return
             self._emit(
                 "protocol_warning",
                 code="UNKNOWN_RESPONSE_ID",
