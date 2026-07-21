@@ -65,6 +65,9 @@ _LONG_THREAD_WARNING = (
 _COMPACTION_NOTICE = "Codex 已自动整理较早的对话内容。"
 _DEFAULT_MCP_BACKEND = "hia_v2"
 _GOAL_OBJECTIVE_MAX_LENGTH = 4_000
+_GOAL_CONTINUE_INSTRUCTION = (
+    "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。"
+)
 _GOAL_STATUS_LABELS = {
     "active": "正在跟进",
     "complete": "已完成",
@@ -136,6 +139,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._goal_turn_id: str | None = None
         self._goal_turn_has_text = False
         self._focus_mode = False
+        self._goal_continuation_paused = False
+        self._goal_continuation_boundary: tuple[str, str] | None = None
+        self._goal_auto_turn_token: TurnStateToken | None = None
+        self._goal_auto_turn_has_progress = False
+        self._goal_continue_after_open_thread_id: str | None = None
         self._team_records: dict[str, dict[str, Any]] = {}
         self._turn_performance_token: TurnStateToken | None = None
         self._turn_performance_marks: dict[str, float] = {}
@@ -1227,6 +1235,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             token=self._turn_state.capture_token(),
             allow_followup=True,
         )
+        self._maybe_start_goal_continuation()
 
     def _apply_session(
         self,
@@ -1242,11 +1251,23 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return False
 
         was_busy = self._turn_state.busy
+        previous_turn_token = self._turn_state.capture_token()
+        previous_turn_was_auto = self._goal_auto_turn_is_current(
+            previous_turn_token.thread_id
+        )
         stopping = self._is_stopping_turn()
         thread_id = session.get("thread_id")
         turn_id = session.get("turn_id")
         turn_status = session.get("turn_status")
         turn_active = session.get("turn_active")
+        if (
+            turn_active is False
+            and self._goal_continuation_boundary == (thread_id, turn_id)
+            and isinstance(self._goal_auto_turn_token, TurnStateToken)
+        ):
+            # A repeated idle snapshot for the completed source Turn cannot
+            # roll back the continuation that has already reserved a new Turn.
+            turn_active = None
         previous_recovery_state = self._stop_recovery_state
         if turn_status == "stopRecovering":
             self._stop_recovery_state = "recovering"
@@ -1457,6 +1478,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             elif allow_followup and was_busy and not self._turn_state.busy:
                 self._mark_turn_terminal(
                     turn_status if isinstance(turn_status, str) else None
+                )
+                self._queue_goal_continuation(
+                    previous_turn_token.thread_id,
+                    previous_turn_token.turn_id,
+                    turn_status,
+                    auto_turn=previous_turn_was_auto,
                 )
             else:
                 self.turn_status_label.setText(
@@ -1750,6 +1777,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     ) -> bool:
         if self._stopped_source_turn == (thread_id, turn_id):
             return True
+        if (
+            self._goal_continuation_boundary == (thread_id, turn_id)
+            and isinstance(self._goal_auto_turn_token, TurnStateToken)
+        ):
+            return True
         context = self._active_turn_start_context
         draft = self._pending_turn_drafts.get(context) if context else None
         if (
@@ -1797,6 +1829,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         draft = self._pending_turn_drafts.pop(context, None)
         if not isinstance(draft, dict):
             return None
+        if draft.get("goal_auto_continue") is True:
+            return draft
         text = draft.get("text")
         if isinstance(text, str) and self.input_edit.toPlainText() == text:
             self.input_edit.clear()
@@ -2572,6 +2606,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._current_goal = None
         self._goal_turn_id = None
         self._goal_turn_has_text = False
+        self._goal_continuation_paused = False
+        self._goal_continuation_boundary = None
+        self._goal_auto_turn_token = None
+        self._goal_auto_turn_has_progress = False
+        self._goal_continue_after_open_thread_id = None
         objective = getattr(self, "goal_objective_edit", None)
         if objective is not None:
             objective.setPlainText("")
@@ -2595,6 +2634,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if thread_id != self._selected_thread_id or not isinstance(enabled, bool):
             return False
         self._focus_mode = enabled
+        if not enabled:
+            self._goal_continuation_boundary = None
+            self._goal_auto_turn_token = None
+            self._goal_auto_turn_has_progress = False
         checkbox = getattr(self, "goal_focus_checkbox", None)
         if checkbox is not None:
             checkbox.blockSignals(True)
@@ -2602,11 +2645,145 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             checkbox.blockSignals(False)
         hint = getattr(self, "goal_focus_hint_label", None)
         if hint is not None:
-            hint.setText(
-                "已开启：Houdini 异常退出后会尝试恢复，并继续当前 Goal。"
-                if enabled
-                else "已关闭：普通聊天，不自动恢复或续做。"
+            if enabled and self._goal_continuation_paused:
+                hint.setText(
+                    "已暂停自动续做；点击“保存（继续跟进）”或重新开启专注模式后恢复。"
+                )
+            else:
+                hint.setText(
+                    "已开启：Houdini 异常退出后会尝试恢复，并继续当前 Goal。"
+                    if enabled
+                    else "已关闭：普通聊天，不自动恢复或续做。"
+                )
+        return True
+
+    def _pause_goal_continuation(self, message: str, *, notify: bool) -> None:
+        already_paused = self._goal_continuation_paused
+        self._goal_continuation_paused = True
+        self._goal_continuation_boundary = None
+        self._goal_auto_turn_token = None
+        self._goal_auto_turn_has_progress = False
+        if isinstance(self._current_goal, dict):
+            self.goal_activity_label.setText(
+                "当前跟进：已暂停；点击“保存（继续跟进）”后恢复"
             )
+        if self._focus_mode:
+            self.goal_focus_hint_label.setText(
+                "已暂停自动续做；点击“保存（继续跟进）”或重新开启专注模式后恢复。"
+            )
+        if notify and not already_paused:
+            self._append_system(message)
+
+    def _goal_auto_turn_is_current(self, thread_id: Any) -> bool:
+        token = self._goal_auto_turn_token
+        return (
+            isinstance(token, TurnStateToken)
+            and token.thread_id == thread_id
+            and self._turn_state.token_generation_is_current(token)
+        )
+
+    def _mark_goal_auto_turn_progress(self) -> None:
+        token = self._goal_auto_turn_token
+        if (
+            isinstance(token, TurnStateToken)
+            and self._turn_state.token_generation_is_current(token)
+        ):
+            self._goal_auto_turn_has_progress = True
+
+    def _queue_goal_continuation(
+        self,
+        thread_id: Any,
+        turn_id: Any,
+        status: Any,
+        *,
+        auto_turn: bool = False,
+    ) -> None:
+        was_auto_turn = auto_turn or self._goal_auto_turn_is_current(thread_id)
+        auto_turn_had_progress = self._goal_auto_turn_has_progress
+        if was_auto_turn:
+            self._goal_auto_turn_token = None
+            self._goal_auto_turn_has_progress = False
+            if status != "completed":
+                self._pause_goal_continuation(
+                    "目标专注模式已暂停：自动续轮未正常完成。",
+                    notify=True,
+                )
+                return
+        if (
+            status != "completed"
+            or thread_id != self._selected_thread_id
+            or not isinstance(thread_id, str)
+            or not isinstance(turn_id, str)
+        ):
+            return
+        if was_auto_turn and not auto_turn_had_progress:
+            self._pause_goal_continuation(
+                "目标专注模式已暂停：上一轮没有返回文字或工具活动，未继续创建空 Turn。",
+                notify=True,
+            )
+            return
+        if (
+            not self._focus_mode
+            or not isinstance(self._current_goal, dict)
+            or self._current_goal.get("status") != "active"
+        ):
+            return
+        self._goal_continuation_boundary = (thread_id, turn_id)
+
+    def _goal_continuation_is_safe(self) -> bool:
+        return bool(
+            self._client is not None
+            and self._connected
+            and self._authenticated
+            and isinstance(self._selected_thread_id, str)
+            and isinstance(self._current_goal, dict)
+            and self._current_goal.get("status") == "active"
+            and self._focus_mode
+            and not self._goal_continuation_paused
+            and not self._turn_state.busy
+            and self._goal_turn_id is None
+            and not self._session_action_pending
+            and not self._turn_start_request_pending
+            and not self._turn_steer_request_pending
+            and not self._reconciliation_tokens
+            and not self._interrupt_pending
+            and not self._is_stopping_turn()
+            and self._stop_recovery_state is None
+            and self._goal_action_context is None
+            and self._current_approval is None
+            and not self._pending_approvals
+            and not self._scene_capability_pending
+            and not self._scene_work_pending
+        )
+
+    def _maybe_start_goal_continuation(
+        self,
+        *,
+        explicit_source: str | None = None,
+    ) -> bool:
+        thread_id = self._selected_thread_id
+        if explicit_source is not None and isinstance(thread_id, str):
+            self._goal_continuation_paused = False
+            if self._goal_continuation_boundary is None:
+                self._goal_continuation_boundary = (
+                    thread_id, f"explicit:{explicit_source}"
+                )
+        boundary = self._goal_continuation_boundary
+        if (
+            not isinstance(boundary, tuple)
+            or len(boundary) != 2
+            or not self._goal_continuation_is_safe()
+        ):
+            return False
+        if not self._start_new_turn(
+            _GOAL_CONTINUE_INSTRUCTION,
+            (),
+            boundary[0],
+            request_text=_GOAL_CONTINUE_INSTRUCTION,
+            goal_auto_continue=True,
+        ):
+            return False
+        self.goal_activity_label.setText(_GOAL_RUNNING_NO_TEXT)
         return True
 
     def _set_focus_mode(self, enabled: bool) -> None:
@@ -2724,7 +2901,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.goal_objective_edit.setPlainText(objective)
         self._current_goal = dict(raw_goal)
         raw_goal_turn_id = raw_goal.get("turnId")
-        if status == "active" and isinstance(raw_goal_turn_id, str):
+        completed_goal_boundary = (
+            self._goal_continuation_boundary == (thread_id, raw_goal_turn_id)
+        )
+        if (
+            status == "active"
+            and isinstance(raw_goal_turn_id, str)
+            and not completed_goal_boundary
+        ):
             if raw_goal_turn_id != self._goal_turn_id:
                 self._goal_turn_has_text = False
             self._goal_turn_id = raw_goal_turn_id
@@ -2782,6 +2966,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             metrics.append(f"已用 {time_used}s")
         self.goal_metrics_label.setText(" · ".join(metrics) or "Codex 原生 Goal")
         if status != "active":
+            self._goal_continuation_boundary = None
+            self._goal_auto_turn_token = None
+            self._goal_auto_turn_has_progress = False
             self._apply_focus_mode(thread_id, False)
         return True
 
@@ -2822,6 +3009,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._stop_recovery_state == "failed" or not self._connected
         ):
             return "当前跟进：已暂停，等待重连"
+        if status == "active" and self._goal_continuation_paused:
+            return "当前跟进：已暂停；点击“保存（继续跟进）”后恢复"
         if status == "blocked":
             return "当前跟进：等待你完成上轮要求，完成后点继续跟进"
         if status == "complete":
@@ -2829,6 +3018,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if (
             isinstance(self._goal_turn_id, str)
             or self._goal_action_context == _GOAL_SET_CONTEXT
+            or (
+                isinstance(self._goal_auto_turn_token, TurnStateToken)
+                and self._turn_state.busy
+            )
         ):
             return (
                 _GOAL_RUNNING_WITH_TEXT
@@ -3116,9 +3309,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                             entry.get("path"), str
                         ):
                             attachments.append(Path(entry["path"]).name)
-                    restored.append(
-                        ("user", ("\n".join(texts), tuple(attachments)))
-                    )
+                    restored_text = "\n".join(texts)
+                    if (
+                        not attachments
+                        and restored_text == _GOAL_CONTINUE_INSTRUCTION
+                    ):
+                        continue
+                    restored.append(("user", (restored_text, tuple(attachments))))
                 elif item_type == "agentMessage" and isinstance(
                     item.get("text"), str
                 ):
@@ -3201,6 +3398,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if not self._start_new_turn(text, attachment_paths, thread_id):
             self._append_system("当前 Turn 暂不能发送。")
             self._refresh_controls()
+        elif self._goal_continuation_paused:
+            self._goal_continuation_paused = False
+            self._apply_focus_mode(thread_id, self._focus_mode)
         return
 
     def _start_new_turn(
@@ -3213,6 +3413,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         steer_fallback: bool = False,
         steer_source_thread_id: str | None = None,
         steer_source_turn_id: str | None = None,
+        goal_auto_continue: bool = False,
     ) -> bool:
         if self._client is None or not self._turn_state.begin_start(thread_id):
             return False
@@ -3221,7 +3422,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             if isinstance(request_text, str)
             else self._request_text_with_selection(text)
         )
-        self._add_user_message(text, attachment_paths)
+        if not goal_auto_continue:
+            self._add_user_message(text, attachment_paths)
         self._begin_codex_message()
         self._stream_thread_id = thread_id
         self._stream_turn_id = None
@@ -3241,7 +3443,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "steer_fallback": steer_fallback,
             "steer_source_thread_id": steer_source_thread_id,
             "steer_source_turn_id": steer_source_turn_id,
+            "goal_auto_continue": goal_auto_continue,
         }
+        if goal_auto_continue:
+            self._goal_auto_turn_token = token
+            self._goal_auto_turn_has_progress = False
+        else:
+            self._goal_auto_turn_token = None
+            self._goal_auto_turn_has_progress = False
         self._begin_diagnostic_turn(
             thread_id,
             token,
@@ -3568,6 +3777,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._active_interrupt_context = context
             self._stopping_turn_token = token
             self._interrupt_pending = True
+            self._pause_goal_continuation("", notify=False)
             for draft in self._pending_steer_drafts.values():
                 if isinstance(draft, dict):
                     draft["fallback_cancelled"] = True
@@ -3622,6 +3832,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     @QtCore.Slot(str, dict)
     def _on_action_completed(self, context: str, payload: dict[str, Any]) -> None:
         if self._handle_scene_action(context, payload):
+            self._maybe_start_goal_continuation()
             return
         if context == _HOUDINI_STATUS_CONTEXT:
             self._houdini_status_pending = False
@@ -3666,6 +3877,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._request_goal()
                 self._refresh_controls()
                 return
+            explicit_continue: str | None = None
             if context == _FOCUS_SET_CONTEXT:
                 if self._apply_focus_mode(thread_id, payload.get("focus_mode")):
                     self._append_system(
@@ -3673,6 +3885,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         if payload.get("focus_mode") is True
                         else "目标专注模式已关闭；Goal 保持不变。"
                     )
+                    if payload.get("focus_mode") is True:
+                        explicit_continue = "focus"
             elif context == _GOAL_CLEAR_CONTEXT:
                 if payload.get("cleared") is True:
                     self._apply_goal(thread_id, None)
@@ -3680,8 +3894,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             elif self._apply_goal(thread_id, payload.get("goal")):
                 if context == _GOAL_SET_CONTEXT:
                     self._append_system("Goal 已保存到当前 Codex Thread。")
+                    self._goal_continuation_paused = False
             self._apply_focus_mode(thread_id, payload.get("focus_mode"))
+            if (
+                context == _GOAL_GET_CONTEXT
+                and self._goal_continue_after_open_thread_id == thread_id
+            ):
+                self._goal_continue_after_open_thread_id = None
+                explicit_continue = "manual-open"
             self._refresh_controls()
+            self._maybe_start_goal_continuation(
+                explicit_source=explicit_continue,
+            )
             return
         if context.startswith(_THREAD_READ_CONTEXT_PREFIX):
             self._render_thread_read(payload)
@@ -3717,11 +3941,20 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     and session.get("turn_active") is False
                     and not was_stopping
                 ):
-                    self._mark_turn_terminal(
+                    turn_status = (
                         session.get("turn_status")
                         if isinstance(session.get("turn_status"), str)
                         else None
                     )
+                    auto_turn = self._goal_auto_turn_is_current(token.thread_id)
+                    self._mark_turn_terminal(turn_status)
+                    self._queue_goal_continuation(
+                        token.thread_id,
+                        token.turn_id,
+                        turn_status,
+                        auto_turn=auto_turn,
+                    )
+                    self._maybe_start_goal_continuation()
                 elif (
                     not applied
                     and self._turn_state.busy
@@ -3787,6 +4020,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 else:
                     self._render_thread_read(payload)
                     self._append_system("已恢复会话。")
+                    self._goal_continue_after_open_thread_id = thread_id
                 self._request_goal()
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
             token = self._turn_start_tokens.pop(context, None)
@@ -3798,6 +4032,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 if isinstance(token, TurnStateToken)
                 and self._turn_state.token_generation_is_current(token)
                 else None
+            )
+            auto_start = (
+                isinstance(accepted_draft, dict)
+                and accepted_draft.get("goal_auto_continue") is True
             )
             thread_id = payload.get("thread_id")
             turn_id = payload.get("turn_id")
@@ -3848,12 +4086,24 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         if isinstance(turn_id, str)
                         else "当前 Codex Turn 正在运行"
                     )
+                    if auto_start:
+                        self.goal_activity_label.setText(
+                            self._goal_waiting_activity_text()
+                        )
                 else:
-                    self._mark_turn_terminal(
+                    turn_status = (
                         payload.get("turn_status")
                         if isinstance(payload.get("turn_status"), str)
                         else None
                     )
+                    self._mark_turn_terminal(turn_status)
+                    self._queue_goal_continuation(
+                        thread_id,
+                        turn_id,
+                        turn_status,
+                        auto_turn=auto_start,
+                    )
+                    self._maybe_start_goal_continuation()
             else:
                 self._request_session_reconciliation("late_turn_start_ack")
         elif context.startswith(_TURN_STEER_CONTEXT_PREFIX):
@@ -3912,6 +4162,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self.deny_button.setEnabled(True)
             self.persistent_allow_button.setEnabled(True)
             self._show_next_approval()
+            self._maybe_start_goal_continuation()
         self._refresh_controls()
 
     @QtCore.Slot(dict)
@@ -3940,6 +4191,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             if isinstance(self._selected_thread_id, str):
                 self._append_system("事件缓冲出现间隙；正在同步 Turn 状态。")
             self._request_session_reconciliation("event_gap")
+        self._maybe_start_goal_continuation()
         self._schedule_poll(0)
 
     @classmethod
@@ -4064,16 +4316,20 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         isinstance(goal, dict)
                         and goal.get("status") == "active"
                         and isinstance(goal_turn_id, str)
+                        and self._goal_continuation_boundary
+                        != (thread_id, goal_turn_id)
+                        and self._can_bind_goal_turn(thread_id, goal_turn_id)
                     ):
                         self._goal_turn_id = goal_turn_id
                 return
             if method == "thread/goal/cleared":
                 self._apply_goal(params.get("threadId"), None)
                 return
-            if method in {"item/started", "item/completed"} and self._update_team_item(
-                method, params
-            ):
-                return
+            if method in {"item/started", "item/completed"}:
+                if self._update_team_item(method, params):
+                    if self._event_matches_active_stream(params):
+                        self._mark_goal_auto_turn_progress()
+                    return
             if isinstance(method, str) and self._handle_child_thread_event(
                 method, params
             ):
@@ -4110,6 +4366,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 if isinstance(delta, str) and (active_stream or goal_stream):
                     if active_stream:
                         self._record_turn_performance("first_delta")
+                        if delta.strip():
+                            self._mark_goal_auto_turn_progress()
                     self._append_codex_delta(delta)
                     if goal_stream:
                         self._goal_turn_has_text = True
@@ -4164,6 +4422,21 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                             )
             elif method in {"item/started", "item/completed"}:
                 item = params.get("item")
+                active_stream = self._event_matches_active_stream(params)
+                if (
+                    active_stream
+                    and isinstance(item, dict)
+                    and item.get("type")
+                    in {
+                        "collabAgentToolCall",
+                        "commandExecution",
+                        "dynamicToolCall",
+                        "fileChange",
+                        "mcpToolCall",
+                        "webSearch",
+                    }
+                ):
+                    self._mark_goal_auto_turn_progress()
                 if (
                     isinstance(item, dict)
                     and item.get("type") == "contextCompaction"
@@ -4175,7 +4448,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         key = f"{thread_id or ''}:{turn_id or item_id or 'compaction'}"
                         self._show_compaction_notice(key)
                 if (
-                    self._event_matches_active_stream(params)
+                    active_stream
                     and isinstance(item, dict)
                     and item.get("type") == "mcpToolCall"
                 ):
@@ -4211,6 +4484,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     )
                 ):
                     self._update_tool_progress(item_id, message)
+                    self._mark_goal_auto_turn_progress()
             elif method == "turn/started":
                 raw_turn = params.get("turn")
                 turn = raw_turn if isinstance(raw_turn, dict) else {}
@@ -4263,6 +4537,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     if self._event_is_stale_source_turn(thread_id, turn_id):
                         return
                     if self._goal_turn_matches(thread_id, turn_id):
+                        turn_status = (
+                            turn.get("status")
+                            if isinstance(turn.get("status"), str)
+                            else None
+                        )
                         if (
                             not self._turn_state.busy
                             and self._stream_thread_id == thread_id
@@ -4276,11 +4555,26 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         self.goal_activity_label.setText(
                             self._goal_waiting_activity_text()
                         )
+                        self._queue_goal_continuation(
+                            thread_id,
+                            turn_id,
+                            turn_status,
+                        )
                     elif self._turn_state.observe_completed(thread_id, turn_id):
-                        self._mark_turn_terminal(
+                        auto_turn = self._goal_auto_turn_is_current(thread_id)
+                        turn_status = (
                             turn.get("status")
                             if isinstance(turn.get("status"), str)
                             else None
+                        )
+                        self._mark_turn_terminal(
+                            turn_status
+                        )
+                        self._queue_goal_continuation(
+                            thread_id,
+                            turn_id,
+                            turn_status,
+                            auto_turn=auto_turn,
                         )
                         self._refresh_controls()
                     elif self._turn_state.phase in {
@@ -4739,6 +5033,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._session_action_pending = False
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
             token = self._turn_start_tokens.pop(context, None)
+            failed_draft = self._pending_turn_drafts.get(context)
+            if (
+                isinstance(failed_draft, dict)
+                and failed_draft.get("goal_auto_continue") is True
+            ):
+                self._pause_goal_continuation("", notify=False)
             if context == self._active_turn_start_context:
                 self._active_turn_start_context = None
                 self._turn_start_request_pending = False
@@ -5216,6 +5516,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._active_interrupt_context = None
         self._reconciliation_tokens.clear()
         self._stopping_turn_token = None
+        self._goal_continuation_boundary = None
+        self._goal_auto_turn_token = None
         conversation = getattr(self, "conversation", None)
         if conversation is not None and hasattr(conversation, "stop_timers"):
             conversation.stop_timers()

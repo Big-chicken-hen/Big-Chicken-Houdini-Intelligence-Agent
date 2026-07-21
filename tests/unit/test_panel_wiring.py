@@ -771,6 +771,11 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._goal_turn_id = None
     panel._goal_turn_has_text = False
     panel._focus_mode = False
+    panel._goal_continuation_paused = False
+    panel._goal_continuation_boundary = None
+    panel._goal_auto_turn_token = None
+    panel._goal_auto_turn_has_progress = False
+    panel._goal_continue_after_open_thread_id = None
     panel._team_records = {}
     panel._turn_performance_token = None
     panel._turn_performance_marks = {}
@@ -3352,7 +3357,8 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertEqual("active", panel._current_goal["status"])
         self.assertTrue(panel._focus_mode)
-        self.assertIn("等待下一轮", panel.goal_activity_label.text())
+        self.assertIn("已暂停", panel.goal_activity_label.text())
+        self.assertEqual("active", panel._current_goal["status"])
         self.assertEqual(1, len(panel._client.turn_requests))
 
     def test_stop_background_recovery_failure_is_final_once_without_losing_draft(self) -> None:
@@ -4053,6 +4059,7 @@ class PanelWiringTests(unittest.TestCase):
             "session_resume",
             {
                 "thread_id": "019f-history-one",
+                "focus_mode": True,
                 "read": {
                     "thread": {
                         "id": "019f-history-one",
@@ -4069,6 +4076,24 @@ class PanelWiringTests(unittest.TestCase):
                                             },
                                         ],
                                     },
+                                    {
+                                        "type": "userMessage",
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。",
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "type": "userMessage",
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": "请继续推进当前 Goal，这是我亲自发送的补充。",
+                                            }
+                                        ],
+                                    },
                                     {"type": "agentMessage", "text": "已经完成。"},
                                     {"type": "commandExecution", "command": "ignored"},
                                 ]
@@ -4080,6 +4105,14 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertEqual(1, panel.conversation.clear_calls)
         self.assertIn("继续调整材质", panel.conversation.toPlainText())
+        self.assertNotIn(
+            "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。",
+            panel.conversation.toPlainText(),
+        )
+        self.assertIn(
+            "请继续推进当前 Goal，这是我亲自发送的补充。",
+            panel.conversation.toPlainText(),
+        )
         self.assertIn("已经完成", panel.conversation.toPlainText())
         self.assertNotIn("ignored", panel.conversation.toPlainText())
         self.assertEqual(["019f-history-one"], panel._client.goal_get_requests)
@@ -4093,11 +4126,13 @@ class PanelWiringTests(unittest.TestCase):
                     "objective": "完成材质审阅",
                     "status": "active",
                 },
+                "focus_mode": True,
             },
         )
         panel._render_event(team_event)
         self.assertEqual("完成材质审阅", panel.goal_objective_edit.toPlainText())
         self.assertIn("thread-review", panel._team_records)
+        self.assertEqual(1, len(panel._client.turn_requests))
 
     def test_session_wait_timeouts_are_accurate_and_unlock_retry(self) -> None:
         cases = (
@@ -4199,6 +4234,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual([], first._client.resume_requests)
         self.assertEqual([], first._client.thread_read_requests)
         self.assertEqual([], first._client.goal_get_requests)
+        self.assertEqual([], first._client.turn_requests)
         self.assertEqual({}, first._team_records)
 
         event = _CloseEvent()
@@ -4275,6 +4311,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual([], panel._client.thread_read_requests)
         self.assertEqual([], panel._client.resume_requests)
         self.assertEqual([], panel._client.goal_get_requests)
+        self.assertEqual([], panel._client.turn_requests)
         self.assertIsNone(panel._selected_thread_id)
         self.assertIsNone(panel._current_goal)
         self.assertFalse(panel.goal_focus_checkbox.isChecked())
@@ -4980,6 +5017,577 @@ class PanelWiringTests(unittest.TestCase):
         self.assertNotIn("普通聊天计划", panel.goal_activity_label.text())
         panel._render_event(_completed_notification(normal_turn_id, sequence=99))
         self.assertIn("等待下一轮任务进展", panel.goal_activity_label.text())
+
+    def test_focused_goal_completion_continues_without_fake_user_message(self) -> None:
+        panel = _make_panel()
+        panel._apply_models(
+            [
+                {
+                    "model": "goal-model",
+                    "displayName": "Goal Model",
+                    "isDefault": True,
+                    "inputModalities": ["text", "image"],
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "high", "description": "High"}
+                    ],
+                    "defaultReasoningEffort": "high",
+                    "serviceTiers": [
+                        {"id": "priority", "name": "快速", "description": "Fast"}
+                    ],
+                    "defaultServiceTier": "priority",
+                }
+            ]
+        )
+        goal = {
+            "threadId": "thread-1",
+            "objective": "完成木屋",
+            "status": "active",
+        }
+        panel._apply_goal("thread-1", goal)
+        panel._apply_focus_mode("thread-1", True)
+        panel.input_edit.setPlainText("用户正在编辑的追加内容")
+        attachment = "E:/houdini-intelligence-agent/.runtime/attachments/reference.png"
+        panel.attachment_strip.add_path(attachment)
+        system_count = sum(
+            entry["role"] == "system" for entry in panel.conversation.entries
+        )
+
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 1,
+                        "type": "codex_notification",
+                        "method": "turn/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": "goal-turn", "status": "inProgress"},
+                        },
+                    },
+                    {
+                        "seq": 2,
+                        "type": "codex_notification",
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": "goal-turn", "status": "completed"},
+                        },
+                    },
+                    {
+                        "seq": 3,
+                        "type": "codex_notification",
+                        "method": "thread/goal/updated",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "goal-turn",
+                            "goal": goal,
+                        },
+                    },
+                ],
+                "gap": False,
+            }
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        text, model, effort, images, context = panel._client.turn_requests[0]
+        self.assertEqual(
+            "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。",
+            text,
+        )
+        self.assertEqual("goal-model", model)
+        self.assertEqual("high", effort)
+        self.assertEqual("priority", panel._client.turn_service_tiers[0])
+        self.assertEqual([], images)
+        self.assertEqual("用户正在编辑的追加内容", panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+        self.assertNotIn(text, panel.conversation.toPlainText())
+        self.assertEqual(
+            0,
+            sum(entry["role"] == "user" for entry in panel.conversation.entries),
+        )
+        self.assertEqual(
+            system_count,
+            sum(entry["role"] == "system" for entry in panel.conversation.entries),
+        )
+
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 4,
+                        "type": "codex_notification",
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": "goal-turn", "status": "completed"},
+                        },
+                    },
+                    {
+                        "seq": 5,
+                        "type": "session_state",
+                        "session": {
+                            "connected": True,
+                            "authentication": "authenticated",
+                            "thread_id": "thread-1",
+                            "turn_id": "goal-turn",
+                            "turn_status": "completed",
+                            "turn_active": False,
+                            "focus_mode": True,
+                        },
+                    },
+                ],
+                "gap": False,
+            }
+        )
+        panel._apply_threads(panel._thread_history)
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual([], panel._client.session_contexts)
+
+        panel._on_action_completed(
+            context,
+            {
+                "thread_id": "thread-1",
+                "turn_id": "auto-turn",
+                "turn_active": True,
+                "turn_status": "inProgress",
+            },
+        )
+        self.assertEqual("追加指令", panel.send_button.text())
+        panel._send()
+        steer_text, steer_images, steer_context = panel._client.steer_requests[-1]
+        self.assertEqual("用户正在编辑的追加内容", steer_text)
+        self.assertEqual([attachment], steer_images)
+        panel._on_action_completed(
+            steer_context,
+            {"thread_id": "thread-1", "turn_id": "auto-turn"},
+        )
+        self.assertIn("用户正在编辑的追加内容", panel.conversation.toPlainText())
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 6,
+                        "type": "codex_notification",
+                        "method": "item/agentMessage/delta",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "auto-turn",
+                            "itemId": "auto-message",
+                            "delta": "已完成这一阶段。",
+                        },
+                    },
+                    _completed_notification("auto-turn", sequence=7),
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+        self.assertNotIn(
+            panel._client.turn_requests[-1][0],
+            [
+                entry.get("text", "")
+                for entry in panel.conversation.entries
+                if entry.get("role") == "user"
+            ],
+        )
+
+    def test_normal_turn_completion_continues_only_once(self) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {"threadId": "thread-1", "objective": "完成木屋", "status": "active"},
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+
+        panel._on_events(
+            {"events": [_completed_notification(turn_id)], "gap": False}
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+        self.assertEqual(
+            "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。",
+            panel._client.turn_requests[-1][0],
+        )
+        self.assertNotEqual(
+            panel._client.turn_requests[0][0], panel._client.turn_requests[1][0]
+        )
+
+        panel._on_events(
+            {
+                "events": [
+                    _completed_notification(turn_id, sequence=2),
+                    {
+                        "seq": 3,
+                        "type": "session_state",
+                        "session": {
+                            "connected": True,
+                            "authentication": "authenticated",
+                            "thread_id": "thread-1",
+                            "turn_id": turn_id,
+                            "turn_status": "completed",
+                            "turn_active": False,
+                            "focus_mode": True,
+                        },
+                    },
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+
+    def test_stop_pauses_goal_continuation_until_explicit_save(self) -> None:
+        panel = _make_panel()
+        goal = {
+            "threadId": "thread-1",
+            "objective": "完成木屋",
+            "status": "active",
+        }
+        panel._apply_goal("thread-1", goal)
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+
+        panel._stop()
+        panel._on_events(
+            {"events": [_completed_notification(turn_id)], "gap": False}
+        )
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertTrue(panel._goal_continuation_paused)
+        self.assertEqual("active", panel._current_goal["status"])
+
+        interrupt_context = panel._client.interrupt_contexts[-1]
+        panel._on_action_completed(
+            interrupt_context,
+            {
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_id": turn_id,
+                    "turn_status": "interrupted",
+                    "turn_active": False,
+                    "focus_mode": True,
+                }
+            },
+        )
+        self.assertIn("已暂停", panel.goal_activity_label.text())
+        panel._save_goal()
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 2,
+                        "type": "codex_notification",
+                        "method": "turn/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": "goal-save-turn", "status": "inProgress"},
+                        },
+                    },
+                    _completed_notification("goal-save-turn", sequence=3),
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(1, len(panel._client.turn_requests))
+        panel._on_action_completed(
+            "goal_set",
+            {"thread_id": "thread-1", "goal": goal, "focus_mode": True},
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+        self.assertFalse(panel._goal_continuation_paused)
+
+    def test_goal_save_waits_for_native_goal_completion_before_continuing(self) -> None:
+        panel = _make_panel()
+        goal = {
+            "threadId": "thread-1",
+            "objective": "完成木屋",
+            "status": "active",
+        }
+        panel._apply_goal("thread-1", goal)
+        panel._apply_focus_mode("thread-1", True)
+
+        panel._save_goal()
+        panel._on_action_completed(
+            "goal_set",
+            {"thread_id": "thread-1", "goal": goal, "focus_mode": True},
+        )
+        self.assertEqual([], panel._client.turn_requests)
+
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 1,
+                        "type": "codex_notification",
+                        "method": "turn/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": "goal-save-turn", "status": "inProgress"},
+                        },
+                    },
+                    _completed_notification("goal-save-turn", sequence=2),
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertFalse(panel._goal_continuation_paused)
+
+    def test_goal_continuation_respects_all_existing_safety_gates(self) -> None:
+        cases = (
+            "focus-off",
+            "goal-complete",
+            "goal-blocked",
+            "goal-cleared",
+            "goal-completes-same-batch",
+            "disconnected",
+            "recovering",
+            "approval",
+            "goal-action",
+            "session-action",
+            "steer",
+            "reconciliation",
+            "scene-capability",
+            "scene-work",
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                panel = _make_panel()
+                goal = {
+                    "threadId": "thread-1",
+                    "objective": "完成木屋",
+                    "status": "active",
+                }
+                panel._apply_goal("thread-1", goal)
+                panel._apply_focus_mode("thread-1", True)
+                _context, turn_id = _start_active_turn(panel, 1)
+                if case == "focus-off":
+                    panel._apply_focus_mode("thread-1", False)
+                elif case == "goal-complete":
+                    panel._apply_goal("thread-1", {**goal, "status": "complete"})
+                elif case == "goal-blocked":
+                    panel._apply_goal("thread-1", {**goal, "status": "blocked"})
+                elif case == "goal-cleared":
+                    panel._apply_goal("thread-1", None)
+                elif case == "disconnected":
+                    panel._connected = False
+                elif case == "recovering":
+                    panel._stop_recovery_state = "recovering"
+                elif case == "approval":
+                    panel._current_approval = {"request_id": "approval-1"}
+                elif case == "goal-action":
+                    panel._goal_action_context = "goal_get"
+                elif case == "session-action":
+                    panel._session_action_pending = True
+                elif case == "steer":
+                    panel._turn_steer_request_pending = True
+                elif case == "reconciliation":
+                    panel._reconciliation_tokens["session_reconcile:test"] = (
+                        panel._turn_state.capture_token()
+                    )
+                elif case == "scene-capability":
+                    panel._scene_capability_pending = True
+                elif case == "scene-work":
+                    panel._scene_work_pending = True
+
+                events = [_completed_notification(turn_id)]
+                if case == "goal-completes-same-batch":
+                    events.append(
+                        {
+                            "seq": 2,
+                            "type": "codex_notification",
+                            "method": "thread/goal/updated",
+                            "params": {
+                                "threadId": "thread-1",
+                                "goal": {**goal, "status": "complete"},
+                            },
+                        }
+                    )
+                panel._on_events({"events": events, "gap": False})
+                self.assertEqual(1, len(panel._client.turn_requests))
+
+    def test_empty_auto_continuation_pauses_without_a_fast_loop(self) -> None:
+        panel = _make_panel()
+        goal = {
+            "threadId": "thread-1",
+            "objective": "完成木屋",
+            "status": "active",
+        }
+        panel._apply_goal("thread-1", goal)
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        panel._on_events(
+            {"events": [_completed_notification(turn_id)], "gap": False}
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+
+        auto_context = panel._client.turn_requests[-1][-1]
+        panel._on_action_completed(
+            auto_context,
+            {
+                "thread_id": "thread-1",
+                "turn_id": "auto-empty",
+                "turn_active": True,
+                "turn_status": "inProgress",
+            },
+        )
+        panel._on_events(
+            {
+                "events": [_completed_notification("auto-empty", sequence=2)],
+                "gap": False,
+            }
+        )
+
+        self.assertEqual(2, len(panel._client.turn_requests))
+        self.assertTrue(panel._goal_continuation_paused)
+        self.assertEqual("active", panel._current_goal["status"])
+        self.assertIn("已暂停", panel.goal_activity_label.text())
+        pause_notices = [
+            entry
+            for entry in panel.conversation.entries
+            if entry.get("role") == "system"
+            and "没有返回文字或工具活动" in entry.get("text", "")
+        ]
+        self.assertEqual(1, len(pause_notices))
+
+        panel._on_events(
+            {
+                "events": [
+                    _completed_notification("auto-empty", sequence=3),
+                    {
+                        "seq": 4,
+                        "type": "session_state",
+                        "session": {
+                            "connected": True,
+                            "authentication": "authenticated",
+                            "thread_id": "thread-1",
+                            "turn_id": "auto-empty",
+                            "turn_status": "completed",
+                            "turn_active": False,
+                            "focus_mode": True,
+                        },
+                    },
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+        self.assertEqual(
+            1,
+            sum(
+                entry.get("role") == "system"
+                and "没有返回文字或工具活动" in entry.get("text", "")
+                for entry in panel.conversation.entries
+            ),
+        )
+
+    def test_non_mcp_tool_activity_counts_as_auto_continuation_progress(self) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {"threadId": "thread-1", "objective": "完成木屋", "status": "active"},
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        panel._on_events(
+            {"events": [_completed_notification(turn_id)], "gap": False}
+        )
+
+        auto_context = panel._client.turn_requests[-1][-1]
+        panel._on_action_completed(
+            auto_context,
+            {
+                "thread_id": "thread-1",
+                "turn_id": "auto-command",
+                "turn_active": True,
+                "turn_status": "inProgress",
+            },
+        )
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 2,
+                        "type": "codex_notification",
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "auto-command",
+                            "item": {
+                                "id": "command-1",
+                                "type": "commandExecution",
+                                "status": "completed",
+                            },
+                        },
+                    },
+                    _completed_notification("auto-command", sequence=3),
+                ],
+                "gap": False,
+            }
+        )
+
+        self.assertFalse(panel._goal_continuation_paused)
+        self.assertEqual(3, len(panel._client.turn_requests))
+
+    def test_goal_update_cannot_rebind_an_active_auto_turn(self) -> None:
+        panel = _make_panel()
+        goal = {
+            "threadId": "thread-1",
+            "objective": "完成木屋",
+            "status": "active",
+        }
+        panel._apply_goal("thread-1", goal)
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        panel._on_events(
+            {"events": [_completed_notification(turn_id)], "gap": False}
+        )
+
+        auto_context = panel._client.turn_requests[-1][-1]
+        panel._on_action_completed(
+            auto_context,
+            {
+                "thread_id": "thread-1",
+                "turn_id": "auto-turn",
+                "turn_active": True,
+                "turn_status": "inProgress",
+            },
+        )
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "thread/goal/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "auto-turn",
+                    "goal": goal,
+                },
+            }
+        )
+        self.assertIsNone(panel._goal_turn_id)
+
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 2,
+                        "type": "codex_notification",
+                        "method": "item/agentMessage/delta",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "auto-turn",
+                            "itemId": "message-1",
+                            "delta": "已完成一个阶段。",
+                        },
+                    },
+                    _completed_notification("auto-turn", sequence=3),
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(3, len(panel._client.turn_requests))
+        self.assertEqual(TurnPhase.STARTING, panel._turn_state.phase)
+        self.assertIsNone(panel._turn_state.turn_id)
 
     def test_turn_and_focus_failures_never_rewrite_authoritative_goal(self) -> None:
         panel = _make_panel()

@@ -969,3 +969,9 @@
 - 本节取代前述“6 秒内成功，否则永久断线”的 Stop 收口。Stop 仍只发送一次 interrupt，并在约 1 秒宽限内接受正常 completion；超过宽限后立即把旧 Turn 本地终结并隔离，HTTP 返回 `stopRecovering`。Bridge 同时最多启动一个后台 worker，在 50 秒总上限内只执行 Codex app-server restart、initialize 和原 exact Thread resume，不调用 `turn/start`，不重放 Turn、HOM 或 Houdini 操作。成功或最终失败都只通过既有 `session_state` 发布；旧进程 reader、旧 Turn 通知和已知恢复请求的迟到响应不能污染新 generation。
 - Panel 点击 Stop 后立即冻结可见流、显示“已停止”并保持 composer 可编辑；恢复期间发送/新建/切会话禁用，但模型、推理强度和速度可为下一 Turn 本地调整。active Goal 只显示恢复暂停，不改 Goal 或专注模式；恢复成功后同一 Thread 自动恢复连接与发送，最终失败则保留草稿/附件并只提示一次重启 launcher。普通未知 response 仍保留协议警告。
 - 定向运行 Bridge session、Codex stdio、Bridge HTTP、BridgeClient、ConversationView 与 Panel wiring 回归 210/210 通过，用时 10.849 秒；未运行完整套件，也未启动、停止或重启真实 Houdini、Bridge 或 Codex。仍需真实 GUI 验证长 Thread Stop 后恢复中状态、自动恢复模型控件与发送、Goal 暂停文案，以及已进入 Houdini UI 主线程的 HOM 最终收尾行为。
+
+## Goal 专注模式自动续轮（2026-07-21）
+
+- 真实 GUI 中 Goal 仍显示“正在跟进/正在推进”，但当前 Turn 已经 idle，底部按钮退回“发送”，用户必须手动发消息才能继续。根因是既有逻辑只收口 completion 和保留 active Goal 元数据，没有把“active Goal + 专注开启 + 权威 idle”连接到下一轮 `turn/start`。
+- Panel 现在用单一 completion boundary 在全部安全条件满足时为同一 Thread 恰好启动一次内部续轮，继续沿用当前模型、推理强度和速度，不重放上一轮文字、工具或 Houdini 操作。内部短指令不显示为用户气泡，历史恢复也精确隐藏；Stop、断线、审批、Goal 非 active 或无有效文字/工具进展会暂停续轮，用户明确继续后才恢复。Goal 更新也不能把正在运行的普通/自动 Turn 误绑定成原生 Goal Turn。
+- Stop、stale steer、历史、Goal、IME/composer、附件与 Bridge Turn 相邻回归 215/215 通过；最终完整套件 763/763 通过。仍需真实 Houdini GUI 验证：手动打开一个 active 且专注开启的 Goal Thread，确认每轮完成后仅续一次、按钮进入“追加指令”、内部续轮不产生用户气泡或 System 刷屏；Stop 后保持暂停，明确继续后再恢复。
