@@ -155,6 +155,25 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         stdout = io.StringIO()
 
         stack, client_constructor = self._common_patches(session, client)
+        original_is_file = Path.is_file
+        original_is_dir = Path.is_dir
+        expected_fx_python = (
+            REPOSITORY_ROOT / bridge_main.FXHOUDINI_MCP_PYTHON_RELATIVE_PATH
+        ).resolve()
+        expected_fx_source = (
+            REPOSITORY_ROOT / bridge_main.FXHOUDINI_MCP_SOURCE_RELATIVE_PATH
+        ).resolve()
+
+        def is_file(path: Path) -> bool:
+            if path.resolve() == expected_fx_python:
+                return True
+            return original_is_file(path)
+
+        def is_dir(path: Path) -> bool:
+            if path.resolve() == expected_fx_source:
+                return True
+            return original_is_dir(path)
+
         with stack, mock.patch.object(
             bridge_main.SchemaRegistry,
             "b2_read_only",
@@ -173,7 +192,15 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             side_effect=lambda *_args, **_kwargs: (
                 order.append("bind") or server
             ),
-        ) as server_constructor, contextlib.redirect_stdout(stdout):
+        ) as server_constructor, mock.patch.object(
+            Path,
+            "is_file",
+            new=is_file,
+        ), mock.patch.object(
+            Path,
+            "is_dir",
+            new=is_dir,
+        ), contextlib.redirect_stdout(stdout):
             exit_code = bridge_main.run(["--mcp-backend", "fxhoudini"])
 
         self.assertEqual(0, exit_code)

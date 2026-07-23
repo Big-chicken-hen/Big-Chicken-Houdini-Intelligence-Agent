@@ -52,7 +52,6 @@ class LauncherPreflightTests(unittest.TestCase):
     def run_powershell(self, body: str, *, timeout: int = 30) -> str:
         prefix = f"""
 $ErrorActionPreference = 'Stop'
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Import-Module -Force {_ps_literal(MODULE_PATH)}
 """

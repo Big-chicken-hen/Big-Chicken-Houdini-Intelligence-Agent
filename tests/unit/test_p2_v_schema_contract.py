@@ -736,7 +736,7 @@ class P2VGeneralGraphSchemaContractTests(unittest.TestCase):
     def test_protocol_has_no_table_roles_or_fixed_five_box_contract(self) -> None:
         paths = [MANIFEST_PATH] + [
             SCHEMA_ROOT / file_name for file_name in sorted(self.schemas)
-        ] + list(P2_PROTOCOL_DOCS)
+        ] + [path for path in P2_PROTOCOL_DOCS if path.is_file()]
         protocol_text = "\n".join(path.read_text(encoding="utf-8") for path in paths).casefold()
         for marker in sorted(TABLE_PROTOCOL_MARKERS):
             with self.subTest(marker=marker):
@@ -748,6 +748,10 @@ class P2VGeneralGraphSchemaContractTests(unittest.TestCase):
         self.assertNotIn("contains", nodes)
         self.assertIn('"transform"', json.dumps(schema, sort_keys=True))
 
+    @unittest.skipUnless(
+        all(path.is_file() for path in P2_PROTOCOL_DOCS),
+        "internal historical P2 documents are not part of the public repository",
+    )
     def test_documented_error_inventory_matches_closed_output_schemas(self) -> None:
         documents = [path.read_text(encoding="utf-8") for path in P2_PROTOCOL_DOCS]
         for error_code in TOOL_RESULT_ERROR_CODES:
