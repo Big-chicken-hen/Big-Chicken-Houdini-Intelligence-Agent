@@ -53,6 +53,10 @@ jobs:
             throw "PowerShell parse errors: $($allParseErrors.Count)"
           }
 
+      - name: Prepare test runtime directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force .runtime/tmp | Out-Null
+
       - name: Run standard-library tests
         shell: pwsh
         run: python -B -m unittest discover -s tests -t .
