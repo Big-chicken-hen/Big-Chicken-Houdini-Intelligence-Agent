@@ -167,7 +167,10 @@ class FakeNode:
     def add_child(self, child: "FakeNode", *, notify: bool = False) -> None:
         self._children.append(child)
         if notify:
-            self.emit(self._owner.nodeEventType.ChildCreated)
+            self.emit(
+                self._owner.nodeEventType.ChildCreated,
+                child_node=child,
+            )
 
     def children(self) -> tuple["FakeNode", ...]:
         self._owner._record("node.children")
@@ -204,14 +207,53 @@ class FakeNode:
         expected = (tuple(event_types), callback)
         self._callbacks = [item for item in self._callbacks if item != expected]
 
-    def emit(self, event_type: Any) -> None:
+    def eventCallbacks(self) -> tuple[tuple[tuple[Any, ...], Any], ...]:
+        self._owner._record("node.event_callbacks")
+        if self._owner.hide_node_event_callbacks:
+            return ()
+        return tuple(self._callbacks)
+
+    def emit(
+        self,
+        event_type: Any,
+        *,
+        callback_source: "FakeNode | None" = None,
+        **event_details: Any,
+    ) -> None:
         for event_types, callback in tuple(self._callbacks):
             if event_type in event_types:
-                callback(node=self, event_type=event_type)
+                callback(
+                    node=self if callback_source is None else callback_source,
+                    event_type=event_type,
+                    **event_details,
+                )
 
     @property
     def callback_count(self) -> int:
         return len(self._callbacks)
+
+
+class FakeNodeWrapper:
+    """A fresh Python wrapper for one existing fake HOM node.
+
+    Real Houdini can return multiple ``hou.Node`` Python objects for the same
+    underlying node.  ``equivalent=False`` models an adversarial replacement
+    that reuses the same path and session ID but does not compare equal.
+    """
+
+    def __init__(self, node: FakeNode, *, equivalent: bool = True) -> None:
+        self._node = node
+        self._equivalent = bool(equivalent)
+
+    def __eq__(self, other: object) -> bool:
+        if not self._equivalent:
+            return False
+        if isinstance(other, FakeNodeWrapper):
+            return bool(other._equivalent and self._node is other._node)
+        return self._node is other
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._node, name)
 
 
 class FakeHipFile:
@@ -258,14 +300,20 @@ class FakeHou:
         build: str = "21.0.440",
         reject_hip_observer: bool = False,
         reject_node_observers: bool = False,
+        hide_node_event_callbacks: bool = False,
         missing_node_event: str | None = None,
         missing_node_types: tuple[tuple[str, str], ...] = (),
         parameter_conflict: tuple[str, str, str] | None = None,
+        return_fresh_node_wrappers: bool = False,
+        node_wrappers_equivalent: bool = True,
     ) -> None:
         self.calls: list[FakeHouCall] = []
         self.build = build
         self.reject_hip_observer = reject_hip_observer
         self.reject_node_observers = reject_node_observers
+        self.hide_node_event_callbacks = hide_node_event_callbacks
+        self.return_fresh_node_wrappers = bool(return_fresh_node_wrappers)
+        self.node_wrappers_equivalent = bool(node_wrappers_equivalent)
         self._frame = 1.0
         self._fps = 24.0
         self._session_id_counter = 0
@@ -392,9 +440,21 @@ class FakeHou:
         self._record("node_type_categories")
         return dict(self._categories)
 
-    def node(self, path: str) -> FakeNode | None:
+    def node(self, path: str) -> FakeNode | FakeNodeWrapper | None:
         self._record("node.lookup")
-        return self._nodes.get(path)
+        node = self._nodes.get(path)
+        if node is None or not self.return_fresh_node_wrappers:
+            return node
+        return FakeNodeWrapper(
+            node,
+            equivalent=self.node_wrappers_equivalent,
+        )
+
+    def node_wrapper(
+        self, path: str, *, equivalent: bool = True
+    ) -> FakeNodeWrapper:
+        node = self._nodes[path]
+        return FakeNodeWrapper(node, equivalent=equivalent)
 
     def frame(self) -> float:
         self._record("frame")

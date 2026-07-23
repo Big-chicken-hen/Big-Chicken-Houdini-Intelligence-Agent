@@ -30,11 +30,17 @@ CORE_CLIENT_REQUESTS = frozenset(
         "initialize",
         "account/read",
         "model/list",
+        "thread/list",
+        "thread/name/set",
+        "thread/goal/get",
+        "thread/goal/set",
+        "thread/goal/clear",
         "thread/start",
         "thread/resume",
         "thread/read",
         "thread/fork",
         "turn/start",
+        "turn/steer",
         "turn/interrupt",
     }
 )
@@ -51,6 +57,7 @@ P1_PASSIVE_SERVER_NOTIFICATIONS = frozenset(
         "account/rateLimits/updated",
         "mcpServer/startupStatus/updated",
         "remoteControl/status/changed",
+        "skills/changed",
     }
 )
 CORE_SERVER_NOTIFICATIONS = frozenset(
@@ -61,6 +68,9 @@ CORE_SERVER_NOTIFICATIONS = frozenset(
         "guardianWarning",
         "configWarning",
         "thread/started",
+        "thread/name/updated",
+        "thread/goal/updated",
+        "thread/goal/cleared",
         "thread/status/changed",
         "thread/tokenUsage/updated",
         "thread/compacted",

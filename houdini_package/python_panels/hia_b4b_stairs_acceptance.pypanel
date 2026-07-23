@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="hia_b4b_stairs_acceptance" label="HIA Gate B4B Stairs Acceptance" icon="MISC_python">
+    <script><![CDATA[from hia_panel.b4b_panel import B4BStairsAcceptancePanel
+
+
+def onCreateInterface():
+    # Real HOM exists only at this Houdini Python Panel entrypoint and is
+    # dependency-injected into the local, one-shot acceptance controller.
+    import hou
+
+    return B4BStairsAcceptancePanel(kwargs.get("paneTab"), hou_module=hou)
+]]></script>
+    <help><![CDATA[Local Gate B4B acceptance only: review one stairs payload, apply once, manually Undo, then verify. No MCP graph tool is enabled.]]></help>
+  </interface>
+</pythonPanelDocument>

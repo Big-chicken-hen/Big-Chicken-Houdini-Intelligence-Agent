@@ -1,0 +1,4 @@
+interface:
+  display_name: "Houdini Procedural Modeling"
+  short_description: "Complete editable procedural Houdini asset construction"
+  default_prompt: "Use $houdini-procedural-modeling to build or substantially revise a complete, recognizable, editable Houdini asset."

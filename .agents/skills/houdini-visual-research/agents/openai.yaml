@@ -1,0 +1,4 @@
+interface:
+  display_name: "Houdini Visual Research"
+  short_description: "Research-led Houdini visual production workflows"
+  default_prompt: "Use $houdini-visual-research to plan and refine a complex Houdini visual task from references through validation."

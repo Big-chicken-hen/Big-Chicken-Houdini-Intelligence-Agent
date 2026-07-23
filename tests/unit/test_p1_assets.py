@@ -41,10 +41,12 @@ class P1AssetTests(unittest.TestCase):
         package = json.loads(package_path.read_text(encoding="utf-8"))
         self.assertTrue(package["enable"])
         self.assertEqual(
-            "E:/houdini-intelligence-agent/houdini_package",
+            "$HIA_PROJECT_ROOT/houdini_package",
             package["path"],
         )
         encoded = json.dumps(package)
+        self.assertNotIn(str(REPOSITORY_ROOT), encoded)
+        self.assertNotIn("E:/houdini-intelligence-agent", encoded)
         self.assertNotIn("AppData", encoded)
         self.assertNotIn("WindowsApps", encoded)
 
@@ -59,7 +61,7 @@ class P1AssetTests(unittest.TestCase):
         interface = document.getroot().find("interface")
         self.assertIsNotNone(interface)
         self.assertEqual("houdini_intelligence", interface.attrib["name"])
-        self.assertEqual("Houdini Intelligence", interface.attrib["label"])
+        self.assertEqual("Big-Chicken Houdini Intelligence Agent", interface.attrib["label"])
         embedded = interface.find("script").text
         tree = ast.parse(embedded)
         hou_imports = [
@@ -156,8 +158,14 @@ class P1AssetTests(unittest.TestCase):
         self.assertNotIn("hou.", source)
         self.assertIn("PySide6", source)
 
-    def test_b2_hou_import_is_confined_to_python_panel_entrypoint(self) -> None:
+    def test_hou_import_is_confined_to_the_hia_ui_runtime(self) -> None:
         package_root = REPOSITORY_ROOT / "houdini_package"
+        hia_runtime = (
+            package_root
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "executor.py"
+        )
         offenders: list[str] = []
         for path in sorted(package_root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -168,9 +176,12 @@ class P1AssetTests(unittest.TestCase):
                     offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
                 if isinstance(node, ast.ImportFrom) and node.module == "hou":
                     offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
-        self.assertEqual([], offenders)
+        self.assertEqual(
+            [str(hia_runtime.relative_to(REPOSITORY_ROOT))],
+            offenders,
+        )
 
-    def test_b4a_only_dormant_adapter_contains_bounded_scene_write_calls(self) -> None:
+    def test_only_reviewed_houdini_runtimes_contain_direct_scene_calls(self) -> None:
         package_root = REPOSITORY_ROOT / "houdini_package"
         forbidden_attributes = {
             "createNode",
@@ -178,7 +189,6 @@ class P1AssetTests(unittest.TestCase):
             "setParms",
             "setParm",
             "destroy",
-            "save",
             "saveAndIncrementFileName",
             "cook",
             "render",
@@ -194,6 +204,18 @@ class P1AssetTests(unittest.TestCase):
             / "hia_panel"
             / "houdini_write_adapter.py"
         )
+        local_acceptance = (
+            package_root
+            / "python_libs"
+            / "hia_panel"
+            / "b4b_acceptance.py"
+        )
+        hia_runtime = (
+            package_root
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "executor.py"
+        )
         found: dict[Path, set[str]] = {}
         for path in sorted(package_root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -201,20 +223,33 @@ class P1AssetTests(unittest.TestCase):
                 if (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in forbidden_attributes
+                    and (
+                        node.func.attr in forbidden_attributes
+                        or (
+                            node.func.attr == "save"
+                            and isinstance(node.func.value, ast.Attribute)
+                            and node.func.value.attr == "hipFile"
+                        )
+                    )
                 ):
                     found.setdefault(path, set()).add(node.func.attr)
-        self.assertEqual({dormant}, set(found))
+        self.assertEqual({dormant, hia_runtime}, set(found))
         self.assertEqual({"createNode", "setInput", "destroy"}, found[dormant])
+        self.assertEqual({"cook"}, found[hia_runtime])
 
         for path in sorted(package_root.rglob("*.py")):
-            if path == dormant:
+            if path in {dormant, local_acceptance}:
                 continue
             self.assertNotIn(
                 "houdini_write_adapter",
                 path.read_text(encoding="utf-8"),
                 str(path.relative_to(REPOSITORY_ROOT)),
             )
+
+        acceptance_source = local_acceptance.read_text(encoding="utf-8")
+        self.assertIn("from .houdini_write_adapter import", acceptance_source)
+        self.assertNotIn("b4b_acceptance", (package_root / "python_libs" / "hia_panel" / "panel.py").read_text(encoding="utf-8"))
+        self.assertNotIn("b4b_acceptance", (package_root / "python_panels" / "houdini_intelligence.pypanel").read_text(encoding="utf-8"))
 
     def test_panel_displays_ignored_notification_method(self) -> None:
         panel_path = (
@@ -227,10 +262,11 @@ class P1AssetTests(unittest.TestCase):
         source = panel_path.read_text(encoding="utf-8")
         ast.parse(source)
         self.assertIn('method = event.get("method")', source)
-        self.assertIn('method_text = f" method={method}"', source)
-        self.assertIn("协议警告", source)
+        self.assertIn('method_text = str(method)', source)
+        self.assertIn("协议提示：", source)
+        self.assertIn("known-request-user-input", source)
 
-    def test_panel_uses_stock_qtextedit_without_input_method_overrides(self) -> None:
+    def test_panel_uses_expandable_qtextedit_with_local_send_shortcuts(self) -> None:
         panel_path = (
             REPOSITORY_ROOT
             / "houdini_package"
@@ -238,10 +274,32 @@ class P1AssetTests(unittest.TestCase):
             / "hia_panel"
             / "panel.py"
         )
-        source = panel_path.read_text(encoding="utf-8")
-        ast.parse(source)
-        self.assertIn("self.input_edit = QtWidgets.QTextEdit()", source)
-        self.assertNotIn("self.input_edit = QtWidgets.QPlainTextEdit()", source)
+        composer_path = panel_path.with_name("composer.py")
+        panel_source = panel_path.read_text(encoding="utf-8")
+        composer_source = composer_path.read_text(encoding="utf-8")
+        ast.parse(panel_source)
+        ast.parse(composer_source)
+
+        self.assertIn(
+            "self.input_edit = ExpandableTextEdit(self)",
+            panel_source,
+        )
+        self.assertNotIn(
+            "self.input_edit = QtWidgets.QPlainTextEdit()",
+            panel_source,
+        )
+        self.assertIn(
+            "class ExpandableTextEdit(QtWidgets.QTextEdit):",
+            composer_source,
+        )
+        self.assertIn('"Ctrl+Return"', composer_source)
+        self.assertIn('"Ctrl+Enter"', composer_source)
+        self.assertIn("QtGui.QShortcut(", composer_source)
+        self.assertIn("QtGui.QKeySequence(sequence)", composer_source)
+        self.assertIn(
+            "shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)",
+            composer_source,
+        )
         for forbidden in (
             "self.input_edit.setAttribute(",
             "self.input_edit.setInputMethodHints(",
@@ -252,13 +310,104 @@ class P1AssetTests(unittest.TestCase):
             "def keyPressEvent",
             "def eventFilter",
             "def inputMethodEvent",
+            "installEventFilter",
             "QInputMethodEvent",
             "focusProxy",
             "self.input_edit.viewport(",
             "self.input_edit.viewport()",
-            "setFocus(",
         ):
-            self.assertNotIn(forbidden, source)
+            self.assertNotIn(forbidden, panel_source)
+            self.assertNotIn(forbidden, composer_source)
+
+    def test_panel_conversation_view_is_native_pyside6(self) -> None:
+        conversation_path = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_panel"
+            / "conversation_view.py"
+        )
+        source = conversation_path.read_text(encoding="utf-8")
+        ast.parse(source)
+
+        self.assertIn("from PySide6 import QtCore, QtGui, QtWidgets", source)
+        self.assertIn("class ConversationView(QtWidgets.QWidget):", source)
+        self.assertIn("QtWidgets.QTextBrowser", source)
+        self.assertIn("self.setMarkdown(text)", source)
+        self.assertIn('self.toggle_button.setText("展开详情")', source)
+        self.assertIn('self.toggle_button.setText("收起详情"', source)
+        self.assertNotIn("QtWebEngine", source)
+        self.assertNotIn("QWebEngine", source)
+
+    def test_panel_attachment_widgets_cover_file_clipboard_thumbnail_and_remove(self) -> None:
+        panel_path = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_panel"
+            / "panel.py"
+        )
+        composer_path = panel_path.with_name("composer.py")
+        panel_source = panel_path.read_text(encoding="utf-8")
+        composer_source = composer_path.read_text(encoding="utf-8")
+        ast.parse(panel_source)
+        ast.parse(composer_source)
+
+        self.assertIn("dialog = QtWidgets.QFileDialog(", panel_source)
+        self.assertIn("QtWidgets.QFileDialog.Option.DontUseNativeDialog", panel_source)
+        self.assertIn("QtWidgets.QFileDialog.FileMode.ExistingFiles", panel_source)
+        self.assertIn("QtCore.Qt.WindowModality.NonModal", panel_source)
+        self.assertIn("dialog.show()", panel_source)
+        self.assertNotIn("dialog.open()", panel_source)
+        self.assertIn(
+            "dialog.finished.connect(self._attachment_dialog_finished)",
+            panel_source,
+        )
+        self.assertIn("self._attachment_dialog = None", panel_source)
+        self.assertIn("dialog.deleteLater()", panel_source)
+        self.assertNotIn("QtWidgets.QFileDialog.getOpenFileNames(", panel_source)
+        for forbidden in (
+            "ApplicationModal",
+            "activateWindow",
+            "raise_",
+            "grabKeyboard",
+            "grabMouse",
+            "processEvents",
+            "clearFocus(",
+        ):
+            self.assertNotIn(forbidden, panel_source)
+        self.assertIn("self._attachment_store.copy_file(", panel_source)
+        self.assertIn("self._attachment_store.clipboard_path(", panel_source)
+        self.assertIn('image.save(path, "PNG")', panel_source)
+        self.assertIn("def insertFromMimeData", composer_source)
+        self.assertIn("source.hasImage()", composer_source)
+        self.assertIn("QtGui.QPixmap(path)", composer_source)
+        self.assertIn("class AttachmentStrip(QtWidgets.QWidget):", composer_source)
+        self.assertIn("self.remove(attachment_path)", composer_source)
+
+    def test_panel_has_no_manual_context_compaction_surface(self) -> None:
+        panel_root = REPOSITORY_ROOT / "houdini_package" / "python_libs" / "hia_panel"
+        bridge_root = REPOSITORY_ROOT / "services" / "bridge" / "hia_bridge"
+        relevant_paths = (
+            panel_root / "panel.py",
+            panel_root / "conversation_view.py",
+            panel_root / "bridge_client.py",
+            panel_root / "http_transport.py",
+            bridge_root / "http_server.py",
+            bridge_root / "session.py",
+            bridge_root / "codex_stdio.py",
+        )
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in relevant_paths)
+
+        for forbidden in (
+            "压缩并继续",
+            "thread/compact/start",
+            '"/v1/compact"',
+            "compact_button",
+            "manual_compact",
+            "local_summarizer",
+        ):
+            self.assertNotIn(forbidden, combined)
 
     def test_panel_model_selectors_are_catalog_driven_and_forward_parameters(self) -> None:
         panel_path = (
@@ -271,12 +420,15 @@ class P1AssetTests(unittest.TestCase):
         source = panel_path.read_text(encoding="utf-8")
         ast.parse(source)
         self.assertIn("self._client.get_models()", source)
-        self.assertIn("self._client.start_thread(model=self._selected_model_id())", source)
+        self.assertIn("self._client.start_thread(", source)
         self.assertIn("model=self._selected_model_id()", source)
         self.assertIn("effort=self._selected_effort()", source)
+        self.assertIn("service_tier=self._selected_service_tier()", source)
         self.assertIn('payload.get("models")', source)
         self.assertIn("supportedReasoningEfforts", source)
         self.assertIn("defaultReasoningEffort", source)
+        self.assertIn("serviceTiers", source)
+        self.assertIn("defaultServiceTier", source)
 
     def test_panel_wires_authoritative_terminal_and_bounded_reconciliation(self) -> None:
         panel_path = (
@@ -289,12 +441,13 @@ class P1AssetTests(unittest.TestCase):
         source = panel_path.read_text(encoding="utf-8")
         ast.parse(source)
         terminal_branch = source.index(
-            'error_code == "NO_ACTIVE_TURN" and details.get("turn_active") is False'
+            'error_code == "NO_ACTIVE_TURN"'
         )
         generic_failure = source.index(
-            'self._append_system(f"{context} 失败：{format_bridge_error(payload)}")'
+            'self._append_system(f"{context} 失败：{formatted_error}")'
         )
         self.assertLess(terminal_branch, generic_failure)
+        self.assertIn('details.get("turn_active") is False', source[terminal_branch:generic_failure])
         self.assertIn("reconcile_no_active_error", source)
         self.assertIn("claim_reconciliation", source)
         self.assertIn("_SESSION_RECONCILE_CONTEXT_PREFIX", source)
@@ -363,6 +516,9 @@ class P1AssetTests(unittest.TestCase):
         self.assertNotIn(r"C:\Program Files\Side Effects Software", source)
         self.assertIn("[string]$BridgePython =", source)
         self.assertIn("[string]$HoudiniExe = ''", source)
+        self.assertNotIn("$ExpectedRoot", source)
+        self.assertIn("Resolve-ProjectCodexExecutable", source)
+        self.assertIn("Join-Path $ResolvedRoot '.runtime\\codex-home'", source)
         self.assertIn("function Resolve-HoudiniExecutable", source)
         self.assertIn("if ($RequestedPath)", source)
         self.assertIn("$env:HFS", source)
@@ -422,7 +578,8 @@ class P1AssetTests(unittest.TestCase):
         self.assertIn("HIA_SCENE_EXECUTOR_TOKEN", source)
         self.assertIn("'HIA_SCENE_EXECUTOR_TOKEN' = $sceneExecutorToken", source)
         self.assertIn("'HIA_EXPECTED_PYTHON_EXE' = $normalizedPython", source)
-        self.assertIn("$mcpPythonPath", source)
+        self.assertIn("$bridgeBackendPythonPaths", source)
+        self.assertIn("services\\hia_mcp_v2", source)
         self.assertIn("$bootstrap.PSObject.Properties['token']", source)
         self.assertIn("$bootstrap.PSObject.Properties['url']", source)
         self.assertNotIn("$bootstrap.url", source)
@@ -467,6 +624,31 @@ class P1AssetTests(unittest.TestCase):
         self.assertNotIn("$_.Exception.Message", source)
         self.assertIsNone(re.search(r"(?m)^\s*'USERPROFILE'\s*=", source))
         self.assertIsNone(re.search(r"(?m)^\s*'HOME'\s*=", source))
+
+    def test_launcher_derives_sibling_hython_and_exposes_it_to_bridge(self) -> None:
+        launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+        source = launcher.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "$houdiniBinDirectory = [System.IO.Path]::GetDirectoryName($HoudiniExe)",
+            source,
+        )
+        self.assertIn(
+            "$HythonExe = Join-Path $houdiniBinDirectory 'hython.exe'",
+            source,
+        )
+        self.assertIn(
+            "Test-Path -LiteralPath $HythonExe -PathType Leaf",
+            source,
+        )
+        self.assertIn(
+            "Selected Houdini installation is missing sibling hython.exe",
+            source,
+        )
+        self.assertIn(
+            "'PATH' = \"$pythonDirectory;$houdiniBinDirectory;$($env:PATH)\"",
+            source,
+        )
 
     def test_launcher_bridge_tree_ownership_guard_is_fail_closed(self) -> None:
         launcher = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
@@ -688,18 +870,20 @@ foreach ($case in $cases) {{
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
 
-    def test_legacy_launcher_is_a_two_parameter_forwarding_wrapper(self) -> None:
+    def test_legacy_launcher_is_a_three_parameter_forwarding_wrapper(self) -> None:
         generic = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
         legacy = REPOSITORY_ROOT / "scripts" / "launch-houdini-21.0.440.ps1"
         self.assertTrue(generic.is_file())
         self.assertTrue(legacy.is_file())
         source = legacy.read_text(encoding="utf-8")
-        self.assertLessEqual(len(source.splitlines()), 12)
+        self.assertLessEqual(len(source.splitlines()), 14)
         self.assertIn("[string]$BridgePython =", source)
         self.assertIn("[string]$HoudiniExe = ''", source)
+        self.assertIn("[string]$McpBackend = 'hia_v2'", source)
         self.assertEqual(1, source.count("launch-houdini.ps1"))
         self.assertEqual(1, source.count("-BridgePython $BridgePython"))
         self.assertEqual(1, source.count("-HoudiniExe $HoudiniExe"))
+        self.assertEqual(1, source.count("-McpBackend $McpBackend"))
         for duplicated_logic in (
             "function Resolve-HoudiniExecutable",
             "Get-Command -Name 'houdini.exe'",
@@ -753,17 +937,36 @@ foreach ($case in $cases) {{
         self.assertNotIn('"executor_token": scene_executor_token', bridge_main)
         self.assertIn('client.set_environment_overlay(', bridge_main)
         self.assertIn('"--strict-config"', bridge_main)
-        self.assertIn('"mcp_servers.houdini_intelligence.command="', bridge_main)
+        self.assertIn('HIA_MCP_V2_SERVER_ID = "hia_mcp_v2"', bridge_main)
         self.assertIn(
-            '"mcp_servers.houdini_intelligence.required=true"',
+            'FXHOUDINI_MCP_SERVER_ID = "houdini_intelligence"',
             bridge_main,
         )
+        self.assertIn(
+            'f"mcp_servers.{FXHOUDINI_MCP_SERVER_ID}.enabled=false"',
+            bridge_main,
+        )
+        self.assertIn('f"{server}.required=true"', bridge_main)
         self.assertNotIn("import hou", bridge_main)
         self.assertNotIn("from hou", bridge_main)
         self.assertIn("HoudiniMCPAdapter.b2_read_only", mcp_stdio)
         self.assertNotIn("B2A_REAL_MCP_START_DISABLED", mcp_stdio)
         self.assertIn("LoopbackBridgeTransport.from_environment(", mcp_stdio)
-        self.assertIn('QtWidgets.QGroupBox("Houdini 只读状态")', panel_source)
+        panel_tree = ast.parse(panel_source)
+        build_ui = next(
+            node
+            for node in ast.walk(panel_tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_build_ui"
+        )
+        build_ui_source = ast.get_source_segment(panel_source, build_ui) or ""
+        for obsolete_ui in (
+            "Houdini 只读状态",
+            "Catalog",
+            "Schema",
+            "可用类型",
+            "5/5",
+        ):
+            self.assertNotIn(obsolete_ui, build_ui_source)
         for forbidden_button in (
             'QPushButton("Apply")',
             'QPushButton("应用")',

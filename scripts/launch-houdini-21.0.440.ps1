@@ -1,9 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$BridgePython = 'D:\Python_3.10\python.exe',
-    [string]$HoudiniExe = ''
+    [string]$BridgePython = '',
+    [string]$HoudiniExe = '',
+    [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2'
 )
 
 & (Join-Path $PSScriptRoot 'launch-houdini.ps1') `
     -BridgePython $BridgePython `
-    -HoudiniExe $HoudiniExe
+    -HoudiniExe $HoudiniExe `
+    -McpBackend $McpBackend

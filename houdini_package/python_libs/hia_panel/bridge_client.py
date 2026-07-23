@@ -9,6 +9,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
+from urllib.parse import quote
 
 from PySide6 import QtCore
 
@@ -19,12 +20,18 @@ from .network_response import normalize_bridge_response
 _RECONCILIATION_TIMEOUT_MS = 5_000
 _EVENT_POLL_TIMEOUT_MS = 20_000
 _DEFAULT_REQUEST_TIMEOUT_MS = 15_000
+_SESSION_ACTION_TIMEOUT_MS = 50_000
+_INTERRUPT_TIMEOUT_MS = 7_000
 _RESULT_DRAIN_INTERVAL_MS = 25
 _MAX_RESULTS_PER_TICK = 128
 _RESULT_QUEUE_LIMIT = 256
 _SCENE_CONTROL_TIMEOUT_MS = 5_000
 _SCENE_POLL_TIMEOUT_MS = 3_000
 _SCENE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_LONG_SESSION_ACTIONS = frozenset({"start", "resume", "read"})
+_GOAL_ACTION_CONTEXTS = frozenset(
+    {"goal_get", "goal_set", "goal_clear", "focus_set"}
+)
 
 
 class BridgeClient(QtCore.QObject):
@@ -77,6 +84,11 @@ class BridgeClient(QtCore.QObject):
     def get_health(self) -> str | None:
         return self._request("GET", "/v1/health", context="health")
 
+    def get_houdini_status(self) -> str | None:
+        """Refresh only the Panel's local Houdini status from the health route."""
+
+        return self._request("GET", "/v1/health", context="houdini_status")
+
     def get_session(self, *, context: str = "session") -> str | None:
         """Read Bridge session state with a caller-supplied correlation context."""
 
@@ -87,8 +99,90 @@ class BridgeClient(QtCore.QObject):
 
         return self._request("GET", "/v1/models", context="models")
 
-    def start_thread(self, *, model: str | None = None) -> str | None:
-        payload: dict[str, Any] = {"action": "start"}
+    def get_threads(self) -> str | None:
+        return self._request("GET", "/v1/threads", context="threads")
+
+    def get_goal(self, thread_id: str) -> str | None:
+        return self._request(
+            "GET",
+            f"/v1/goal?thread_id={quote(thread_id, safe='')}",
+            context="goal_get",
+        )
+
+    def set_goal(
+        self,
+        objective: str,
+        status: str,
+        *,
+        thread_id: str,
+        token_budget: int | None = None,
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/goal",
+            {
+                "action": "set",
+                "thread_id": thread_id,
+                "objective": objective,
+                "status": status,
+                "token_budget": token_budget,
+            },
+            context="goal_set",
+        )
+
+    def clear_goal(self, thread_id: str) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/goal",
+            {"action": "clear", "thread_id": thread_id},
+            context="goal_clear",
+        )
+
+    def set_focus_mode(self, thread_id: str, enabled: bool) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/focus",
+            {"thread_id": thread_id, "enabled": enabled},
+            context="focus_set",
+        )
+
+    def read_thread(
+        self,
+        thread_id: str,
+        *,
+        context: str = "thread_read",
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/session",
+            {"action": "read", "thread_id": thread_id},
+            context=context,
+        )
+
+    def rename_thread(
+        self,
+        thread_id: str,
+        name: str,
+        *,
+        context: str = "thread_rename",
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/threads/name",
+            {"thread_id": thread_id, "name": name},
+            context=context,
+        )
+
+    def start_thread(
+        self,
+        *,
+        model: str | None = None,
+        service_tier: str | None = None,
+    ) -> str | None:
+        payload: dict[str, Any] = {
+            "action": "start",
+            "service_tier": service_tier,
+        }
         if model is not None:
             payload["model"] = model
         return self._request(
@@ -98,12 +192,22 @@ class BridgeClient(QtCore.QObject):
             context="session_start",
         )
 
-    def resume_thread(self, thread_id: str) -> str | None:
+    def resume_thread(
+        self,
+        thread_id: str,
+        *,
+        service_tier: str | None = None,
+        context: str = "session_resume",
+    ) -> str | None:
         return self._request(
             "POST",
             "/v1/session",
-            {"action": "resume", "thread_id": thread_id},
-            context="session_resume",
+            {
+                "action": "resume",
+                "thread_id": thread_id,
+                "service_tier": service_tier,
+            },
+            context=context,
         )
 
     def start_turn(
@@ -112,16 +216,40 @@ class BridgeClient(QtCore.QObject):
         *,
         model: str | None = None,
         effort: str | None = None,
+        service_tier: str | None = None,
+        local_image_paths: list[str] | None = None,
         context: str = "turn_start",
     ) -> str | None:
-        payload: dict[str, Any] = {"text": text}
+        payload: dict[str, Any] = {
+            "text": text,
+            "service_tier": service_tier,
+        }
         if model is not None:
             payload["model"] = model
         if effort is not None:
             payload["effort"] = effort
+        if local_image_paths is not None:
+            payload["local_image_paths"] = list(local_image_paths)
         return self._request(
             "POST",
             "/v1/turn",
+            payload,
+            context=context,
+        )
+
+    def steer_turn(
+        self,
+        text: str,
+        *,
+        local_image_paths: list[str] | None = None,
+        context: str = "turn_steer",
+    ) -> str | None:
+        payload: dict[str, Any] = {"text": text}
+        if local_image_paths is not None:
+            payload["local_image_paths"] = list(local_image_paths)
+        return self._request(
+            "POST",
+            "/v1/steer",
             payload,
             context=context,
         )
@@ -265,6 +393,17 @@ class BridgeClient(QtCore.QObject):
     ) -> str | None:
         if context.startswith("session_reconcile:"):
             timeout_ms = _RECONCILIATION_TIMEOUT_MS
+        elif method == "POST" and path == "/v1/interrupt":
+            timeout_ms = _INTERRUPT_TIMEOUT_MS
+        elif context in _GOAL_ACTION_CONTEXTS:
+            timeout_ms = _SESSION_ACTION_TIMEOUT_MS
+        elif (
+            method == "POST"
+            and path == "/v1/session"
+            and isinstance(payload, dict)
+            and payload.get("action") in _LONG_SESSION_ACTIONS
+        ):
+            timeout_ms = _SESSION_ACTION_TIMEOUT_MS
         elif context == "events":
             timeout_ms = _EVENT_POLL_TIMEOUT_MS
         elif context == "scene_work":

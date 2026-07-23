@@ -87,7 +87,18 @@ _MAX_OUTPUTS = 64
 _MAX_SESSION_ID = 9_007_199_254_740_991
 _MAX_BUILD_LENGTH = 128
 _MAX_VERSION_LENGTH = 128
+_MAX_EVENT_JOURNAL = 512
+_MAX_EVENT_OPERATION_LENGTH = 128
+_MAX_EVENT_PATH_LENGTH = 256
 _HOUDINI_BUILD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$")
+_EVENT_OPERATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+_SILENT_READBACK_OPERATIONS = frozenset(
+    {
+        "set_user_data:hia_ownership",
+        "set_user_data:hia_transaction_id",
+        "set_user_data:hia_graph_digest",
+    }
+)
 
 
 class HoudiniReadAdapterError(RuntimeError):
@@ -119,6 +130,7 @@ class HoudiniReadAdapter:
         main_thread_id: int | None = None,
         fingerprint_key: bytes | None = None,
         clock: Any = time.monotonic,
+        strict_event_evidence: bool = False,
     ) -> None:
         # Construction stores the injected object but intentionally performs no
         # attribute access on it.  This keeps construction safe for test and
@@ -145,6 +157,7 @@ class HoudiniReadAdapter:
             raise ValueError("fingerprint_key must contain at least 16 bytes")
         self._fingerprint_key = bytes(key)
         self._clock = clock
+        self._strict_event_evidence = bool(strict_event_evidence)
         self._state_lock = threading.RLock()
 
         self._started = False
@@ -169,6 +182,11 @@ class HoudiniReadAdapter:
         # one already-authorized owned write.  No production path constructs or
         # calls it, and its opaque token is deliberately absent from reports.
         self._owned_write: dict[str, Any] | None = None
+        # Strict B4B evidence is opt-in.  The default B2/B4A read behavior and
+        # capability-report schema remain unchanged.
+        self._event_journal: list[dict[str, Any]] = []
+        self._event_journal_sequence = 0
+        self._last_owned_evidence: dict[str, Any] | None = None
 
     @property
     def main_thread_id(self) -> int:
@@ -177,6 +195,22 @@ class HoudiniReadAdapter:
     @property
     def publisher_id(self) -> str:
         return self._publisher_id
+
+    @property
+    def strict_event_evidence(self) -> bool:
+        return self._strict_event_evidence
+
+    def event_journal_snapshot(self) -> tuple[dict[str, Any], ...]:
+        """Return a bounded, content-safe copy of strict observer evidence."""
+
+        with self._state_lock:
+            return tuple(copy.deepcopy(self._event_journal))
+
+    def last_owned_evidence(self) -> dict[str, Any] | None:
+        """Return the last completed strict owned-write evidence bundle."""
+
+        with self._state_lock:
+            return copy.deepcopy(self._last_owned_evidence)
 
     def begin_owned_write(
         self,
@@ -262,6 +296,17 @@ class HoudiniReadAdapter:
                 "pending_node_events": 0,
                 "mutation_expectation": None,
                 "invalidated": False,
+                "strict_event_evidence": self._strict_event_evidence,
+                "events": [],
+                "mutations": [],
+                "observer_installations": [
+                    self._strict_node_identity(node)
+                    for _path, (_session_id, node) in sorted(
+                        self._observed_nodes.items()
+                    )
+                ]
+                if self._strict_event_evidence
+                else [],
             }
             return token
 
@@ -269,19 +314,25 @@ class HoudiniReadAdapter:
         self,
         token: object,
         *,
-        expected_callback_source: object,
+        expected_callback_source: object | None = None,
+        operation: str | None = None,
+        event_source_rules: Mapping[str, Sequence[object]] | None = None,
+        allowed_child_subjects: Sequence[object] | None = None,
+        required_event_types: Sequence[str] | None = None,
+        allow_zero_events: bool = False,
     ) -> object:
         """Expect callbacks from exactly one internal HOM mutator source.
 
-        The expectation is deliberately identity based: only a callback whose
-        ``node`` object *is* ``expected_callback_source`` may be coalesced into
-        the active owned write.  A missing, different, late, or otherwise
-        unmarked callback remains an external scene observation and invalidates
-        the write.  This method grants no mutation or approval authority.
+        The expectation is deliberately underlying-node based: a callback may
+        use a different Python HOM wrapper, but it must compare equal and have
+        the same session ID and path as ``expected_callback_source``.  A
+        missing, different, late, or otherwise unmarked callback remains an
+        external scene observation and invalidates the write.  This method
+        grants no mutation or approval authority.
         """
 
         self._assert_main_thread()
-        if expected_callback_source is None:
+        if expected_callback_source is None and event_source_rules is None:
             raise HoudiniReadAdapterError(
                 "INVALID_ARGUMENT",
                 "The owned mutation callback source is invalid",
@@ -306,21 +357,40 @@ class HoudiniReadAdapter:
                 )
 
             expectation_token = object()
-            transaction["mutation_expectation"] = {
+            expectation: dict[str, Any] = {
                 "token": expectation_token,
                 "callback_source": expected_callback_source,
                 "event_count": 0,
             }
+            if transaction["strict_event_evidence"]:
+                expectation.update(
+                    self._strict_mutation_expectation(
+                        operation=operation,
+                        event_source_rules=event_source_rules,
+                        allowed_child_subjects=allowed_child_subjects,
+                        required_event_types=required_event_types,
+                        allow_zero_events=allow_zero_events,
+                    )
+                )
+            transaction["mutation_expectation"] = expectation
             return expectation_token
 
     def finish_owned_mutation(
         self,
         token: object,
         expectation_token: object,
+        *,
+        expected_child_subjects: Sequence[object] | None = None,
+        require_all_child_subjects: bool = False,
+        exact_readback_proven: bool = False,
     ) -> int:
         """Close one exact callback expectation and return its event count."""
 
         self._assert_main_thread()
+        if type(exact_readback_proven) is not bool:
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT", "The exact mutation readback proof is invalid"
+            )
         failure: tuple[str, str] | None = None
         with self._state_lock:
             transaction = self._owned_write
@@ -338,15 +408,137 @@ class HoudiniReadAdapter:
 
             event_count = expectation["event_count"]
             transaction["mutation_expectation"] = None
+            if transaction["strict_event_evidence"]:
+                strict_failure = self._validate_strict_mutation_evidence(
+                    expectation,
+                    expected_child_subjects=expected_child_subjects,
+                    require_all_child_subjects=require_all_child_subjects,
+                    exact_readback_proven=exact_readback_proven,
+                )
+                mutation_record = {
+                    "operation": expectation["operation"],
+                    "event_count": event_count,
+                    "event_types": sorted(expectation["seen_event_types"]),
+                    "no_op": False,
+                }
+                if expectation.get("allow_zero_events") is True:
+                    mutation_record["exact_readback_proven"] = exact_readback_proven
+                transaction["mutations"].append(mutation_record)
+                if strict_failure is not None:
+                    transaction["invalidated"] = True
+                    failure = strict_failure
             if transaction["invalidated"]:
                 failure = (
                     "SCENE_CONFLICT",
-                    "The owned mutation observed an external scene change",
+                    (
+                        "The owned mutation event evidence is incomplete or unsafe"
+                        if transaction["strict_event_evidence"]
+                        else "The owned mutation observed an external scene change"
+                    ),
                 )
 
         if failure is not None:
             raise HoudiniReadAdapterError(*failure)
         return event_count
+
+    def install_owned_node_observer(
+        self,
+        token: object,
+        node: object,
+    ) -> dict[str, Any]:
+        """Install and read back one strict observer on an exact new node.
+
+        This is an observer-only HOM boundary.  It grants no write authority
+        and is available only while an explicitly strict owned write is active.
+        """
+
+        self._assert_main_thread()
+        with self._state_lock:
+            transaction = self._owned_write
+            if (
+                transaction is None
+                or token is not transaction["token"]
+                or not transaction["strict_event_evidence"]
+                or transaction["invalidated"]
+                or transaction["mutation_expectation"] is not None
+            ):
+                raise HoudiniReadAdapterError(
+                    "SCENE_CONFLICT",
+                    "The strict owned observer cannot be installed",
+                )
+        identity = self._strict_node_identity(node)
+        path = identity["path"]
+        session_id = identity["session_id"]
+        if not _same_houdini_node(self._hou.node(path), node):
+            raise HoudiniReadAdapterError(
+                "CAPABILITY_MISMATCH",
+                "The strict observer target is not the exact registered node",
+            )
+        previous = self._observed_nodes.get(path)
+        if previous is not None and (
+            previous[0] != session_id
+            or not _same_houdini_node(previous[1], node)
+        ):
+            raise HoudiniReadAdapterError(
+                "CAPABILITY_MISMATCH",
+                "The strict observer target conflicts with an observed identity",
+            )
+        try:
+            if not self._callback_registration_matches(node):
+                node.addEventCallback(self._node_event_types, self._on_node_event)
+            if not self._callback_registration_matches(node):
+                raise RuntimeError("observer callback readback mismatch")
+        except Exception as exc:
+            with self._state_lock:
+                transaction = self._owned_write
+                if transaction is not None and token is transaction["token"]:
+                    transaction["invalidated"] = True
+                self._revision_observer_reliable = False
+            raise HoudiniReadAdapterError(
+                "HOUDINI_UNAVAILABLE",
+                "The strict observer could not be installed and verified",
+            ) from exc
+        self._observed_nodes[path] = (session_id, node)
+        safe = self._safe_observer_identity(node)
+        with self._state_lock:
+            transaction = self._owned_write
+            if transaction is None or token is not transaction["token"]:
+                raise HoudiniReadAdapterError(
+                    "SCENE_CONFLICT", "The owned write ended during observer setup"
+                )
+            transaction["observer_installations"].append(safe)
+        return copy.deepcopy(safe)
+
+    def record_owned_noop(
+        self,
+        token: object,
+        *,
+        operation: str,
+    ) -> None:
+        """Record one observed strict no-op without claiming callback evidence."""
+
+        self._assert_main_thread()
+        normalized = self._validate_event_operation(operation)
+        with self._state_lock:
+            transaction = self._owned_write
+            if (
+                transaction is None
+                or token is not transaction["token"]
+                or not transaction["strict_event_evidence"]
+                or transaction["invalidated"]
+                or transaction["mutation_expectation"] is not None
+            ):
+                raise HoudiniReadAdapterError(
+                    "SCENE_CONFLICT", "The strict no-op evidence is invalid"
+                )
+            transaction["mutations"].append(
+                {
+                    "operation": normalized,
+                    "event_count": 0,
+                    "event_types": [],
+                    "no_op": True,
+                }
+            )
 
     def finish_owned_write(
         self,
@@ -406,6 +598,19 @@ class HoudiniReadAdapter:
                 else:
                     self._scene_revision = base_revision + 1
                     self._observer_sequence += 1
+
+            if transaction["strict_event_evidence"]:
+                self._last_owned_evidence = {
+                    "transaction_id": transaction["transaction_id"],
+                    "outcome": outcome,
+                    "event_count": len(transaction["events"]),
+                    "events": copy.deepcopy(transaction["events"]),
+                    "mutations": copy.deepcopy(transaction["mutations"]),
+                    "observer_installations": copy.deepcopy(
+                        transaction["observer_installations"]
+                    ),
+                    "invalidated": bool(transaction["invalidated"]),
+                }
 
             # A token is single-use even when observation was invalidated.  In
             # that case the existing callback state remains authoritative; do
@@ -637,6 +842,241 @@ class HoudiniReadAdapter:
         with self._state_lock:
             self._observer_sequence += 1
 
+    def _validate_event_operation(self, operation: object) -> str:
+        if (
+            not isinstance(operation, str)
+            or len(operation) > _MAX_EVENT_OPERATION_LENGTH
+            or _EVENT_OPERATION.fullmatch(operation) is None
+        ):
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT", "The strict event operation is invalid"
+            )
+        return operation
+
+    def _strict_mutation_expectation(
+        self,
+        *,
+        operation: str | None,
+        event_source_rules: Mapping[str, Sequence[object]] | None,
+        allowed_child_subjects: Sequence[object] | None,
+        required_event_types: Sequence[str] | None,
+        allow_zero_events: bool,
+    ) -> dict[str, Any]:
+        normalized_operation = self._validate_event_operation(operation)
+        if type(allow_zero_events) is not bool or (
+            allow_zero_events
+            and normalized_operation not in _SILENT_READBACK_OPERATIONS
+        ):
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT", "A zero-event mutation policy is not authorized"
+            )
+        if not isinstance(event_source_rules, Mapping) or not event_source_rules:
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT", "Strict event source rules are required"
+            )
+        rules: dict[str, tuple[object, ...]] = {}
+        for event_name, sources in event_source_rules.items():
+            if not self._known_event_name(event_name):
+                raise HoudiniReadAdapterError(
+                    "INVALID_ARGUMENT", "A strict event type is unavailable"
+                )
+            if isinstance(sources, (str, bytes, bytearray)) or not isinstance(
+                sources, Sequence
+            ):
+                raise HoudiniReadAdapterError(
+                    "INVALID_ARGUMENT", "Strict event sources are invalid"
+                )
+            identities = tuple(sources)
+            if not identities or any(item is None for item in identities):
+                raise HoudiniReadAdapterError(
+                    "INVALID_ARGUMENT", "Strict event sources are empty"
+                )
+            rules[event_name] = identities
+        required = (
+            tuple(required_event_types or ())
+            if allow_zero_events
+            else tuple(required_event_types or tuple(rules))
+        )
+        if (not allow_zero_events and not required) or any(
+            name not in rules for name in required
+        ):
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT", "Required strict event types are invalid"
+            )
+        subjects = tuple(allowed_child_subjects or ())
+        if any(item is None for item in subjects):
+            raise HoudiniReadAdapterError(
+                "INVALID_ARGUMENT", "Strict child subjects are invalid"
+            )
+        return {
+            "operation": normalized_operation,
+            "event_source_rules": rules,
+            "required_event_types": required,
+            "seen_event_types": set(),
+            "seen_child_subjects": [],
+            "allowed_child_subjects": subjects,
+            "allow_zero_events": allow_zero_events,
+        }
+
+    def _validate_strict_mutation_evidence(
+        self,
+        expectation: Mapping[str, Any],
+        *,
+        expected_child_subjects: Sequence[object] | None,
+        require_all_child_subjects: bool,
+        exact_readback_proven: bool,
+    ) -> tuple[str, str] | None:
+        allow_zero_events = expectation.get("allow_zero_events") is True
+        if allow_zero_events and exact_readback_proven is not True:
+            return (
+                "HOUDINI_UNAVAILABLE",
+                "The silent mutation exact readback was not proven",
+            )
+        if expectation.get("event_count", 0) < 1 and not allow_zero_events:
+            return (
+                "HOUDINI_UNAVAILABLE",
+                "The strict mutation produced no observer event",
+            )
+        seen_types = expectation.get("seen_event_types", set())
+        required_types = expectation["required_event_types"]
+        if required_types and not any(name in seen_types for name in required_types):
+            return (
+                "HOUDINI_UNAVAILABLE",
+                "The strict mutation produced no required observer event",
+            )
+        expected = tuple(expected_child_subjects or ())
+        allowed = expectation.get("allowed_child_subjects", ()) or expected
+        seen_subjects = tuple(expectation.get("seen_child_subjects", ()))
+        if allowed and any(
+            not _contains_houdini_node(allowed, subject)
+            for subject in seen_subjects
+        ):
+            return (
+                "SCENE_CONFLICT",
+                "A strict observer event named an unexpected child subject",
+            )
+        if require_all_child_subjects and (
+            not expected
+            or any(
+                not _contains_houdini_node(seen_subjects, subject)
+                for subject in expected
+            )
+        ):
+            return (
+                "HOUDINI_UNAVAILABLE",
+                "The strict observer did not cover every required child subject",
+            )
+        return None
+
+    def _known_event_name(self, name: object) -> bool:
+        if not isinstance(name, str) or name not in _REQUIRED_NODE_EVENT_NAMES:
+            return False
+        try:
+            return getattr(self._hou.nodeEventType, name) is not None
+        except Exception:
+            return False
+
+    def _event_type_name(self, event_type: object) -> str | None:
+        try:
+            namespace = self._hou.nodeEventType
+            for name in _REQUIRED_NODE_EVENT_NAMES:
+                candidate = getattr(namespace, name, None)
+                if candidate is not None and event_type == candidate:
+                    return name
+        except Exception:
+            return None
+        return None
+
+    def _strict_node_identity(self, node: object) -> dict[str, Any]:
+        try:
+            path = str(node.path())
+            session_id = _bounded_nonnegative_int(
+                node.sessionId(), _MAX_SESSION_ID
+            )
+        except Exception as exc:
+            raise HoudiniReadAdapterError(
+                "CAPABILITY_MISMATCH", "The observer node identity is unavailable"
+            ) from exc
+        if (
+            not (path == "/obj" or path.startswith("/obj/"))
+            or len(path) > _MAX_EVENT_PATH_LENGTH
+            or any(character in path for character in ("\r", "\n", "\x00"))
+        ):
+            raise HoudiniReadAdapterError(
+                "CAPABILITY_MISMATCH", "The observer node path is unsafe"
+            )
+        return {"path": path, "session_id": session_id}
+
+    def _safe_observer_identity(self, node: object) -> dict[str, Any]:
+        try:
+            return self._strict_node_identity(node)
+        except HoudiniReadAdapterError:
+            return {"path": None, "session_id": None}
+
+    def _callback_registration_matches(self, node: object) -> bool:
+        if not self._strict_event_evidence or not self._node_event_types:
+            return not self._strict_event_evidence
+        callbacks = node.eventCallbacks()
+        if not isinstance(callbacks, Sequence):
+            return False
+        registered: list[object] = []
+        for entry in callbacks:
+            if not isinstance(entry, Sequence) or len(entry) != 2:
+                continue
+            event_types, callback = entry
+            if callback != self._on_node_event or not isinstance(
+                event_types, Sequence
+            ):
+                continue
+            registered.extend(event_types)
+        return all(
+            any(expected == actual for actual in registered)
+            for expected in self._node_event_types
+        )
+
+    def _append_strict_event(
+        self,
+        transaction: dict[str, Any] | None,
+        *,
+        operation: str,
+        event_name: str | None,
+        callback_source: object | None,
+        child_subject: object | None,
+        matched: bool,
+        main_thread: bool,
+    ) -> None:
+        source = (
+            self._safe_observer_identity(callback_source)
+            if callback_source is not None and main_thread
+            else {"path": None, "session_id": None}
+        )
+        subject = (
+            self._safe_observer_identity(child_subject)
+            if child_subject is not None and main_thread
+            else {"path": None, "session_id": None}
+        )
+        self._event_journal_sequence += 1
+        record = {
+            "sequence": self._event_journal_sequence,
+            "operation": operation,
+            "event_type": event_name or "unknown",
+            "source_path": source["path"],
+            "source_session_id": source["session_id"],
+            "child_path": subject["path"],
+            "child_session_id": subject["session_id"],
+            "main_thread": bool(main_thread),
+            "matched": bool(matched),
+        }
+        if len(self._event_journal) >= _MAX_EVENT_JOURNAL:
+            if transaction is not None:
+                transaction["invalidated"] = True
+            self._observer_violation = True
+            self._revision_observer_reliable = False
+            return
+        self._event_journal.append(record)
+        if transaction is not None:
+            transaction["events"].append(copy.deepcopy(record))
+
     def _install_hip_observer(self) -> bool:
         self._assert_main_thread()
         try:
@@ -679,6 +1119,10 @@ class HoudiniReadAdapter:
 
         seen: dict[str, tuple[int, Any]] = {}
         seen_session_ids: set[int] = set()
+        # Publish the exact subscription set before strict add/readback checks.
+        # The enum surface is immutable for one live Houdini process.
+        previous_event_types = self._node_event_types
+        self._node_event_types = event_types
         previous_by_session_id = {
             session_id: (path, node)
             for path, (session_id, node) in self._observed_nodes.items()
@@ -699,11 +1143,30 @@ class HoudiniReadAdapter:
                 continue
             previous = previous_by_session_id.get(session_id)
             if previous is not None:
-                seen[path] = (session_id, previous[1])
+                if not self._strict_event_evidence:
+                    seen[path] = (session_id, previous[1])
+                    seen_session_ids.add(session_id)
+                    continue
+                if not _same_houdini_node(previous[1], node):
+                    reliable = False
+                    continue
+                try:
+                    if not self._callback_registration_matches(node):
+                        node.addEventCallback(event_types, self._on_node_event)
+                    if not self._callback_registration_matches(node):
+                        raise RuntimeError("observer callback readback mismatch")
+                except Exception:
+                    reliable = False
+                    continue
+                seen[path] = (session_id, node)
                 seen_session_ids.add(session_id)
                 continue
             try:
                 node.addEventCallback(event_types, self._on_node_event)
+                if self._strict_event_evidence and not self._callback_registration_matches(
+                    node
+                ):
+                    raise RuntimeError("observer callback readback mismatch")
             except Exception:
                 reliable = False
                 continue
@@ -714,13 +1177,15 @@ class HoudiniReadAdapter:
             if session_id in seen_session_ids:
                 continue
             try:
-                node.removeEventCallback(self._node_event_types, self._on_node_event)
+                node.removeEventCallback(
+                    previous_event_types or self._node_event_types,
+                    self._on_node_event,
+                )
             except Exception:
                 # A deleted node can reject callback removal.  Its parent delete
                 # event already advanced the revision, so no live node remains
                 # unobserved because of this cleanup failure.
                 pass
-        self._node_event_types = event_types
         self._observed_nodes = seen
         return reliable and len(seen) == len(nodes)
 
@@ -794,12 +1259,33 @@ class HoudiniReadAdapter:
     def _on_node_event(self, *args: Any, **kwargs: Any) -> None:
         del args
         callback_source = kwargs.get("node")
+        event_type = kwargs.get("event_type")
+        child_subject = kwargs.get("child_node")
         if self._disposed:
             return
         if threading.get_ident() != self._main_thread_id:
             with self._state_lock:
                 if self._owned_write is not None:
                     self._owned_write["invalidated"] = True
+                if self._strict_event_evidence:
+                    expectation = (
+                        None
+                        if self._owned_write is None
+                        else self._owned_write["mutation_expectation"]
+                    )
+                    self._append_strict_event(
+                        self._owned_write,
+                        operation=(
+                            "external"
+                            if expectation is None
+                            else expectation.get("operation", "external")
+                        ),
+                        event_name=self._event_type_name(event_type),
+                        callback_source=None,
+                        child_subject=None,
+                        matched=False,
+                        main_thread=False,
+                    )
                 changed = (
                     self._revision_observer_reliable
                     or not self._observer_violation
@@ -809,18 +1295,82 @@ class HoudiniReadAdapter:
                 if changed:
                     self._observer_sequence += 1
             return
+        event_name = self._event_type_name(event_type)
         with self._state_lock:
             transaction = self._owned_write
             if transaction is not None and not transaction["invalidated"]:
                 expectation = transaction["mutation_expectation"]
+                if transaction["strict_event_evidence"]:
+                    rules = (
+                        {}
+                        if expectation is None
+                        else expectation.get("event_source_rules", {})
+                    )
+                    sources = rules.get(event_name, ())
+                    matched = bool(
+                        expectation is not None
+                        and event_name is not None
+                        and _contains_houdini_node(sources, callback_source)
+                    )
+                    if matched and event_name in {
+                        "ChildCreated",
+                        "ChildDeleted",
+                        "ChildSwitched",
+                    }:
+                        matched = child_subject is not None
+                        allowed_subjects = expectation.get(
+                            "allowed_child_subjects", ()
+                        )
+                        if matched and allowed_subjects:
+                            matched = _contains_houdini_node(
+                                allowed_subjects, child_subject
+                            )
+                    self._append_strict_event(
+                        transaction,
+                        operation=(
+                            "external"
+                            if expectation is None
+                            else expectation["operation"]
+                        ),
+                        event_name=event_name,
+                        callback_source=callback_source,
+                        child_subject=child_subject,
+                        matched=matched,
+                        main_thread=True,
+                    )
+                    if matched:
+                        expectation["event_count"] += 1
+                        expectation["seen_event_types"].add(event_name)
+                        if child_subject is not None:
+                            expectation["seen_child_subjects"].append(
+                                child_subject
+                            )
+                        transaction["pending_node_events"] += 1
+                        return
+                    transaction["invalidated"] = True
+                    self._scene_revision += 1
+                    self._observer_sequence += 1
+                    return
                 if (
                     expectation is not None
-                    and callback_source is expectation["callback_source"]
+                    and _same_houdini_node(
+                        callback_source, expectation["callback_source"]
+                    )
                 ):
                     expectation["event_count"] += 1
                     transaction["pending_node_events"] += 1
                     return
                 transaction["invalidated"] = True
+            if self._strict_event_evidence:
+                self._append_strict_event(
+                    transaction,
+                    operation="external",
+                    event_name=event_name,
+                    callback_source=callback_source,
+                    child_subject=child_subject,
+                    matched=False,
+                    main_thread=True,
+                )
             self._scene_revision += 1
             self._observer_sequence += 1
 
@@ -1223,6 +1773,46 @@ def _bounded_positive_int(value: Any, maximum: int) -> int:
     if result == 0:
         raise ValueError("Integer value must be positive")
     return result
+
+
+def _same_houdini_node(left: object, right: object) -> bool:
+    """Compare the underlying HOM node without trusting Python wrapper identity.
+
+    Houdini may return multiple Python ``hou.Node`` wrappers for one live node.
+    Equality alone is also insufficient for this safety boundary, so a
+    non-identical wrapper is accepted only when ``==`` returns the exact
+    singleton ``True`` and both bounded session IDs and exact paths agree.  Any
+    unavailable or adversarial comparison fails closed.
+    """
+
+    if left is right:
+        return True
+    if left is None or right is None:
+        return False
+    try:
+        if (left == right) is not True:
+            return False
+        left_session = left.sessionId()  # type: ignore[attr-defined]
+        right_session = right.sessionId()  # type: ignore[attr-defined]
+        left_path = left.path()  # type: ignore[attr-defined]
+        right_path = right.path()  # type: ignore[attr-defined]
+    except Exception:
+        return False
+    return bool(
+        type(left_session) is int
+        and type(right_session) is int
+        and 0 <= left_session <= _MAX_SESSION_ID
+        and left_session == right_session
+        and type(left_path) is str
+        and type(right_path) is str
+        and left_path == right_path
+    )
+
+
+def _contains_houdini_node(
+    values: Sequence[object], candidate: object
+) -> bool:
+    return any(_same_houdini_node(value, candidate) for value in values)
 
 
 def _bounded_float(

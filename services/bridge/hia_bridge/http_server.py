@@ -11,6 +11,8 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlsplit
 
 from hia_core.houdini_contract import ContractError, SchemaRegistry, strict_json_loads
@@ -29,7 +31,12 @@ from .session import BridgeSession
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_SCENE_REQUEST_BYTES = 262_144
 MAX_SCENE_POLL_MS = 1_000
+MAX_MCP_HEALTH_RESPONSE_BYTES = 65_536
 SCENE_EXECUTOR_HEADER = "X-HIA-Executor-Token"
+HIA_MCP_V2_BACKEND = "hia_v2"
+FXHOUDINI_MCP_BACKEND = "fxhoudini"
+HIA_MCP_V2_HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
+HIA_MCP_V2_WIRE_PROTOCOL = "hia-mcp-v2/1"
 _SCENE_CAPABILITY_PATH = "/v1/scene/capabilities"
 _SCENE_STATUS_PATH = "/v1/scene/status"
 _SCENE_RESULT_PATH = re.compile(
@@ -53,6 +60,9 @@ class BridgeApplication:
         scene_queue: SceneQueue | None = None,
         scene_registry: SchemaRegistry | None = None,
         scene_executor_token: str | None = None,
+        houdini_mcp_port: int | None = None,
+        houdini_mcp_token: str | None = None,
+        houdini_mcp_backend: str = FXHOUDINI_MCP_BACKEND,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Bearer token must contain at least 32 characters")
@@ -93,6 +103,28 @@ class BridgeApplication:
         ):
             raise ValueError("B2 read-only scene queue requires an independent executor token")
         self._expected_scene_executor_token = scene_executor_token
+        if (houdini_mcp_port is None) != (houdini_mcp_token is None):
+            raise ValueError("Houdini MCP port and token must be configured together")
+        if houdini_mcp_port is not None and (
+            isinstance(houdini_mcp_port, bool)
+            or not isinstance(houdini_mcp_port, int)
+            or not 1 <= houdini_mcp_port <= 65_535
+        ):
+            raise ValueError("Houdini MCP port is invalid")
+        if houdini_mcp_token is not None and (
+            len(houdini_mcp_token) < 32
+            or "\r" in houdini_mcp_token
+            or "\n" in houdini_mcp_token
+        ):
+            raise ValueError("Houdini MCP token is invalid")
+        if houdini_mcp_backend not in {
+            HIA_MCP_V2_BACKEND,
+            FXHOUDINI_MCP_BACKEND,
+        }:
+            raise ValueError("Houdini MCP backend is invalid")
+        self._houdini_mcp_port = houdini_mcp_port
+        self._houdini_mcp_token = houdini_mcp_token
+        self._houdini_mcp_backend = houdini_mcp_backend
 
     def authorized(self, value: str | None) -> bool:
         return value is not None and hmac.compare_digest(
@@ -118,6 +150,79 @@ class BridgeApplication:
         if http_method == "GET" and path == "/v1/scene/requests/next":
             return True
         return http_method == "POST" and _SCENE_RESULT_PATH.fullmatch(path) is not None
+
+    def houdini_mcp_status(self) -> dict[str, Any]:
+        backend = self._houdini_mcp_backend
+        if backend == HIA_MCP_V2_BACKEND:
+            server_id = "hia_mcp_v2"
+            display_name = "HIA MCP V2"
+        else:
+            server_id = "houdini_intelligence"
+            display_name = "FXHoudiniMCP 1.3.0"
+        status: dict[str, Any] = {
+            "backend": backend,
+            "server_id": server_id,
+            "display_name": display_name,
+            "available": False,
+        }
+        if backend == HIA_MCP_V2_BACKEND:
+            status["scene_revision"] = None
+        port = self._houdini_mcp_port
+        token = self._houdini_mcp_token
+        if port is None or token is None:
+            return status
+        if backend == HIA_MCP_V2_BACKEND:
+            request = urllib_request.Request(
+                f"http://127.0.0.1:{port}{HIA_MCP_V2_HEALTH_ROUTE}",
+                headers={"Authorization": f"Bearer {token}"},
+                method="GET",
+            )
+            try:
+                with urllib_request.urlopen(request, timeout=0.75) as response:
+                    raw = response.read(MAX_MCP_HEALTH_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_MCP_HEALTH_RESPONSE_BYTES:
+                    return status
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                return status
+            result = payload.get("result") if isinstance(payload, dict) else None
+            status["available"] = (
+                isinstance(payload, dict)
+                and set(payload) == {"protocol", "ok", "result"}
+                and payload.get("protocol") == HIA_MCP_V2_WIRE_PROTOCOL
+                and payload.get("ok") is True
+                and isinstance(result, dict)
+                and set(result) == {"server_id", "scene_revision"}
+                and result.get("server_id") == server_id
+                and isinstance(result.get("scene_revision"), int)
+                and not isinstance(result.get("scene_revision"), bool)
+                and result["scene_revision"] >= 0
+            )
+            if status["available"]:
+                status["scene_revision"] = result["scene_revision"]
+            return status
+
+        body = urllib_parse.urlencode(
+            {"json": json.dumps(["mcp.health", [], {}])}
+        ).encode("utf-8")
+        request = urllib_request.Request(
+            f"http://127.0.0.1:{port}/api",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=0.75) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return status
+        status["available"] = (
+            isinstance(payload, dict) and payload.get("status") == "ok"
+        )
+        return status
 
 
 class LoopbackHTTPServer(ThreadingHTTPServer):
@@ -224,11 +329,26 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "status": "ok",
                 "session": application.session.snapshot(),
+                "houdini_mcp": application.houdini_mcp_status(),
             }, HTTPStatus.OK
         if path == "/v1/session":
             return {"ok": True, "session": application.session.snapshot()}, HTTPStatus.OK
         if path == "/v1/models":
             result = application.session.list_models()
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/threads":
+            result = application.session.list_threads()
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/goal":
+            values = parse_qs(query, keep_blank_values=True)
+            thread_ids = values.get("thread_id", [])
+            if set(values) != {"thread_id"} or len(thread_ids) != 1:
+                raise BridgeError(
+                    "INVALID_REQUEST",
+                    "Goal get requires exactly one thread_id query field",
+                    HTTPStatus.BAD_REQUEST,
+                )
+            result = application.session.get_goal(thread_ids[0])
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/events":
             values = parse_qs(query, keep_blank_values=False)
@@ -294,9 +414,15 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/session":
             action = body.get("action")
             if action == "start":
-                result = application.session.start_thread(body.get("model"))
+                result = application.session.start_thread(
+                    model=body.get("model"),
+                    service_tier=body.get("service_tier"),
+                )
             elif action == "resume":
-                result = application.session.resume_thread(body.get("thread_id"))
+                result = application.session.resume_thread(
+                    thread_id=body.get("thread_id"),
+                    service_tier=body.get("service_tier"),
+                )
             elif action == "read":
                 result = application.session.read_thread(body.get("thread_id"))
             else:
@@ -307,9 +433,67 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/turn":
             result = application.session.start_turn(
+                text=body.get("text"),
+                model=body.get("model"),
+                effort=body.get("effort"),
+                local_image_paths=body.get("local_image_paths"),
+                service_tier=body.get("service_tier"),
+            )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/threads/name":
+            self._require_exact_fields(body, {"thread_id", "name"})
+            result = application.session.rename_thread(
+                body.get("thread_id"), body.get("name")
+            )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/goal":
+            action = body.get("action")
+            if action == "clear":
+                if set(body) != {"action", "thread_id"}:
+                    raise BridgeError(
+                        "INVALID_REQUEST",
+                        "Goal clear requires action and thread_id",
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                result = application.session.clear_goal(body["thread_id"])
+            elif action == "set":
+                expected = {
+                    "action",
+                    "thread_id",
+                    "objective",
+                    "status",
+                    "token_budget",
+                }
+                if set(body) != expected:
+                    raise BridgeError(
+                        "INVALID_REQUEST",
+                        "Goal set requires objective, status, and token_budget",
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                result = application.session.set_goal(
+                    expected_thread_id=body["thread_id"],
+                    objective=body["objective"],
+                    status=body["status"],
+                    token_budget=body["token_budget"],
+                )
+            else:
+                raise BridgeError(
+                    "INVALID_GOAL_ACTION",
+                    "Goal action must be set or clear",
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/focus":
+            self._require_exact_fields(body, {"thread_id", "enabled"})
+            result = application.session.set_focus_mode(
+                body["thread_id"],
+                body["enabled"],
+            )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/steer":
+            result = application.session.steer_turn(
                 body.get("text"),
-                body.get("model"),
-                body.get("effort"),
+                body.get("local_image_paths"),
             )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/interrupt":

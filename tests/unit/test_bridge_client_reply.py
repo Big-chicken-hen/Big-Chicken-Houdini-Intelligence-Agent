@@ -8,6 +8,7 @@ import types
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -262,6 +263,286 @@ class BridgeClientQueueTests(unittest.TestCase):
             calling_thread,
             client.healthReceived.emission_threads[-1],
         )
+
+    def test_turn_start_forwards_local_image_paths_in_one_request(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        image_paths = [
+            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\one.png",
+            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\two.webp",
+        ]
+
+        client.start_turn(
+            "参考这些图片",
+            model="model-a",
+            effort="high",
+            service_tier="priority",
+            local_image_paths=image_paths,
+        )
+
+        submission = transport.submissions[-1]
+        self.assertEqual("POST", submission["method"])
+        self.assertEqual("/v1/turn", submission["path"])
+        self.assertEqual(
+            {
+                "text": "参考这些图片",
+                "model": "model-a",
+                "effort": "high",
+                "service_tier": "priority",
+                "local_image_paths": image_paths,
+            },
+            submission["payload"],
+        )
+
+    def test_thread_start_and_resume_forward_dynamic_service_tier(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.start_thread(model="model-a", service_tier="priority")
+        self.assertEqual(
+            {
+                "action": "start",
+                "model": "model-a",
+                "service_tier": "priority",
+            },
+            transport.submissions[-1]["payload"],
+        )
+
+        client.resume_thread("thread-a", service_tier=None)
+        self.assertEqual(
+            {
+                "action": "resume",
+                "thread_id": "thread-a",
+                "service_tier": None,
+            },
+            transport.submissions[-1]["payload"],
+        )
+
+    def test_long_session_and_bounded_interrupt_keep_other_control_timeouts(
+        self,
+    ) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.start_thread(model=None, service_tier=None)
+        client.resume_thread(
+            "thread-a",
+            service_tier=None,
+            context="session_auto_resume",
+        )
+        client.read_thread("thread-a", context="thread_read:initial")
+        client.get_health()
+        client.interrupt(context="interrupt:test")
+        client.poll_events(0)
+        client.get_session(context="session_reconcile:1:1:test")
+
+        by_context = {
+            submission["context"]: submission
+            for submission in transport.submissions
+        }
+        for context in (
+            "session_start",
+            "session_auto_resume",
+            "thread_read:initial",
+        ):
+            self.assertEqual(50_000, by_context[context]["timeout_ms"])
+        self.assertEqual(15_000, by_context["health"]["timeout_ms"])
+        self.assertEqual(7_000, by_context["interrupt:test"]["timeout_ms"])
+        self.assertEqual(20_000, by_context["events"]["timeout_ms"])
+        self.assertEqual(
+            5_000,
+            by_context["session_reconcile:1:1:test"]["timeout_ms"],
+        )
+
+        timed_client, timed_transport = _load_transport_bridge_client()
+        client_time = timed_client._request.__globals__["time"]
+        with mock.patch.object(
+            client_time,
+            "monotonic",
+            side_effect=(100.0, 116.0),
+        ):
+            timed_client.resume_thread(
+                "thread-a",
+                service_tier=None,
+                context="session_auto_resume",
+            )
+            resume = timed_transport.submissions[-1]
+            timed_client._result_queue.put(
+                _result_for(
+                    resume,
+                    raw=b'{"ok":true,"thread_id":"thread-a","read":{}}',
+                )
+            )
+            timed_client._drain_results()
+
+        self.assertEqual(
+            [("session_auto_resume", {"ok": True, "thread_id": "thread-a", "read": {}})],
+            timed_client.actionCompleted.emissions,
+        )
+        self.assertEqual([], timed_client.requestFailed.emissions)
+
+    def test_structured_codex_timeout_arrives_before_session_deadline(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        client_time = client._request.__globals__["time"]
+        with mock.patch.object(
+            client_time,
+            "monotonic",
+            side_effect=(200.0, 245.0),
+        ):
+            client.resume_thread("thread-a", context="session_resume")
+            submission = transport.submissions[-1]
+            client._result_queue.put(
+                _result_for(
+                    submission,
+                    raw=(
+                        b'{"ok":false,"structured_error":{"code":'
+                        b'"CODEX_REQUEST_TIMEOUT","message":'
+                        b'"Codex request timed out"}}'
+                    ),
+                    http_status=504,
+                )
+            )
+            client._drain_results()
+
+        self.assertEqual(50_000, submission["timeout_ms"])
+        self.assertGreater(submission["timeout_ms"], 45_000)
+        self.assertEqual(1, len(client.requestFailed.emissions))
+        context, payload = client.requestFailed.emissions[0]
+        self.assertEqual("session_resume", context)
+        self.assertEqual(
+            "CODEX_REQUEST_TIMEOUT",
+            payload["structured_error"]["code"],
+        )
+        self.assertEqual([], client.actionCompleted.emissions)
+
+    def test_thread_history_requests_preserve_paths_payloads_and_contexts(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.get_threads()
+        client.read_thread("thread-a", context="history_read:thread-a")
+        client.rename_thread(
+            "thread-a",
+            "Houdini lookdev",
+            context="history_rename:thread-a",
+        )
+        client.resume_thread(
+            "thread-a",
+            service_tier="priority",
+            context="history_resume:thread-a",
+        )
+
+        self.assertEqual(
+            [
+                ("GET", "/v1/threads", None, "threads"),
+                (
+                    "POST",
+                    "/v1/session",
+                    {"action": "read", "thread_id": "thread-a"},
+                    "history_read:thread-a",
+                ),
+                (
+                    "POST",
+                    "/v1/threads/name",
+                    {"thread_id": "thread-a", "name": "Houdini lookdev"},
+                    "history_rename:thread-a",
+                ),
+                (
+                    "POST",
+                    "/v1/session",
+                    {
+                        "action": "resume",
+                        "thread_id": "thread-a",
+                        "service_tier": "priority",
+                    },
+                    "history_resume:thread-a",
+                ),
+            ],
+            [
+                (
+                    submission["method"],
+                    submission["path"],
+                    submission["payload"],
+                    submission["context"],
+                )
+                for submission in transport.submissions
+            ],
+        )
+
+    def test_goal_requests_are_thin_control_calls(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.get_goal("thread-a")
+        client.set_goal(
+            "完成当前场景",
+            "active",
+            thread_id="thread-a",
+            token_budget=12_000,
+        )
+        client.clear_goal("thread-a")
+        client.set_focus_mode("thread-a", True)
+
+        self.assertEqual(
+            [
+                ("GET", "/v1/goal?thread_id=thread-a", None, "goal_get"),
+                (
+                    "POST",
+                    "/v1/goal",
+                    {
+                        "action": "set",
+                        "thread_id": "thread-a",
+                        "objective": "完成当前场景",
+                        "status": "active",
+                        "token_budget": 12_000,
+                    },
+                    "goal_set",
+                ),
+                (
+                    "POST",
+                    "/v1/goal",
+                    {"action": "clear", "thread_id": "thread-a"},
+                    "goal_clear",
+                ),
+                (
+                    "POST",
+                    "/v1/focus",
+                    {"thread_id": "thread-a", "enabled": True},
+                    "focus_set",
+                ),
+            ],
+            [
+                (
+                    submission["method"],
+                    submission["path"],
+                    submission["payload"],
+                    submission["context"],
+                )
+                for submission in transport.submissions
+            ],
+        )
+        self.assertTrue(
+            all(submission["timeout_ms"] == 50_000 for submission in transport.submissions)
+        )
+
+    def test_turn_steer_forwards_text_and_local_images_without_starting_turn(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        image_paths = [
+            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\follow-up.png"
+        ]
+
+        client.steer_turn(
+            "追加要求",
+            local_image_paths=image_paths,
+            context="turn_steer:1:2:test",
+        )
+
+        submission = transport.submissions[-1]
+        self.assertEqual("POST", submission["method"])
+        self.assertEqual("/v1/steer", submission["path"])
+        self.assertEqual(
+            {
+                "text": "追加要求",
+                "local_image_paths": image_paths,
+            },
+            submission["payload"],
+        )
+        self.assertEqual("turn_steer:1:2:test", submission["context"])
 
     def test_old_generation_unknown_request_and_old_same_context_are_dropped(self) -> None:
         client, transport = _load_transport_bridge_client()

@@ -40,6 +40,36 @@
         "purpose": "p1-read-only-model-catalog"
       },
       {
+        "method": "thread/list",
+        "params_definition": "ThreadListParams",
+        "response_schema": "v2/ThreadListResponse.json",
+        "purpose": "thread-history"
+      },
+      {
+        "method": "thread/name/set",
+        "params_definition": "ThreadSetNameParams",
+        "response_schema": "v2/ThreadSetNameResponse.json",
+        "purpose": "thread-history"
+      },
+      {
+        "method": "thread/goal/get",
+        "params_definition": "ThreadGoalGetParams",
+        "response_schema": "v2/ThreadGoalGetResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/set",
+        "params_definition": "ThreadGoalSetParams",
+        "response_schema": "v2/ThreadGoalSetResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/clear",
+        "params_definition": "ThreadGoalClearParams",
+        "response_schema": "v2/ThreadGoalClearResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
         "method": "thread/start",
         "params_definition": "ThreadStartParams",
         "response_schema": "v2/ThreadStartResponse.json"
@@ -63,6 +93,11 @@
         "method": "turn/start",
         "params_definition": "TurnStartParams",
         "response_schema": "v2/TurnStartResponse.json"
+      },
+      {
+        "method": "turn/steer",
+        "params_definition": "TurnSteerParams",
+        "response_schema": "v2/TurnSteerResponse.json"
       },
       {
         "method": "turn/interrupt",
@@ -126,6 +161,21 @@
         "method": "thread/started",
         "params_definition": "ThreadStartedNotification",
         "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "thread/name/updated",
+        "params_definition": "ThreadNameUpdatedNotification",
+        "purpose": "thread-history"
+      },
+      {
+        "method": "thread/goal/updated",
+        "params_definition": "ThreadGoalUpdatedNotification",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/cleared",
+        "params_definition": "ThreadGoalClearedNotification",
+        "purpose": "thread-goal"
       },
       {
         "method": "thread/status/changed",
@@ -250,6 +300,11 @@
       {
         "method": "remoteControl/status/changed",
         "params_definition": "RemoteControlStatusChangedNotification",
+        "purpose": "passive-observation-only"
+      },
+      {
+        "method": "skills/changed",
+        "params_definition": "SkillsChangedNotification",
         "purpose": "passive-observation-only"
       }
     ]

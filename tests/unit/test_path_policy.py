@@ -27,33 +27,41 @@ class PathPolicyTests(unittest.TestCase):
 
     def test_accepts_relative_ordinary_child(self) -> None:
         result = validate_project_subpath(r"docs\design.md")
-        self.assertEqual(Path(r"E:\houdini-intelligence-agent\docs\design.md"), result)
+        self.assertEqual(PROJECT_ROOT / "docs" / "design.md", result)
 
     def test_accepts_absolute_child_case_insensitively(self) -> None:
-        result = validate_project_subpath(r"e:\HOUDINI-INTELLIGENCE-AGENT\docs\design.md")
+        candidate = str(PROJECT_ROOT / "docs" / "design.md").swapcase()
+        result = validate_project_subpath(candidate)
         self.assertEqual(
-            r"e:\HOUDINI-INTELLIGENCE-AGENT\docs\design.md".casefold(),
+            candidate.casefold(),
             str(result).casefold(),
         )
 
     def test_rejects_empty_path(self) -> None:
         self.assert_rejected("   ", "EMPTY_PATH")
 
-    def test_rejects_c_drive(self) -> None:
-        self.assert_rejected(r"C:\work\asset.bgeo", "C_DRIVE_FORBIDDEN")
+    def test_accepts_project_root_on_another_local_drive(self) -> None:
+        result = validate_project_subpath(
+            r"docs\design.md",
+            project_root=r"C:\portable\houdini-intelligence-agent",
+        )
+        self.assertEqual(
+            Path(r"C:\portable\houdini-intelligence-agent\docs\design.md"),
+            result,
+        )
 
     def test_rejects_appdata_case_insensitively(self) -> None:
         self.assert_rejected(r"cache\AppData\file.bin", "APPDATA_FORBIDDEN")
 
     def test_rejects_drive_root(self) -> None:
-        self.assert_rejected("E:\\", "DRIVE_ROOT")
+        self.assert_rejected(f"{PROJECT_ROOT.drive}\\", "DRIVE_ROOT")
 
     def test_rejects_unc_path(self) -> None:
         self.assert_rejected(r"\\server\share\asset.bgeo", "UNC_OR_DEVICE_PATH")
 
     def test_rejects_device_path(self) -> None:
         self.assert_rejected(
-            r"\\?\E:\houdini-intelligence-agent\asset.bgeo",
+            rf"\\?\{PROJECT_ROOT}\asset.bgeo",
             "UNC_OR_DEVICE_PATH",
         )
 
@@ -64,13 +72,13 @@ class PathPolicyTests(unittest.TestCase):
         self.assert_rejected(r"..\outside.txt", "OUTSIDE_PROJECT")
 
     def test_rejects_absolute_outside_path(self) -> None:
-        self.assert_rejected(r"E:\another-project\file.txt", "OUTSIDE_PROJECT")
+        self.assert_rejected(str(PROJECT_ROOT.parent / "outside" / "file.txt"), "OUTSIDE_PROJECT")
 
     def test_rejects_project_root_itself(self) -> None:
         self.assert_rejected(str(PROJECT_ROOT), "PROJECT_ROOT_FORBIDDEN")
 
     def test_rejects_existing_reparse_component(self) -> None:
-        target = Path(r"E:\houdini-intelligence-agent\linked\file.txt")
+        target = PROJECT_ROOT / "linked" / "file.txt"
 
         def is_reparse(path: Path) -> bool:
             return str(path).casefold() == str(target.parent).casefold()

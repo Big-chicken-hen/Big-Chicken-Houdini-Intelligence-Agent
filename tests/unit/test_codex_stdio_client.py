@@ -90,6 +90,7 @@ class CodexStdioClientTests(unittest.TestCase):
                 "serverName": "project-codex",
                 "status": "disabled",
             },
+            "skills/changed": {},
         }
 
         for method, params in notifications.items():
@@ -129,6 +130,40 @@ class CodexStdioClientTests(unittest.TestCase):
         )
         self.assertIsNone(second["nextCursor"])
         self.assertEqual("fake-secondary-model", second["data"][0]["model"])
+
+    def test_stable_thread_history_requests_and_name_notification(self) -> None:
+        self.initialize()
+        list_params = {
+            "cwd": str(REPOSITORY_ROOT),
+            "archived": False,
+            "limit": 20,
+            "sortKey": "recency_at",
+            "sortDirection": "desc",
+        }
+
+        listed = self.client.request("thread/list", list_params)
+
+        self.assertEqual(list_params, listed["receivedParams"])
+        self.assertEqual("thread-fake", listed["data"][0]["id"])
+        self.assertEqual(str(REPOSITORY_ROOT), listed["data"][0]["cwd"])
+
+        name = "  Houdini lookdev  "
+        renamed = self.client.request(
+            "thread/name/set",
+            {"threadId": "thread-fake", "name": name},
+        )
+        self.assertEqual(
+            {"threadId": "thread-fake", "name": name},
+            renamed["receivedParams"],
+        )
+        notification = self.wait_for(
+            lambda event: event.get("type") == "codex_notification"
+            and event.get("method") == "thread/name/updated"
+        )
+        self.assertEqual(
+            {"threadId": "thread-fake", "threadName": name},
+            notification["params"],
+        )
 
     def test_streaming_reply_plan_and_approval(self) -> None:
         self.initialize()
@@ -204,6 +239,104 @@ class CodexStdioClientTests(unittest.TestCase):
         self.assertIsNotNone(process)
         self.client.close()
         self.assertIsNotNone(process.poll())
+
+    def test_restart_reaps_old_process_clears_approvals_and_reinitializes(self) -> None:
+        self.initialize()
+        self.client._handle_server_request(
+            {
+                "id": "approval-before-restart",
+                "method": "item/commandExecution/requestApproval",
+                "params": {"command": "Get-Date"},
+            }
+        )
+        old_process = self.client.process
+        self.assertIsNotNone(old_process)
+        self.assertIsNotNone(
+            self.client.pending_server_request("approval-before-restart")
+        )
+
+        self.client.restart(grace_seconds=0.1)
+
+        self.assertIsNotNone(old_process.poll())
+        self.assertIsNot(old_process, self.client.process)
+        self.assertIsNone(
+            self.client.pending_server_request("approval-before-restart")
+        )
+        response = self.client.initialize_with_timeout(2.0)
+        self.assertEqual("fake-codex/0.144.3", response["userAgent"])
+
+    def test_request_specific_timeout_does_not_change_default_timeout(self) -> None:
+        with mock.patch.object(self.client, "_send_json"):
+            started = time.monotonic()
+            with self.assertRaises(BridgeError) as captured:
+                self.client.request_with_timeout(
+                    "account/read",
+                    {"refreshToken": False},
+                    timeout_seconds=0.01,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertEqual("CODEX_REQUEST_TIMEOUT", captured.exception.code)
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(5.0, self.client._request_timeout)
+
+    def test_late_recovery_responses_are_silent_and_tombstones_are_bounded(
+        self,
+    ) -> None:
+        methods = ("turn/interrupt", "initialize", "thread/resume")
+        with mock.patch.object(self.client, "_send_json"):
+            for index in range(18):
+                request_id = self.client._next_request_id
+                with self.assertRaises(BridgeError) as captured:
+                    self.client.request_with_timeout(
+                        methods[index % len(methods)],
+                        {},
+                        timeout_seconds=0.001,
+                    )
+                self.assertEqual("CODEX_REQUEST_TIMEOUT", captured.exception.code)
+                if index == 0:
+                    first_request_id = request_id
+                last_request_id = request_id
+
+        self.assertEqual(16, len(self.client._late_response_tombstones))
+        self.client._handle_response({"id": last_request_id, "result": {}})
+        self.client._handle_response({"id": first_request_id, "result": {}})
+        self.client._handle_response({"id": "never-issued", "result": {}})
+
+        unknown_ids = [
+            event.get("request_id")
+            for event in self.events
+            if event.get("code") == "UNKNOWN_RESPONSE_ID"
+        ]
+        self.assertEqual([first_request_id, "never-issued"], unknown_ids)
+
+    def test_stale_stdout_reader_does_not_fail_new_process_requests(self) -> None:
+        client = CodexStdioClient(
+            [sys.executable, "-B", "-c", "pass"],
+            cwd=REPOSITORY_ROOT,
+            environment=os.environ.copy(),
+            policy=self.policy,
+            event_sink=self._record_event,
+        )
+        old_process = mock.Mock()
+        new_process = mock.Mock()
+
+        def exhausted_old_stdout():
+            client._process = new_process
+            if False:
+                yield ""
+
+        old_process.stdout = exhausted_old_stdout()
+        client._process = old_process
+        pending = _PendingResponse(method="initialize")
+        client._pending[1] = pending
+
+        client._read_stdout()
+
+        self.assertFalse(pending.event.is_set())
+        self.assertFalse(
+            any(event.get("type") == "process_exit" for event in self.events)
+        )
 
     def test_environment_overlay_is_rejected_after_process_start(self) -> None:
         with self.assertRaises(BridgeError) as captured:
@@ -321,6 +454,65 @@ class CodexStdioClientTests(unittest.TestCase):
         self.assertNotIn(secret, request_encoded)
         self.assertNotIn(url, request_encoded)
         self.assertIn("[REDACTED]", request_encoded)
+
+    def test_arbitrary_request_credentials_are_redacted_before_storage_and_emit(
+        self,
+    ) -> None:
+        secrets = {
+            "authorization": "authorization-secret-123456",
+            "bearer": "bearer-secret-123456",
+            "cookie": "cookie-secret-123456",
+            "api_key": "api-key-secret-123456",
+            "query": "query-secret-123456",
+            "password": "password-secret-123456",
+            "userinfo": "userinfo-secret-123456",
+        }
+        request_id = "approval-arbitrary-credentials"
+        self.client._handle_server_request(
+            {
+                "id": request_id,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "Authorization": f"Bearer {secrets['authorization']}",
+                    "nested": {
+                        "sessionCookie": f"session={secrets['cookie']}",
+                        "openai_api_key": secrets["api_key"],
+                        "databasePassword": secrets["password"],
+                        "totalTokens": 123,
+                    },
+                    "commandActions": [
+                        {
+                            "command": (
+                                "curl -H \"Authorization: Bearer "
+                                f"{secrets['bearer']}\" --cookie \"session="
+                                f"{secrets['cookie']}\" \"https://user:"
+                                f"{secrets['userinfo']}@example.com/data?access_token="
+                                f"{secrets['query']}\""
+                            )
+                        },
+                        {
+                            "command": (
+                                "curl -b \"sid="
+                                f"{secrets['cookie']}\" -H \"X-API-Key: "
+                                f"{secrets['api_key']}\" https://example.com"
+                            )
+                        },
+                    ],
+                },
+            }
+        )
+
+        pending = self.client.pending_server_request(request_id)
+        emitted = self.wait_for(
+            lambda event: event.get("type") == "server_request"
+            and event.get("request_id") == request_id
+        )
+        for serialized in (repr(pending), repr(emitted)):
+            for secret in secrets.values():
+                self.assertNotIn(secret, serialized)
+            self.assertIn("[REDACTED]", serialized)
+
+        self.assertEqual(123, pending["params"]["nested"]["totalTokens"])
 
 
 if __name__ == "__main__":

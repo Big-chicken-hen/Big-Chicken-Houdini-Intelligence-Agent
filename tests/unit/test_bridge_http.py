@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 from typing import Any, Callable
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -128,8 +131,67 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual("127.0.0.1", self.server.server_address[0])
         self.assertEqual("authenticated", health["session"]["authentication"])
         self.assertNotIn("email", health["session"]["account"]["account"])
+        self.assertEqual(
+            {
+                "backend": "fxhoudini",
+                "server_id": "houdini_intelligence",
+                "display_name": "FXHoudiniMCP 1.3.0",
+                "available": False,
+            },
+            health["houdini_mcp"],
+        )
         with self.assertRaises(ValueError):
             LoopbackHTTPServer(("0.0.0.0", 0), self.application)
+
+    def test_hia_v2_health_uses_authenticated_get_and_strict_payload(self) -> None:
+        mcp_token = "hia-runtime-" + "x" * 40
+        application = BridgeApplication(
+            self.session,
+            self.events,
+            self.TOKEN,
+            houdini_mcp_port=45123,
+            houdini_mcp_token=mcp_token,
+            houdini_mcp_backend="hia_v2",
+        )
+        payload = {
+            "protocol": "hia-mcp-v2/1",
+            "ok": True,
+            "result": {"server_id": "hia_mcp_v2", "scene_revision": 4},
+        }
+        with mock.patch(
+            "hia_bridge.http_server.urllib_request.urlopen",
+            return_value=io.BytesIO(json.dumps(payload).encode("utf-8")),
+        ) as open_url:
+            status = application.houdini_mcp_status()
+
+        self.assertEqual(
+            {
+                "backend": "hia_v2",
+                "server_id": "hia_mcp_v2",
+                "display_name": "HIA MCP V2",
+                "available": True,
+                "scene_revision": 4,
+            },
+            status,
+        )
+        request = open_url.call_args.args[0]
+        self.assertEqual(
+            "http://127.0.0.1:45123/hia-mcp-v2/v1/health",
+            request.full_url,
+        )
+        self.assertEqual("GET", request.get_method())
+        self.assertEqual(f"Bearer {mcp_token}", request.get_header("Authorization"))
+        self.assertEqual(0.75, open_url.call_args.kwargs["timeout"])
+
+        invalid_payload = {**payload, "unexpected": True}
+        with mock.patch(
+            "hia_bridge.http_server.urllib_request.urlopen",
+            return_value=io.BytesIO(json.dumps(invalid_payload).encode("utf-8")),
+        ):
+            unavailable = application.houdini_mcp_status()
+        self.assertFalse(unavailable["available"])
+        self.assertEqual("hia_v2", unavailable["backend"])
+        self.assertIsNone(unavailable["scene_revision"])
 
     def test_bad_token_is_rejected(self) -> None:
         with self.assertRaises(HTTPError) as raised:
@@ -151,39 +213,207 @@ class BridgeHTTPTests(unittest.TestCase):
             "description",
             "isDefault",
             "inputModalities",
+            "serviceTiers",
+            "defaultServiceTier",
             "supportedReasoningEfforts",
             "defaultReasoningEffort",
         }
         for model in response["models"]:
             self.assertEqual(expected_keys, set(model))
             self.assertNotIn("hidden", model)
+            self.assertEqual([], model["serviceTiers"])
+            self.assertIsNone(model["defaultServiceTier"])
             for effort in model["supportedReasoningEfforts"]:
                 self.assertEqual(
                     {"reasoningEffort", "description"},
                     set(effort),
                 )
 
-    def test_unicode_model_and_effort_are_forwarded_without_loss(self) -> None:
+    def test_thread_history_list_and_rename_routes(self) -> None:
+        listed = self.request("GET", "/v1/threads")
+
+        self.assertEqual(
+            {
+                "ok": True,
+                "threads": [
+                    {
+                        "thread_id": "thread-fake",
+                        "name": "Fake Thread",
+                        "preview": "fake thread",
+                        "updated_at": 1_720_000_000,
+                        "recency_at": 1_720_000_001,
+                    }
+                ],
+            },
+            listed,
+        )
+
+        name = "  Houdini lookdev  "
+        renamed = self.request(
+            "POST",
+            "/v1/threads/name",
+            {"thread_id": "thread-fake", "name": name},
+        )
+        self.assertEqual("thread-fake", renamed["thread_id"])
+        self.assertEqual(name, renamed["name"])
+        self.assertEqual(
+            {"threadId": "thread-fake", "name": name},
+            renamed["result"]["receivedParams"],
+        )
+
+    def test_native_goal_routes_use_the_selected_thread(self) -> None:
+        self.request("POST", "/v1/session", {"action": "start"})
+
+        empty = self.request("GET", "/v1/goal?thread_id=thread-fake")
+        saved = self.request(
+            "POST",
+            "/v1/goal",
+            {
+                "action": "set",
+                "thread_id": "thread-fake",
+                "objective": "完成当前木屋任务",
+                "status": "active",
+                "token_budget": 25_000,
+            },
+        )
+        focused = self.request(
+            "POST",
+            "/v1/focus",
+            {"thread_id": "thread-fake", "enabled": True},
+        )
+        session = self.request("GET", "/v1/session")
+        cleared = self.request(
+            "POST",
+            "/v1/goal",
+            {"action": "clear", "thread_id": "thread-fake"},
+        )
+
+        self.assertIsNone(empty["goal"])
+        self.assertEqual("thread-fake", saved["thread_id"])
+        self.assertEqual("完成当前木屋任务", saved["goal"]["objective"])
+        self.assertEqual(25_000, saved["goal"]["tokenBudget"])
+        self.assertTrue(focused["focus_mode"])
+        self.assertTrue(session["session"]["focus_mode"])
+        self.assertTrue(cleared["cleared"])
+        self.assertFalse(cleared["focus_mode"])
+
+    def test_unicode_model_effort_and_service_tier_are_forwarded_without_loss(
+        self,
+    ) -> None:
         original = "中文输入测试：请生成一张四条腿的桌子，尺寸为 120×60×75 厘米。"
         model = "fake-default-model"
         started = self.request(
             "POST",
             "/v1/session",
-            {"action": "start", "model": model},
+            {
+                "action": "start",
+                "model": model,
+                "service_tier": "priority",
+            },
         )
         self.assertEqual(model, started["result"]["receivedParams"]["model"])
+        self.assertEqual(
+            "priority",
+            started["result"]["receivedParams"]["serviceTier"],
+        )
 
         turn = self.request(
             "POST",
             "/v1/turn",
-            {"text": original, "model": model, "effort": "high"},
+            {
+                "text": original,
+                "model": model,
+                "effort": "high",
+                "service_tier": "priority",
+            },
         )
         received = turn["result"]["receivedParams"]
         self.assertEqual(original, received["input"][0]["text"])
         self.assertEqual(model, received["model"])
         self.assertEqual("high", received["effort"])
+        self.assertEqual("priority", received["serviceTier"])
 
-    def test_model_and_effort_validation_is_structured(self) -> None:
+    def test_turn_endpoint_forwards_local_image_paths_to_session(self) -> None:
+        attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="bridge-http-test-",
+            dir=attachments_root,
+        ) as temporary_thread_directory:
+            thread_directory = Path(temporary_thread_directory)
+            thread_id = thread_directory.name
+            image = thread_directory / "reference.png"
+            image.write_bytes(b"test image payload")
+            self.request(
+                "POST",
+                "/v1/session",
+                {"action": "resume", "thread_id": thread_id},
+            )
+            response = self.request(
+                "POST",
+                "/v1/turn",
+                {"text": "参考图片", "local_image_paths": [str(image)]},
+            )
+
+            received = response["result"]["receivedParams"]
+            self.assertEqual(thread_id, received["threadId"])
+            self.assertEqual(
+                [
+                    {
+                        "type": "text",
+                        "text": "参考图片",
+                        "text_elements": [],
+                    },
+                    {"type": "localImage", "path": str(image.resolve())},
+                ],
+                received["input"],
+            )
+
+    def test_steer_endpoint_appends_to_the_same_active_turn(self) -> None:
+        attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="bridge-steer-test-",
+            dir=attachments_root,
+        ) as temporary_thread_directory:
+            thread_directory = Path(temporary_thread_directory)
+            thread_id = thread_directory.name
+            image = thread_directory / "follow-up.webp"
+            image.write_bytes(b"test image payload")
+            self.request(
+                "POST",
+                "/v1/session",
+                {"action": "resume", "thread_id": thread_id},
+            )
+            started = self.request("POST", "/v1/turn", {"text": "initial"})
+
+            steered = self.request(
+                "POST",
+                "/v1/steer",
+                {
+                    "text": "追加要求",
+                    "local_image_paths": [str(image)],
+                },
+            )
+
+            self.assertEqual(started["turn_id"], steered["turn_id"])
+            self.assertEqual(started["turn_id"], steered["result"]["turnId"])
+            received = steered["result"]["receivedParams"]
+            self.assertEqual(thread_id, received["threadId"])
+            self.assertEqual(started["turn_id"], received["expectedTurnId"])
+            self.assertEqual(
+                [
+                    {
+                        "type": "text",
+                        "text": "追加要求",
+                        "text_elements": [],
+                    },
+                    {"type": "localImage", "path": str(image.resolve())},
+                ],
+                received["input"],
+            )
+
+    def test_model_effort_and_service_tier_validation_is_structured(self) -> None:
         for value in ("", "   ", "bad\nmodel", 7, "m" * 257):
             with self.subTest(model=value):
                 with self.assertRaises(HTTPError) as raised:
@@ -215,14 +445,31 @@ class BridgeHTTPTests(unittest.TestCase):
                     payload["structured_error"]["code"],
                 )
 
+        for value in ("", "   ", "bad\ntier", 7, "t" * 257):
+            with self.subTest(service_tier=value):
+                with self.assertRaises(HTTPError) as raised:
+                    self.request(
+                        "POST",
+                        "/v1/turn",
+                        {"text": "hello", "service_tier": value},
+                    )
+                self.assertEqual(400, raised.exception.code)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(
+                    "INVALID_SERVICE_TIER",
+                    payload["structured_error"]["code"],
+                )
+
     def test_session_turn_events_approval_and_interrupt(self) -> None:
         started = self.request("POST", "/v1/session", {"action": "start"})
         self.assertEqual("thread-fake", started["thread_id"])
         self.assertNotIn("model", started["result"]["receivedParams"])
+        self.assertIsNone(started["result"]["receivedParams"]["serviceTier"])
         turn = self.request("POST", "/v1/turn", {"text": "hello"})
         self.assertEqual("turn-fake", turn["turn_id"])
         self.assertNotIn("model", turn["result"]["receivedParams"])
         self.assertNotIn("effort", turn["result"]["receivedParams"])
+        self.assertIsNone(turn["result"]["receivedParams"]["serviceTier"])
 
         _, after = self.wait_for_event(
             lambda event: event.get("type") == "server_request"

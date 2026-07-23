@@ -1,9 +1,8 @@
 [project]
-name = "houdini-intelligence-agent"
-version = "0.0.0"
-description = "Safety-first foundation for a Houdini-embedded Codex client"
+name = "big-chicken-houdini-intelligence-agent"
+version = "0.1.0-preview"
+description = "Big-Chicken Houdini Intelligence Agent: a Codex-powered Houdini plugin for natural-language creation and live editable scene work"
 requires-python = ">=3.10"
 
 [tool.hia]
-project-root = "E:\\houdini-intelligence-agent"
-phase = "P2-V-B4A-dormant-fake-HOM-write-adapter"
+project-root = "."

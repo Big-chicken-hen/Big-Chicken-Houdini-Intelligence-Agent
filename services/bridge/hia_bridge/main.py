@@ -30,6 +30,40 @@ PINNED_CODEX_RELATIVE_PATH = Path(
     ".runtime/toolchains/codex/0.144.3/codex.exe"
 )
 CODEX_HOME_RELATIVE_PATH = Path(".runtime/codex-home")
+CACHE_RELATIVE_PATH = Path(".runtime/cache")
+FOCUS_STATE_RELATIVE_PATH = Path(".runtime/bridge/focus-mode.json")
+HIA_MCP_V2_SERVICE_RELATIVE_PATH = Path("services/hia_mcp_v2")
+HIA_MCP_V2_RUNTIME_RELATIVE_PATH = Path(".runtime/hia-mcp-v2")
+FXHOUDINI_MCP_PYTHON_RELATIVE_PATH = Path(
+    ".runtime/fxhoudinimcp/1.3.0/venv/Scripts/python.exe"
+)
+FXHOUDINI_MCP_SOURCE_RELATIVE_PATH = Path(
+    ".runtime/fxhoudinimcp/1.3.0/source/python"
+)
+HIA_MCP_V2_BACKEND = "hia_v2"
+FXHOUDINI_MCP_BACKEND = "fxhoudini"
+HIA_MCP_V2_SERVER_ID = "hia_mcp_v2"
+FXHOUDINI_MCP_SERVER_ID = "houdini_intelligence"
+HIA_MCP_V2_HOST = "127.0.0.1"
+HIA_MCP_V2_EXECUTE_ROUTE = "/hia-mcp-v2/v1/execute"
+HIA_MCP_V2_HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
+HIA_MCP_V2_CHILD_ENVIRONMENT = (
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONNOUSERSITE",
+    "TEMP",
+    "TMP",
+    "HIA_PROJECT_ROOT",
+    "HIA_CACHE_DIR",
+    "HIA_RENDER_OUTPUT_DIR",
+    "HIA_EXPECTED_PYTHON_EXE",
+    "HIA_MCP_V2_HOST",
+    "HIA_MCP_V2_PORT",
+    "HIA_MCP_V2_TOKEN",
+    "HIA_MCP_V2_ROUTE",
+    "HIA_MCP_V2_RUNTIME_DIR",
+)
 _HIA_CHATGPT_HTTP_PROVIDER_ID = "hia_chatgpt_http"
 _HIA_CHATGPT_HTTP_PROVIDER_NAME = "HIA ChatGPT HTTP"
 _HIA_CHATGPT_HTTP_BASE_URL = "https://chatgpt.com/backend-api/codex"
@@ -61,7 +95,7 @@ _CODEX_CHILD_ENVIRONMENT_ALLOWLIST = (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Houdini Intelligence local Bridge")
+    parser = argparse.ArgumentParser(description="Big-Chicken Houdini Intelligence Agent local Bridge")
     parser.add_argument("--project-root", default=str(PROJECT_ROOT))
     parser.add_argument(
         "--codex-exe",
@@ -71,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-home",
         default=str(PROJECT_ROOT / CODEX_HOME_RELATIVE_PATH),
     )
+    parser.add_argument(
+        "--mcp-backend",
+        choices=(HIA_MCP_V2_BACKEND, FXHOUDINI_MCP_BACKEND),
+        default=HIA_MCP_V2_BACKEND,
+    )
     return parser
 
 
@@ -78,6 +117,36 @@ def _same_windows_path(left: Path, right: Path) -> bool:
     return str(left).replace("/", "\\").rstrip("\\").casefold() == str(
         right
     ).replace("/", "\\").rstrip("\\").casefold()
+
+
+def _cache_directory(project_root: Path, configured: str | None) -> Path:
+    """Resolve the single project-local cache root without a drive assumption."""
+
+    resolved_project_root = project_root.resolve()
+    expected = (resolved_project_root / CACHE_RELATIVE_PATH).resolve()
+    try:
+        common = Path(os.path.commonpath((str(resolved_project_root), str(expected))))
+    except ValueError as exc:
+        raise BridgeError("INVALID_CACHE_DIR", "HIA_CACHE_DIR escaped the project") from exc
+    if not _same_windows_path(common, resolved_project_root):
+        raise BridgeError("INVALID_CACHE_DIR", "HIA_CACHE_DIR escaped the project")
+    if configured is None:
+        return expected
+    if not isinstance(configured, str) or not configured.strip() or "\x00" in configured:
+        raise BridgeError("INVALID_CACHE_DIR", "HIA_CACHE_DIR is invalid")
+    candidate = Path(configured)
+    if not candidate.is_absolute():
+        raise BridgeError("INVALID_CACHE_DIR", "HIA_CACHE_DIR must be absolute")
+    try:
+        candidate = candidate.resolve()
+    except OSError as exc:
+        raise BridgeError("INVALID_CACHE_DIR", "HIA_CACHE_DIR cannot be resolved") from exc
+    if not _same_windows_path(candidate, expected):
+        raise BridgeError(
+            "INVALID_CACHE_DIR",
+            "HIA_CACHE_DIR must be the project .runtime/cache directory",
+        )
+    return expected
 
 
 def _required_launch_secret(name: str) -> str:
@@ -110,6 +179,60 @@ def _required_bridge_url() -> tuple[str, int]:
             "Bridge URL port is outside the valid range",
         )
     return value, port
+
+
+def _required_loopback_port(name: str) -> int:
+    value = os.environ.get(name, "")
+    if not value.isascii() or not value.isdecimal():
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            f"Required Houdini MCP loopback port is missing or invalid: {name}",
+        )
+    port = int(value)
+    if not 1 <= port <= 65_535:
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "Houdini MCP loopback port is outside the valid range",
+        )
+    return port
+
+
+def _required_houdini_mcp_port() -> int:
+    return _required_loopback_port("HIA_HOUDINI_MCP_PORT")
+
+
+def _required_hia_mcp_v2_environment(project_root: Path) -> dict[str, str]:
+    host = os.environ.get("HIA_MCP_V2_HOST")
+    if host != HIA_MCP_V2_HOST:
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "HIA MCP V2 host must be exactly 127.0.0.1",
+        )
+    port = _required_loopback_port("HIA_MCP_V2_PORT")
+    token = _required_launch_secret("HIA_MCP_V2_TOKEN")
+    route = os.environ.get("HIA_MCP_V2_ROUTE")
+    if route != HIA_MCP_V2_EXECUTE_ROUTE:
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "HIA MCP V2 execute route is missing or invalid",
+        )
+    runtime_directory = os.environ.get("HIA_MCP_V2_RUNTIME_DIR")
+    expected_runtime_directory = project_root / HIA_MCP_V2_RUNTIME_RELATIVE_PATH
+    if not isinstance(runtime_directory, str) or not _same_windows_path(
+        Path(runtime_directory),
+        expected_runtime_directory,
+    ):
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            f"HIA MCP V2 runtime directory must be {expected_runtime_directory}",
+        )
+    return {
+        "HIA_MCP_V2_HOST": host,
+        "HIA_MCP_V2_PORT": str(port),
+        "HIA_MCP_V2_TOKEN": token,
+        "HIA_MCP_V2_ROUTE": route,
+        "HIA_MCP_V2_RUNTIME_DIR": str(expected_runtime_directory),
+    }
 
 
 def _prepend_environment_path(
@@ -184,32 +307,74 @@ def _toml_basic_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
-def _codex_app_server_command(codex_exe: Path, mcp_python: str) -> list[str]:
+def _codex_app_server_command(
+    codex_exe: Path,
+    mcp_python: str,
+    *,
+    backend: str = FXHOUDINI_MCP_BACKEND,
+    project_root: Path = PROJECT_ROOT,
+) -> list[str]:
     """Build the strict, process-local HIA app-server command."""
 
     provider = f"model_providers.{_HIA_CHATGPT_HTTP_PROVIDER_ID}"
-    return [
+    if backend == HIA_MCP_V2_BACKEND:
+        server = f"mcp_servers.{HIA_MCP_V2_SERVER_ID}"
+        mcp_overrides = [
+            f"mcp_servers.{FXHOUDINI_MCP_SERVER_ID}.enabled=false",
+            f"{server}.command=" + _toml_basic_string(mcp_python),
+            f"{server}.args="
+            + json.dumps(["-B", "-m", HIA_MCP_V2_SERVER_ID]),
+            f"{server}.cwd=" + _toml_basic_string(str(project_root)),
+            f"{server}.env_vars="
+            + json.dumps(list(HIA_MCP_V2_CHILD_ENVIRONMENT)),
+            f"{server}.enabled=true",
+            f"{server}.required=true",
+            f"{server}.startup_timeout_sec=15",
+            f"{server}.tool_timeout_sec=65",
+            f"{server}.default_tools_approval_mode="
+            + _toml_basic_string("approve"),
+        ]
+    elif backend == FXHOUDINI_MCP_BACKEND:
+        server = f"mcp_servers.{FXHOUDINI_MCP_SERVER_ID}"
+        mcp_overrides = [
+            f"{server}.command=" + _toml_basic_string(mcp_python),
+            f"{server}.required=true",
+            f"{server}.default_tools_approval_mode="
+            + _toml_basic_string("approve"),
+        ]
+    else:
+        raise BridgeError(
+            "INVALID_MCP_BACKEND",
+            f"Unsupported Houdini MCP backend: {backend}",
+        )
+
+    command = [
         str(codex_exe),
         "app-server",
         "--strict-config",
-        "-c",
-        "mcp_servers.houdini_intelligence.command="
-        + _toml_basic_string(mcp_python),
-        "-c",
-        "mcp_servers.houdini_intelligence.required=true",
-        "-c",
-        "model_provider=" + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_ID),
-        "-c",
-        f"{provider}.name=" + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_NAME),
-        "-c",
-        f"{provider}.base_url=" + _toml_basic_string(_HIA_CHATGPT_HTTP_BASE_URL),
-        "-c",
-        f"{provider}.wire_api=" + _toml_basic_string(_HIA_CHATGPT_HTTP_WIRE_API),
-        "-c",
-        f"{provider}.requires_openai_auth=true",
-        "-c",
-        f"{provider}.supports_websockets=false",
     ]
+    for override in mcp_overrides:
+        command.extend(("-c", override))
+    command.extend(
+        [
+            "-c",
+            "model_provider=" + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_ID),
+            "-c",
+            f"{provider}.name="
+            + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_NAME),
+            "-c",
+            f"{provider}.base_url="
+            + _toml_basic_string(_HIA_CHATGPT_HTTP_BASE_URL),
+            "-c",
+            f"{provider}.wire_api="
+            + _toml_basic_string(_HIA_CHATGPT_HTTP_WIRE_API),
+            "-c",
+            f"{provider}.requires_openai_auth=true",
+            "-c",
+            f"{provider}.supports_websockets=false",
+        ]
+    )
+    return command
 
 
 def _validated_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
@@ -253,8 +418,38 @@ def run(argv: Sequence[str] | None = None) -> int:
     sensitive_values: list[str] = []
     try:
         project_root, codex_exe, codex_home, temp_directory = _validated_paths(args)
+        backend = args.mcp_backend
         codex_home.mkdir(parents=True, exist_ok=True)
         temp_directory.mkdir(parents=True, exist_ok=True)
+        cache_directory = _cache_directory(
+            project_root,
+            os.environ.get("HIA_CACHE_DIR"),
+        )
+        configured_focus_state = os.environ.get("HIA_FOCUS_STATE_PATH", "")
+        focus_state_path = validate_project_subpath(
+            configured_focus_state,
+            project_root=project_root,
+        )
+        expected_focus_state = project_root / FOCUS_STATE_RELATIVE_PATH
+        if not _same_windows_path(focus_state_path, expected_focus_state):
+            raise BridgeError(
+                "INVALID_FOCUS_STATE_PATH",
+                f"HIA_FOCUS_STATE_PATH must be {expected_focus_state}",
+            )
+        configured_render_output = os.environ.get("HIA_RENDER_OUTPUT_DIR")
+        render_output_directory = (
+            configured_render_output.strip()
+            if isinstance(configured_render_output, str)
+            and configured_render_output.strip()
+            else str(cache_directory)
+        )
+        for directory in (
+            cache_directory,
+            cache_directory / "screenshots",
+            cache_directory / "previews",
+            cache_directory / "tmp",
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
 
         token = _required_launch_secret("HIA_BRIDGE_TOKEN")
         sensitive_values.append(token)
@@ -273,18 +468,68 @@ def run(argv: Sequence[str] | None = None) -> int:
         policy = ProtocolPolicy.from_project_root(project_root)
         child_environment = _allowlisted_child_environment(os.environ)
         resolved_python = str(Path(sys.executable).resolve())
-        _prepend_environment_path(
-            child_environment,
-            "PATH",
-            (Path(resolved_python).parent,),
-        )
+        resolved_python_path = Path(resolved_python)
+        if not resolved_python_path.is_absolute() or not resolved_python_path.is_file():
+            raise BridgeError(
+                "INVALID_CODEX_EXECUTABLE",
+                "The active Bridge Python executable is not an absolute existing file",
+            )
+
+        if backend == HIA_MCP_V2_BACKEND:
+            hia_service_root = validate_project_subpath(
+                project_root / HIA_MCP_V2_SERVICE_RELATIVE_PATH,
+                project_root=project_root,
+            )
+            if not (
+                hia_service_root / "hia_mcp_v2" / "__main__.py"
+            ).is_file():
+                raise BridgeError(
+                    "HIA_MCP_V2_MISSING",
+                    "Project-local HIA MCP V2 stdio package is incomplete",
+                )
+            hia_environment = _required_hia_mcp_v2_environment(project_root)
+            houdini_mcp_token = hia_environment["HIA_MCP_V2_TOKEN"]
+            houdini_mcp_port = int(hia_environment["HIA_MCP_V2_PORT"])
+            sensitive_values.append(houdini_mcp_token)
+            mcp_python = resolved_python
+            path_entries = (resolved_python_path.parent,)
+            python_path_entries = (hia_service_root, project_root / "src")
+            mcp_environment = hia_environment
+        else:
+            fx_mcp_python = validate_project_subpath(
+                project_root / FXHOUDINI_MCP_PYTHON_RELATIVE_PATH,
+                project_root=project_root,
+            )
+            fx_mcp_source = validate_project_subpath(
+                project_root / FXHOUDINI_MCP_SOURCE_RELATIVE_PATH,
+                project_root=project_root,
+            )
+            if not fx_mcp_python.is_file() or not fx_mcp_source.is_dir():
+                raise BridgeError(
+                    "FXHOUDINIMCP_MISSING",
+                    "Project-local fxhoudinimcp 1.3.0 runtime is incomplete",
+                )
+            houdini_mcp_token = _required_launch_secret("FXHOUDINIMCP_TOKEN")
+            houdini_mcp_port = _required_houdini_mcp_port()
+            sensitive_values.append(houdini_mcp_token)
+            mcp_python = str(fx_mcp_python)
+            path_entries = (fx_mcp_python.parent, resolved_python_path.parent)
+            python_path_entries = (
+                project_root / "services" / "houdini_mcp",
+                fx_mcp_source,
+                project_root / "src",
+            )
+            mcp_environment = {
+                "HOUDINI_HOST": "127.0.0.1",
+                "HOUDINI_PORT": str(houdini_mcp_port),
+                "FXHOUDINIMCP_TOKEN": houdini_mcp_token,
+            }
+
+        _prepend_environment_path(child_environment, "PATH", path_entries)
         _prepend_environment_path(
             child_environment,
             "PYTHONPATH",
-            (
-                project_root / "services" / "houdini_mcp",
-                project_root / "src",
-            ),
+            python_path_entries,
         )
         child_environment.update(
             {
@@ -294,18 +539,32 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONNOUSERSITE": "1",
                 "HIA_PROJECT_ROOT": str(project_root),
+                "HIA_CACHE_DIR": str(cache_directory),
+                "HIA_RENDER_OUTPUT_DIR": render_output_directory,
                 "HIA_EXPECTED_PYTHON_EXE": resolved_python,
+                **mcp_environment,
             }
         )
         events = EventBuffer()
         client = CodexStdioClient(
-            _codex_app_server_command(codex_exe, resolved_python),
+            _codex_app_server_command(
+                codex_exe,
+                mcp_python,
+                backend=backend,
+                project_root=project_root,
+            ),
             cwd=project_root,
             environment=child_environment,
             policy=policy,
             request_timeout=45.0,
         )
-        session = BridgeSession(project_root, client, events)
+        session = BridgeSession(
+            project_root,
+            client,
+            events,
+            mcp_backend=backend,
+            focus_state_path=focus_state_path,
+        )
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
         houdini_process_nonce = f"houdini-{secrets.token_hex(16)}"
@@ -327,6 +586,9 @@ def run(argv: Sequence[str] | None = None) -> int:
             scene_queue=scene_queue,
             scene_registry=scene_registry,
             scene_executor_token=scene_executor_token,
+            houdini_mcp_port=houdini_mcp_port,
+            houdini_mcp_token=houdini_mcp_token,
+            houdini_mcp_backend=backend,
         )
         server = LoopbackHTTPServer(
             ("127.0.0.1", requested_bridge_port),
@@ -366,6 +628,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             "codex_pid": client.process_id,
             "codex_version": policy.version,
             "transport": "stdio-jsonl",
+            "mcp_backend": backend,
             "scene": {
                 "profile": "p2-v-b2-read-only",
                 "launch_id": scene_launch_id,

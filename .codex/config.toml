@@ -1,10 +1,10 @@
 [mcp_servers.houdini_intelligence]
-command = 'D:\Python_3.10\python.exe'
-args = ['-B', '-m', 'hia_houdini_mcp.stdio']
-cwd = 'E:\houdini-intelligence-agent'
+command = '.runtime\fxhoudinimcp\1.3.0\venv\Scripts\python.exe'
+args = ['-B', '-m', 'fxhoudinimcp']
+cwd = '.'
 enabled = true
 required = false
-startup_timeout_sec = 5
+startup_timeout_sec = 15
 tool_timeout_sec = 65
 env_vars = [
     'PATH',
@@ -12,18 +12,11 @@ env_vars = [
     'PYTHONDONTWRITEBYTECODE',
     'PYTHONNOUSERSITE',
     'TEMP',
-    'TMP',
-    'HIA_PROJECT_ROOT',
-    'HIA_EXPECTED_PYTHON_EXE',
-    'HIA_BRIDGE_URL',
-    'HIA_BRIDGE_TOKEN',
-]
-enabled_tools = [
-    'houdini_scene_info',
-    'houdini_node_type_info',
-]
-disabled_tools = [
-    'houdini_graph_validate',
-    'houdini_graph_apply',
-    'houdini_graph_verify',
+  'TMP',
+  'HIA_PROJECT_ROOT',
+  'HIA_CACHE_DIR',
+  'HIA_EXPECTED_PYTHON_EXE',
+    'HOUDINI_HOST',
+    'HOUDINI_PORT',
+    'FXHOUDINIMCP_TOKEN',
 ]

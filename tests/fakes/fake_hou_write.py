@@ -13,6 +13,7 @@ import copy
 import threading
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 
@@ -167,6 +168,13 @@ class FakeMutation:
     thread_id: int
 
 
+@dataclass(frozen=True)
+class FakeNodeEventType:
+    """Identity-stable HOM-like node-event enum used by strict B4B tests."""
+
+    name: str
+
+
 class FakeNodeType:
     def __init__(self, resolved_name: str) -> None:
         self._resolved_name = resolved_name
@@ -257,6 +265,7 @@ class FakeNode:
         self._user_data: dict[str, str] = {}
         self._destroyed = False
         self._parameter_values: dict[str, Any] = {}
+        self._callbacks: list[tuple[tuple[Any, ...], Any]] = []
         for parm_name, parm_spec in _parameter_specs(self._catalog_entry).items():
             default = parm_spec.get("default")
             if default is None:
@@ -310,11 +319,38 @@ class FakeNode:
         self._owner._record("node.children", self._path)
         return tuple(self._children)
 
+    def addEventCallback(
+        self, event_types: tuple[Any, ...], callback: Any
+    ) -> None:
+        self._owner._record("node.add_event_callback", self._path)
+        if self._owner.reject_observer_paths and self._path in self._owner.reject_observer_paths:
+            raise RuntimeError("injected fake observer registration failure")
+        entry = (tuple(event_types), callback)
+        if entry not in self._callbacks:
+            self._callbacks.append(entry)
+
+    def removeEventCallback(
+        self, event_types: tuple[Any, ...], callback: Any
+    ) -> None:
+        self._owner._record("node.remove_event_callback", self._path)
+        expected = (tuple(event_types), callback)
+        self._callbacks = [item for item in self._callbacks if item != expected]
+
+    def eventCallbacks(self) -> tuple[tuple[tuple[Any, ...], Any], ...]:
+        self._owner._record("node.event_callbacks", self._path)
+        if self._path in self._owner.tamper_observer_readback_paths:
+            return ()
+        return tuple(self._callbacks)
+
+    def _emit(self, event_type: Any, **event_details: Any) -> None:
+        self._owner._emit_node_event(self, event_type, event_details)
+
     def createNode(
         self,
         node_type_name: str,
         node_name: str | None = None,
         run_init_scripts: bool = True,
+        exact_type_name: bool = False,
     ) -> "FakeNode":
         self._assert_live()
         self._owner._assert_mutation_allowed("createNode")
@@ -337,14 +373,18 @@ class FakeNode:
             node_type_name,
             entry,
         )
+        if self._owner.coupled_display_flag_events and self._path != "/obj" and not self._children:
+            child._display = True
         self._children.append(child)
         self._owner._registry[child_path] = child
+        self._emit(self._owner.nodeEventType.ChildCreated, child_node=child)
         self._owner._mutate(
             "createNode",
             child_path,
             self,
             node_type_name,
             bool(run_init_scripts),
+            bool(exact_type_name),
         )
         phase = "create_root" if self._path == "/obj" else "create_nodes"
         self._owner._note_phase_mutation(phase)
@@ -390,6 +430,10 @@ class FakeNode:
         self._owner._mutate(
             "setParm", self._path, self, name, copy.deepcopy(stored)
         )
+        self._emit(
+            self._owner.nodeEventType.ParmTupleChanged,
+            parm_tuple=self.parmTuple(name),
+        )
         self._owner._note_phase_mutation("set_parameters")
 
     def setInput(
@@ -417,6 +461,10 @@ class FakeNode:
             input_index,
             source_path,
             output_index,
+        )
+        self._emit(
+            self._owner.nodeEventType.InputRewired,
+            input_index=input_index,
         )
         self._owner._note_phase_mutation("connect_nodes")
 
@@ -455,9 +503,49 @@ class FakeNode:
     def setDisplayFlag(self, value: bool) -> None:
         self._assert_live()
         self._owner._assert_mutation_allowed("setDisplayFlag")
+        desired = bool(value)
+        if (
+            self._owner.coupled_display_flag_events
+            and self._parent is not None
+            and self._display is not desired
+        ):
+            changed_siblings: list[FakeNode] = []
+            switched = self
+            if desired:
+                for sibling in self._parent._children:
+                    if sibling is not self and sibling._display:
+                        sibling._display = False
+                        changed_siblings.append(sibling)
+            else:
+                candidates = [
+                    sibling for sibling in self._parent._children if sibling is not self
+                ]
+                if candidates:
+                    switched = candidates[-1]
+                    if not switched._display:
+                        switched._display = True
+                        changed_siblings.append(switched)
+            if "display_flag" not in self._owner.tamper_hooks:
+                self._display = desired
+            self._owner._mutate("setDisplayFlag", self._path, self, desired)
+            self._parent._emit(
+                self._owner.nodeEventType.ChildSwitched,
+                child_node=switched,
+            )
+            for sibling in changed_siblings:
+                sibling._emit(self._owner.nodeEventType.FlagChanged)
+            self._emit(self._owner.nodeEventType.FlagChanged)
+            self._owner._note_phase_mutation("set_flags_layout")
+            return
         if "display_flag" not in self._owner.tamper_hooks:
-            self._display = bool(value)
-        self._owner._mutate("setDisplayFlag", self._path, self, bool(value))
+            self._display = desired
+        self._owner._mutate("setDisplayFlag", self._path, self, desired)
+        self._emit(self._owner.nodeEventType.FlagChanged)
+        if self._parent is not None:
+            self._parent._emit(
+                self._owner.nodeEventType.ChildSwitched,
+                child_node=self,
+            )
         self._owner._note_phase_mutation("set_flags_layout")
 
     def isDisplayFlagSet(self) -> bool:
@@ -470,6 +558,12 @@ class FakeNode:
         if "render_flag" not in self._owner.tamper_hooks:
             self._render = bool(value)
         self._owner._mutate("setRenderFlag", self._path, self, bool(value))
+        self._emit(self._owner.nodeEventType.FlagChanged)
+        if self._parent is not None:
+            self._parent._emit(
+                self._owner.nodeEventType.ChildSwitched,
+                child_node=self,
+            )
         self._owner._note_phase_mutation("set_flags_layout")
 
     def isRenderFlagSet(self) -> bool:
@@ -483,6 +577,7 @@ class FakeNode:
         self._owner._mutate(
             "setUserData", self._path, self, str(key), str(value)
         )
+        self._emit(self._owner.nodeEventType.CustomDataChanged)
 
     def userData(self, key: str) -> str | None:
         self._owner._record("node.user_data", self._path)
@@ -513,6 +608,11 @@ class FakeNode:
             raise RuntimeError("fake node parent identity mismatch")
         for child in tuple(self._children):
             child._destroy_exact()
+        self._emit(self._owner.nodeEventType.BeingDeleted)
+        self._parent._emit(
+            self._owner.nodeEventType.ChildDeleted,
+            child_node=self,
+        )
         self._parent._children.remove(self)
         if not self._owner.destroy_retains_registry:
             self._owner._registry.pop(self._path, None)
@@ -525,6 +625,14 @@ class FakeNode:
     def _destroy_exact(self) -> None:
         for child in tuple(self._children):
             child._destroy_exact()
+        self._emit(self._owner.nodeEventType.BeingDeleted)
+        if self._parent is not None:
+            self._parent._emit(
+                self._owner.nodeEventType.ChildDeleted,
+                child_node=self,
+            )
+            if self in self._parent._children:
+                self._parent._children.remove(self)
         if self._owner._registry.get(self._path) is self:
             self._owner._registry.pop(self._path, None)
         self._destroyed = True
@@ -593,6 +701,7 @@ class FakeHouWrite:
         undo_failure_point: str | None = None,
         create_node_failure_after_registration: int | None = None,
         path_equality: bool = False,
+        coupled_display_flag_events: bool = False,
     ) -> None:
         if failure_phase is not None and failure_phase not in MUTATION_PHASES:
             raise ValueError("unknown fake failure phase")
@@ -623,7 +732,47 @@ class FakeHouWrite:
         self.create_node_failure_after_registration = (
             create_node_failure_after_registration
         )
+        event_names = (
+            "BeingDeleted",
+            "FlagChanged",
+            "NameChanged",
+            "AppearanceChanged",
+            "PositionChanged",
+            "InputRewired",
+            "ParmTupleChanged",
+            "ParmTupleAnimated",
+            "ParmTupleChannelChanged",
+            "ParmTupleLockChanged",
+            "ChildCreated",
+            "ChildDeleted",
+            "ChildReordered",
+            "ChildSwitched",
+            "NetworkBoxCreated",
+            "NetworkBoxChanged",
+            "NetworkBoxDeleted",
+            "StickyNoteCreated",
+            "StickyNoteChanged",
+            "StickyNoteDeleted",
+            "IndirectInputCreated",
+            "IndirectInputRewired",
+            "IndirectInputDeleted",
+            "SpareParmTemplatesChanged",
+            "CustomDataChanged",
+        )
+        self.nodeEventType = SimpleNamespace(
+            **{name: FakeNodeEventType(name) for name in event_names}
+        )
+        self.reject_observer_paths: set[str] = set()
+        self.tamper_observer_readback_paths: set[str] = set()
+        self.suppressed_event_operations: set[str] = set()
+        self.event_type_overrides: dict[str, Any] = {}
+        self.event_source_overrides: dict[str, FakeNode] = {}
+        self.deferred_event_operations: set[str] = set()
+        self._deferred_node_events: list[
+            tuple[FakeNode, Any, dict[str, Any]]
+        ] = []
         self.path_equality = bool(path_equality)
+        self.coupled_display_flag_events = bool(coupled_display_flag_events)
         self._create_node_registrations = 0
         self._mutation_callback = mutation_callback
         self._triggered_failures: set[tuple[str, str]] = set()
@@ -692,6 +841,39 @@ class FakeHouWrite:
         self.mutation_log.append(mutation)
         if self._mutation_callback is not None:
             self._mutation_callback(mutation)
+
+    def _emit_node_event(
+        self,
+        source: FakeNode,
+        event_type: Any,
+        event_details: Mapping[str, Any],
+    ) -> None:
+        operation = event_type.name
+        if operation in self.suppressed_event_operations:
+            return
+        emitted_type = self.event_type_overrides.get(operation, event_type)
+        emitted_source = self.event_source_overrides.get(operation, source)
+        payload = dict(event_details)
+        if operation in self.deferred_event_operations:
+            self._deferred_node_events.append(
+                (emitted_source, emitted_type, payload)
+            )
+            return
+        for event_types, callback in tuple(source._callbacks):
+            if emitted_type in event_types:
+                callback(
+                    node=emitted_source,
+                    event_type=emitted_type,
+                    **payload,
+                )
+
+    def flush_deferred_events(self) -> None:
+        pending = tuple(self._deferred_node_events)
+        self._deferred_node_events.clear()
+        for source, event_type, details in pending:
+            for event_types, callback in tuple(source._callbacks):
+                if event_type in event_types:
+                    callback(node=source, event_type=event_type, **details)
 
     def _assert_mutation_allowed(self, operation: str) -> None:
         if not self._undo_active:
@@ -785,6 +967,14 @@ class FakeHouWrite:
         )
         return replacement
 
+    def duplicate_node_wrapper(self, path: str) -> FakeNode:
+        """Return another Python wrapper for the same fake HOM node identity."""
+
+        original = self._registry[path]
+        duplicate = object.__new__(FakeNode)
+        duplicate.__dict__ = original.__dict__.copy()
+        return duplicate
+
     def seed_preexisting_child(
         self,
         parent_path: str,
@@ -864,6 +1054,7 @@ __all__ = [
     "FakeHouWrite",
     "FakeMutation",
     "FakeNode",
+    "FakeNodeEventType",
     "FakeNodeType",
     "FakeParm",
     "FakeParmTuple",

@@ -2,9 +2,9 @@
 
 ## Status and authorization boundary
 
-Gate B0, Gate B1, Gate B2, and Gate B3 are complete. Gate B2C closed the real pinned-Codex-to-stdio-MCP-to-authenticated-Bridge-to-Panel read chain at commit `edf7f3a`; the direct HTTPS transport hotfix closed at commit `3213625`; Gate B3 closed at commit `862defff`. Gate B4A is authorized only for one dormant dependency-injected HOM graph write adapter and fake-HOM tests.
+Gate B0 through Gate B4A are complete. Gate B2C closed the real pinned-Codex-to-stdio-MCP-to-authenticated-Bridge-to-Panel read chain at commit `edf7f3a`; the direct HTTPS transport hotfix closed at commit `3213625`; Gate B3 closed at commit `862defff`; and Gate B4A closed at commit `0b3b5a51c0ad95aee382794d74852d2d541bf880`. Gate B4B is authorized only for the frozen stairs fixture, one local live Apply, and one user-triggered Undo in a blank unsaved disposable HIP.
 
-Production registration remains limited to `houdini_scene_info` and `houdini_node_type_info`. The B4A adapter is never imported, constructed, registered, or called by production. Gate B4B, every real scene write, real `hou`, Houdini GUI, hython, and the live MCP/Bridge/app-server chain remain unauthorized.
+Production registration remains limited to `houdini_scene_info` and `houdini_node_type_info`. The B4B controller is reachable only from its dedicated manually opened Python Panel; it is never imported or called by the normal Panel, MCP server, Bridge, app-server, launcher, or configuration. The production graph tools and every later Gate remain unauthorized.
 
 ## Acceptance claim
 
@@ -20,7 +20,7 @@ Passing Schema tests alone does not prove live Houdini behavior. Evidence is acc
 | Fake MCP client and fake Panel gateway | End-to-end correlation, approval, timeout, and error mapping | None |
 | Injected B4A fake-HOM | Low-level HOM calls, catalog translation, postconditions, Undo-group boundary, and rollback containment | Simulated only |
 | Houdini read-only probe | Runtime version, node-type, parameter, and main-thread capability discovery | None |
-| Future B4B blank unsaved disposable HIP | One selected graph apply and one manual Undo | One separately approved container |
+| B4B dedicated local Panel in a blank unsaved disposable HIP | Frozen stairs graph, one Apply, one user-triggered Undo | One exact `/obj/HIA_Graph_stairs_demo` container |
 
 No test saves or overwrites a HIP, writes an HDA, renders, installs a package, modifies Houdini preferences, or writes outside `E:\houdini-intelligence-agent`. Runtime records, if later approved, remain below `.runtime`.
 
@@ -191,35 +191,34 @@ The user performs this finite test after the complete offline suite passes:
 
 The screenshots and observations from this manual run are user evidence. They must not be described as an automated Houdini test.
 
-## Future Gate B4B: single live Houdini write acceptance (not authorized)
+## Gate B4B: one-shot local live Houdini acceptance
 
-Completion of B4A does not authorize B4B. Before B4B, show one selected fixture, the exact blank unsaved disposable HIP state, graph request, node names, parameters, connections, and owned-root rollback scope, then obtain a separate approval.
+The only live fixture is `tests/fixtures/p2_v/stairs_graph.json`, whose normalized digest is `0a9cf0fd98882d8916dcdd9edda77655e93d9bde2857409581b0eb54f65290c4`. The test uses the dedicated `HIA Gate B4B Stairs Acceptance` Python Panel. It does not expose or call a production graph MCP tool.
 
-### Baseline evidence
+### Offline entry tests
 
-1. Use one blank unsaved disposable scene and record `hip_session_id`, scene revision, `/obj` structural fingerprint, selection, current node, and all pre-existing node paths.
-2. Verify the requested container name does not exist.
-3. Before any production write path can be enabled, the separately approved B4B acceptance must capture live capability-probe evidence for observer installation on newly created nodes and actual event coverage of the exact HOM mutations exercised by its one selected apply and manual Undo, including `createNode`, `setUserData`, typed parameter, connection, flag, and destruction calls. Record which events and callback-source identities the active build really delivers. If reliable coverage cannot be proven from that bounded acceptance, stop and request a separate scope; do not infer reliability from B4A fake events or add extra mutations under the existing B4B approval.
-4. Display the exact approval payload and obtain one decision.
+1. Parse the fixture with bounded strict JSON, normalize it, validate the frozen `0.1.0` relations, and reject any digest or target-name change.
+2. Prove the controller imports no live `hou`, Qt, network client, subprocess, environment configuration, save, cook, render, cache, HDA, automatic Undo, or Redo path. Only the `.pypanel` entry imports `hou` and injects it.
+3. Use fake-HOM to prove prepare is read-only and UI-main-thread-only; the HIP must be new, clean, empty under `/obj`, unselected, and missing the target.
+4. Require the complete normalized graph, side-effect summary, exact request digest, approval payload/binding digest, build, session, revision, dirty state, `/obj` fingerprint, selection, and current node in the displayed report.
+5. Traverse the existing `SceneQueue` submit -> approval presentation -> allow -> claim -> one-use binding -> writer -> completion path. The fake attestation is labeled as a local ledger envelope, not live evidence.
+6. Consume the process latch before the Apply boundary. A denied, failed, expired, or successful attempt cannot be retried, and closing/reopening the Panel cannot reset it.
+7. Require verified observer installation on `/obj`, the exact root, and all five exact children. Each exercised create, ownership metadata, parameter, connection, and flag operation must have one matching strict mutation record; a changed operation must have a matching main-thread event, while a true flag no-op must be recorded without fabricated callback evidence.
+8. Preserve a read-only manual-cleanup path if an actual root exists after incomplete acceptance evidence. Cleanup success must not be reported as Gate success.
+9. After the fake user Undo, reject absent exact `/obj` `ChildDeleted` root evidence, any unknown event source/subject, any retained declared path, or any baseline identity/fingerprint/selection/current/session discrepancy.
 
-### One selected fixture
+### User-run live sequence
 
-1. Select exactly one of the reviewed table or stairs fixtures. Record that Codex native reasoning, not a hard-coded prompt mapper or object-specific tool, produced the general graph request.
-2. Run `houdini_graph_validate` and record its normalized graph, bounded summary, and canonical digest. Assert the read-only operation changes neither the scene fingerprint nor revision.
-3. Display and approve the complete normalized graph. Submit the unchanged graph and digest to `houdini_graph_apply`.
-4. Assert one new `/obj/HIA_Graph_<id>` exists and its live nodes, names, typed parameters, connections, display/render flags, cook status, and graph digest exactly match the normalized declaration. No pre-existing node may appear in `changed_nodes`.
-5. Run `houdini_graph_verify` and require it to agree with the validate/apply digest and report no undeclared node, parameter, connection, or flag.
-6. Require no node error from the selected fixture's ordinary result; do not add a caller-selected force-cook step.
-7. Assert the scene revision advances exactly once for the apply and remains unchanged for validate/verify reads.
+1. Start Houdini manually with the existing project launcher; create a new blank unsaved HIP and leave `/obj` empty with no node selected. Do not start a second Houdini process for the same acceptance.
+2. Open `HIA Gate B4B Stairs Acceptance`. Click `Prepare（只读）` once. Confirm the live build/session/revision/dirty state, `/obj` fingerprint, selection/current node, target `/obj/HIA_Graph_stairs_demo`, full normalized graph, digest, parameters, five connections, flags, side-effect summary, request digest, and approval-binding digest.
+3. Confirm that the catalog resolves `Object/geo`, `Sop/box`, `Sop/transform` to `xform`, `Sop/merge`, and `Sop/null`, with only the fixture-required safe parameters. If capability or callback readback is unavailable, stop; do not add a probe write.
+4. Tick the exact-review checkbox and click `Apply 一次（不可重试）` exactly once. Do not close/reopen the pane to attempt another Apply.
+5. The passing branch requires state `WAIT_MANUAL_UNDO`, `manual_undo_required=true`, `ok=true`, revision exactly baseline plus one, one exact root, five exact children, five exact connections, exact typed values/flags/digest, no root/child errors, no extra/external content, unchanged selection/current node, and complete matched event evidence. If the exact root remains but strict acceptance or ledger evidence is incomplete, require the fail-closed cleanup branch `WAIT_MANUAL_UNDO`, `manual_undo_required=true`, `ok=false`; do not treat it as Gate success and do not attempt Apply again.
+6. In either retained-root branch, press Ctrl+Z manually exactly once. Do not use Redo. Click `Verify Manual Undo（只读）`.
+7. For the passing branch, require state `VERIFIED`, the exact root and all child paths absent, baseline `/obj` identity/fingerprint, selection/current node and HIP session restored, the HIP still new and unsaved, exact root-deletion evidence, and no unrelated journal source. For the fail-closed cleanup branch, require cleanup restoration but final state/result must remain failed; cleanup success must not be reported as Gate acceptance.
+8. Confirm no HIP save, forced cook, render, cache, HDA, external file, network service, or production graph tool was used.
 
-### Undo and isolation
-
-- Invoke one Houdini Undo manually and verify the entire new container disappears.
-- Verify all pre-existing node paths, types, parameters, connections, flags, selection, and current-node state match the baseline.
-- Redo is not required for P2-V and must not be invoked automatically.
-- Verify the HIP was not saved, its on-disk timestamp was not changed, and no HDA, render, cache, or external file was created.
-
-Do not replay the apply, run a second fixture, or deliberately inject the full B4A conflict, cancellation, timeout, rollback, or destructive failure matrix in real Houdini during B4B.
+Do not replay Apply, run the table or any second fixture, invoke Redo, or inject the B4A destructive failure matrix in real Houdini. A successful B4B run does not verify the writer's real `root.destroy()` rollback path.
 
 ## B4A offline structured error matrix
 
@@ -243,7 +242,7 @@ The B4A review package must contain:
 - For B2C, the exact two-tool `tools/list`, sanitized real read results, bounded Panel-loss result, and before/after no-change evidence.
 - Explicitly unverified real Houdini Undo, cook, callback, rollback, and version-compatibility claims.
 
-A later separately approved B4B report must add the exact Houdini build/catalog plus before/apply/Undo scene fingerprints, revision sequence, selected created-node list, and actual manual outcomes.
+The current user-run B4B report must add the exact Houdini build/catalog plus before/apply/Undo scene fingerprints, revision sequence, selected created-node list, strict event journal, and actual manual outcomes.
 
 Screenshots are optional supporting evidence and never substitute for `hou`-derived verification.
 
@@ -258,4 +257,12 @@ Screenshots are optional supporting evidence and never substitute for `hou`-deri
 - Existing tests and the complete offline suite remain green; `git diff --check` passes.
 - Production `.codex/config.toml`, launcher, app-server lifecycle, `stdio.main()`, Bridge, and Panel dispatch remain unchanged. Production `tools/list` contains exactly the two read tools, registers zero graph tools, and no production file imports or constructs the adapter.
 - B4A source imports neither real `hou` nor Qt and exposes no save/cook/render/cache/HDA/arbitrary-code or external-call product capability. No real service or Houdini process is started and no real HIP is modified; fake thread/clock tests are not evidence about live HOM scheduling or timing.
-- The staging area remains empty and all B4A changes remain uncommitted until the user explicitly approves a commit. Passing B4A does not authorize B4B or any live write.
+- At B4A exit, the staging area remained empty and all B4A changes stayed uncommitted until the user explicitly approved commit `0b3b5a51c0ad95aee382794d74852d2d541bf880`. B4A completion did not itself authorize B4B or any live write; the current one-shot B4B authorization is separate.
+
+## Gate B4B offline implementation exit criteria
+
+- The dedicated Panel and controller are the only new live entry; the normal Panel, MCP, Bridge, app-server, launcher, configuration, frozen Schema, and fixtures are unchanged.
+- The controller permits only the frozen stairs digest and exact target, uses the existing queue/approval/claim/binding/writer path, consumes one process latch, and never calls Undo/Redo or starts Houdini automatically.
+- Strict fake-HOM tests prove observer readback, new-node attachment, zero/wrong/late/off-main failure, bounded journal, complete mutation-operation coverage, one revision advance, exact postcondition checks, one-shot behavior, and manual-Undo cleanup verification.
+- Full standard-library tests and `git diff --check` pass; the staging area remains empty and all B4B files remain uncommitted.
+- Real Houdini build, event ordering, `setUserData` event delivery, wrapper identity stability, one live Apply, and one user-triggered Undo remain explicitly unverified until the user completes the finite GUI sequence above.
