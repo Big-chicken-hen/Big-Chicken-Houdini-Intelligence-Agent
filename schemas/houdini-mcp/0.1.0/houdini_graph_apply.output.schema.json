@@ -1,0 +1,370 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hia:houdini-mcp:0.1.0:houdini_graph_apply:output",
+  "title": "houdini_graph_apply output",
+  "description": "Structured result for one generic HIA-owned graph transaction. No object semantics are encoded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "request_id",
+    "thread_id",
+    "turn_id",
+    "hip_session_id",
+    "base_scene_revision",
+    "idempotency_key",
+    "scene_revision",
+    "result",
+    "warnings",
+    "structured_error"
+  ],
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "request_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "thread_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "turn_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "hip_session_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "base_scene_revision": {
+      "$ref": "#/$defs/sceneRevision"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotencyKey"
+    },
+    "scene_revision": {
+      "$ref": "#/$defs/sceneRevision"
+    },
+    "result": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/applyResult"
+        }
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/message"
+      }
+    },
+    "structured_error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/error"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["ok"],
+        "properties": { "ok": { "const": true } }
+      },
+      "then": {
+        "properties": {
+          "result": { "$ref": "#/$defs/applyResult" },
+          "structured_error": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": { "type": "null" },
+          "structured_error": { "$ref": "#/$defs/error" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$"
+    },
+    "sceneRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "detailEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "value"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+            },
+            {
+              "type": "number",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            { "type": "boolean" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID_ARGUMENT",
+            "SCHEMA_INVALID",
+            "NODE_TYPE_NOT_ALLOWED",
+            "NODE_TYPE_UNAVAILABLE",
+            "PARAMETER_NOT_ALLOWED",
+            "PARAMETER_TYPE_MISMATCH",
+            "PATH_SCOPE_VIOLATION",
+            "GRAPH_INVALID",
+            "TOPOLOGY_NOT_ALLOWED",
+            "DIGEST_MISMATCH",
+            "APPROVAL_REQUIRED",
+            "APPROVAL_DENIED",
+            "APPROVAL_MISMATCH",
+            "APPROVAL_EXPIRED",
+            "DEADLINE_EXCEEDED",
+            "HIP_SESSION_MISMATCH",
+            "SCENE_CONFLICT",
+            "IDEMPOTENCY_CONFLICT",
+            "NAME_CONFLICT",
+            "MAIN_THREAD_REQUIRED",
+            "CAPABILITY_MISMATCH",
+            "HOUDINI_UNAVAILABLE",
+            "WRITE_IN_PROGRESS",
+            "GRAPH_NOT_FOUND",
+            "OWNERSHIP_MISMATCH",
+            "COOK_FAILED",
+            "VERIFY_FAILED",
+            "POSTCONDITION_FAILED",
+            "ROLLBACK_FAILED",
+            "SCENE_STATE_INDETERMINATE",
+            "BRIDGE_DISCONNECTED",
+            "INTERNAL_ERROR"
+          ]
+        },
+        "message": {
+          "$ref": "#/$defs/message"
+        },
+        "details": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/detailEntry"
+          }
+        }
+      }
+    },
+    "graphPath": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 160,
+      "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}$"
+    },
+    "createdNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_local_id",
+        "path",
+        "context",
+        "resolved_type"
+      ],
+      "properties": {
+        "request_local_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(root|[a-z][a-z0-9_]{0,63})$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 320,
+          "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}(?:/[A-Za-z][A-Za-z0-9_]{0,63})?$"
+        },
+        "context": {
+          "type": "string",
+          "enum": [
+            "Object",
+            "Sop"
+          ]
+        },
+        "resolved_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "undoTransaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "opened",
+        "committed"
+      ],
+      "properties": {
+        "label": {
+          "const": "HIA: Apply Graph"
+        },
+        "opened": {
+          "type": "boolean"
+        },
+        "committed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempted",
+        "complete",
+        "retained_paths"
+      ],
+      "properties": {
+        "attempted": {
+          "type": "boolean"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "retained_paths": {
+          "type": "array",
+          "maxItems": 129,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320,
+            "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}(?:/[A-Za-z][A-Za-z0-9_]{0,63})?$"
+          }
+        }
+      }
+    },
+    "applyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_path",
+        "canonical_graph_digest",
+        "approval_binding_digest",
+        "replay",
+        "revision_before",
+        "revision_after",
+        "created_nodes",
+        "changed_nodes",
+        "undo_transaction",
+        "rollback",
+        "artifacts",
+        "job_id"
+      ],
+      "properties": {
+        "root_path": {
+          "$ref": "#/$defs/graphPath"
+        },
+        "canonical_graph_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "approval_binding_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "replay": {
+          "type": "boolean"
+        },
+        "revision_before": {
+          "$ref": "#/$defs/sceneRevision"
+        },
+        "revision_after": {
+          "$ref": "#/$defs/sceneRevision"
+        },
+        "created_nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 129,
+          "items": {
+            "$ref": "#/$defs/createdNode"
+          }
+        },
+        "changed_nodes": {
+          "type": "array",
+          "maxItems": 129,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320,
+            "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}(?:/[A-Za-z][A-Za-z0-9_]{0,63})?$"
+          }
+        },
+        "undo_transaction": {
+          "$ref": "#/$defs/undoTransaction"
+        },
+        "rollback": {
+          "$ref": "#/$defs/rollback"
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "job_id": {
+          "type": "null"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="houdini_intelligence" label="Big-Chicken Houdini Intelligence Agent" icon="MISC_python">
+    <script><![CDATA[from hia_panel.panel import HoudiniIntelligencePanel
+
+
+def onCreateInterface():
+    # Import Houdini only inside its Python Panel environment for live status.
+    import hou
+
+    return HoudiniIntelligencePanel(kwargs.get("paneTab"), hou_module=hou)
+]]></script>
+    <includeInToolbarMenu menu_position="200" create_separator="true"/>
+    <help><![CDATA[Big-Chicken Houdini Intelligence Agent: a Codex conversation client with authenticated real-time Houdini MCP and native HOM execution in the current scene.]]></help>
+  </interface>
+</pythonPanelDocument>

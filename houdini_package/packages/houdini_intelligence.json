@@ -1,0 +1,18 @@
+{
+    "enable":  true,
+    "env":  [
+                {
+                    "PYTHONPATH":  {
+                                       "method":  "prepend",
+                                       "value":  "$HIA_PROJECT_ROOT/houdini_package/python_libs"
+                                   }
+                },
+                {
+                    "PYTHONPATH":  {
+                                       "method":  "prepend",
+                                       "value":  "$HIA_PROJECT_ROOT/src"
+                                   }
+                }
+            ],
+    "path":  "$HIA_PROJECT_ROOT/houdini_package"
+}

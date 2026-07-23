@@ -1,0 +1,22 @@
+[mcp_servers.houdini_intelligence]
+command = '.runtime\fxhoudinimcp\1.3.0\venv\Scripts\python.exe'
+args = ['-B', '-m', 'fxhoudinimcp']
+cwd = '.'
+enabled = true
+required = false
+startup_timeout_sec = 15
+tool_timeout_sec = 65
+env_vars = [
+    'PATH',
+    'PYTHONPATH',
+    'PYTHONDONTWRITEBYTECODE',
+    'PYTHONNOUSERSITE',
+    'TEMP',
+  'TMP',
+  'HIA_PROJECT_ROOT',
+  'HIA_CACHE_DIR',
+  'HIA_EXPECTED_PYTHON_EXE',
+    'HOUDINI_HOST',
+    'HOUDINI_PORT',
+    'FXHOUDINIMCP_TOKEN',
+]

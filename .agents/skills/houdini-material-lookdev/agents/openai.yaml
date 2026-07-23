@@ -1,0 +1,4 @@
+interface:
+  display_name: "Houdini Material LookDev"
+  short_description: "Houdini materials, shaders, and LookDev workflows"
+  default_prompt: "Use $houdini-material-lookdev to design and validate a substantive Houdini material or LookDev task."

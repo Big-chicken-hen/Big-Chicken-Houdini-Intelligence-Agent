@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hia:houdini-mcp:0.1.0:houdini_graph_verify:input",
+  "title": "houdini_graph_verify input",
+  "description": "Read and verify one HIA-owned generic graph at the expected immutable session and revision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request_id",
+    "thread_id",
+    "turn_id",
+    "hip_session_id",
+    "expected_hip_fingerprint",
+    "base_scene_revision",
+    "idempotency_key",
+    "deadline_ms",
+    "permission_level",
+    "root_path",
+    "expected_graph_digest"
+  ],
+  "properties": {
+    "request_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "thread_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "turn_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "hip_session_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "expected_hip_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "base_scene_revision": {
+      "$ref": "#/$defs/sceneRevision"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotencyKey"
+    },
+    "deadline_ms": {
+      "$ref": "#/$defs/deadlineMs"
+    },
+    "permission_level": {
+      "const": "scene_read"
+    },
+    "root_path": {
+      "$ref": "#/$defs/graphPath"
+    },
+    "expected_graph_digest": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$"
+    },
+    "sceneRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "deadlineMs": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 60000
+    },
+    "fingerprint": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Fa-f0-9]{16,128}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "graphPath": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 160,
+      "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}$"
+    }
+  }
+}

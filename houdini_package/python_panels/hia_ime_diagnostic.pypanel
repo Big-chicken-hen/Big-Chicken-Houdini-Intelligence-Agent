@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="hia_ime_diagnostic" label="HIA IME Diagnostic (Offline)" icon="MISC_python">
+    <script><![CDATA[from hia_panel.ime_diagnostic import ImeDiagnosticPanel
+
+
+def onCreateInterface():
+    return ImeDiagnosticPanel(kwargs.get("paneTab"))
+]]></script>
+    <includeInToolbarMenu menu_position="201" create_separator="false"/>
+    <help><![CDATA[Offline comparison of stock Qt text widgets. No entered text is recorded.]]></help>
+  </interface>
+</pythonPanelDocument>

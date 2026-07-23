@@ -1,0 +1,85 @@
+{
+  "schema_version": "0.1.0",
+  "context": {
+    "root": "Object",
+    "children": "Sop"
+  },
+  "target": {
+    "parent_path": "/obj",
+    "root_local_id": "root",
+    "root_type": {
+      "context": "Object",
+      "name": "geo"
+    },
+    "name_hint": "HIA_Graph_stairs_demo",
+    "ownership": "hia_owned_new"
+  },
+  "nodes": [
+    {
+      "id": "step_source",
+      "type": { "context": "Sop", "name": "box" },
+      "name_hint": "step_source",
+      "parent": "root",
+      "parameters": [
+        {
+          "name": "size",
+          "value": { "type": "tuple", "items_type": "float", "value": [1.2, 0.25, 0.4] }
+        }
+      ],
+      "flags": { "display": false, "render": false }
+    },
+    {
+      "id": "step_offset",
+      "type": { "context": "Sop", "name": "transform" },
+      "name_hint": "step_offset",
+      "parent": "root",
+      "parameters": [
+        {
+          "name": "t",
+          "value": { "type": "tuple", "items_type": "float", "value": [0.0, 0.25, 0.4] }
+        }
+      ],
+      "flags": { "display": false, "render": false }
+    },
+    {
+      "id": "landing",
+      "type": { "context": "Sop", "name": "box" },
+      "name_hint": "landing",
+      "parent": "root",
+      "parameters": [
+        {
+          "name": "size",
+          "value": { "type": "tuple", "items_type": "float", "value": [1.8, 0.25, 1.2] }
+        }
+      ],
+      "flags": { "display": false, "render": false }
+    },
+    {
+      "id": "combine",
+      "type": { "context": "Sop", "name": "merge" },
+      "name_hint": "combine_stairs",
+      "parent": "root",
+      "parameters": [],
+      "flags": { "display": false, "render": false }
+    },
+    {
+      "id": "output",
+      "type": { "context": "Sop", "name": "null" },
+      "name_hint": "OUT_STAIRS",
+      "parent": "root",
+      "parameters": [],
+      "flags": { "display": true, "render": true }
+    }
+  ],
+  "connections": [
+    { "source": { "node": "step_source", "output": 0 }, "destination": { "node": "step_offset", "input": 0 } },
+    { "source": { "node": "step_source", "output": 0 }, "destination": { "node": "combine", "input": 0 } },
+    { "source": { "node": "step_offset", "output": 0 }, "destination": { "node": "combine", "input": 1 } },
+    { "source": { "node": "landing", "output": 0 }, "destination": { "node": "combine", "input": 2 } },
+    { "source": { "node": "combine", "output": 0 }, "destination": { "node": "output", "input": 0 } }
+  ],
+  "layout": {
+    "mode": "network_editor",
+    "direction": "top_to_bottom"
+  }
+}

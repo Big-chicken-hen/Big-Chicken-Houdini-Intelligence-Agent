@@ -1,0 +1,4 @@
+interface:
+  display_name: "Houdini Artifact Review"
+  short_description: "Read-only review for complex Houdini assets"
+  default_prompt: "Use $houdini-artifact-review to perform a read-only quality review before final Houdini delivery."

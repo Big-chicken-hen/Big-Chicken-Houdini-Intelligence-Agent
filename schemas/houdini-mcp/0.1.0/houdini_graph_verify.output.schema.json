@@ -1,0 +1,659 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hia:houdini-mcp:0.1.0:houdini_graph_verify:output",
+  "title": "houdini_graph_verify output",
+  "description": "Bounded verification of an already created generic graph, including nodes, typed parameters, connections, flags, cook state, and digest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "request_id",
+    "thread_id",
+    "turn_id",
+    "hip_session_id",
+    "base_scene_revision",
+    "idempotency_key",
+    "scene_revision",
+    "result",
+    "warnings",
+    "structured_error"
+  ],
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "request_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "thread_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "turn_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "hip_session_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "base_scene_revision": {
+      "$ref": "#/$defs/sceneRevision"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/idempotencyKey"
+    },
+    "scene_revision": {
+      "$ref": "#/$defs/sceneRevision"
+    },
+    "result": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/verifyResult"
+        }
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/message"
+      }
+    },
+    "structured_error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/error"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["ok"],
+        "properties": { "ok": { "const": true } }
+      },
+      "then": {
+        "properties": {
+          "result": { "$ref": "#/$defs/verifyResult" },
+          "structured_error": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": { "type": "null" },
+          "structured_error": { "$ref": "#/$defs/error" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$"
+    },
+    "sceneRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "graphPath": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 160,
+      "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}$"
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "localId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "nodePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 320,
+      "pattern": "^/obj/HIA_Graph_[A-Za-z0-9][A-Za-z0-9_]{0,63}/[A-Za-z][A-Za-z0-9_]{0,63}$"
+    },
+    "detailEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "value"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+            },
+            {
+              "type": "number",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            { "type": "boolean" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID_ARGUMENT",
+            "SCHEMA_INVALID",
+            "NODE_TYPE_NOT_ALLOWED",
+            "NODE_TYPE_UNAVAILABLE",
+            "PARAMETER_NOT_ALLOWED",
+            "PARAMETER_TYPE_MISMATCH",
+            "PATH_SCOPE_VIOLATION",
+            "GRAPH_INVALID",
+            "TOPOLOGY_NOT_ALLOWED",
+            "DIGEST_MISMATCH",
+            "APPROVAL_REQUIRED",
+            "APPROVAL_DENIED",
+            "APPROVAL_MISMATCH",
+            "APPROVAL_EXPIRED",
+            "DEADLINE_EXCEEDED",
+            "HIP_SESSION_MISMATCH",
+            "SCENE_CONFLICT",
+            "IDEMPOTENCY_CONFLICT",
+            "NAME_CONFLICT",
+            "MAIN_THREAD_REQUIRED",
+            "CAPABILITY_MISMATCH",
+            "HOUDINI_UNAVAILABLE",
+            "WRITE_IN_PROGRESS",
+            "GRAPH_NOT_FOUND",
+            "OWNERSHIP_MISMATCH",
+            "COOK_FAILED",
+            "VERIFY_FAILED",
+            "POSTCONDITION_FAILED",
+            "ROLLBACK_FAILED",
+            "SCENE_STATE_INDETERMINATE",
+            "BRIDGE_DISCONNECTED",
+            "INTERNAL_ERROR"
+          ]
+        },
+        "message": {
+          "$ref": "#/$defs/message"
+        },
+        "details": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/detailEntry"
+          }
+        }
+      }
+    },
+    "floatValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "float"
+        },
+        "value": {
+          "type": "number",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        }
+      }
+    },
+    "intValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "int"
+        },
+        "value": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "boolValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "bool"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      }
+    },
+    "stringValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "string"
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+        }
+      }
+    },
+    "floatTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "items_type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "tuple"
+        },
+        "items_type": {
+          "const": "float"
+        },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "number",
+            "minimum": -1000000000,
+            "maximum": 1000000000
+          }
+        }
+      }
+    },
+    "intTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "items_type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "tuple"
+        },
+        "items_type": {
+          "const": "int"
+        },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          }
+        }
+      }
+    },
+    "boolTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "items_type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "tuple"
+        },
+        "items_type": {
+          "const": "bool"
+        },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "stringTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "items_type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "tuple"
+        },
+        "items_type": {
+          "const": "string"
+        },
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+          }
+        }
+      }
+    },
+    "typedValue": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/floatValue"
+        },
+        {
+          "$ref": "#/$defs/intValue"
+        },
+        {
+          "$ref": "#/$defs/boolValue"
+        },
+        {
+          "$ref": "#/$defs/stringValue"
+        },
+        {
+          "$ref": "#/$defs/floatTuple"
+        },
+        {
+          "$ref": "#/$defs/intTuple"
+        },
+        {
+          "$ref": "#/$defs/boolTuple"
+        },
+        {
+          "$ref": "#/$defs/stringTuple"
+        }
+      ]
+    },
+    "observedParameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value",
+        "expression_present"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+        },
+        "value": {
+          "$ref": "#/$defs/typedValue"
+        },
+        "expression_present": {
+          "const": false
+        }
+      }
+    },
+    "observedNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_local_id",
+        "path",
+        "context",
+        "resolved_type",
+        "parameters",
+        "flags",
+        "cook_state"
+      ],
+      "properties": {
+        "request_local_id": {
+          "$ref": "#/$defs/localId"
+        },
+        "path": {
+          "$ref": "#/$defs/nodePath"
+        },
+        "context": {
+          "const": "Sop"
+        },
+        "resolved_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "parameters": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/observedParameter"
+          }
+        },
+        "flags": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "display",
+            "render"
+          ],
+          "properties": {
+            "display": {
+              "type": "boolean"
+            },
+            "render": {
+              "type": "boolean"
+            }
+          }
+        },
+        "cook_state": {
+          "type": "string",
+          "enum": [
+            "not_cooked",
+            "clean",
+            "warning",
+            "error"
+          ]
+        }
+      }
+    },
+    "observedEndpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "index"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/localId"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        }
+      }
+    },
+    "observedConnection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "destination"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/observedEndpoint"
+        },
+        "destination": {
+          "$ref": "#/$defs/observedEndpoint"
+        }
+      }
+    },
+    "verificationCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "passed",
+        "message"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "session",
+            "revision",
+            "target",
+            "ownership",
+            "nodes",
+            "parameters",
+            "connections",
+            "flags",
+            "cook",
+            "graph_digest"
+          ]
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "message": {
+          "$ref": "#/$defs/message"
+        }
+      }
+    },
+    "verifyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "valid",
+        "root_path",
+        "ownership",
+        "context",
+        "expected_graph_digest",
+        "observed_graph_digest",
+        "digest_matches",
+        "nodes",
+        "connections",
+        "checks"
+      ],
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "root_path": {
+          "$ref": "#/$defs/graphPath"
+        },
+        "ownership": {
+          "const": "hia_owned"
+        },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "root",
+            "children"
+          ],
+          "properties": {
+            "root": {
+              "const": "Object"
+            },
+            "children": {
+              "const": "Sop"
+            }
+          }
+        },
+        "expected_graph_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_graph_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "digest_matches": {
+          "type": "boolean"
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/observedNode"
+          }
+        },
+        "connections": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/observedConnection"
+          }
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/verificationCheck"
+          }
+        }
+      }
+    }
+  }
+}

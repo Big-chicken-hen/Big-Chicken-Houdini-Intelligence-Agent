@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>BigChickenLauncher</AssemblyName>
+    <RootNamespace>HoudiniIntelligenceLauncher</RootNamespace>
+    <Title>Big-Chicken Launcher</Title>
+    <AssemblyTitle>Big-Chicken Launcher</AssemblyTitle>
+    <Product>Big-Chicken Houdini Intelligence Agent</Product>
+    <Company>Big-Chicken</Company>
+    <Description>Launcher and preflight for Big-Chicken Houdini Intelligence Agent</Description>
+    <Authors>Big-chicken-hen</Authors>
+    <Version>0.1.0-preview</Version>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>

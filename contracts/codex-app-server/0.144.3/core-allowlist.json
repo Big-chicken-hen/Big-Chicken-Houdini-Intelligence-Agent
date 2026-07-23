@@ -1,0 +1,366 @@
+{
+  "format_version": 1,
+  "policy": "deny-by-default",
+  "codex_cli_version": "0.144.3",
+  "schema_draft": "http://json-schema.org/draft-07/schema#",
+  "inventory": "protocol-inventory.json",
+  "schema_generation": {
+    "experimental": false,
+    "forbidden_flag": "--experimental"
+  },
+  "transport": {
+    "allowed": [
+      "stdio-jsonl"
+    ],
+    "forbidden": [
+      "websocket",
+      "ws",
+      "wss",
+      "http",
+      "https",
+      "tcp"
+    ]
+  },
+  "allowed": {
+    "client_requests": [
+      {
+        "method": "initialize",
+        "params_definition": "InitializeParams",
+        "response_schema": "v1/InitializeResponse.json"
+      },
+      {
+        "method": "account/read",
+        "params_definition": "GetAccountParams",
+        "response_schema": "v2/GetAccountResponse.json"
+      },
+      {
+        "method": "model/list",
+        "params_definition": "ModelListParams",
+        "response_schema": "v2/ModelListResponse.json",
+        "purpose": "p1-read-only-model-catalog"
+      },
+      {
+        "method": "thread/list",
+        "params_definition": "ThreadListParams",
+        "response_schema": "v2/ThreadListResponse.json",
+        "purpose": "thread-history"
+      },
+      {
+        "method": "thread/name/set",
+        "params_definition": "ThreadSetNameParams",
+        "response_schema": "v2/ThreadSetNameResponse.json",
+        "purpose": "thread-history"
+      },
+      {
+        "method": "thread/goal/get",
+        "params_definition": "ThreadGoalGetParams",
+        "response_schema": "v2/ThreadGoalGetResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/set",
+        "params_definition": "ThreadGoalSetParams",
+        "response_schema": "v2/ThreadGoalSetResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/clear",
+        "params_definition": "ThreadGoalClearParams",
+        "response_schema": "v2/ThreadGoalClearResponse.json",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/start",
+        "params_definition": "ThreadStartParams",
+        "response_schema": "v2/ThreadStartResponse.json"
+      },
+      {
+        "method": "thread/resume",
+        "params_definition": "ThreadResumeParams",
+        "response_schema": "v2/ThreadResumeResponse.json"
+      },
+      {
+        "method": "thread/read",
+        "params_definition": "ThreadReadParams",
+        "response_schema": "v2/ThreadReadResponse.json"
+      },
+      {
+        "method": "thread/fork",
+        "params_definition": "ThreadForkParams",
+        "response_schema": "v2/ThreadForkResponse.json"
+      },
+      {
+        "method": "turn/start",
+        "params_definition": "TurnStartParams",
+        "response_schema": "v2/TurnStartResponse.json"
+      },
+      {
+        "method": "turn/steer",
+        "params_definition": "TurnSteerParams",
+        "response_schema": "v2/TurnSteerResponse.json"
+      },
+      {
+        "method": "turn/interrupt",
+        "params_definition": "TurnInterruptParams",
+        "response_schema": "v2/TurnInterruptResponse.json"
+      }
+    ],
+    "client_notifications": [
+      {
+        "method": "initialized",
+        "params_definition": null
+      }
+    ],
+    "server_requests": [
+      {
+        "method": "item/commandExecution/requestApproval",
+        "params_definition": "CommandExecutionRequestApprovalParams",
+        "response_schema": "CommandExecutionRequestApprovalResponse.json",
+        "purpose": "approval"
+      },
+      {
+        "method": "item/fileChange/requestApproval",
+        "params_definition": "FileChangeRequestApprovalParams",
+        "response_schema": "FileChangeRequestApprovalResponse.json",
+        "purpose": "approval"
+      },
+      {
+        "method": "item/permissions/requestApproval",
+        "params_definition": "PermissionsRequestApprovalParams",
+        "response_schema": "PermissionsRequestApprovalResponse.json",
+        "purpose": "approval"
+      }
+    ],
+    "server_notifications": [
+      {
+        "method": "error",
+        "params_definition": "ErrorNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "warning",
+        "params_definition": "WarningNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "deprecationNotice",
+        "params_definition": "DeprecationNoticeNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "guardianWarning",
+        "params_definition": "GuardianWarningNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "configWarning",
+        "params_definition": "ConfigWarningNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "thread/started",
+        "params_definition": "ThreadStartedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "thread/name/updated",
+        "params_definition": "ThreadNameUpdatedNotification",
+        "purpose": "thread-history"
+      },
+      {
+        "method": "thread/goal/updated",
+        "params_definition": "ThreadGoalUpdatedNotification",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/goal/cleared",
+        "params_definition": "ThreadGoalClearedNotification",
+        "purpose": "thread-goal"
+      },
+      {
+        "method": "thread/status/changed",
+        "params_definition": "ThreadStatusChangedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "thread/tokenUsage/updated",
+        "params_definition": "ThreadTokenUsageUpdatedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "thread/compacted",
+        "params_definition": "ContextCompactedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "turn/started",
+        "params_definition": "TurnStartedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "turn/completed",
+        "params_definition": "TurnCompletedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "turn/diff/updated",
+        "params_definition": "TurnDiffUpdatedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "turn/plan/updated",
+        "params_definition": "TurnPlanUpdatedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/started",
+        "params_definition": "ItemStartedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/completed",
+        "params_definition": "ItemCompletedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/agentMessage/delta",
+        "params_definition": "AgentMessageDeltaNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/reasoning/summaryTextDelta",
+        "params_definition": "ReasoningSummaryTextDeltaNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/reasoning/summaryPartAdded",
+        "params_definition": "ReasoningSummaryPartAddedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/reasoning/textDelta",
+        "params_definition": "ReasoningTextDeltaNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/commandExecution/outputDelta",
+        "params_definition": "CommandExecutionOutputDeltaNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/commandExecution/terminalInteraction",
+        "params_definition": "TerminalInteractionNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/fileChange/outputDelta",
+        "params_definition": "FileChangeOutputDeltaNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/fileChange/patchUpdated",
+        "params_definition": "FileChangePatchUpdatedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "item/mcpToolCall/progress",
+        "params_definition": "McpToolCallProgressNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "serverRequest/resolved",
+        "params_definition": "ServerRequestResolvedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "model/rerouted",
+        "params_definition": "ModelReroutedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "model/verification",
+        "params_definition": "ModelVerificationNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "model/safetyBuffering/updated",
+        "params_definition": "ModelSafetyBufferingUpdatedNotification",
+        "purpose": "stream-or-lifecycle"
+      },
+      {
+        "method": "account/rateLimits/updated",
+        "params_definition": "AccountRateLimitsUpdatedNotification",
+        "purpose": "passive-observation-only"
+      },
+      {
+        "method": "mcpServer/startupStatus/updated",
+        "params_definition": "McpServerStatusUpdatedNotification",
+        "purpose": "passive-observation-only"
+      },
+      {
+        "method": "remoteControl/status/changed",
+        "params_definition": "RemoteControlStatusChangedNotification",
+        "purpose": "passive-observation-only"
+      },
+      {
+        "method": "skills/changed",
+        "params_definition": "SkillsChangedNotification",
+        "purpose": "passive-observation-only"
+      }
+    ]
+  },
+  "explicit_exclusions": {
+    "experimental": {
+      "reason": "Experimental protocol surfaces are outside the stable P0-C2B core.",
+      "methods": [
+        "experimentalFeature/list",
+        "experimentalFeature/enablement/set",
+        "item/tool/requestUserInput",
+        "item/plan/delta"
+      ],
+      "schema_flags": [
+        "--experimental"
+      ]
+    },
+    "dynamicTools": {
+      "reason": "Dynamic tool dispatch is not a core dependency.",
+      "methods": [
+        "item/tool/call"
+      ]
+    },
+    "processApi": {
+      "reason": "Process and command execution APIs are not part of the bridge core.",
+      "methods": [
+        "command/exec",
+        "command/exec/write",
+        "command/exec/terminate",
+        "command/exec/resize",
+        "command/exec/outputDelta",
+        "process/outputDelta",
+        "process/exited"
+      ]
+    },
+    "threadShellCommand": {
+      "reason": "Thread shell command execution is explicitly excluded.",
+      "methods": [
+        "thread/shellCommand"
+      ]
+    },
+    "webSocket": {
+      "reason": "The bridge-to-app-server transport is pinned to stdio JSONL.",
+      "transports": [
+        "websocket",
+        "ws",
+        "wss"
+      ]
+    }
+  },
+  "compatibility": {
+    "unknown_methods": "reject",
+    "unknown_notifications": "log-and-ignore-with-metric",
+    "missing_allowlisted_method": "block-upgrade",
+    "changed_allowlisted_schema": "block-upgrade-pending-review",
+    "additive_optional_fields": "compatible-after-contract-tests",
+    "additive_non_allowlisted_methods": "ignored"
+  }
+}

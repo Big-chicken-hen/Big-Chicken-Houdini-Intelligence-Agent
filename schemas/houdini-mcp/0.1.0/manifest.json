@@ -1,0 +1,89 @@
+{
+  "manifestVersion": "1.0",
+  "schemaVersion": "0.1.0",
+  "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "schemaDigestEncoding": "canonical-json-utf8-v1",
+  "contractStatus": "frozen_pre_release",
+  "protocolPolicy": "deny_by_default",
+  "activeContexts": [
+    "Object",
+    "Sop"
+  ],
+  "tools": [
+    {
+      "name": "houdini_scene_info",
+      "description": "Read bounded Houdini session, revision, enabled context, and HIA-owned generic graph summaries without modifying the scene.",
+      "permissionLevel": "scene_read",
+      "inputSchema": "houdini_scene_info.input.schema.json",
+      "outputSchema": "houdini_scene_info.output.schema.json",
+      "inputSha256": "1d67990a08fc252d84c58ca28e4fadc01e9bce07723a9fcc678bad09872a3d80",
+      "outputSha256": "664b67c4b263b8a209dec9da9930dcb722cee56c3fc28784172c5245e8ba2e93",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "houdini_node_type_info",
+      "description": "Read live authoritative parameter schema metadata for the currently approved Object and SOP node types.",
+      "permissionLevel": "scene_read",
+      "inputSchema": "houdini_node_type_info.input.schema.json",
+      "outputSchema": "houdini_node_type_info.output.schema.json",
+      "inputSha256": "add5b89c2530f8adaeffe9e6e6d1446b0092cd02567557bf70c890d32871268c",
+      "outputSha256": "f9ed589d3850756f3ef015206c604b8b5994599916a7cb7578895c8bed6b927a",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "houdini_graph_validate",
+      "description": "Purely validate, normalize, summarize, and digest a generic declarative HIA-owned graph without modifying the scene.",
+      "permissionLevel": "scene_read",
+      "inputSchema": "houdini_graph_validate.input.schema.json",
+      "outputSchema": "houdini_graph_validate.output.schema.json",
+      "inputSha256": "8853be48404ef5c3d4c65c6f591f1fcabdc12b4489ec0cdbba9d84f4f6fbe51f",
+      "outputSha256": "b5c32d0ebcf29b1738745c88b9e73c3add94214508114449d472b54b4ee5f1d6",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "houdini_graph_apply",
+      "description": "Apply one approved canonical generic graph as a new HIA-owned container under /obj in one revision and Undo transaction.",
+      "permissionLevel": "scene_write",
+      "inputSchema": "houdini_graph_apply.input.schema.json",
+      "outputSchema": "houdini_graph_apply.output.schema.json",
+      "inputSha256": "44f49ea86271adb5787f74f9c7931506b2589d45dcf376a0e24706de6759319d",
+      "outputSha256": "56ce9d1038566ce7eede6a7824bed03dc04921090fb6db7680db481d2e8ce1f1",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "houdini_graph_verify",
+      "description": "Read and verify an HIA-owned generic graph, including nodes, typed parameters, connections, flags, cook state, and canonical digest.",
+      "permissionLevel": "scene_read",
+      "inputSchema": "houdini_graph_verify.input.schema.json",
+      "outputSchema": "houdini_graph_verify.output.schema.json",
+      "inputSha256": "5cbbd4c92ada1fd817cbac8e151c26d3037f823b9e66cf478df52c5b61c9af69",
+      "outputSha256": "e80a69cc11f34882b354a3625240c05beb9523258287cbe48643a82620858db8",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    }
+  ]
+}
