@@ -732,6 +732,11 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._mcp_backend = "hia_v2"
     panel._authenticated = True
     panel._selected_thread_id = selected_thread_id
+    panel._crash_recovery_marker = None
+    panel._crash_recovery_health_session = None
+    panel._crash_recovery_goal_payload = None
+    panel._crash_recovery_thread_payload = None
+    panel._crash_recovery_observation = None
     panel._session_action_pending = False
     panel._turn_start_request_pending = False
     panel._interrupt_pending = False
@@ -921,6 +926,100 @@ def _completed_notification(turn_id: str, *, sequence: int = 1) -> dict[str, Any
             "turn": {"id": turn_id, "status": "completed"},
         },
     }
+
+
+_RECOVERY_GOAL_BINDING = "a" * 64
+_RECOVERY_PROMPT_ID = "launcher-session-1"
+
+
+def _recovery_session(
+    *,
+    turn_id: str = "pre-crash-turn",
+    turn_status: str = "completed",
+    turn_active: bool = False,
+    focus_mode: bool = True,
+    thread_id: str = "thread-1",
+) -> dict[str, Any]:
+    return {
+        "connected": True,
+        "authentication": "authenticated",
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "turn_status": turn_status,
+        "turn_active": turn_active,
+        "focus_mode": focus_mode,
+    }
+
+
+def _recovery_goal_payload(
+    *,
+    thread_id: str = "thread-1",
+    focus_mode: bool = True,
+    status: str = "active",
+    goal_binding: str = _RECOVERY_GOAL_BINDING,
+) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "focus_mode": focus_mode,
+        "goal_binding": goal_binding,
+        "goal": {
+            "threadId": thread_id,
+            "objective": "Finish the recovered asset",
+            "status": status,
+        },
+    }
+
+
+def _recovery_read_payload(*, include_launcher_prompt: bool = False) -> dict[str, Any]:
+    text = (
+        f"[HIA launcher recovery {_RECOVERY_PROMPT_ID}] recovered"
+        if include_launcher_prompt
+        else "Work completed before the crash"
+    )
+    return {
+        "thread_id": "thread-1",
+        "result": {
+            "thread": {
+                "id": "thread-1",
+                "turns": [
+                    {
+                        "items": [
+                            {
+                                "type": "userMessage",
+                                "content": [{"type": "text", "text": text}],
+                            },
+                            {"type": "agentMessage", "text": "Recovered history"},
+                        ]
+                    }
+                ],
+            }
+        },
+    }
+
+
+def _prime_crash_recovery_panel(
+    panel: Any,
+    *,
+    initial_session: dict[str, Any] | None = None,
+    include_launcher_prompt: bool = False,
+) -> None:
+    panel._crash_recovery_marker = {
+        "thread_id": "thread-1",
+        "goal_binding": _RECOVERY_GOAL_BINDING,
+        "prompt_id": _RECOVERY_PROMPT_ID,
+    }
+    panel._on_health(
+        {
+            "houdini_mcp": {"backend": "hia_v2", "available": True},
+            "session": initial_session or _recovery_session(),
+        }
+    )
+    panel._on_action_completed("goal_get", _recovery_goal_payload())
+    panel._on_action_completed(
+        "thread_read:crash_recovery",
+        _recovery_read_payload(include_launcher_prompt=include_launcher_prompt),
+    )
+    panel._on_action_completed("goal_get", _recovery_goal_payload())
 
 
 def _complete_steer_sync(
@@ -4319,6 +4418,295 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("Thread：未选择", panel.thread_status_label.text())
         self.assertEqual("Turn：空闲", panel.turn_status_label.text())
         self.assertEqual("", panel.conversation.toPlainText())
+
+    def test_crash_recovery_marker_is_validated_and_consumed_once(self) -> None:
+        environment = {
+            "HIA_CRASH_RECOVERY_THREAD_ID": "thread-1",
+            "HIA_CRASH_RECOVERY_GOAL_BINDING": _RECOVERY_GOAL_BINDING,
+            "HIA_CRASH_RECOVERY_PROMPT_ID": _RECOVERY_PROMPT_ID,
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            marker = HoudiniIntelligencePanel._take_crash_recovery_marker()
+            second = HoudiniIntelligencePanel._take_crash_recovery_marker()
+
+        self.assertEqual("thread-1", marker["thread_id"])
+        self.assertEqual(_RECOVERY_GOAL_BINDING, marker["goal_binding"])
+        self.assertEqual(_RECOVERY_PROMPT_ID, marker["prompt_id"])
+        self.assertIsNone(second)
+
+        invalid = dict(environment)
+        invalid["HIA_CRASH_RECOVERY_GOAL_BINDING"] = "not-a-binding"
+        with mock.patch.dict(os.environ, invalid, clear=False):
+            self.assertIsNone(
+                HoudiniIntelligencePanel._take_crash_recovery_marker()
+            )
+
+    def test_crash_recovery_binds_exact_thread_without_resume_or_duplicate_turn(self) -> None:
+        panel = _make_panel(selected_thread_id=None)
+
+        _prime_crash_recovery_panel(panel)
+
+        self.assertEqual(["thread-1", "thread-1"], panel._client.goal_get_requests)
+        self.assertEqual(
+            [("thread-1", "thread_read:crash_recovery")],
+            panel._client.thread_read_requests,
+        )
+        self.assertEqual([], panel._client.resume_requests)
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual("thread-1", panel._selected_thread_id)
+        self.assertEqual("active", panel._current_goal["status"])
+        self.assertTrue(panel._focus_mode)
+        self.assertIn("Recovered history", panel.conversation.toPlainText())
+        self.assertNotIn("HIA launcher recovery", panel.conversation.toPlainText())
+        self.assertEqual(["session"], panel._client.session_contexts)
+
+    def test_crash_recovery_rejects_stale_thread_focus_goal_or_binding(self) -> None:
+        for case in ("session-thread", "session-focus"):
+            with self.subTest(case=case):
+                panel = _make_panel(selected_thread_id=None)
+                panel._crash_recovery_marker = {
+                    "thread_id": "thread-1",
+                    "goal_binding": _RECOVERY_GOAL_BINDING,
+                    "prompt_id": _RECOVERY_PROMPT_ID,
+                }
+                session = _recovery_session(
+                    thread_id="thread-other" if case == "session-thread" else "thread-1",
+                    focus_mode=case != "session-focus",
+                )
+                panel._on_health(
+                    {
+                        "houdini_mcp": {"backend": "hia_v2", "available": True},
+                        "session": session,
+                    }
+                )
+                self.assertIsNone(panel._selected_thread_id)
+                self.assertEqual([], panel._client.goal_get_requests)
+                self.assertEqual([], panel._client.thread_read_requests)
+                self.assertEqual([], panel._client.turn_requests)
+
+        goal_cases = {
+            "goal-thread": {"thread_id": "thread-other"},
+            "goal-focus": {"focus_mode": False},
+            "goal-complete": {"status": "complete"},
+            "goal-blocked": {"status": "blocked"},
+            "goal-binding": {"goal_binding": "b" * 64},
+        }
+        for case, overrides in goal_cases.items():
+            with self.subTest(case=case):
+                panel = _make_panel(selected_thread_id=None)
+                panel._crash_recovery_marker = {
+                    "thread_id": "thread-1",
+                    "goal_binding": _RECOVERY_GOAL_BINDING,
+                    "prompt_id": _RECOVERY_PROMPT_ID,
+                }
+                panel._on_health(
+                    {
+                        "houdini_mcp": {"backend": "hia_v2", "available": True},
+                        "session": _recovery_session(),
+                    }
+                )
+                panel._on_action_completed(
+                    "goal_get",
+                    _recovery_goal_payload(**overrides),
+                )
+                self.assertIsNone(panel._selected_thread_id)
+                self.assertEqual([], panel._client.thread_read_requests)
+                self.assertEqual([], panel._client.resume_requests)
+                self.assertEqual([], panel._client.turn_requests)
+
+    def test_crash_recovery_rechecks_goal_after_history_read(self) -> None:
+        cases = {
+            "thread": {"thread_id": "thread-other"},
+            "focus": {"focus_mode": False},
+            "status": {"status": "blocked"},
+            "binding": {"goal_binding": "b" * 64},
+        }
+        for case, overrides in cases.items():
+            with self.subTest(case=case):
+                panel = _make_panel(selected_thread_id=None)
+                panel._crash_recovery_marker = {
+                    "thread_id": "thread-1",
+                    "goal_binding": _RECOVERY_GOAL_BINDING,
+                    "prompt_id": _RECOVERY_PROMPT_ID,
+                }
+                panel._on_health(
+                    {
+                        "houdini_mcp": {"backend": "hia_v2", "available": True},
+                        "session": _recovery_session(),
+                    }
+                )
+                panel._on_action_completed("goal_get", _recovery_goal_payload())
+                panel._on_action_completed(
+                    "thread_read:crash_recovery",
+                    _recovery_read_payload(),
+                )
+
+                self.assertEqual(["thread-1", "thread-1"], panel._client.goal_get_requests)
+                self.assertIsNone(panel._selected_thread_id)
+                panel._on_action_completed(
+                    "goal_get",
+                    _recovery_goal_payload(**overrides),
+                )
+
+                self.assertIsNone(panel._selected_thread_id)
+                self.assertIsNone(panel._current_goal)
+                self.assertEqual([], panel._client.turn_requests)
+                self.assertEqual("", panel.conversation.toPlainText())
+
+    def test_crash_recovery_bind_does_not_reapply_the_initial_session(self) -> None:
+        panel = _make_panel(selected_thread_id=None)
+        panel._crash_recovery_marker = {
+            "thread_id": "thread-1",
+            "goal_binding": _RECOVERY_GOAL_BINDING,
+            "prompt_id": _RECOVERY_PROMPT_ID,
+        }
+        panel._on_health(
+            {
+                "houdini_mcp": {"backend": "hia_v2", "available": True},
+                "session": _recovery_session(turn_id="initial-turn"),
+            }
+        )
+        panel._on_action_completed("goal_get", _recovery_goal_payload())
+        panel._on_action_completed(
+            "thread_read:crash_recovery",
+            _recovery_read_payload(),
+        )
+
+        with mock.patch.object(
+            panel,
+            "_apply_session",
+            wraps=panel._apply_session,
+        ) as apply_session:
+            panel._on_action_completed("goal_get", _recovery_goal_payload())
+
+        apply_session.assert_not_called()
+        self.assertEqual(["session"], panel._client.session_contexts)
+        self.assertEqual("thread-1", panel._selected_thread_id)
+
+    def test_recovered_launcher_turn_continues_two_rounds_once_each(self) -> None:
+        panel = _make_panel(selected_thread_id=None)
+        _prime_crash_recovery_panel(panel)
+        self.assertEqual([], panel._client.turn_requests)
+
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 1,
+                        "type": "codex_notification",
+                        "method": "turn/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {
+                                "id": "launcher-recovery-turn",
+                                "status": "inProgress",
+                            },
+                        },
+                    },
+                    _completed_notification("launcher-recovery-turn", sequence=2),
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(1, len(panel._client.turn_requests))
+        first_context = panel._client.turn_requests[-1][-1]
+
+        panel._on_events(
+            {
+                "events": [
+                    _completed_notification("launcher-recovery-turn", sequence=3),
+                    {
+                        "seq": 4,
+                        "type": "session_state",
+                        "session": _recovery_session(
+                            turn_id="launcher-recovery-turn"
+                        ),
+                    },
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(1, len(panel._client.turn_requests))
+
+        panel._on_action_completed(
+            first_context,
+            {
+                "thread_id": "thread-1",
+                "turn_id": "auto-turn-1",
+                "turn_active": True,
+                "turn_status": "inProgress",
+            },
+        )
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 5,
+                        "type": "codex_notification",
+                        "method": "item/agentMessage/delta",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "auto-turn-1",
+                            "itemId": "message-1",
+                            "delta": "Finished another meaningful stage.",
+                        },
+                    },
+                    _completed_notification("auto-turn-1", sequence=6),
+                ],
+                "gap": False,
+            }
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+        self.assertTrue(
+            all(request[0] == panel._client.turn_requests[0][0] for request in panel._client.turn_requests)
+        )
+        self.assertEqual([], panel._client.resume_requests)
+
+    def test_late_panel_bind_recovers_completed_launcher_turn_without_duplication(self) -> None:
+        panel = _make_panel(selected_thread_id=None)
+        completed = _recovery_session(
+            turn_id="launcher-recovery-turn",
+            turn_status="completed",
+            turn_active=False,
+        )
+        _prime_crash_recovery_panel(
+            panel,
+            initial_session=completed,
+            include_launcher_prompt=True,
+        )
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertNotIn("HIA launcher recovery", panel.conversation.toPlainText())
+
+        panel._on_session({"session": completed})
+        panel._on_session({"session": completed})
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertIsNone(panel._crash_recovery_observation)
+        self.assertEqual([], panel._client.resume_requests)
+
+    def test_recovery_completion_between_reads_is_correlated_once(self) -> None:
+        panel = _make_panel(selected_thread_id=None)
+        _prime_crash_recovery_panel(panel)
+
+        completed = _recovery_session(turn_id="launcher-recovery-turn")
+        panel._on_session({"session": completed})
+        self.assertEqual(
+            ("thread-1", "thread_read:crash_recovery_recheck"),
+            panel._client.thread_read_requests[-1],
+        )
+        self.assertEqual([], panel._client.turn_requests)
+
+        panel._on_action_completed(
+            "thread_read:crash_recovery_recheck",
+            _recovery_read_payload(include_launcher_prompt=True),
+        )
+        panel._on_action_completed(
+            "thread_read:crash_recovery_recheck",
+            _recovery_read_payload(include_launcher_prompt=True),
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertIsNone(panel._crash_recovery_observation)
 
     def test_unselected_panel_network_timeout_does_not_restore_or_render(self) -> None:
         panel = _make_panel(selected_thread_id=None)

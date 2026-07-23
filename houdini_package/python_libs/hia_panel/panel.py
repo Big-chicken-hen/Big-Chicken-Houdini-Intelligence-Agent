@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import sys
 import time
 import uuid
@@ -40,6 +41,8 @@ _SESSION_RECONCILE_CONTEXT_PREFIX = "session_reconcile:"
 _MODELS_CONTEXT = "models"
 _THREADS_CONTEXT = "threads"
 _THREAD_READ_CONTEXT_PREFIX = "thread_read:"
+_CRASH_RECOVERY_READ_CONTEXT = "thread_read:crash_recovery"
+_CRASH_RECOVERY_RECHECK_CONTEXT = "thread_read:crash_recovery_recheck"
 _THREAD_RENAME_CONTEXT_PREFIX = "thread_rename:"
 _GOAL_GET_CONTEXT = "goal_get"
 _GOAL_SET_CONTEXT = "goal_set"
@@ -81,6 +84,12 @@ _GOAL_RUNNING_WITH_TEXT = "当前跟进：Codex 正在推进 Goal"
 _TEAM_RECORD_LIMIT = 32
 _TEAM_EVENT_LIMIT = 24
 _TEAM_TEXT_LIMIT = 65_536
+_CRASH_RECOVERY_THREAD_ENV = "HIA_CRASH_RECOVERY_THREAD_ID"
+_CRASH_RECOVERY_GOAL_BINDING_ENV = "HIA_CRASH_RECOVERY_GOAL_BINDING"
+_CRASH_RECOVERY_PROMPT_ENV = "HIA_CRASH_RECOVERY_PROMPT_ID"
+_CRASH_RECOVERY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+_CRASH_RECOVERY_PROMPT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_CRASH_RECOVERY_GOAL_BINDING = re.compile(r"[0-9a-f]{64}\Z")
 _MCP_BACKEND_PRESENTATION = {
     "hia_v2": ("HIA MCP V2", "HIA MCP V2 当前 Houdini 会话状态"),
     "fxhoudini": (
@@ -92,6 +101,25 @@ _MCP_BACKEND_PRESENTATION = {
 
 class HoudiniIntelligencePanel(QtWidgets.QWidget):
     """Conversation UI with current-session Houdini and MCP status."""
+
+    @staticmethod
+    def _take_crash_recovery_marker() -> dict[str, str] | None:
+        values = {
+            "thread_id": os.environ.pop(_CRASH_RECOVERY_THREAD_ENV, ""),
+            "goal_binding": os.environ.pop(
+                _CRASH_RECOVERY_GOAL_BINDING_ENV, ""
+            ),
+            "prompt_id": os.environ.pop(_CRASH_RECOVERY_PROMPT_ENV, ""),
+        }
+        if (
+            _CRASH_RECOVERY_ID.fullmatch(values["thread_id"]) is None
+            or _CRASH_RECOVERY_GOAL_BINDING.fullmatch(values["goal_binding"])
+            is None
+            or _CRASH_RECOVERY_PROMPT_ID.fullmatch(values["prompt_id"])
+            is None
+        ):
+            return None
+        return values
 
     def __init__(
         self,
@@ -111,6 +139,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         self._authenticated = False
         self._selected_thread_id: str | None = None
+        self._crash_recovery_marker = self._take_crash_recovery_marker()
+        self._crash_recovery_health_session: dict[str, Any] | None = None
+        self._crash_recovery_goal_payload: dict[str, Any] | None = None
+        self._crash_recovery_thread_payload: dict[str, Any] | None = None
+        self._crash_recovery_observation: dict[str, Any] | None = None
         self._session_action_pending = False
         self._turn_start_request_pending = False
         self._interrupt_pending = False
@@ -1210,6 +1243,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     )
             self._refresh_controls()
             return
+        self._maybe_request_crash_recovery_goal(session)
         self._app_server_exit_notice_shown = False
         self._polling_enabled = True
         self._schedule_poll(0)
@@ -1230,11 +1264,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(dict)
     def _on_session(self, payload: dict[str, Any]) -> None:
+        session = payload.get("session", {})
         self._apply_session(
-            payload.get("session", {}),
+            session,
             token=self._turn_state.capture_token(),
             allow_followup=True,
         )
+        if isinstance(session, dict):
+            self._reconcile_crash_recovery_session(session)
         self._maybe_start_goal_continuation()
 
     def _apply_session(
@@ -2588,6 +2625,210 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 f"Codex Thread ID：{thread_id}"
             )
 
+    def _discard_crash_recovery_candidate(self) -> None:
+        self._crash_recovery_marker = None
+        self._crash_recovery_health_session = None
+        self._crash_recovery_goal_payload = None
+        self._crash_recovery_thread_payload = None
+
+    def _maybe_request_crash_recovery_goal(
+        self,
+        session: dict[str, Any],
+    ) -> bool:
+        marker = self._crash_recovery_marker
+        if not isinstance(marker, dict):
+            return False
+        if isinstance(self._selected_thread_id, str):
+            self._discard_crash_recovery_candidate()
+            return False
+        if not self._connected or session.get("authentication") != "authenticated":
+            return False
+        if (
+            session.get("thread_id") != marker["thread_id"]
+            or session.get("focus_mode") is not True
+        ):
+            self._discard_crash_recovery_candidate()
+            return False
+        if (
+            self._client is None
+            or self._goal_action_context is not None
+            or self._crash_recovery_goal_payload is not None
+        ):
+            return False
+        self._crash_recovery_health_session = dict(session)
+        self._goal_action_context = _GOAL_GET_CONTEXT
+        self._refresh_controls()
+        self._client.get_goal(marker["thread_id"])
+        return True
+
+    def _crash_recovery_goal_matches(self, payload: dict[str, Any]) -> bool:
+        marker = self._crash_recovery_marker
+        goal = payload.get("goal")
+        return bool(
+            isinstance(marker, dict)
+            and isinstance(goal, dict)
+            and payload.get("thread_id") == marker["thread_id"]
+            and payload.get("focus_mode") is True
+            and payload.get("goal_binding") == marker["goal_binding"]
+            and goal.get("threadId") == marker["thread_id"]
+            and goal.get("status") == "active"
+        )
+
+    @staticmethod
+    def _thread_read_has_recovery_prompt(
+        payload: dict[str, Any],
+        prompt_id: str,
+    ) -> bool:
+        raw_result = payload.get("read", payload.get("result"))
+        thread = raw_result.get("thread") if isinstance(raw_result, dict) else None
+        turns = thread.get("turns") if isinstance(thread, dict) else None
+        prefix = f"[HIA launcher recovery {prompt_id}]"
+        for turn in turns if isinstance(turns, list) else ():
+            items = turn.get("items") if isinstance(turn, dict) else None
+            for item in items if isinstance(items, list) else ():
+                if not isinstance(item, dict) or item.get("type") != "userMessage":
+                    continue
+                content = item.get("content")
+                for entry in content if isinstance(content, list) else ():
+                    if (
+                        isinstance(entry, dict)
+                        and entry.get("type") == "text"
+                        and isinstance(entry.get("text"), str)
+                        and entry["text"].startswith(prefix)
+                    ):
+                        return True
+        return False
+
+    def _complete_crash_recovery_bind(self, payload: dict[str, Any]) -> bool:
+        marker = self._crash_recovery_marker
+        goal_payload = self._crash_recovery_goal_payload
+        initial_session = self._crash_recovery_health_session
+        raw_result = payload.get("read", payload.get("result"))
+        thread = raw_result.get("thread") if isinstance(raw_result, dict) else None
+        if (
+            not isinstance(marker, dict)
+            or not isinstance(goal_payload, dict)
+            or not isinstance(initial_session, dict)
+            or not isinstance(thread, dict)
+            or thread.get("id") != marker["thread_id"]
+            or not self._crash_recovery_goal_matches(goal_payload)
+            or self._selected_thread_id is not None
+        ):
+            self._discard_crash_recovery_candidate()
+            return False
+
+        thread_id = marker["thread_id"]
+        prompt_seen = self._thread_read_has_recovery_prompt(
+            payload,
+            marker["prompt_id"],
+        )
+        self._selected_thread_id = thread_id
+        self._clear_goal_display()
+        self._team_records.clear()
+        self._refresh_team_combo()
+        self._clear_turn_performance()
+        self.thread_id_edit.setText(thread_id)
+        for index in range(self.history_combo.count()):
+            record = self.history_combo.itemData(index)
+            if isinstance(record, dict) and record.get("thread_id") == thread_id:
+                self.history_combo.setCurrentIndex(index)
+                self._on_history_index_changed(index)
+                break
+        self.thread_status_label.setText(
+            f"Thread：{self._history_title(thread_id)}"
+        )
+        self.thread_status_label.setToolTip(
+            f"{self._history_title(thread_id, full=True)}\n"
+            f"Codex Thread ID：{thread_id}"
+        )
+        if not self._render_thread_read(
+            payload,
+            allow_active=True,
+            hidden_user_prefix=(
+                f"[HIA launcher recovery {marker['prompt_id']}]"
+            ),
+        ):
+            self._selected_thread_id = None
+            self._discard_crash_recovery_candidate()
+            return False
+        self._apply_goal(thread_id, goal_payload.get("goal"))
+        self._apply_focus_mode(thread_id, True)
+        self._crash_recovery_observation = {
+            "thread_id": thread_id,
+            "prompt_id": marker["prompt_id"],
+            "prompt_seen": prompt_seen,
+            "initial_turn_id": initial_session.get("turn_id"),
+            "reread_requested": False,
+            "terminal_turn_id": None,
+            "terminal_status": None,
+        }
+        self._discard_crash_recovery_candidate()
+        if self._client is not None:
+            self._client.get_session()
+        self._refresh_controls()
+        return True
+
+    def _reconcile_crash_recovery_session(
+        self,
+        session: dict[str, Any],
+    ) -> None:
+        observation = self._crash_recovery_observation
+        if not isinstance(observation, dict):
+            return
+        thread_id = observation.get("thread_id")
+        if (
+            session.get("thread_id") != thread_id
+            or session.get("focus_mode") is not True
+            or session.get("connected") is not True
+        ):
+            self._crash_recovery_observation = None
+            return
+        if session.get("turn_active") is not False:
+            return
+        turn_id = session.get("turn_id")
+        status = session.get("turn_status")
+        if not isinstance(turn_id, str):
+            return
+        if observation.get("prompt_seen") is True:
+            self._crash_recovery_observation = None
+            self._queue_goal_continuation(thread_id, turn_id, status)
+            return
+        if (
+            turn_id == observation.get("initial_turn_id")
+            or observation.get("reread_requested") is True
+            or self._client is None
+        ):
+            return
+        observation["reread_requested"] = True
+        observation["terminal_turn_id"] = turn_id
+        observation["terminal_status"] = status
+        self._client.read_thread(
+            thread_id,
+            context=_CRASH_RECOVERY_RECHECK_CONTEXT,
+        )
+
+    def _complete_crash_recovery_recheck(self, payload: dict[str, Any]) -> None:
+        observation = self._crash_recovery_observation
+        if not isinstance(observation, dict):
+            return
+        thread_id = observation.get("thread_id")
+        raw_result = payload.get("read", payload.get("result"))
+        thread = raw_result.get("thread") if isinstance(raw_result, dict) else None
+        marker_prompt = observation.get("prompt_id")
+        valid = (
+            isinstance(thread, dict)
+            and thread.get("id") == thread_id
+            and isinstance(marker_prompt, str)
+            and bool(marker_prompt)
+            and self._thread_read_has_recovery_prompt(payload, marker_prompt)
+        )
+        turn_id = observation.get("terminal_turn_id")
+        status = observation.get("terminal_status")
+        self._crash_recovery_observation = None
+        if valid and isinstance(turn_id, str) and not self._turn_state.busy:
+            self._queue_goal_continuation(thread_id, turn_id, status)
+            self._maybe_start_goal_continuation()
+
     def _request_goal(self) -> None:
         thread_id = self._selected_thread_id
         if (
@@ -2698,6 +2939,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         *,
         auto_turn: bool = False,
     ) -> None:
+        observation = self._crash_recovery_observation
+        if (
+            isinstance(observation, dict)
+            and observation.get("thread_id") == thread_id
+            and (
+                observation.get("prompt_seen") is True
+                or turn_id != observation.get("initial_turn_id")
+            )
+        ):
+            self._crash_recovery_observation = None
         was_auto_turn = auto_turn or self._goal_auto_turn_is_current(thread_id)
         auto_turn_had_progress = self._goal_auto_turn_has_progress
         if was_auto_turn:
@@ -3269,8 +3520,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._refresh_team_combo()
         return True
 
-    def _render_thread_read(self, payload: dict[str, Any]) -> bool:
-        if self._turn_state.busy:
+    def _render_thread_read(
+        self,
+        payload: dict[str, Any],
+        *,
+        allow_active: bool = False,
+        hidden_user_prefix: str | None = None,
+    ) -> bool:
+        if self._turn_state.busy and not allow_active:
             return False
         raw_result = payload.get("read", payload.get("result"))
         if not isinstance(raw_result, dict):
@@ -3312,7 +3569,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     restored_text = "\n".join(texts)
                     if (
                         not attachments
-                        and restored_text == _GOAL_CONTINUE_INSTRUCTION
+                        and (
+                            restored_text == _GOAL_CONTINUE_INSTRUCTION
+                            or (
+                                isinstance(hidden_user_prefix, str)
+                                and restored_text.startswith(hidden_user_prefix)
+                            )
+                        )
                     ):
                         continue
                     restored.append(("user", (restored_text, tuple(attachments))))
@@ -3863,6 +4126,32 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._apply_threads(payload.get("threads"))
             self._refresh_controls()
             return
+        if (
+            context == _GOAL_GET_CONTEXT
+            and isinstance(self._crash_recovery_marker, dict)
+            and isinstance(self._crash_recovery_health_session, dict)
+        ):
+            if context != self._goal_action_context:
+                return
+            self._goal_action_context = None
+            if (
+                self._selected_thread_id is not None
+                or not self._crash_recovery_goal_matches(payload)
+                or self._client is None
+            ):
+                self._discard_crash_recovery_candidate()
+            elif self._crash_recovery_thread_payload is None:
+                self._crash_recovery_goal_payload = dict(payload)
+                self._client.read_thread(
+                    self._crash_recovery_marker["thread_id"],
+                    context=_CRASH_RECOVERY_READ_CONTEXT,
+                )
+            else:
+                thread_payload = self._crash_recovery_thread_payload
+                self._crash_recovery_goal_payload = dict(payload)
+                self._complete_crash_recovery_bind(thread_payload)
+            self._refresh_controls()
+            return
         if context in {
             _GOAL_GET_CONTEXT,
             _GOAL_SET_CONTEXT,
@@ -3906,6 +4195,30 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._maybe_start_goal_continuation(
                 explicit_source=explicit_continue,
             )
+            return
+        if context == _CRASH_RECOVERY_READ_CONTEXT:
+            marker = self._crash_recovery_marker
+            raw_result = payload.get("read", payload.get("result"))
+            thread = (
+                raw_result.get("thread") if isinstance(raw_result, dict) else None
+            )
+            if (
+                isinstance(marker, dict)
+                and isinstance(thread, dict)
+                and thread.get("id") == marker["thread_id"]
+                and self._selected_thread_id is None
+                and self._client is not None
+            ):
+                self._crash_recovery_thread_payload = dict(payload)
+                self._goal_action_context = _GOAL_GET_CONTEXT
+                self._client.get_goal(marker["thread_id"])
+            else:
+                self._discard_crash_recovery_candidate()
+            self._refresh_controls()
+            return
+        if context == _CRASH_RECOVERY_RECHECK_CONTEXT:
+            self._complete_crash_recovery_recheck(payload)
+            self._refresh_controls()
             return
         if context.startswith(_THREAD_READ_CONTEXT_PREFIX):
             self._render_thread_read(payload)
@@ -4773,6 +5086,26 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         details = details if isinstance(details, dict) else {}
         error_code = error.get("code") if isinstance(error, dict) else None
         formatted_error = format_bridge_error(payload)
+
+        if (
+            context == _GOAL_GET_CONTEXT
+            and isinstance(self._crash_recovery_marker, dict)
+            and isinstance(self._crash_recovery_health_session, dict)
+            and self._selected_thread_id is None
+        ):
+            if context == self._goal_action_context:
+                self._goal_action_context = None
+            self._discard_crash_recovery_candidate()
+            self._refresh_controls()
+            return
+        if context == _CRASH_RECOVERY_READ_CONTEXT:
+            self._discard_crash_recovery_candidate()
+            self._refresh_controls()
+            return
+        if context == _CRASH_RECOVERY_RECHECK_CONTEXT:
+            self._crash_recovery_observation = None
+            self._refresh_controls()
+            return
 
         if context.startswith(_SESSION_RECONCILE_CONTEXT_PREFIX):
             pending = self._pending_steer_reconciliation(context)

@@ -1442,6 +1442,46 @@ foreach ($count in 1..4) {
         self.assertIn("$attemptedRecoveryPrompts.Add", source)
         self.assertNotIn("Stop-Process", source)
 
+    def test_crash_recovery_marker_is_scoped_to_one_pending_houdini_child(self) -> None:
+        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
+        marker_names = (
+            "HIA_CRASH_RECOVERY_THREAD_ID",
+            "HIA_CRASH_RECOVERY_GOAL_BINDING",
+            "HIA_CRASH_RECOVERY_PROMPT_ID",
+        )
+        base_environment = source[
+            source.index("$houdiniEnvironment = @{") : source.index(
+                "$stableCheckpoint = $null"
+            )
+        ]
+        child_setup = source[
+            source.index("$houdiniInfo = [System.Diagnostics.ProcessStartInfo]::new()") : source.index(
+                "$houdiniProcess = [System.Diagnostics.Process]::new()"
+            )
+        ]
+
+        for name in marker_names:
+            self.assertNotIn(name, base_environment)
+            self.assertIn(f"'{name}'", child_setup)
+            self.assertEqual(2, source.count(f"'{name}'"))
+        self.assertIn("if ($null -ne $pendingRecovery)", child_setup)
+        self.assertIn(
+            "'HIA_CRASH_RECOVERY_THREAD_ID' = [string]$pendingRecovery.thread_id",
+            child_setup,
+        )
+        self.assertIn(
+            "'HIA_CRASH_RECOVERY_GOAL_BINDING' = [string]$pendingRecovery.goal_binding",
+            child_setup,
+        )
+        self.assertIn(
+            "'HIA_CRASH_RECOVERY_PROMPT_ID' = [string]$pendingRecovery.prompt_id",
+            child_setup,
+        )
+        self.assertLess(
+            child_setup.index("Remove-ChildEnvironment"),
+            child_setup.index("if ($null -ne $pendingRecovery)"),
+        )
+
     def test_exe_project_root_locator_works_after_project_move(self) -> None:
         fake_root = self.sandbox / "moved-launcher-project"
         nested_launcher = fake_root / ".runtime" / "dist" / "launcher"

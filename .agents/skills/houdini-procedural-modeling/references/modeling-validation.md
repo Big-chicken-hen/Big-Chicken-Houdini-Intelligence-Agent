@@ -11,7 +11,10 @@ Verify only the relevant items:
 - output geometry exists with plausible bounds, scale, orientation, and location;
 - required groups, attributes, names, and material regions are present;
 - repeated systems produce expected relationships without unintended overlaps;
+- continuous paths and sweeps preserve intended profile, frame, seam, and scale behavior;
+- hosts, anchors, supports, and affected dependents remain correct after representative upstream changes;
 - important controls make local, predictable changes;
+- required UV or alternative coordinate sets and stable semantic groups remain valid after topology or parameter changes;
 - costly stages, quality controls, instances, and caches behave as intended;
 - the graph has no overlapping nodes, reverse wires, obvious crossings, needlessly long wires, default important names, disconnected experiments, or ambiguous final output.
 

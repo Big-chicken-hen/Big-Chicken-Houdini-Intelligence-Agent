@@ -981,3 +981,9 @@
 - 真实 GUI 中约 800px 的会话 viewport 仍把长 Codex 与用户消息卡压在约 280px，造成严重窄列换行。根因不是 0.82/0.68 上限计算，而是 `QHBoxLayout.addWidget(..., alignment)` 的水平 alignment 让 Expanding 卡按窄 `sizeHint` 留在已分配槽内；旧测试只检查 `maximumWidth`，因此未发现实际几何错误。
 - 最小修复仅移除消息行两处 `addWidget` 的水平 alignment 参数，继续用原左右 stretch 对齐：Codex 实际约占可用宽度 80%，用户卡受既有 68% maximum 限制；未改 ratio、composer、Goal、Bridge 或其他布局。新增近真实布局回归直接验证 actual width、viewport resize、长 Markdown 高度重排和短用户消息不越界。
 - ConversationView 精确回归 13/13、Panel/IME/composer/附件相邻回归 145/145 通过；本轮唯一一次完整套件 764/764 通过，用时 34.283 秒。仍需在真实 Houdini GUI 验证宽/窄 Pane 拖动时两类气泡实际比例、长 Markdown 重排高度及短消息视觉效果。
+
+## 专注模式崩溃恢复后的 Panel 精确接管（2026-07-22）
+
+- 真实问题是 launcher 已能在 Houdini 异常退出后恢复 HIP 并为原 Thread 发送一次恢复 Turn，但重启后的 Panel 按正常规则保持未选择、空白，因而收不到该 Turn 的 completion 边界，既有 Goal 自动续轮无法继续第二轮。普通启动空白规则本身没有错误。
+- launcher 现在只给本次已验证的恢复 Houdini 子进程传入一次性 exact Thread、Goal binding 与恢复 prompt 标记；Panel 仅在 `/v1/health`、两次实时 Goal 校验和 `thread/read` 全部证明 exact Thread、focus=true、同一 active Goal 后本地绑定，不调用 resume、不猜最近历史，也不重复 launcher 的恢复 Turn。绑定后用 fresh session/事件接回既有 Goal 续轮；读取期间 Goal/focus 改变会拒绝绑定，旧 session 不回灌，内部恢复指令不显示成用户气泡。普通子进程没有标记，标记消费后普通重开仍为空白。
+- Panel/launcher 精确回归 146/146 通过；Panel、launcher 与相邻 Bridge 回归 233/233 通过；最终完整套件 773/773 通过，用时 33.749 秒。PowerShell AST 与 Python 编译检查通过。尚需真实 Houdini 人工验证同一 launcher 内异常退出后：原 Thread 自动显示、launcher 恢复 Turn 完成后连续两轮各只续一次；正常关闭或普通重开 Panel 仍为空白。本轮不覆盖 launcher 自身退出、断电或进程仍存活但界面假死。

@@ -10,6 +10,8 @@ Pass a subsystem only the values it consumes. Avoid global parameters that make 
 
 ## Choose representations by behavior
 
+Choose generators from component semantics. Do not disguise a pile of unrelated primitives as a procedural design by emitting the same construction from Python, VEX, copied meshes, or custom point arrays.
+
 - Use polygonal or subdivision construction for controlled manufactured surfaces.
 - Use curves and profiles for directional, swept, rail, trim, cable, or path-driven forms.
 - Use points, packed geometry, or instances for repeated independent elements.
@@ -19,6 +21,22 @@ Pass a subsystem only the values it consumes. Avoid global parameters that make 
 - Use loops only where iteration is structurally required; do not use a solver for a static result.
 
 Use HOM to author the network. Keep the asset's modeling logic in inspectable Houdini nodes rather than hiding it inside one opaque Python node or script.
+
+## Keep paths and sweeps stable
+
+Generate a genuinely continuous linear component from a continuous path and a stable profile. Keep path position and direction separate from profile shape; do not approximate a bend with intersecting straight pieces or conceal it with oversized connectors.
+
+Before sweeping, remove duplicate and near-zero segments and establish stable direction, tangent, normal, reference frame, and seam behavior. Treat necking, bulging, profile flipping, unintended scale change, or uncontrolled twist as path, frame, or profile failures. Repair that upstream system instead of smoothing or decorating the symptom.
+
+Keep independent parts separate when the intended result is a joint, bracket, clamp, or other assembly rather than one continuous form.
+
+## Track hosts and dependency updates
+
+Represent significant attachment semantics through existing groups, attributes, metadata, hierarchy, or USD paths. Record the component role, valid host, anchor, support, clearance, local relationship, and update behavior without forcing one universal schema.
+
+When a host changes, distinguish fixed anchors from moving boundaries. Rebind endpoint and corner components, recalculate path- or boundary-distributed systems, regenerate opening- or surface-derived parts, and resolve both endpoints of multi-host components. Rebuild only affected dependents.
+
+Do not preserve obsolete world-space positions, apply one translation to every dependent, uniformly scale linear components, or patch a downstream mesh when the upstream relationship is wrong.
 
 ## Design useful controls
 

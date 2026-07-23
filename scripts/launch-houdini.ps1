@@ -842,7 +842,10 @@ $backendEnvironmentNames = @(
     'HIA_MCP_V2_PORT',
     'HIA_MCP_V2_TOKEN',
     'HIA_MCP_V2_ROUTE',
-    'HIA_MCP_V2_RUNTIME_DIR'
+    'HIA_MCP_V2_RUNTIME_DIR',
+    'HIA_CRASH_RECOVERY_THREAD_ID',
+    'HIA_CRASH_RECOVERY_GOAL_BINDING',
+    'HIA_CRASH_RECOVERY_PROMPT_ID'
 )
 if ($McpBackend -eq 'hia_v2') {
     $hiaMcpServicePath = Assert-OrdinaryProjectPath `
@@ -1062,6 +1065,13 @@ try {
         }
         Remove-ChildEnvironment -StartInfo $houdiniInfo -Names $backendEnvironmentNames
         Set-ChildEnvironment -StartInfo $houdiniInfo -Values $houdiniEnvironment
+        if ($null -ne $pendingRecovery) {
+            Set-ChildEnvironment -StartInfo $houdiniInfo -Values @{
+                'HIA_CRASH_RECOVERY_THREAD_ID' = [string]$pendingRecovery.thread_id
+                'HIA_CRASH_RECOVERY_GOAL_BINDING' = [string]$pendingRecovery.goal_binding
+                'HIA_CRASH_RECOVERY_PROMPT_ID' = [string]$pendingRecovery.prompt_id
+            }
+        }
         $houdiniProcess = [System.Diagnostics.Process]::new()
         $houdiniProcess.StartInfo = $houdiniInfo
         $houdiniStartedAt = [DateTime]::UtcNow
