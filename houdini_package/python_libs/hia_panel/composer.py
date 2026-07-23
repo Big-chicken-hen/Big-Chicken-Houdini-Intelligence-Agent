@@ -1,4 +1,4 @@
-"""Native PySide6 message composer helpers for the Houdini Intelligence Panel."""
+"""Native PySide6 message composer helpers for the Big-Chicken Houdini Intelligence Agent Panel."""
 
 from __future__ import annotations
 

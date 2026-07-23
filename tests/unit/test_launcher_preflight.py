@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -27,9 +26,6 @@ EXE_PROJECT_PATH = EXE_PROJECT_ROOT / "HoudiniIntelligenceLauncher.csproj"
 EXE_APP_PATH = EXE_PROJECT_ROOT / "App.xaml.cs"
 EXE_ROOT_LOCATOR_PATH = EXE_PROJECT_ROOT / "ProjectRootLocator.cs"
 EXE_BUILD_SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "build-launcher.ps1"
-ARTWORK_PATH = REPOSITORY_ROOT / "assets" / "launcher" / "steam-winter-sale.png"
-ARTWORK_NOTICE_PATH = REPOSITORY_ROOT / "assets" / "launcher" / "NOTICE.md"
-ARTWORK_SHA256 = "54699b8d1f09b8e8889e57cbea24f89d7e12adad703c517488fe5ce065874cad"
 UI_READY_PATHS = (
     REPOSITORY_ROOT / "houdini_package" / "python3.10libs" / "uiready.py",
     REPOSITORY_ROOT / "houdini_package" / "python3.11libs" / "uiready.py",
@@ -184,6 +180,25 @@ $checks = @(Test-HiaHoudiniProbeConsistency -HoudiniExe {_ps_literal(houdini)} -
         )
         self.assertEqual("red", output)
 
+    def test_hython_license_failure_is_reported_without_becoming_timeout(self) -> None:
+        houdini = self.make_houdini_install("Houdini 21.0.440")
+        output = self.run_powershell(
+            f"""
+$checks = @(Test-HiaHoudiniProbeConsistency `
+    -HoudiniExe {_ps_literal(houdini)} `
+    -HoudiniOutput 'Houdini 21.0.440' `
+    -HoudiniExitCode 0 `
+    -HythonOutput 'No licenses could be found to run this application. Please check for a valid license server host' `
+    -HythonExitCode 3)
+$checks | Where-Object id -eq 'houdini.hython_probe' | ConvertTo-Json -Compress
+"""
+        )
+        check = json.loads(output)
+        self.assertEqual("red", check["level"])
+        self.assertIn("许可证", check["message"])
+        self.assertIn("License Administrator", check["advice"])
+        self.assertNotIn("超时", check["message"])
+
     def test_houdini_and_hython_build_mismatch_is_blocking(self) -> None:
         houdini = self.make_houdini_install("Houdini 22.0.100")
         levels = self.probe_consistency(
@@ -276,6 +291,27 @@ cwd = 'Z:\\old-location'
         self.assertEqual("$HIA_PROJECT_ROOT/houdini_package", package["path"])
         self.assertNotIn("Z:/old-location", json.dumps(package))
         self.assertTrue((fake_root / ".runtime" / "launcher").is_dir())
+
+    def test_codex_login_guidance_is_project_local_and_contains_no_credentials(self) -> None:
+        fake_root = self.sandbox / "portable login project"
+        fake_root.mkdir()
+        output = self.run_powershell(
+            f"Get-HiaCodexLoginCommand -ProjectRoot {_ps_literal(fake_root)}"
+        )
+        self.assertIn(str(fake_root / ".runtime" / "codex-home"), output)
+        self.assertIn(
+            str(
+                fake_root
+                / ".runtime"
+                / "toolchains"
+                / "codex"
+                / "0.144.3"
+                / "codex.exe"
+            ),
+            output,
+        )
+        self.assertIn("login --device-auth", output)
+        self.assertNotRegex(output.lower(), r"(bearer|refresh_token|sk-proj)")
 
     def test_report_json_redacts_credentials(self) -> None:
         output = self.run_powershell(
@@ -753,8 +789,6 @@ $fxResult = Invoke-HiaPreflight `
         required_types = {
             "LayoutRoot": "System.Windows.Controls.Grid",
             "RightVisualRail": "System.Windows.Controls.Border",
-            "OptionalArtworkPanel": "System.Windows.Controls.Border",
-            "OptionalArtworkImage": "System.Windows.Controls.Image",
             "RecoveryCard": "System.Windows.Controls.Border",
             "RecoveryCheckpointText": "System.Windows.Controls.TextBlock",
             "RecoverCheckpointOption": "System.Windows.Controls.RadioButton",
@@ -930,11 +964,11 @@ try {{
         )
         for text in forbidden:
             self.assertNotIn(text, combined)
-        self.assertEqual(1, xaml_source.count("<Image"))
-        self.assertIn('Stretch="UniformToFill"', xaml_source)
+        self.assertEqual(0, xaml_source.count("<Image"))
+        self.assertIn("CREATIVE WORKSPACE", xaml_source)
         self.assertIn('x:Name="RightVisualRail"', xaml_source)
         self.assertIn("Update-ResponsiveLayout", wpf_source)
-        self.assertIn("[System.Windows.Media.Imaging.BitmapImage]::new()", wpf_source)
+        self.assertNotIn("[System.Windows.Media.Imaging.BitmapImage]::new()", wpf_source)
         self.assertIsNone(re.search(r"(?i)(?:^|[\"'>\s])[a-z]:\\", combined))
         self.assertNotIn(r"\\", xaml_source)
         uri_set = set(re.findall(r"(?:https?|file|pack)://[^\"\s<]+", xaml_source))
@@ -1106,30 +1140,20 @@ try {{
         ):
             self.assertEqual(1, wpf_source.count(event_binding), event_binding)
 
-    def test_optional_project_artwork_and_recovery_ui_are_nonblocking_and_explicit(self) -> None:
-        fake_root = self.sandbox / "portable-artwork-project"
-        (fake_root / "scripts").mkdir(parents=True)
-        (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
-        (fake_root / "scripts" / "launch-houdini.ps1").write_text("# marker\n")
-        expected = fake_root / "assets/launcher/steam-winter-sale.png"
-        output = self.run_powershell(
-            f"Get-HiaLauncherArtworkPath -ProjectRoot {_ps_literal(fake_root)}"
-        )
-        self.assertEqual(str(expected), output)
-        self.assertFalse(expected.exists())
-
+    def test_builtin_visual_and_recovery_ui_are_nonblocking_and_explicit(self) -> None:
         tree = ET.parse(XAML_PATH)
         root = tree.getroot()
-        presentation = "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}"
         xaml_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
         named = {
             element.attrib.get(xaml_name): element
             for element in root.iter()
             if xaml_name in element.attrib
         }
-        self.assertEqual("Collapsed", named["OptionalArtworkPanel"].attrib["Visibility"])
-        self.assertNotIn("Source", named["OptionalArtworkImage"].attrib)
-        self.assertEqual("UniformToFill", named["OptionalArtworkImage"].attrib["Stretch"])
+        self.assertNotIn("OptionalArtworkPanel", named)
+        self.assertNotIn("OptionalArtworkImage", named)
+        xaml_source = XAML_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn("CREATIVE WORKSPACE", xaml_source)
+        self.assertNotIn("STEAM WINTER", xaml_source.upper())
         self.assertEqual("Collapsed", named["RecoveryCard"].attrib["Visibility"])
         self.assertEqual("True", named["RecoverCheckpointOption"].attrib["IsChecked"])
         self.assertNotIn("IsChecked", named["NormalLaunchOption"].attrib)
@@ -1140,8 +1164,9 @@ try {{
 
         wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
+        self.assertNotIn("Get-HiaLauncherArtworkPath", wpf_source)
+        self.assertNotIn("steam-winter-sale", wpf_source)
         for required in (
-            "Get-HiaLauncherArtworkPath -ProjectRoot $projectRoot",
             "Get-HiaRecoverableLauncherSession -ProjectRoot $projectRoot",
             "$recoverCheckpointOption.IsChecked = $true",
             "'RecoverySessionId'",
@@ -1527,7 +1552,12 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertEqual("WinExe", properties["OutputType"])
         self.assertEqual("net8.0-windows", properties["TargetFramework"])
         self.assertEqual("true", properties["UseWPF"])
-        self.assertEqual("HoudiniIntelligenceLauncher", properties["AssemblyName"])
+        self.assertEqual("BigChickenLauncher", properties["AssemblyName"])
+        self.assertEqual("Big-Chicken Launcher", properties["Title"])
+        self.assertEqual("Big-Chicken Launcher", properties["AssemblyTitle"])
+        self.assertEqual("Big-Chicken Houdini Intelligence Agent", properties["Product"])
+        self.assertEqual("Big-Chicken", properties["Company"])
+        self.assertEqual("0.1.0-preview", properties["Version"])
         self.assertEqual("win-x64", properties["RuntimeIdentifier"])
         self.assertEqual("true", properties["SelfContained"])
         self.assertEqual("true", properties["PublishSingleFile"])
@@ -1535,20 +1565,7 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertEqual("false", properties["PublishTrimmed"])
         self.assertEqual([], project.findall(".//PackageReference"))
 
-        content_items = {
-            item.attrib["Include"]: {
-                child.tag: (child.text or "").strip() for child in item
-            }
-            for item in project.findall(".//Content")
-        }
-        for include in (
-            r"..\..\assets\launcher\steam-winter-sale.png",
-            r"..\..\assets\launcher\NOTICE.md",
-        ):
-            self.assertIn(include, content_items)
-            self.assertEqual("PreserveNewest", content_items[include]["CopyToOutputDirectory"])
-            self.assertEqual("PreserveNewest", content_items[include]["CopyToPublishDirectory"])
-            self.assertEqual("true", content_items[include]["ExcludeFromSingleFile"])
+        self.assertEqual([], project.findall(".//Content"))
 
         build_source = EXE_BUILD_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         app_source = EXE_APP_PATH.read_text(encoding="utf-8")
@@ -1591,15 +1608,10 @@ Add-Type -TypeDefinition $source -Language CSharp
             in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico", ".mp4"}
         ]
         self.assertEqual([], launcher_assets)
-        self.assertTrue(ARTWORK_PATH.is_file())
-        self.assertEqual(
-            ARTWORK_SHA256,
-            hashlib.sha256(ARTWORK_PATH.read_bytes()).hexdigest(),
+        self.assertNotIn(
+            "steam-winter-sale",
+            (EXE_PROJECT_PATH.read_text(encoding="utf-8") + WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")).lower(),
         )
-        notice = ARTWORK_NOTICE_PATH.read_text(encoding="utf-8")
-        self.assertIn("supplied by a project user as Steam seasonal artwork", notice)
-        self.assertIn("does not claim copyright or ownership", notice)
-        self.assertIn("Redistribution permission has not", notice)
 
     def test_cli_modes_do_not_load_wpf_assets(self) -> None:
         fake_root = self.sandbox / "portable-cli-no-ui"
@@ -1611,14 +1623,6 @@ Add-Type -TypeDefinition $source -Language CSharp
             "# lifecycle marker\n", encoding="utf-8"
         )
         (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
-        artwork = (
-            fake_root
-            / "assets"
-            / "launcher"
-            / "steam-winter-sale.png"
-        )
-        artwork.parent.mkdir(parents=True)
-        artwork.write_bytes(b"deliberately invalid image; CLI must not decode this")
         self.assertFalse((launcher_directory / "HiaLauncher.Wpf.ps1").exists())
         self.assertFalse((launcher_directory / "HiaLauncher.xaml").exists())
 
@@ -1704,6 +1708,12 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertNotIn("'-RenderOutputDir'", launcher_source)
         self.assertNotIn("$env:HIA_RENDER_OUTPUT_DIR =", combined)
         self.assertIn("Invoke-HiaScreenshotCacheCleanup", wpf_source)
+        self.assertIn("Start-HiaCodexBootstrap", wpf_source)
+        self.assertIn("[System.Diagnostics.ProcessStartInfo]::new()", wpf_source)
+        self.assertIn("[System.Windows.Threading.DispatcherTimer]::new()", wpf_source)
+        self.assertIn("Get-HiaCodexLoginCommand", wpf_source)
+        self.assertIn("scripts\\bootstrap-runtime.ps1", wpf_source)
+        self.assertNotIn("Invoke-WebRequest", wpf_source)
         self.assertIn("[System.Windows.MessageBoxButton]::YesNo", wpf_source)
         self.assertIn("[System.Windows.MessageBoxResult]::No", wpf_source)
 

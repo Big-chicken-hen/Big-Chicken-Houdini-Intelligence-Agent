@@ -29,7 +29,7 @@ namespace HoudiniIntelligenceLauncher
             }
 
             throw new InvalidOperationException(
-                "The Houdini Intelligence project root could not be derived from the launcher location."
+                "The Big-Chicken Houdini Intelligence Agent project root could not be derived from the launcher location."
             );
         }
 

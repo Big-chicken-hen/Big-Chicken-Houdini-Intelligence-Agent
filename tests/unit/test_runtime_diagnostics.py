@@ -168,7 +168,7 @@ class RuntimeDiagnosticWriterTests(unittest.TestCase):
         files = list((self.project_root / ".runtime" / "diagnostics").glob("*.md"))
         self.assertEqual([Path(first)], files)
         content = Path(first).read_text(encoding="utf-8")
-        self.assertEqual(1, content.count("# Houdini Intelligence 问题报告"))
+        self.assertEqual(1, content.count("# Big-Chicken Houdini Intelligence Agent 问题报告"))
         self.assertEqual(1, content.count("## 更新 2"))
         self.assertIn("first failure", content)
         self.assertIn("second failure", content)

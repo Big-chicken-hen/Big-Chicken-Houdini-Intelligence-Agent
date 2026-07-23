@@ -3,8 +3,15 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
-    <AssemblyName>HoudiniIntelligenceLauncher</AssemblyName>
+    <AssemblyName>BigChickenLauncher</AssemblyName>
     <RootNamespace>HoudiniIntelligenceLauncher</RootNamespace>
+    <Title>Big-Chicken Launcher</Title>
+    <AssemblyTitle>Big-Chicken Launcher</AssemblyTitle>
+    <Product>Big-Chicken Houdini Intelligence Agent</Product>
+    <Company>Big-Chicken</Company>
+    <Description>Launcher and preflight for Big-Chicken Houdini Intelligence Agent</Description>
+    <Authors>Big-chicken-hen</Authors>
+    <Version>0.1.0-preview</Version>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
@@ -16,18 +23,4 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
-  <ItemGroup>
-    <Content Include="..\..\assets\launcher\steam-winter-sale.png">
-      <Link>assets\launcher\steam-winter-sale.png</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
-    </Content>
-    <Content Include="..\..\assets\launcher\NOTICE.md">
-      <Link>assets\launcher\NOTICE.md</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
-    </Content>
-  </ItemGroup>
 </Project>

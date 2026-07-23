@@ -230,7 +230,7 @@ class CodexStdioClient:
             {
                 "clientInfo": {
                     "name": "houdini-intelligence",
-                    "title": "Houdini Intelligence",
+                    "title": "Big-Chicken Houdini Intelligence Agent",
                     "version": "0.1.0",
                 },
                 "capabilities": {"experimentalApi": False},

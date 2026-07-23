@@ -95,7 +95,7 @@ _CODEX_CHILD_ENVIRONMENT_ALLOWLIST = (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Houdini Intelligence local Bridge")
+    parser = argparse.ArgumentParser(description="Big-Chicken Houdini Intelligence Agent local Bridge")
     parser.add_argument("--project-root", default=str(PROJECT_ROOT))
     parser.add_argument(
         "--codex-exe",

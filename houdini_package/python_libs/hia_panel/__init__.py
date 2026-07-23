@@ -1,4 +1,4 @@
-"""Houdini Intelligence Python Panel package.
+"""Big-Chicken Houdini Intelligence Agent Python Panel package.
 
 The Qt panel is imported lazily so the state and response helpers remain
 testable with the project-standard Python, where PySide6 is intentionally not

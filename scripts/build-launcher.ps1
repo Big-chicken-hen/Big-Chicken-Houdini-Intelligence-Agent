@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$InstallLocalSdk
+    [switch]$InstallLocalSdk,
+    [AllowEmptyString()][string]$OutputDirectory = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,7 +16,18 @@ $temporaryRoot = Join-Path $runtimeRoot 'tmp\dotnet-launcher-build'
 $buildRoot = Join-Path $runtimeRoot 'build\launcher'
 $binRoot = Join-Path $buildRoot 'bin'
 $objRoot = Join-Path $buildRoot 'obj'
-$distRoot = Join-Path $runtimeRoot 'dist\launcher'
+$distRoot = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    Join-Path $runtimeRoot 'dist\launcher'
+} else {
+    [System.IO.Path]::GetFullPath($OutputDirectory)
+}
+$runtimePrefix = $runtimeRoot.TrimEnd('\') + '\'
+if (-not $distRoot.StartsWith(
+    $runtimePrefix,
+    [System.StringComparison]::OrdinalIgnoreCase
+)) {
+    throw "Launcher output must stay under the project runtime directory: $distRoot"
+}
 $projectFile = Join-Path $projectRoot 'launcher\HoudiniIntelligenceLauncher\HoudiniIntelligenceLauncher.csproj'
 $localDotnet = Join-Path $toolchainRoot 'dotnet.exe'
 
@@ -154,7 +166,7 @@ Write-Output "[launcher] publish: $distRoot"
 & $dotnetExe @publishArguments
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish exited with code $LASTEXITCODE." }
 
-$executable = Join-Path $distRoot 'HoudiniIntelligenceLauncher.exe'
+$executable = Join-Path $distRoot 'BigChickenLauncher.exe'
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Published launcher executable is missing: $executable"
 }

@@ -1,4 +1,4 @@
-"""Native PySide6 conversation widgets for the Houdini Intelligence Panel."""
+"""Native PySide6 conversation widgets for the Big-Chicken Houdini Intelligence Agent Panel."""
 
 from __future__ import annotations
 

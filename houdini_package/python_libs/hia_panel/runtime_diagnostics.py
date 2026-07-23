@@ -294,7 +294,7 @@ class RuntimeDiagnosticWriter:
         values = dict(snapshot)
         if not self._has_value(values, ("time", "timestamp")):
             values["time"] = moment.isoformat(timespec="seconds")
-        lines = ["# Houdini Intelligence 问题报告", "", "## 本轮快照", ""]
+        lines = ["# Big-Chicken Houdini Intelligence Agent 问题报告", "", "## 本轮快照", ""]
         lines.extend(self._render_fields(values, _SNAPSHOT_FIELDS))
         lines.append(self._render_occurrence(occurrence, moment, 1))
         return "\n".join(lines).rstrip() + "\n"

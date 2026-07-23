@@ -5,7 +5,7 @@ Add-Type -AssemblyName WindowsBase
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
     [void][System.Windows.MessageBox]::Show(
         '启动器界面需要 STA 模式。请使用 Windows PowerShell 5.1 直接运行 scripts\hia-launcher.ps1。',
-        'HIA 启动器无法继续',
+        'Big-Chicken Launcher 无法继续',
         [System.Windows.MessageBoxButton]::OK,
         [System.Windows.MessageBoxImage]::Error
     )
@@ -24,7 +24,7 @@ try {
 } catch {
     [void][System.Windows.MessageBox]::Show(
         '无法加载项目本地 WPF 界面资源。请检查 scripts\launcher\HiaLauncher.xaml。',
-        'HIA 启动器无法继续',
+        'Big-Chicken Launcher 无法继续',
         [System.Windows.MessageBoxButton]::OK,
         [System.Windows.MessageBoxImage]::Error
     )
@@ -74,8 +74,6 @@ $repairButton = Get-RequiredControl -Name 'RepairButton'
 $cleanupScreenshotsButton = Get-RequiredControl -Name 'CleanupScreenshotsButton'
 $copyReportButton = Get-RequiredControl -Name 'CopyReportButton'
 $launchButton = Get-RequiredControl -Name 'LaunchButton'
-$optionalArtworkPanel = Get-RequiredControl -Name 'OptionalArtworkPanel'
-$optionalArtworkImage = Get-RequiredControl -Name 'OptionalArtworkImage'
 $recoveryCard = Get-RequiredControl -Name 'RecoveryCard'
 $recoveryCheckpointText = Get-RequiredControl -Name 'RecoveryCheckpointText'
 $recoverCheckpointOption = Get-RequiredControl -Name 'RecoverCheckpointOption'
@@ -105,6 +103,8 @@ $script:isBusy = $false
 $script:initialScanStarted = $false
 $script:pendingRecovery = $null
 $script:compactLayout = $null
+$script:bootstrapProcess = $null
+$script:bootstrapPreferences = $null
 $renderOutputTextBox.Text = [string]$inputs.render_output
 $renderOutputTextBox.ToolTip = if ($renderOutputTextBox.Text) {
     $renderOutputTextBox.Text
@@ -118,6 +118,9 @@ $script:inlineStatusTimer.Add_Tick({
     $script:inlineStatusTimer.Stop()
     $inlineStatusBorder.Visibility = [System.Windows.Visibility]::Collapsed
 })
+
+$script:bootstrapTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:bootstrapTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 
 function Set-OverallState {
     param([Parameter(Mandatory = $true)][ValidateSet('green', 'yellow', 'red', 'neutral', 'busy')][string]$State)
@@ -153,49 +156,6 @@ function Set-OverallState {
             $overallStatusBadge.BorderBrush = $brushNeutral
             $overallStatusBadge.Background = $surfaceNeutral
         }
-    }
-}
-
-function Initialize-OptionalArtwork {
-    $optionalArtworkImage.Source = $null
-    $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Collapsed
-    try {
-        $artworkPath = Get-HiaLauncherArtworkPath -ProjectRoot $projectRoot
-        if (-not (Test-Path -LiteralPath $artworkPath -PathType Leaf)) { return }
-        $artworkFile = Get-Item -LiteralPath $artworkPath -Force -ErrorAction Stop
-        if (
-            $artworkFile -isnot [System.IO.FileInfo] -or
-            [long]$artworkFile.Length -le 0 -or
-            [long]$artworkFile.Length -gt 33554432
-        ) {
-            return
-        }
-
-        $stream = [System.IO.File]::Open(
-            $artworkPath,
-            [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::Read,
-            [System.IO.FileShare]::Read
-        )
-        try {
-            $bitmap = [System.Windows.Media.Imaging.BitmapImage]::new()
-            $bitmap.BeginInit()
-            $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-            $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
-            $bitmap.DecodePixelHeight = 640
-            $bitmap.StreamSource = $stream
-            $bitmap.EndInit()
-            $bitmap.Freeze()
-        } finally {
-            $stream.Dispose()
-        }
-        $optionalArtworkImage.Source = $bitmap
-        $optionalArtworkPanel.ToolTip = $artworkPath
-        $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Visible
-    } catch {
-        # Optional project artwork never changes preflight or launch eligibility.
-        $optionalArtworkImage.Source = $null
-        $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Collapsed
     }
 }
 
@@ -386,6 +346,26 @@ function Set-BusyState {
     }
 }
 
+function Test-CurrentRedCheck {
+    param([Parameter(Mandatory = $true)][string]$Id)
+
+    if ($null -eq $script:currentResult) { return $false }
+    return @($script:currentResult.checks | Where-Object {
+        [string]$_.id -eq $Id -and [string]$_.level -eq 'red'
+    }).Count -gt 0
+}
+
+function Update-RepairButton {
+    $label = '修复安全项目'
+    if (Test-CurrentRedCheck -Id 'codex.executable') {
+        $label = '安装/修复 Codex'
+    } elseif (Test-CurrentRedCheck -Id 'codex.login') {
+        $label = '复制登录命令'
+    }
+    $repairButton.Content = $label
+    [System.Windows.Automation.AutomationProperties]::SetName($repairButton, $label)
+}
+
 function New-CheckView {
     param([Parameter(Mandatory = $true)]$Check)
 
@@ -453,6 +433,7 @@ function Show-Result {
     } else {
         Set-OverallState -State 'red'
     }
+    Update-RepairButton
 }
 
 function Show-PreflightFailure {
@@ -471,6 +452,7 @@ function Show-PreflightFailure {
     $warningCountText.Text = '0'
     $blockedCountText.Text = '1'
     Set-OverallState -State 'red'
+    Update-RepairButton
     Show-InlineStatus -Kind 'error' -Text '自检失败；未启动 Houdini。请使用控制台检查模式定位问题。'
 }
 
@@ -486,9 +468,85 @@ function Mark-SelectionNeedsCheck {
     $warningCountText.Text = '0'
     $blockedCountText.Text = '0'
     Set-OverallState -State 'neutral'
+    Update-RepairButton
     Update-PathSummaries
     Set-BusyState -Busy $false
     Show-InlineStatus -Kind 'warning' -Text '环境选择已变化，请点击“重新扫描”完成检查。'
+}
+
+function Complete-HiaCodexBootstrap {
+    if ($null -eq $script:bootstrapProcess -or -not $script:bootstrapProcess.HasExited) { return }
+
+    $script:bootstrapTimer.Stop()
+    $exitCode = $script:bootstrapProcess.ExitCode
+    $script:bootstrapProcess.Dispose()
+    $script:bootstrapProcess = $null
+
+    $preferences = $script:bootstrapPreferences
+    $script:bootstrapPreferences = $null
+    $repairFailed = $false
+    if ($exitCode -eq 0) {
+        try {
+            [void]@(Repair-HiaSafeProject -ProjectRoot $projectRoot)
+        } catch {
+            $repairFailed = $true
+        }
+    }
+
+    Set-BusyState -Busy $false
+    Invoke-GuiScan `
+        -PreferredHoudini ([string]$preferences.houdini) `
+        -PreferredBridge ([string]$preferences.bridge) `
+        -PreferredBackend ([string]$preferences.backend)
+
+    if ($exitCode -eq 0 -and -not $repairFailed) {
+        Show-InlineStatus -Kind 'success' -Transient -Text 'Codex 已安装到项目 .runtime；自检已自动刷新。'
+        return
+    }
+    Show-InlineStatus -Kind 'error' -Text ("Codex 项目本地安装失败（退出码 {0}）。请在 PowerShell 中运行 scripts\bootstrap-runtime.ps1 查看详情。" -f $exitCode)
+}
+
+$script:bootstrapTimer.Add_Tick({ Complete-HiaCodexBootstrap })
+
+function Start-HiaCodexBootstrap {
+    if ($null -ne $script:bootstrapProcess) { return }
+
+    $bootstrapScript = Join-Path $projectRoot 'scripts\bootstrap-runtime.ps1'
+    if (-not (Test-Path -LiteralPath $bootstrapScript -PathType Leaf)) {
+        Show-InlineStatus -Kind 'error' -Text '缺少 scripts\bootstrap-runtime.ps1，无法执行项目本地 Codex 安装。'
+        return
+    }
+
+    $script:bootstrapPreferences = [pscustomobject]@{
+        houdini = Get-ComboPath -Combo $houdiniCombo
+        bridge = Get-ComboPath -Combo $bridgeCombo
+        backend = Get-ComboBackend
+    }
+    $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $powershellExe
+    $startInfo.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$bootstrapScript`""
+    $startInfo.WorkingDirectory = $projectRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+
+    try {
+        $script:bootstrapProcess = [System.Diagnostics.Process]::new()
+        $script:bootstrapProcess.StartInfo = $startInfo
+        if (-not $script:bootstrapProcess.Start()) { throw '无法启动 PowerShell bootstrap 进程。' }
+        Set-BusyState -Busy $true
+        $overallStatusText.Text = '正在安装 Codex'
+        Show-InlineStatus -Kind 'neutral' -Text '正在下载并校验官方 Codex 0.144.3；仅写入项目 .runtime。'
+        $script:bootstrapTimer.Start()
+    } catch {
+        if ($null -ne $script:bootstrapProcess) {
+            $script:bootstrapProcess.Dispose()
+            $script:bootstrapProcess = $null
+        }
+        $script:bootstrapPreferences = $null
+        Set-BusyState -Busy $false
+        Show-InlineStatus -Kind 'error' -Text ("无法启动 Codex 项目本地安装：{0}" -f $_.Exception.Message)
+    }
 }
 
 function Get-PathIndex {
@@ -746,6 +804,19 @@ $browseRenderOutputButton.Add_Click({
 
 $repairButton.Add_Click({
     if ($script:isBusy) { return }
+    if (Test-CurrentRedCheck -Id 'codex.executable') {
+        Start-HiaCodexBootstrap
+        return
+    }
+    if (Test-CurrentRedCheck -Id 'codex.login') {
+        try {
+            [System.Windows.Clipboard]::SetText((Get-HiaCodexLoginCommand -ProjectRoot $projectRoot))
+            Show-InlineStatus -Kind 'success' -Text '项目本地 Codex 登录命令已复制；请在 PowerShell 中运行并完成 device login。命令不含凭据。'
+        } catch {
+            Show-InlineStatus -Kind 'error' -Text '无法复制登录命令；请按安装文档中的项目本地登录步骤执行。'
+        }
+        return
+    }
     $preferredHoudini = Get-ComboPath -Combo $houdiniCombo
     $preferredBridge = Get-ComboPath -Combo $bridgeCombo
     $preferredBackend = Get-ComboBackend
@@ -784,7 +855,7 @@ $($preview.target_path)
 总大小：$previewSize
 当前跳过：$($preview.skipped_count) 个
 
-确认只删除该目录第一层、且仍与本次预览一致的 HIA PNG 截图吗？
+确认只删除该目录第一层、且仍与本次预览一致的 Big-Chicken PNG 截图吗？
 子目录、其他缓存、附件和最终渲染输出不会被清理。
 "@
     $confirmation = [System.Windows.MessageBox]::Show(
@@ -895,10 +966,18 @@ $launchButton.Add_Click({
     }
 })
 
-Initialize-OptionalArtwork
 Initialize-RecoveryPrompt
 
 $window.Add_SizeChanged({ Update-ResponsiveLayout })
+$window.Add_Closed({
+    $script:inlineStatusTimer.Stop()
+    $script:bootstrapTimer.Stop()
+    if ($null -ne $script:bootstrapProcess) {
+        # Disposing this wrapper does not terminate the user-started verified bootstrap.
+        $script:bootstrapProcess.Dispose()
+        $script:bootstrapProcess = $null
+    }
+})
 $window.Add_ContentRendered({
     Update-ResponsiveLayout
     if ($script:initialScanStarted) { return }

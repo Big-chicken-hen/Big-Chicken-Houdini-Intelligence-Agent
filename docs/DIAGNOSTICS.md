@@ -34,6 +34,10 @@ Bearer tokens, authorization data, cookies, API keys, login data, refresh tokens
 
 Reports remain local. The writer does not upload them, open Explorer, contact a service, or create a GitHub issue. To request help, copy the saved path and give the report to Codex. The user decides whether to share it elsewhere.
 
+Before sharing a report publicly, read it in a text editor and remove any project name, asset path, Thread summary, or scene detail that should remain private. Never attach the surrounding `.runtime` directory, Codex Home, launcher settings, reference images, screenshots, HIP files, or final outputs to an issue by default.
+
+For a public bug report, pair the smallest relevant redacted excerpt with Big-Chicken Houdini Intelligence Agent, Windows, Houdini, Houdini Python, Bridge Python, Codex, and selected MCP backend versions. Security-sensitive reports should follow [SECURITY.md](../SECURITY.md) instead of a public issue.
+
 ## Fictional example
 
 ```markdown

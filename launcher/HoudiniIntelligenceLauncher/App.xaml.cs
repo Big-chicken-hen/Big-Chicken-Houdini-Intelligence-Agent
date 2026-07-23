@@ -31,8 +31,8 @@ public partial class App : Application
         catch (Exception exception)
         {
             MessageBox.Show(
-                $"Houdini Intelligence Launcher could not start.\n\n{exception.Message}",
-                "Houdini Intelligence Launcher",
+                $"Big-Chicken Launcher could not start.\n\n{exception.Message}",
+                "Big-Chicken Launcher",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error
             );

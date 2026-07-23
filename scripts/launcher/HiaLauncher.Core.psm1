@@ -1,8 +1,18 @@
 ﻿Set-StrictMode -Version Latest
 
 $script:HiaFxHoudiniVersion = '1.3.0'
+$script:HiaCodexVersion = '0.144.3'
 $script:HiaProbeMarker = '__HIA_LAUNCHER_PROBE__'
 $script:HiaDefaultMcpBackend = 'hia_v2'
+
+function Get-HiaCodexLoginCommand {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $codexHome = (Join-Path $root '.runtime\codex-home').Replace("'", "''")
+    $codexExe = (Join-Path $root ".runtime\toolchains\codex\$script:HiaCodexVersion\codex.exe").Replace("'", "''")
+    return "`$env:CODEX_HOME = '$codexHome'; & '$codexExe' login --device-auth"
+}
 
 function Get-HiaMcpBackendChoices {
     return @(
@@ -73,32 +83,6 @@ function Get-HiaProjectRoot {
         $candidate = $parent.FullName
     }
     throw "Unable to derive the project root from launcher path: $StartingPath"
-}
-
-function Get-HiaLauncherArtworkPath {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
-
-    $suppliedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
-    $resolvedRoot = Get-HiaProjectRoot -StartingPath $suppliedRoot
-    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($suppliedRoot, $resolvedRoot)) {
-        throw 'The artwork path requires the exact launcher project root.'
-    }
-    $artworkPath = [System.IO.Path]::GetFullPath(
-        (Join-Path $resolvedRoot 'assets\launcher\steam-winter-sale.png')
-    )
-    foreach ($pathToCheck in @(
-        $resolvedRoot,
-        (Join-Path $resolvedRoot 'assets'),
-        (Join-Path $resolvedRoot 'assets\launcher'),
-        $artworkPath
-    )) {
-        if (-not (Test-Path -LiteralPath $pathToCheck)) { continue }
-        $item = Get-Item -LiteralPath $pathToCheck -Force -ErrorAction Stop
-        if (([int]$item.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'The optional launcher artwork path contains a reparse point.'
-        }
-    }
-    return $artworkPath
 }
 
 function Get-HiaVersionText {
@@ -421,6 +405,7 @@ function Test-HiaHoudiniProbeConsistency {
         -Advice $(if ($houdiniProbePassed) { '无需处理。' } else { '在命令行运行 houdini.exe -version，确认该安装可正常启动版本探针。' })
 
     $payload = Get-HiaProbePayload -Output $HythonOutput
+    $licenseUnavailable = $HythonOutput -match '(?i)No licenses could be found to run this application'
     $hythonPassed = (
         -not $HythonTimedOut -and
         $HythonExitCode -eq 0 -and
@@ -430,8 +415,8 @@ function Test-HiaHoudiniProbeConsistency {
     $checks += New-HiaCheckResult `
         -Id 'houdini.hython_probe' -Name 'Hython / hou probe' `
         -Level $(if ($hythonPassed) { 'green' } else { 'red' }) `
-        -Message $(if ($hythonPassed) { "import hou 成功；Houdini build $($payload.build)；Python $($payload.python)" } elseif ($HythonTimedOut) { 'hython 只读探针超时。' } else { 'hython 无法 import hou 或未返回有效探针数据。' }) `
-        -Advice $(if ($hythonPassed) { '无需处理。' } else { '修复所选 Houdini 安装，并确认 hython 可执行 import hou。' })
+        -Message $(if ($hythonPassed) { "import hou 成功；Houdini build $($payload.build)；Python $($payload.python)" } elseif ($licenseUnavailable) { 'hython 无法取得 Houdini 许可证。' } elseif ($HythonTimedOut) { 'hython 只读探针超时。' } else { 'hython 无法 import hou 或未返回有效探针数据。' }) `
+        -Advice $(if ($hythonPassed) { '无需处理。' } elseif ($licenseUnavailable) { '检查 Houdini License Administrator 与许可证服务器；关闭可能占用许可证 seat 的实例后重新扫描。' } else { '修复所选 Houdini 安装，并确认 hython 可执行 import hou。' })
 
     if ($null -ne $payload) {
         $expectedHython = [System.IO.Path]::GetFullPath($hythonExe)
@@ -466,7 +451,7 @@ function Invoke-HiaHoudiniChecks {
     if (-not $HoudiniExe) {
         if ($Candidates.Count -eq 0) {
             return @(New-HiaCheckResult -Id 'houdini.selection' -Name 'Houdini selection' -Level 'red' `
-                -Message '未发现 Houdini 安装。' -Advice '选择准确的 houdini.exe，或安装 Houdini 后重新扫描。')
+                -Message '未发现 Houdini 安装。' -Advice '安装或选择 Houdini 后重新扫描。当前 Preview 已验证 Houdini 21.0.440 / Python 3.11：https://www.sidefx.com/download/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Houdini、提权或修改系统配置。')
         }
         if ($Candidates.Count -gt 1) {
             return @(New-HiaCheckResult -Id 'houdini.selection' -Name 'Houdini selection' -Level 'red' `
@@ -986,7 +971,7 @@ function Invoke-HiaProjectChecks {
     if (-not $BridgePython -or -not (Test-Path -LiteralPath $BridgePython -PathType Leaf)) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
             -Message '尚未选择有效的 Bridge Python executable。' `
-            -Advice '选择 Python 3.10 或更高版本的 python.exe；不要安装到全局环境作为自动修复。'
+            -Advice '安装并选择 CPython 3.10+ 的 python.exe；当前测试基线为 3.10：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Python、提权或修改 PATH/注册表。'
     } elseif (-not $bridgePathAllowed) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
             -Message 'Bridge Python 必须是普通本地盘绝对路径，且不能来自 AppData 或 WindowsApps。' `
@@ -1035,14 +1020,14 @@ function Invoke-HiaProjectChecks {
         $bridgeLevel = if ($bridgePassed -and $versionPassed -and $identityPassed) { 'green' } else { 'red' }
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level $bridgeLevel `
             -Message $(if ($bridgeLevel -eq 'green') { "Python $($bridgePayload.python)；Bridge 与所选 MCP backend import 成功。" } elseif ([bool]$bridgeProbe.timed_out) { 'Bridge Python 探针超时。' } else { 'Bridge Python 版本、executable 身份或所选 MCP backend import 不符合项目要求。' }) `
-            -Advice $(if ($bridgeLevel -eq 'green') { '无需处理。' } else { '选择 Python 3.10+，并从项目根按 README 提示验证项目本地 import。' })
+            -Advice $(if ($bridgeLevel -eq 'green') { '无需处理。' } else { '选择 CPython 3.10+（测试基线 3.10）并按 README 验证项目 import：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装或修改系统环境。' })
     }
 
     $codexMatches = @(Get-HiaPinnedCodexExecutable -ProjectRoot $ProjectRoot)
     if ($codexMatches.Count -ne 1) {
         $checks += New-HiaCheckResult -Id 'codex.executable' -Name 'Project Codex executable' -Level 'red' `
             -Message "与项目协议版本匹配的 codex.exe 数量为 $($codexMatches.Count)。" `
-            -Advice '按项目锁定版本放置 codex.exe 到 .runtime\toolchains\codex\<version>；不要改系统 PATH。'
+            -Advice "点击「安装/修复 Codex」下载并校验官方固定版本 $script:HiaCodexVersion；仅写入项目 .runtime，不修改系统 PATH。"
     } else {
         $codex = $codexMatches[0]
         if ($ProbeOverrides.ContainsKey('codex_version')) {
@@ -1055,7 +1040,7 @@ function Invoke-HiaProjectChecks {
         $checks += New-HiaCheckResult -Id 'codex.executable' -Name 'Project Codex executable' `
             -Level $(if ($codexVersionPassed) { 'green' } else { 'red' }) `
             -Message $(if ($codexVersionPassed) { "codex $reportedCodexVersion 与项目协议锁定版本匹配。" } else { "codex 版本探针失败或与锁定版本 $($codex.version) 不匹配。" }) `
-            -Advice $(if ($codexVersionPassed) { '无需处理。' } else { '恢复项目锁定的 Codex 本地 toolchain。' })
+            -Advice $(if ($codexVersionPassed) { '无需处理。' } else { "点击「安装/修复 Codex」恢复官方固定版本 $script:HiaCodexVersion；仅写入项目 .runtime。" })
 
         if ($ProbeOverrides.ContainsKey('codex_login')) {
             $loginProbe = $ProbeOverrides.codex_login
@@ -1067,7 +1052,7 @@ function Invoke-HiaProjectChecks {
         $checks += New-HiaCheckResult -Id 'codex.login' -Name 'Codex login status' `
             -Level $(if ($loggedIn) { 'green' } else { 'red' }) `
             -Message $(if ($loggedIn) { '项目本地 CODEX_HOME 已登录；未读取凭据内容。' } else { '项目本地 CODEX_HOME 尚未登录或状态探针失败。' }) `
-            -Advice $(if ($loggedIn) { '无需处理。' } else { '使用项目本地 CODEX_HOME 执行 codex login；报告不会读取或输出凭据内容。' })
+            -Advice $(if ($loggedIn) { '无需处理。' } else { '点击「复制登录命令」，在 PowerShell 中运行项目本地 device login。命令不含凭据，报告也不会读取凭据内容。' })
     }
 
     if ($McpBackend -eq 'hia_v2') {
@@ -1255,7 +1240,7 @@ function Write-HiaPreflightReport {
     [System.IO.File]::WriteAllText($jsonPath, $json + [Environment]::NewLine, $utf8)
 
     $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add('Houdini Intelligence Agent launcher preflight')
+    $lines.Add('Big-Chicken Houdini Intelligence Agent launcher preflight')
     $lines.Add("Generated (UTC): $($Result.generated_at_utc)")
     $lines.Add("Overall: $($Result.overall)")
     $lines.Add("Project root: $($Result.project_root)")
@@ -1814,9 +1799,9 @@ Export-ModuleMember -Function @(
     'ConvertTo-HiaRedactedJson',
     'Copy-HiaLauncherRecoveryHip',
     'Get-HiaBridgePythonCandidates',
+    'Get-HiaCodexLoginCommand',
     'Get-HiaCrashRecoveryDecision',
     'Get-HiaHoudiniCandidates',
-    'Get-HiaLauncherArtworkPath',
     'Get-HiaLatestLauncherCheckpoint',
     'Get-HiaLatestLauncherCrashHip',
     'Get-HiaMcpBackendChoices',

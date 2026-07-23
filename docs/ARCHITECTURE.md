@@ -56,7 +56,7 @@ Reports remain local and are ignored by Git through the existing `.runtime/` rul
 ## Launcher preflight boundary
 
 ```text
-.runtime/dist/launcher/HoudiniIntelligenceLauncher.exe
+.runtime/dist/launcher/BigChickenLauncher.exe
   → locate the project root and invoke scripts/hia-launcher.ps1
 or scripts/hia-launcher.ps1 directly
   → read-only discovery and bounded probes

@@ -1,0 +1,58 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  windows-python:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python sources
+        shell: pwsh
+        run: >-
+          python -B -m compileall -q
+          src
+          services
+          houdini_package/python_libs
+
+      - name: Parse PowerShell sources
+        shell: pwsh
+        run: |
+          $allParseErrors = @()
+          Get-ChildItem -LiteralPath scripts -Recurse -File |
+            Where-Object { $_.Extension -in '.ps1', '.psm1' } |
+            ForEach-Object {
+              $tokens = $null
+              $parseErrors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName,
+                [ref]$tokens,
+                [ref]$parseErrors
+              )
+              $allParseErrors += $parseErrors
+            }
+          if ($allParseErrors.Count -gt 0) {
+            $allParseErrors | Format-List
+            throw "PowerShell parse errors: $($allParseErrors.Count)"
+          }
+
+      - name: Run standard-library tests
+        shell: pwsh
+        run: python -B -m unittest discover -s tests -t .

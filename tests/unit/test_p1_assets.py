@@ -61,7 +61,7 @@ class P1AssetTests(unittest.TestCase):
         interface = document.getroot().find("interface")
         self.assertIsNotNone(interface)
         self.assertEqual("houdini_intelligence", interface.attrib["name"])
-        self.assertEqual("Houdini Intelligence", interface.attrib["label"])
+        self.assertEqual("Big-Chicken Houdini Intelligence Agent", interface.attrib["label"])
         embedded = interface.find("script").text
         tree = ast.parse(embedded)
         hou_imports = [
