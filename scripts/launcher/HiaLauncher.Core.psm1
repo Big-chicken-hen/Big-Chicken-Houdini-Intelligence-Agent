@@ -443,7 +443,7 @@ function Test-HiaHoudiniProbeConsistency {
 function Invoke-HiaHoudiniChecks {
     param(
         [AllowEmptyString()][string]$HoudiniExe,
-        [Parameter(Mandatory = $true)][object[]]$Candidates,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates,
         [int]$TimeoutSeconds = 12,
         [hashtable]$ProbeOverrides = @{}
     )
