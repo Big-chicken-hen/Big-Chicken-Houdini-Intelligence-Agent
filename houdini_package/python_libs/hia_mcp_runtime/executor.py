@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import struct
@@ -25,8 +26,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from .knowledge_index import (
+    LocalKnowledgeIndex,
+    SOURCE_GROUPS,
+)
+
 
 MAX_SCRIPT_CHARS = 524_288
+MAX_FLIPBOOK_FRAME_SPAN = 240.0
+MAX_BATCH_QUERIES = 16
 MAX_TEXT_CHARS = 65_536
 MAX_SNAPSHOT_NODES = 10_000
 MAX_SNAPSHOTS = 16
@@ -36,16 +44,6 @@ STAGE_CHECKPOINT_MARKER = ".hia-stage-checkpoint.json"
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
 _NODE_DIGEST_UNAVAILABLE = object()
-
-_PROJECT_HELP_DOCUMENTS = (
-    "ARCHITECTURE.md",
-    "DIAGNOSTICS.md",
-    "HIA-MCP-V2.md",
-    "ROADMAP.md",
-    "SAFETY.md",
-)
-_HELP_TEXT_SUFFIXES = frozenset({".md", ".txt", ".html", ".json", ".yaml", ".yml"})
-
 
 class HiaRuntimeError(Exception):
     def __init__(self, code: str, message: str, details: Mapping[str, Any] | None = None) -> None:
@@ -139,6 +137,7 @@ class HoudiniExecutor:
         self._state_lock = threading.RLock()
         self._scene_revision = 0
         self._snapshots: dict[str, _Snapshot] = {}
+        self._knowledge_index: LocalKnowledgeIndex | None = None
         self._handlers: dict[str, Callable[[Mapping[str, Any]], dict[str, Any]]] = {
             "hia_context": self._context,
             "hia_inspect": self._inspect,
@@ -293,17 +292,111 @@ class HoudiniExecutor:
         )
 
     def _search_node_types(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        query = str(arguments.get("query", "")).casefold()
+        queries, is_batch = _query_values(arguments)
         requested_contexts = {str(value).casefold() for value in arguments.get("contexts", [])}
         include_deprecated = bool(arguments.get("include_deprecated", False))
         offset = _bounded_int(arguments.get("offset", 0), 0, 1_000_000)
         limit = _limit(arguments)
-        matches = self._node_type_matches(query, requested_contexts, include_deprecated)
+        catalog = self._node_type_catalog(requested_contexts, include_deprecated)
+        if not is_batch:
+            matches = self._filter_node_type_catalog(catalog, queries[0])
+            return self._success(
+                {
+                    "node_types": matches[offset : offset + limit],
+                    "total": len(matches),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
+
+        query_results = []
+        merged = []
+        merged_keys: set[tuple[str, str]] = set()
+        for query in queries:
+            matches = self._filter_node_type_catalog(catalog, query)
+            page = matches[offset : offset + limit]
+            query_results.append(
+                {
+                    "query": query,
+                    "node_types": page,
+                    "total": len(matches),
+                    "offset": offset,
+                    "limit": limit,
+                }
+            )
+            for record in page:
+                key = (
+                    str(record.get("category", "")).casefold(),
+                    str(record.get("name", "")).casefold(),
+                )
+                if key not in merged_keys:
+                    merged_keys.add(key)
+                    merged.append(record)
         return self._success(
-            {"node_types": matches[offset : offset + limit], "total": len(matches), "offset": offset, "limit": limit}
+            {
+                "queries": query_results,
+                "query_count": len(query_results),
+                "node_types": merged,
+                "total": len(merged),
+            }
         )
 
     def _node_help(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        requests = arguments.get("requests")
+        if requests is None:
+            return self._success(self._node_help_result(arguments))
+        if not isinstance(requests, list) or not 1 <= len(requests) <= MAX_BATCH_QUERIES:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                f"requests must contain between 1 and {MAX_BATCH_QUERIES} objects",
+            )
+        if set(arguments) != {"requests"}:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "Batch node help options belong inside each requests item",
+            )
+        results = []
+        error_count = 0
+        for index, request in enumerate(requests):
+            if not isinstance(request, Mapping):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    "Each requests item must be an object",
+                    {"index": index},
+                )
+            try:
+                results.append(
+                    {
+                        "index": index,
+                        "request": dict(request),
+                        "ok": True,
+                        "result": self._node_help_result(request),
+                    }
+                )
+            except HiaRuntimeError as exc:
+                error_count += 1
+                results.append(
+                    {
+                        "index": index,
+                        "request": dict(request),
+                        "ok": False,
+                        "error": {
+                            "code": exc.code,
+                            "message": exc.message,
+                            "details": exc.details,
+                        },
+                    }
+                )
+        return self._success(
+            {
+                "results": results,
+                "request_count": len(results),
+                "ok_count": len(results) - error_count,
+                "error_count": error_count,
+            }
+        )
+
+    def _node_help_result(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         node_type = None
         node_path = str(arguments.get("node_path", ""))
         if node_path:
@@ -383,7 +476,7 @@ class HoudiniExecutor:
             "offset": offset,
             "limit": limit,
         }
-        return self._success(result)
+        return result
 
     def _geometry_summary(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         nodes = self._resolve_nodes(arguments)
@@ -1011,8 +1104,57 @@ class HoudiniExecutor:
         if not bool(_safe_call(self._hou, "isUIAvailable", True)):
             raise HiaRuntimeError("VIEWPORT_UNAVAILABLE", "Viewport capture requires a graphical Houdini session")
         mode = str(arguments.get("mode", "viewport"))
-        width = _bounded_int(arguments.get("width", 1280), 64, 4096)
-        height = _bounded_int(arguments.get("height", 720), 64, 4096)
+        if mode not in {"viewport", "flipbook"}:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "Viewport capture mode must be viewport or flipbook",
+                {"mode": mode},
+            )
+        width = _bounded_int(arguments.get("width", 640), 64, 4096)
+        height = _bounded_int(arguments.get("height", 360), 64, 4096)
+        validated_frame_range: tuple[float, float] | None = None
+        if mode == "flipbook":
+            raw_frame_range = arguments.get("frame_range")
+            if raw_frame_range is None:
+                current_frame = float(_safe_call(self._hou, "frame", 1.0))
+                validated_frame_range = (current_frame, current_frame)
+            else:
+                if (
+                    not isinstance(raw_frame_range, (list, tuple))
+                    or len(raw_frame_range) != 2
+                ):
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        "Flipbook frame_range must contain exactly two frame numbers",
+                    )
+                try:
+                    start = float(raw_frame_range[0])
+                    end = float(raw_frame_range[1])
+                except (TypeError, ValueError) as exc:
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        "Flipbook frame_range values must be finite numbers",
+                    ) from exc
+                if not math.isfinite(start) or not math.isfinite(end):
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        "Flipbook frame_range values must be finite numbers",
+                    )
+                if end < start:
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        "Flipbook frame_range end must not precede its start",
+                    )
+                if end - start > MAX_FLIPBOOK_FRAME_SPAN:
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        f"Flipbook frame_range may span at most {int(MAX_FLIPBOOK_FRAME_SPAN)} frames",
+                        {
+                            "frame_range": [start, end],
+                            "maximum_frame_span": int(MAX_FLIPBOOK_FRAME_SPAN),
+                        },
+                    )
+                validated_frame_range = (start, end)
         desktop = self._hou.ui.curDesktop()
         scene_viewer = desktop.paneTabOfType(self._hou.paneTabType.SceneViewer)
         if scene_viewer is None:
@@ -1053,9 +1195,8 @@ class HoudiniExecutor:
                 viewport.saveViewToImage(str(output_path))
             else:
                 settings = scene_viewer.flipbookSettings().stash()
-                frame_range = arguments.get("frame_range") or [frame, frame]
-                start = float(frame_range[0])
-                end = float(frame_range[1])
+                assert validated_frame_range is not None
+                start, end = validated_frame_range
                 pattern = capture_dir / f"flipbook-{identifier}-$F4.png"
                 settings.frameRange((start, end))
                 settings.output(str(pattern))
@@ -1140,9 +1281,54 @@ class HoudiniExecutor:
         return result
 
     def _dispatch_local_help(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        query = str(arguments.get("query", "")).strip()
-        if len(query) < 2:
-            raise HiaRuntimeError("INVALID_ARGUMENTS", "query must contain at least two characters")
+        queries, is_batch = _query_values(
+            arguments,
+            minimum_length=2,
+            maximum_length=256,
+        )
+        raw_sources = arguments.get("sources")
+        if raw_sources is None:
+            sources = set(SOURCE_GROUPS)
+        elif not isinstance(raw_sources, (list, tuple, set)):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "sources must be an array",
+            )
+        elif not raw_sources:
+            sources = set(SOURCE_GROUPS)
+        else:
+            sources = {str(value) for value in raw_sources}
+        invalid_sources = sources.difference(SOURCE_GROUPS)
+        if invalid_sources:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "sources contains an unsupported local knowledge source",
+                {"sources": sorted(invalid_sources)},
+            )
+        refresh_requested = arguments.get("refresh", False)
+        if not isinstance(refresh_requested, bool):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "refresh must be a boolean",
+            )
+        offset = _bounded_int(arguments.get("offset", 0), 0, 1_000_000)
+        limit = _bounded_int(arguments.get("limit", 10), 1, 50)
+        try:
+            knowledge_index = self._local_knowledge_index()
+            refresh_groups = knowledge_index.refresh_due(
+                sources,
+                force=refresh_requested,
+            )
+            indexed_houdini_version = (
+                knowledge_index.active_houdini_version()
+                if "houdini" in sources
+                else ""
+            )
+        except Exception as exc:
+            raise HiaRuntimeError(
+                "LOCAL_HELP_INDEX_UNAVAILABLE",
+                _bounded_text(_redact_text(str(exc)), 2048),
+            ) from exc
         ui_requested = time.monotonic()
         ui_started = ui_requested
         ui_finished = ui_requested
@@ -1151,15 +1337,20 @@ class HoudiniExecutor:
             nonlocal ui_started, ui_finished
             ui_started = time.monotonic()
             try:
-                sources = set(arguments.get("sources") or ["houdini", "project"])
                 catalog = []
                 houdini_help_root = ""
+                houdini_version = _application_version(self._hou) or "unknown"
                 if "houdini" in sources:
-                    catalog = self._node_type_matches(query.casefold(), set(), True)[:200]
                     houdini_help_root = str(self._hou.expandString("$HH/help"))
+                    if (
+                        "houdini" in refresh_groups
+                        or indexed_houdini_version != houdini_version
+                    ):
+                        catalog = self._node_type_matches("", set(), True)
                 return {
                     "catalog": catalog,
                     "houdini_help_root": houdini_help_root,
+                    "houdini_version": houdini_version,
                     "revision": self.scene_revision,
                     "dirty": self._dirty(),
                 }
@@ -1176,9 +1367,48 @@ class HoudiniExecutor:
                 "Local help metadata could not be read from Houdini's UI main thread",
                 {"reason": _bounded_text(_redact_text(str(exc)), 1024)},
             ) from exc
-        scan_started = time.monotonic()
+        current_houdini_version = str(
+            snapshot.get("houdini_version") or "unknown"
+        )
+        if (
+            "houdini" in sources
+            and indexed_houdini_version != current_houdini_version
+        ):
+            refresh_groups.add("houdini")
+        refresh_started = time.monotonic()
         try:
-            result = self._local_help_search(arguments, snapshot)
+            refresh_stats, index_warnings = knowledge_index.refresh(
+                refresh_groups,
+                snapshot,
+                force=refresh_requested,
+            )
+            refresh_finished = time.monotonic()
+            query_results = []
+            for query in queries:
+                search_result = knowledge_index.search(
+                    query,
+                    sources,
+                    current_houdini_version=current_houdini_version,
+                    offset=offset,
+                    limit=limit,
+                )
+                query_results.append(
+                    {
+                        "query": query,
+                        "matches": search_result["matches"],
+                        "total": search_result["total"],
+                        "offset": offset,
+                        "limit": limit,
+                        "files_scanned": refresh_stats["files_scanned"],
+                        "web_searched": False,
+                        "index": {
+                            **refresh_stats,
+                            "database": knowledge_index.relative_database_path,
+                            "fts": "FTS5",
+                            "tokenizer": search_result["tokenizer"],
+                        },
+                    }
+                )
         except HiaRuntimeError:
             raise
         except Exception as exc:
@@ -1186,125 +1416,73 @@ class HoudiniExecutor:
                 "LOCAL_HELP_SEARCH_FAILED",
                 _bounded_text(_redact_text(str(exc)), 2048),
             ) from exc
-        result["phase_timings"] = {
-            "runtime_ui_queue_seconds": _seconds(ui_started - ui_requested),
-            "runtime_ui_snapshot_seconds": _seconds(ui_finished - ui_started),
-            "local_file_search_seconds": _seconds(time.monotonic() - scan_started),
-        }
-        return result
-
-    def _local_help_search(
-        self,
-        arguments: Mapping[str, Any],
-        snapshot: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        query = str(arguments.get("query", "")).strip()
-        query_folded = query.casefold()
-        sources = set(arguments.get("sources") or ["houdini", "project"])
-        offset = _bounded_int(arguments.get("offset", 0), 0, 1_000_000)
-        limit = _bounded_int(arguments.get("limit", 10), 1, 50)
-        matches = []
-        if "houdini" in sources:
-            for record in list(snapshot.get("catalog", []))[:200]:
-                matches.append(
-                    {
-                        "source": "houdini_node_catalog",
-                        "title": f"{record['category']}::{record['name']}",
-                        "snippet": _bounded_text(record["description"], 1000),
-                        "metadata": record,
-                    }
-                )
-        search_files: list[tuple[str, Path, Path]] = []
-        if "project" in sources:
-            skills_root = self._project_root / ".agents" / "skills"
-            if skills_root.is_dir():
-                skill_candidates = 0
-                for skill_root in skills_root.iterdir():
-                    if not skill_root.is_dir():
-                        continue
-                    skill_entry = skill_root / "SKILL.md"
-                    if skill_entry.is_file():
-                        search_files.append(("project_skill", skills_root, skill_entry))
-                        skill_candidates += 1
-                    references = skill_root / "references"
-                    if references.is_dir():
-                        for path in references.rglob("*"):
-                            if skill_candidates >= 200:
-                                break
-                            search_files.append(("project_skill", skills_root, path))
-                            skill_candidates += 1
-                    if skill_candidates >= 200:
-                        break
-            docs_root = self._project_root / "docs"
-            search_files.extend(
-                ("project_docs", docs_root, docs_root / name)
-                for name in _PROJECT_HELP_DOCUMENTS
-            )
-        if "houdini" in sources:
-            expanded = str(snapshot.get("houdini_help_root", ""))
-            houdini_help_root = Path(expanded) if expanded else None
-            if houdini_help_root is not None and houdini_help_root.is_dir():
-                for index, path in enumerate(houdini_help_root.rglob("*")):
-                    if index >= 400:
-                        break
-                    search_files.append(("houdini_help", houdini_help_root, path))
-        scanned = 0
-        seen_paths: set[str] = set()
-        for source_name, root, path in search_files:
-            if scanned >= 600 or len(matches) >= offset + limit + 200:
-                break
-            try:
-                resolved_root = root.resolve()
-                resolved_path = path.resolve()
-                relative = resolved_path.relative_to(resolved_root).as_posix()
-            except (OSError, ValueError):
-                continue
-            normalized = os.path.normcase(str(resolved_path))
-            if normalized in seen_paths:
-                continue
-            seen_paths.add(normalized)
-            if (
-                not resolved_path.is_file()
-                or resolved_path.suffix.casefold() not in _HELP_TEXT_SUFFIXES
-            ):
-                continue
-            scanned += 1
-            try:
-                if resolved_path.stat().st_size > 512_000:
-                    continue
-                text = resolved_path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            position = text.casefold().find(query_folded)
-            if position < 0:
-                continue
-            start = max(0, position - 240)
-            end = min(len(text), position + len(query) + 480)
-            snippet = re.sub(r"\s+", " ", text[start:end]).strip()
-            matches.append(
-                {
-                    "source": source_name,
-                    "title": relative,
-                    "snippet": _bounded_text(snippet, 1000),
-                }
-            )
-        return {
-            "ok": True,
-            "result": {
-                "query": query,
-                "matches": matches[offset : offset + limit],
-                "total": len(matches),
-                "offset": offset,
-                "limit": limit,
-                "files_scanned": scanned,
+        if not is_batch:
+            result_payload: dict[str, Any] = query_results[0]
+        else:
+            merged: list[dict[str, Any]] = []
+            merged_index: dict[tuple[str, str], dict[str, Any]] = {}
+            for query_result in query_results:
+                query = str(query_result["query"])
+                for match in query_result["matches"]:
+                    key = (
+                        str(match.get("source", "")),
+                        str(match.get("title", "")),
+                    )
+                    existing = merged_index.get(key)
+                    if existing is None:
+                        existing = dict(match)
+                        existing["matched_queries"] = [query]
+                        merged_index[key] = existing
+                        merged.append(existing)
+                    else:
+                        existing["matched_queries"].append(query)
+            result_payload = {
+                "queries": query_results,
+                "query_count": len(query_results),
+                "matches": merged,
+                "total": len(merged),
+                "files_scanned": refresh_stats["files_scanned"],
                 "web_searched": False,
-            },
+                "index": {
+                    **refresh_stats,
+                    "database": knowledge_index.relative_database_path,
+                    "fts": "FTS5",
+                    "tokenizer": query_results[0]["index"]["tokenizer"],
+                },
+            }
+        result = {
+            "ok": True,
+            "result": result_payload,
             "stdout": "",
-            "warnings": [],
+            "warnings": [
+                _bounded_text(_redact_text(value), 4096)
+                for value in index_warnings
+            ],
             "errors": [],
             "revision": int(snapshot.get("revision", self.scene_revision)),
             "dirty": bool(snapshot.get("dirty", False)),
         }
+        search_finished = time.monotonic()
+        result["phase_timings"] = {
+            "runtime_ui_queue_seconds": _seconds(ui_started - ui_requested),
+            "runtime_ui_snapshot_seconds": _seconds(ui_finished - ui_started),
+            "local_index_refresh_seconds": _seconds(
+                refresh_finished - refresh_started
+            ),
+            "local_index_query_seconds": _seconds(
+                search_finished - refresh_finished
+            ),
+            "local_file_search_seconds": _seconds(
+                search_finished - refresh_started
+            ),
+        }
+        return result
+
+    def _local_knowledge_index(self) -> LocalKnowledgeIndex:
+        with self._state_lock:
+            if self._knowledge_index is None:
+                self._knowledge_index = LocalKnowledgeIndex(self._project_root)
+            return self._knowledge_index
 
     def _success(self, result: Any, *, warnings: list[str] | None = None) -> dict[str, Any]:
         return {
@@ -1454,6 +1632,16 @@ class HoudiniExecutor:
         contexts: set[str],
         include_deprecated: bool,
     ) -> list[dict[str, Any]]:
+        return self._filter_node_type_catalog(
+            self._node_type_catalog(contexts, include_deprecated),
+            query,
+        )
+
+    def _node_type_catalog(
+        self,
+        contexts: set[str],
+        include_deprecated: bool,
+    ) -> list[dict[str, Any]]:
         categories = self._hou.nodeTypeCategories()
         matches = []
         for context_name, category in categories.items():
@@ -1477,11 +1665,23 @@ class HoudiniExecutor:
                     "child_context": _safe_name(_safe_call(node_type, "childTypeCategory", None)),
                     "deprecated": deprecated,
                 }
-                if query and query not in json.dumps(record, ensure_ascii=False).casefold():
-                    continue
                 matches.append(record)
         matches.sort(key=lambda item: (item["category"].casefold(), item["name"].casefold()))
         return matches
+
+    @staticmethod
+    def _filter_node_type_catalog(
+        catalog: Iterable[Mapping[str, Any]],
+        query: str,
+    ) -> list[dict[str, Any]]:
+        folded = str(query).casefold()
+        if not folded:
+            return [dict(record) for record in catalog]
+        return [
+            dict(record)
+            for record in catalog
+            if folded in json.dumps(record, ensure_ascii=False).casefold()
+        ]
 
     def _parameter_templates(self, node_type: Any, query: str) -> list[dict[str, Any]]:
         group = node_type.parmTemplateGroup()
@@ -1879,6 +2079,57 @@ def _houdini_frame_ranges(hou_module: Any) -> tuple[Any, Any]:
 
 def _limit(arguments: Mapping[str, Any]) -> int:
     return _bounded_int(arguments.get("limit", DEFAULT_LIMIT), 1, MAX_LIMIT)
+
+
+def _query_values(
+    arguments: Mapping[str, Any],
+    *,
+    minimum_length: int = 0,
+    maximum_length: int = 512,
+) -> tuple[list[str], bool]:
+    raw_queries = arguments.get("queries")
+    if raw_queries is None:
+        raw_query = arguments.get("query", "")
+        if not isinstance(raw_query, str):
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "query must be a string")
+        query = raw_query.strip() if minimum_length else raw_query
+        if not minimum_length <= len(query) <= maximum_length:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                f"query must contain between {minimum_length} and {maximum_length} characters",
+            )
+        return [query], False
+    if "query" in arguments:
+        raise HiaRuntimeError(
+            "INVALID_ARGUMENTS",
+            "Provide query or queries, not both",
+        )
+    if not isinstance(raw_queries, list) or not 1 <= len(raw_queries) <= MAX_BATCH_QUERIES:
+        raise HiaRuntimeError(
+            "INVALID_ARGUMENTS",
+            f"queries must contain between 1 and {MAX_BATCH_QUERIES} strings",
+        )
+    queries: list[str] = []
+    seen: set[str] = set()
+    for index, raw_query in enumerate(raw_queries):
+        if not isinstance(raw_query, str):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "Each queries item must be a string",
+                {"index": index},
+            )
+        query = raw_query.strip() if minimum_length else raw_query
+        if not minimum_length <= len(query) <= maximum_length:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                f"Each query must contain between {minimum_length} and {maximum_length} characters",
+                {"index": index},
+            )
+        key = query.casefold()
+        if key not in seen:
+            seen.add(key)
+            queries.append(query)
+    return queries, True
 
 
 def _bounded_int(value: Any, minimum: int, maximum: int) -> int:

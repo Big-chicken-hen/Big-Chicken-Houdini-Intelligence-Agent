@@ -987,3 +987,117 @@
 - 真实问题是 launcher 已能在 Houdini 异常退出后恢复 HIP 并为原 Thread 发送一次恢复 Turn，但重启后的 Panel 按正常规则保持未选择、空白，因而收不到该 Turn 的 completion 边界，既有 Goal 自动续轮无法继续第二轮。普通启动空白规则本身没有错误。
 - launcher 现在只给本次已验证的恢复 Houdini 子进程传入一次性 exact Thread、Goal binding 与恢复 prompt 标记；Panel 仅在 `/v1/health`、两次实时 Goal 校验和 `thread/read` 全部证明 exact Thread、focus=true、同一 active Goal 后本地绑定，不调用 resume、不猜最近历史，也不重复 launcher 的恢复 Turn。绑定后用 fresh session/事件接回既有 Goal 续轮；读取期间 Goal/focus 改变会拒绝绑定，旧 session 不回灌，内部恢复指令不显示成用户气泡。普通子进程没有标记，标记消费后普通重开仍为空白。
 - Panel/launcher 精确回归 146/146 通过；Panel、launcher 与相邻 Bridge 回归 233/233 通过；最终完整套件 773/773 通过，用时 33.749 秒。PowerShell AST 与 Python 编译检查通过。尚需真实 Houdini 人工验证同一 launcher 内异常退出后：原 Thread 自动显示、launcher 恢复 Turn 完成后连续两轮各只续一次；正常关闭或普通重开 Panel 仍为空白。本轮不覆盖 launcher 自身退出、断电或进程仍存活但界面假死。
+
+## 复杂视觉任务自动低分辨率审阅闭环（2026-07-24）
+
+- HIA V2 的会话指令和现有 Houdini skills 现在共同定义同一闭环：Box、单参数操作、普通 HOM 报错等简单任务不截图；复杂视觉任务只在主要结构完成、任务范围内材质/灯光完成、最终交付前等产生有意义可见变化的里程碑自动预览，相邻或无变化阶段合并或跳过。动画和模拟只抽代表帧或关键帧。
+- 阶段证据完全复用 `hia_capture_viewport`、`hia_validate`、`hia_scene_diff` 与只读 `houdini-artifact-review`。默认同帧 flipbook 为 `640 x 360`、`return_image=true`；reviewer 检查比例/轮廓、浮空/穿插、支撑/接触、构图、材质、曝光、透明度和参考一致性，只返回证据及最低修复建议。主任务仍是唯一 HIP writer，每轮只修最高影响区域，按任务设小范围迭代预算并在达标时立即停止。
+- runtime 在进入 Scene Viewer 或创建文件前校验 flipbook `frame_range`：必须是两个有限数字、结束帧不得早于开始帧、跨度不得超过 240 帧；省略范围时使用当前同一帧。工具协议同步公开 640×360 默认值、关键帧建议、跨度上限，以及相机/锁定/帧恢复承诺。
+- 截图仍只写 `HIA_CACHE_DIR/screenshots`；没有修改任何清理实现或范围，也没有触碰 `previews`、`tmp`、附件和最终输出。没有新增 MCP 工具、服务、调度器、评分系统或 Agent，也没有修改 launcher、Panel 或知识库。
+
+### 自动验证
+
+- `python -m unittest discover -s tests\unit -p test_hia_mcp_v2*.py -v`：共 75 项，73 通过，2 个未安装的可选 FXHoudiniMCP fixture 跳过。
+- `python -m unittest tests.unit.test_bridge_session -v`：53/53 通过；覆盖 HIA V2 指令的复杂/简单触发边界、640×360 同帧预览、关键帧、只读 reviewer、最高偏差有限迭代以及 1000 字符上限。
+- viewport/protocol/Bridge policy 精确定向回归：21/21 通过。新增 viewport fake-Houdini 覆盖默认同帧分辨率、成功路径的相机/锁定/帧恢复、不打开 MPlay/对话框/焦点，以及倒序、非有限和超过 240 帧跨度在捕获前拒绝；协议回归覆盖默认尺寸、范围说明、只读 annotation 和错误形状不进入 transport。
+- `python -m compileall -q` 覆盖 HIA runtime、HIA MCP V2、Bridge 及修改过的测试文件，通过；`git diff --check` 通过。
+- 完整 `python -m unittest discover -s tests\unit -v` 共 792 项：787 通过、2 跳过、3 失败。失败为本任务未修改且用户明确排除的 launcher/Panel 范围：`test_bridge_python_rejects_unsafe_paths_and_failed_probe` 的 UNC `Test-Path` 权限错误、`test_current_session_crash_hip_is_pid_bound_and_copied_read_only` 的恢复目标目录缺失、`test_approval_purpose_prefers_the_actual_system_target` 的既有审批目的文案断言。本轮未越界修复。
+
+### 真实 Houdini 未验证项
+
+- 本轮没有启动真实 Houdini GUI。仍需在 Houdini 21.x 验证真实 `SceneViewer.flipbook` 的 640×360 输出、同帧/关键帧路径、PNG 实际数量、成功与失败后的相机/自由视图/锁定/当前帧恢复，以及 MPlay、对话框和焦点保持不变。
+- 仍需用一个真实复杂视觉 Turn 验证 Codex 在有意义里程碑自动触发预览、`houdini-artifact-review` 保持只读、主任务只修最高影响区域并在达标后停止；同时用简单 Box 或单参数操作确认零截图。未做提交或推送。
+
+## SQLite FTS5 本地知识库核心（2026-07-24）
+
+- `hia_local_help_search` 保持原工具和旧 `query/sources/offset/limit` 形状，新增可选 `sources=["user"]` 与 `refresh`。正文增量写入项目内 `.runtime/knowledge/knowledge.sqlite3`；查询只读 FTS5，不再每次读取源文件。索引覆盖完整 live `hou` node catalog、`$HH/help` 支持文本、发布 Skill/refs、五份当前项目 docs，以及用户授权目录中的 TXT/Markdown/HTML/SRT/VTT；PDF 只尝试已有 `pypdf`，缺失或失败会明确 warning。
+- 数据库按文件 size/mtime 避免无效读取，对变化正文计算 SHA-256 并切成约 1200 字符 chunk。WAL 允许两个 worker 并发读，`BEGIN IMMEDIATE` 保证单写事务；当前 Houdini 版本优先但保留其他版本资料。结果包含 path、URL、author、accessed_at、Houdini version、license、SHA-256、verification、evidence。只有当前真实 `hou` catalog 标为 `verified`；帮助、项目与用户资料统一为 `unverified`，sidecar 不能提升验证等级。
+- 自动刷新窗口为 10 分钟：第 599 秒不刷新，第 600 秒到期；窗口内 `refresh=true` 仍立即增量刷新。实现没有 watcher、后台线程、服务、调度器、向量、embedding 或第二模型/Agent。
+- 单测覆盖旧参数与空 `sources` 兼容、首次索引后查询不再读取文件、允许来源与历史文档排除、用户 sidecar、HTML/VTT、增量 SHA-256、当前版本优先、PDF 明确降级、WAL、两个独立索引实例的并发读/串行写，以及精确刷新时间边界。集成轮的最终测试结果见后续章节。
+- 尚未用真实 Houdini 的 `$HH/help` 规模、完整 node catalog 或双 MCP 进程现场验收；需确认首次索引时 UI 主线程 catalog 快照耗时、随后查询不扫描正文、两个 worker 同时查询，以及升级 Houdini 后当前版本排序。
+
+## 视觉闭环、研究契约与本地知识库集成轮（2026-07-24）
+
+- 本轮以当前 worktree 为基线做字段和段落级合并，没有整文件覆盖。`executor.py` 与 `tools.py` 同时保留 SQLite FTS5 `hia_local_help_search`、10 分钟自动刷新和 `refresh=true`，以及 flipbook 默认 `640 x 360`、最大 240 帧跨度、相机/锁定/帧恢复和协议说明。未增加 MCP 工具、服务、watcher、调度器、评分系统、向量、embedding 或第二模型/Agent。
+- `houdini-visual-research` 保留复杂视觉任务的有意义里程碑、动画/模拟关键帧、最大可见偏差和有限迭代，并合入自动多轮多来源研究、完整来源 ledger、原创 memo 与 `draft`→`verified` 规则。`houdini-artifact-review` 继续只读审阅构图、曝光、透明度、参考一致性和最高影响区域；只有真实 Houdini build 与 live node/cook/frame/viewport/render 证据可以支持 `verified`，reviewer 不写研究草稿或知识索引。`visual-validation` 前半执行低分辨率里程碑闭环，后半只做 bounded in-scope recovery，并保证每个 Thread/Turn 最多一个最终失败报告。
+- 研究 memo 仍位于 `.runtime/cache/research/<thread-or-turn-id>/`；自动截图仍位于 `.runtime/cache/screenshots`。未扩张截图清理范围，未触碰 `previews`、`tmp`、附件或最终输出。契约测试同时断言 Skill 不包含资产专用配方。
+
+### 自动验证
+
+- 集成核心定向测试：`python -B -m unittest tests.unit.test_hia_mcp_v2_local_help tests.unit.test_hia_mcp_v2_protocol tests.unit.test_hia_mcp_v2_viewport_state tests.unit.test_houdini_skill_contracts tests.unit.test_bridge_session.BridgeSessionNativeToolPolicyTests -v`，33/33 通过。
+- HIA MCP V2 全组：`python -B -m unittest discover -s tests\unit -p "test_hia_mcp_v2*.py" -v`，共 79 项，77 通过、2 个可选 FXHoudiniMCP fixture 未安装而跳过。
+- `python -B -m compileall -q` 覆盖 HIA runtime、HIA MCP V2、Bridge 与相关测试文件，通过；`git diff --check` 通过。Ruff 对本轮新增/合并路径仅暴露已有 `services/bridge/hia_bridge/session.py:364` 的 `system_drive` 未定义，该行不在本轮差异内，未越界修改。
+- 默认 Python 缺少 PyYAML，改用机器上已有且带 PyYAML 的隔离解释器执行 Skill Creator `quick_validate.py`，没有安装或修改依赖；`houdini-visual-research`、`houdini-artifact-review`、`houdini-material-lookdev` 与 `houdini-procedural-modeling` 四个 Skill 均返回 `Skill is valid!`。仓库内 `test_houdini_skill_contracts.py` 的 6 项触发边界、研究 ledger、验证状态、诊断报告和资产无关契约测试全部通过。
+- 本轮唯一一次完整 `python -B -m unittest discover -s tests\unit -v` 共 802 项：797 通过、2 跳过、3 失败。失败均为本轮明确排除且没有修改的 launcher/Panel 既有问题：
+  - `test_launcher_preflight.LauncherPreflightTests.test_bridge_python_rejects_unsafe_paths_and_failed_probe`：UNC `Test-Path` 权限错误；
+  - `test_launcher_preflight.LauncherPreflightTests.test_current_session_crash_hip_is_pid_bound_and_copied_read_only`：恢复副本目标目录缺失；
+  - `test_panel_wiring.PanelWiringTests.test_approval_purpose_prefers_the_actual_system_target`：审批目的仍优先显示项目内源路径。
+
+### 真实 Houdini 与 GUI 未验证项
+
+- 未启动真实 Houdini GUI。仍需验证真实 `$HH/help` 与完整 node catalog 首次索引耗时、双 MCP worker 的现场并发查询、Houdini 升级后的版本排序，以及查询阶段不重扫正文。
+- 仍需验证真实 `SceneViewer.flipbook` 的 640×360 同帧/关键帧输出、PNG 数量、240 帧拒绝边界，以及成功和失败后的相机、自由视图、相机锁定、当前帧、MPlay、对话框与焦点状态。
+- 仍需用一个真实复杂视觉 Turn 验证有意义里程碑自动预览、只读 reviewer、只修最高影响区域和达标即停；再用简单确定性任务确认零截图。真实 build/live evidence 驱动 memo 从 `draft` 晋升 `verified` 的路径也尚未现场验收。本轮未提交、推送或清理。
+
+## 集成后 launcher/审批根因回归（2026-07-24）
+
+- 只从回归 worktree 逐段合入两个指定业务文件，没有复制其余文件。Bridge Python 现在先完成普通本地绝对路径、UNC、ADS、WindowsApps 与 AppData 例外策略判断，只有安全路径才执行 `Test-Path`；因此恶意或不可访问 UNC 不再触发权限异常。python.org 的每用户默认安装路径仍按既有规则允许。
+- launcher recovery 副本名中的随机 GUID 从 32 个十六进制字符缩为 16 个，保留 attempt 与 HIP 后缀，避免深层便携项目在传统 Windows 路径上超过限制；源文件仍只读复制，既有目录与 reparse 安全边界不变。
+- 审批卡优先从 `-Destination`、`-Dest`、`-OutFile`、`-Output` 或 `-o` 的明确写入 flag 提取目的目标，再回退到既有系统盘路径选择。修改只影响人类可读目的文案，不改变审批事件识别、触发、允许、拒绝、关闭或可选持久授权边界。
+
+### 自动验证
+
+- 前一轮完整测试的 3 个失败用例精确重跑：3/3 通过。
+- `test_launcher_preflight` 全模块加 3 个 approval 相邻用例：43/43 通过；覆盖不安全路径先拒绝、python.org 每用户安装、失败 probe、长路径 recovery、审批脱敏、真实写入目标优先、deny 值与持久授权提示不变。
+- 补丁后的唯一一次完整 `python -B -m unittest discover -s tests\unit -v`：共 802 项，800 通过、2 个可选 FXHoudiniMCP fixture 跳过，0 失败。没有出现 `.runtime/tmp` 首轮顺序问题，因此没有创建补救目录，也没有重跑完整套件。
+- 未启动真实 launcher、Panel 或 Houdini GUI；仍需人工验证选择不可访问 UNC 时立即显示安全路径错误、深目录崩溃恢复复制，以及包含源路径和 `-Destination`/`-OutFile` 目标的真实审批卡文案。本轮未提交、推送或清理。
+
+## HIA MCP V2 性能、吞吐与有界收口总集成（2026-07-24）
+
+### 根因与最小实现
+
+- 当前基线在本轮前已经具有 2 worker、32 pending 的 hotfix，因此 16 个分离查询已不会产生 `QUEUE_FULL`；剩余浪费来自调用形状：`hia_search_node_types`、`hia_node_help` 与 `hia_local_help_search` 只有单项输入时，16 个关键词会形成 16 个 MCP frame 和 16 次 transport/HTTP POST，并重复读取 catalog 或索引源。
+- 三类读取工具现在都保留旧单项形状，并增加最多 16 项的批量形状：node-type 批量只构建一次 installed catalog；node-help 把单项失败封装在对应 result 中；local-help 每批只做一次 Houdini UI snapshot 和一次现有 `LocalKnowledgeIndex` 增量 refresh，再为各 query 执行 FTS 查询并返回带 `matched_queries` 的合并结果。`sources=["user"]`、10 分钟刷新、`refresh=true`、provenance、verification、index 元数据和 phase timings 全部保留，没有回退为逐文件扫描。
+- stdio 分为两个只读 worker/32 pending 的 read lane，以及一个 worker/8 pending 的 write lane。`hia_execute_hom` 只进入串行 write lane；read burst 不再被等待中的写调用占满容量。stdin EOF 先等待 0.5 秒正常 drain，未结束则 latch 全部 queued/active request cancellation、关闭 transport，再给 0.25 秒有界收口；不会强杀已经进入 Houdini UI 主线程的 HOM。
+- Bridge 与 `houdini-procedural-modeling`、`houdini-visual-research` 仅增加“多个关键词或帮助目标一次批量查询、复用结果、不并发扇出”的通用规则；HIA developerInstructions 为 990/1000 字符。原多轮研究、完整 ledger、原创 memo `draft`→`verified`、640×360 里程碑预览、关键帧、只读 artifact review、最大偏差和有限迭代规则均保留。
+- 没有新增 TTL cache、request coalescing、Redis、服务、watcher、调度器、向量、embedding 或第二 Agent。成功 POST access log 继续默认静默，401/403/507 等非 2xx 日志继续保留。
+
+### 专项性能数据
+
+- 性能专项 worktree 的同一 `RecordingTransport(delay=0.02)`、7 次重复 JSONL 微基准数据为：修改前 16 个分离查询产生 16 次 transport/HTTP 调用，中位 0.250 秒；批量路径 16 个关键词产生 1 次调用，中位 0.031 秒。调用数下降 93.75%，中位耗时下降 87.6%，两条路径的 `QUEUE_FULL` 均为 0。
+- 本集成轮以协议和压力回归保持上述调用形状，没有把微基准冒充真实 Houdini cook 时间。协议测试确认三类 batch 各自只提交一次 transport；16-read burst、独立 write lane 和连续压力测试均为 `QUEUE_FULL=0`。
+
+### 自动验证
+
+- 五个直接相关模块 `stdio_queue/runtime/protocol/local_help/bridge_session`：90/90 通过。
+- HIA MCP V2 全组：共 86 项，84 通过、2 个可选 FXHoudiniMCP fixture 跳过；与完整 Bridge session 合并计算为 139 个唯一专项用例，137 通过、2 跳过，超过原专项 130+2 skip 覆盖。
+- `test_hia_mcp_v2_stdio_queue` 连续运行 5 轮：每轮 8/8，共 40/40 通过；没有时序性 `QUEUE_FULL`、worker 泄漏或 shutdown 挂起。
+- 本轮唯一一次完整 `python -B -m unittest discover -s tests\unit -v`：共 809 项，807 通过、2 个可选 fixture 跳过、0 失败，用时 47.416 秒。此前修复的 launcher/Panel 三项保持通过；没有出现 `.runtime/tmp` 首轮顺序问题，因此没有创建补救目录或重跑完整套件。
+- `houdini-procedural-modeling` 与 `houdini-visual-research` 的 Skill Creator `quick_validate.py` 均返回 `Skill is valid!`。性能生产/测试文件 Ruff、Python compileall 和 `git diff --check` 均通过。
+- launcher Core、approval card 与 `knowledge_index.py` 的 SHA-256 在性能合并前后完全一致；视觉 capture 的 640×360、240 帧、相机/锁定/帧恢复回归也保持通过。
+
+### 真实 Houdini 未验证项
+
+- 未启动真实 Houdini GUI。仍需现场验证一个长 `hia_execute_hom` 与 read burst 并存时的 UI 主线程行为、Stop/EOF 后已进入主线程的 HOM 自行完成、多个独立 MCP stdio 进程同时写入时的实际串行化，以及批量 node search/help/local-help 与 installed Houdini 的结果一致性。
+- 本轮没有提交、推送或清理；保持当前 worktree 等待 launcher 新 UI 集成。
+
+## 冻结 launcher UI 最终集成（2026-07-24）
+
+### 合并范围与保护项
+
+- 冻结源为 `E:\houdini-intelligence-agent`。合并前确认 4f08 的 `HiaLauncher.xaml` 相对自身基线无本地改动；源 XAML 已通过 XML 解析，Wpf 的 33 个 `Get-RequiredControl` 名称全部存在且无重复，12 个 click/selection/size 事件绑定全部存在。按授权只对这一精确大文件做一次整体机械同步；同步后源与目标 SHA-256 均为 `72D1B3D6EA778453294369F301449B98A4B88D0CCB991A0A570AAFEDC401EECA`。
+- `HiaLauncher.Wpf.ps1` 只逐段合入完整产品标题，以及紧凑/宽屏时 `RightVisualRail` 的宽度和边距；规范化换行后与冻结源内容一致。没有启动、显示或继续美化 UI。
+- `test_launcher_preflight.py` 只合入五个 UI 区域：新品牌和必需控件、五种窗口尺寸下启动按钮可达、固定底栏和暗色滚动条、禁用主按钮高对比样式，以及非季节性内置节点图形；既有 recovery、截图清理、portable launcher 与 Core 根因测试保持不变。
+- 4f08 的 `HiaLauncher.Core.psm1` 始终为权威版本，合并前后 SHA-256 都是 `23EA4E99E5D0405571055238A2EB542E54814BC9DFC305956856422748824371`；没有从 E 覆盖。完整回归首次暴露 `test_release_packaging.py` 仍要求已删除的旧文案 `CREATIVE WORKSPACE`，只把这一条陈旧契约更新为冻结 UI 的 `BIG-CHICKEN`，没有修改打包逻辑或视觉。
+
+### 自动验证
+
+- UI 精确契约 5/5 通过，用时 0.830 秒。`test_wpf_xaml_loads_and_exposes_required_controls` 通过 `powershell -Sta` 实际执行 `XamlReader.Load`，对 1180×820、944×656、820×600、787×547、640×480 逐一 Measure/Arrange/UpdateLayout，并从 PowerShell AST 提取和执行 `Update-ResponsiveLayout`；没有 `Show` 或 `ShowDialog`。
+- `python -B -m unittest tests.unit.test_launcher_preflight -v`：41/41 通过，用时 13.150 秒；Core 的不安全路径先拒绝、16 字符 recovery GUID、截图清理、恢复和便携性测试均保持通过。
+- 首次完整回归共 810 项，因上述唯一旧品牌断言得到 1 failure、2 skip；最小更新后 `test_release_packaging` 7/7 通过。最终原样重跑 `python -B -m unittest discover -s tests\unit -v`：810 项中 808 通过、2 个可选 FXHoudiniMCP fixture 跳过、0 failure，用时 35.906 秒。没有 `.runtime/tmp` 首轮顺序问题，也没有创建补救目录。
+- 最终 XML 解析、PowerShell AST、33 个必需控件、12 个事件绑定、冻结源内容对照、Core 哈希保护与 `git diff --check` 均通过。
+
+### GUI 未验证项
+
+- 本轮没有显示真实 launcher 窗口，也没有启动 Panel 或 Houdini GUI。仍需人工确认系统缩放、实际工作区尺寸、键盘导航、滚动手感、禁用按钮视觉和真实点击流程；自动化已经覆盖 XAML 真加载、五种布局尺寸、控件可达性、AST、对比度和事件契约。
+- 未提交、推送或清理；当前 4f08 保持等待同步回 E。

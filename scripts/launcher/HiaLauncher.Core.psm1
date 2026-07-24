@@ -961,21 +961,32 @@ function Invoke-HiaProjectChecks {
     if ($BridgePython) {
         try {
             $bridgeFullPath = [System.IO.Path]::GetFullPath($BridgePython)
+            $pythonOrgUserInstall = (
+                $bridgeFullPath -match '(?i)\\Users\\[^\\]+\\AppData\\Local\\Programs\\Python\\[^\\]+\\python\.exe$'
+            )
             $bridgePathAllowed = (
                 $bridgeFullPath -match '^[A-Za-z]:\\' -and
                 -not $bridgeFullPath.Substring(2).Contains(':') -and
-                $bridgeFullPath -notmatch '(?i)\\(AppData|WindowsApps)\\'
+                $bridgeFullPath -notmatch '(?i)\\WindowsApps\\' -and
+                (
+                    $bridgeFullPath -notmatch '(?i)\\AppData\\' -or
+                    $pythonOrgUserInstall
+                )
             )
         } catch { }
     }
-    if (-not $BridgePython -or -not (Test-Path -LiteralPath $BridgePython -PathType Leaf)) {
+    if (-not $BridgePython) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
             -Message '尚未选择有效的 Bridge Python executable。' `
             -Advice '安装并选择 CPython 3.10+ 的 python.exe；当前测试基线为 3.10：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Python、提权或修改 PATH/注册表。'
     } elseif (-not $bridgePathAllowed) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
-            -Message 'Bridge Python 必须是普通本地盘绝对路径，且不能来自 AppData 或 WindowsApps。' `
-            -Advice '选择项目本地或受控工具链中的 python.exe，使其符合实际生命周期脚本的路径策略。'
+            -Message 'Bridge Python 必须是普通本地盘绝对路径；WindowsApps、普通 AppData 路径、UNC、相对路径和 ADS 均不接受。' `
+            -Advice '选择项目本地工具链，或 python.org 默认安装在 AppData\Local\Programs\Python 下的 python.exe。'
+    } elseif (-not (Test-Path -LiteralPath $BridgePython -PathType Leaf)) {
+        $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
+            -Message '尚未选择有效的 Bridge Python executable。' `
+            -Advice '安装并选择 CPython 3.10+ 的 python.exe；当前测试基线为 3.10：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Python、提权或修改 PATH/注册表。'
     } else {
         if ($ProbeOverrides.ContainsKey('bridge')) {
             $bridgeProbe = $ProbeOverrides.bridge
@@ -1471,7 +1482,7 @@ function Copy-HiaLauncherRecoveryHip {
     $destination = Join-Path $recoveryDirectory (
         'recovery-{0}-{1}{2}' -f `
             $Attempt,
-            [Guid]::NewGuid().ToString('N'),
+            [Guid]::NewGuid().ToString('N').Substring(0, 16),
             [string]$suffixMatch.Groups[1].Value
     )
     [System.IO.File]::Copy($source.FullName, $destination, $false)

@@ -119,18 +119,51 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             item for item in response["result"]["tools"] if item["name"] == "hia_search_node_types"
         )
         search_description = search_tool["description"].casefold()
-        self.assertIn("high-signal query", search_description)
-        self.assertIn("wait for its result", search_description)
-        self.assertIn("do not fan out", search_description)
+        self.assertIn("queries batch", search_description)
+        self.assertIn("reuse its merged results", search_description)
+        self.assertIn("fanning out parallel searches", search_description)
         self.assertIn("blindly retry", search_description)
+        self.assertEqual(
+            16,
+            search_tool["inputSchema"]["properties"]["queries"]["maxItems"],
+        )
 
         help_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_node_help"
         )
         help_description = help_tool["description"].casefold()
+        self.assertIn("requests to batch", help_description)
         self.assertIn("node_path", help_description)
         self.assertIn("category plus a bare node_type", help_description)
         self.assertIn('node_type="category/name"', help_description)
+        self.assertEqual(
+            16,
+            help_tool["inputSchema"]["properties"]["requests"]["maxItems"],
+        )
+
+        local_help_tool = next(
+            item
+            for item in response["result"]["tools"]
+            if item["name"] == "hia_local_help_search"
+        )
+        local_help_properties = local_help_tool["inputSchema"]["properties"]
+        self.assertEqual(
+            ["houdini", "project", "user"],
+            local_help_properties["sources"]["items"]["enum"],
+        )
+        self.assertIn("refresh", local_help_properties)
+        self.assertIn(
+            "sqlite fts5",
+            local_help_tool["description"].casefold(),
+        )
+        self.assertIn(
+            "scanned once",
+            local_help_tool["description"].casefold(),
+        )
+        self.assertIn(
+            "queries",
+            local_help_properties,
+        )
 
         execute_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_execute_hom"
@@ -142,6 +175,21 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("checkpoint", execute_description)
         self.assertIn("diff_paths", execute_properties)
         self.assertIn("checkpoint_label", execute_properties)
+
+        capture_tool = next(
+            item for item in response["result"]["tools"] if item["name"] == "hia_capture_viewport"
+        )
+        capture_description = capture_tool["description"].casefold()
+        capture_properties = capture_tool["inputSchema"]["properties"]
+        self.assertIn("640 x 360", capture_description)
+        self.assertIn("selected key frames", capture_description)
+        self.assertIn("at most 240 frames", capture_description)
+        self.assertIn("camera lock", capture_description)
+        self.assertEqual(640, capture_properties["width"]["default"])
+        self.assertEqual(360, capture_properties["height"]["default"])
+        self.assertTrue(capture_properties["return_image"]["default"])
+        self.assertIn("spans over 240 frames", capture_properties["frame_range"]["description"])
+        self.assertTrue(capture_tool["annotations"]["readOnlyHint"])
 
         codex_response = adapter.handle_message(
             rpc(3, "tools/list", {"_meta": {"progressToken": "inventory"}})
@@ -194,6 +242,56 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                 self.assertEqual("image", response["result"]["content"][1]["type"])
         self.assertEqual(4, len(transport.calls))
 
+    def test_batch_query_forms_remain_one_transport_dispatch_each(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        for request_id, name, arguments in (
+            (
+                2,
+                "hia_search_node_types",
+                {"queries": ["vellum", "pyro", "materialx"]},
+            ),
+            (
+                3,
+                "hia_node_help",
+                {
+                    "requests": [
+                        {
+                            "category": "Sop",
+                            "node_type": "vellumsolver",
+                            "include_parameters": False,
+                        },
+                        {
+                            "node_type": "Lop/karmarendersettings",
+                            "include_parameters": False,
+                        },
+                    ]
+                },
+            ),
+            (
+                4,
+                "hia_local_help_search",
+                {"queries": ["vellum", "materialx"]},
+            ),
+        ):
+            response = adapter.handle_message(
+                rpc(
+                    request_id,
+                    "tools/call",
+                    {"name": name, "arguments": arguments},
+                )
+            )
+            self.assertFalse(response["result"]["isError"])
+        self.assertEqual(
+            [
+                "hia_search_node_types",
+                "hia_node_help",
+                "hia_local_help_search",
+            ],
+            [call[0] for call in transport.calls],
+        )
+
     def test_capability_search_is_local_and_does_not_dispatch(self) -> None:
         transport = FakeTransport()
         adapter = HiaMcpAdapter(transport)
@@ -244,6 +342,42 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertEqual("INVALID_ARGUMENTS", response["error"]["data"]["code"])
         self.assertEqual([], transport.calls)
 
+    def test_ambiguous_or_missing_batch_query_forms_are_rejected_before_transport(
+        self,
+    ) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        cases = (
+            (
+                "hia_search_node_types",
+                {"query": "pyro", "queries": ["pyro"]},
+            ),
+            ("hia_local_help_search", {}),
+            (
+                "hia_node_help",
+                {
+                    "node_type": "Sop/box",
+                    "requests": [{"node_type": "Sop/box"}],
+                },
+            ),
+        )
+        for request_id, (name, arguments) in enumerate(cases, start=10):
+            with self.subTest(name=name):
+                response = adapter.handle_message(
+                    rpc(
+                        request_id,
+                        "tools/call",
+                        {"name": name, "arguments": arguments},
+                    )
+                )
+                self.assertEqual(-32602, response["error"]["code"])
+                self.assertEqual(
+                    "INVALID_ARGUMENTS",
+                    response["error"]["data"]["code"],
+                )
+        self.assertEqual([], transport.calls)
+
     def test_capture_output_path_cannot_escape_the_owned_cache(self) -> None:
         transport = FakeTransport()
         adapter = HiaMcpAdapter(transport)
@@ -255,6 +389,24 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                 {
                     "name": "hia_capture_viewport",
                     "arguments": {"output_path": "..\\outside.png"},
+                },
+            )
+        )
+        self.assertEqual(-32602, response["error"]["code"])
+        self.assertEqual("INVALID_ARGUMENTS", response["error"]["data"]["code"])
+        self.assertEqual([], transport.calls)
+
+    def test_capture_frame_range_shape_is_rejected_before_transport(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        response = adapter.handle_message(
+            rpc(
+                2,
+                "tools/call",
+                {
+                    "name": "hia_capture_viewport",
+                    "arguments": {"mode": "flipbook", "frame_range": [12]},
                 },
             )
         )

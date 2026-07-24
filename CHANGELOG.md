@@ -2,6 +2,23 @@
 
 All notable user-facing changes to Big-Chicken Houdini Intelligence Agent are recorded here.
 
+## 0.1.1-preview - 2026-07-24
+
+### Added
+
+- Project-local SQLite FTS5 knowledge index for curated Houdini references without a vector service or external database.
+- Skill contracts for procedural modeling, material look development, visual research, and artifact review.
+
+### Changed
+
+- HIA MCP V2 batches read-heavy discovery work and keeps scene-writing HOM calls serialized on Houdini's UI thread.
+- Visual review uses bounded low-resolution viewport captures and records reproducible diagnostics for failed work.
+- Launcher preflight, repair guidance, approval presentation, and portable release packaging were refined.
+
+### Fixed
+
+- Release packaging now includes the local knowledge index required by the Houdini runtime.
+
 ## 0.1.0-preview - 2026-07-23
 
 ### Added

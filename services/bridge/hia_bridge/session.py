@@ -656,13 +656,15 @@ class BridgeSession:
             backend_instructions = (
                 "场景默认用 HIA MCP V2 与 HOM；hia_execute_hom 批量执行。"
                 "hia_context/hia_inspect 读取，hia_scene_diff/hia_validate 验证；"
-                "hia_capture_viewport 仅按需视觉核对。"
-                "仅主代理调用当前会话 hia_*/HOM 并写当前 HIP；子代理只做研究、脚本草案和审阅；"
-                "MCP 无 caller lineage，非代码级隔离。"
-                "hia_search_node_types/help 等同类读取由主代理串行或少量调用；不并发扇出，"
-                "遇到 QUEUE_FULL 不立即重试。hia_execute_hom 等场景写入始终由主代理执行。"
-                "goal_focus_mode=true 且有意义阶段成功才设一次 checkpoint_label；"
-                "普通聊天、专注关闭或逐节点/参数不设。"
+                "复杂视觉里程碑（结构、材质/灯光、交付前）自动 hia_capture_viewport 640x360同帧预览，"
+                "动画/模拟抽关键帧；简单任务不截图。只读 artifact-review 审阅；"
+                "主任务每轮只修最大偏差，有限迭代、达标即停。"
+                "仅主任务串行调用 hia_*/HOM 并写 HIP；hia_execute_hom 等场景写入始终由主代理执行；"
+                "子任务只研究、草拟、只读审阅；MCP 无 caller lineage，非代码级隔离；"
+                "同类读取不并发扇出；多个关键词先合并为一次批量查询并复用结果；"
+                "遇到 QUEUE_FULL 不立即重试。"
+                "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label；"
+                "聊天、关闭专注和逐参数操作不设。"
             )
         else:
             backend_instructions = (
@@ -673,7 +675,7 @@ class BridgeSession:
                 "模型行为约束：主代理负责当前 HIP 写入，子代理只做研究、草案和审阅；"
                 "FX fallback 同样非代码级隔离。"
             )
-        return backend_instructions + (
+        common_instructions = (
             "外部研究先定本阶段必需 URL，优先原生 web/search；没有网页工具时才把同阶段公开页合为"
             "一次 PowerShell 只读批量读取，不逐页审批；复用已取内容，不重复抓取相近页面。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
@@ -690,6 +692,22 @@ class BridgeSession:
             "可写所选普通本地项目外目录；未指定才用 HIA_RENDER_OUTPUT_DIR，并始终报告最终路径。"
             "禁止屏幕接管。"
         )
+        if self._mcp_backend == HIA_MCP_V2_BACKEND:
+            common_instructions = (
+                "外部研究先定本阶段必需 URL，优先原生 web/search；无网页工具时把同阶段公开页合为"
+                "一次 PowerShell 只读批量读取，不逐页审批；复用已取内容，不重复抓取相近页面。"
+                "MCP 不可用就说明，不转离线 HIP；hython 仅按用户明确的离线/独立 HIP/批处理/后台渲染要求使用。"
+                "普通场景不查项目代码/文档，仅诊断 Panel/Bridge/MCP/项目代码时读取。"
+                "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，不塞入主上下文；主任务公开采纳。"
+                "上下文由 app-server 自动整理，不手动 compact 或建本地摘要/记忆。"
+                "禁止 hou.hipFile.clear/load/save 和替换当前场景；新资产置于唯一新根。"
+                "不调用 request_user_input；信息不足用合理默认，无法执行才报告。"
+                "截图写 HIA_CACHE_DIR/screenshots，预览写 previews，中间图写 tmp，文件名用时间戳和短随机后缀；"
+                "插件源码、内部缓存、自动截图/预览/附件/临时/诊断留项目内。"
+                "用户指定的最终渲染/EXR/视频/USD/模拟缓存/导出可写所选普通项目外目录；"
+                "否则用 HIA_RENDER_OUTPUT_DIR；始终报告最终路径。禁止屏幕接管。"
+            )
+        return backend_instructions + common_instructions
 
     @staticmethod
     def _sanitize_account_result(account_result: Any) -> dict[str, Any]:
