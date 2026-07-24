@@ -34,8 +34,19 @@ STRING = {"type": "string", "maxLength": 4096}
 PATH = {"type": "string", "maxLength": 4096}
 PATHS = {"type": "array", "items": PATH, "maxItems": 64}
 QUERY = {"type": "string", "maxLength": 512}
+QUERIES = {"type": "array", "items": QUERY, "minItems": 1, "maxItems": 16}
 OFFSET = {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}
+
+NODE_HELP_PROPERTIES = {
+    "node_path": PATH,
+    "category": STRING,
+    "node_type": STRING,
+    "include_parameters": {"type": "boolean", "default": True},
+    "parameter_query": QUERY,
+    "offset": OFFSET,
+    "limit": LIMIT,
+}
 
 
 @dataclass(frozen=True)
@@ -126,10 +137,11 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_search_node_types",
         "dynamic_node_knowledge",
-        "Search node types actually installed in the current Houdini build across any context, including versioned names. Use one high-signal query with appropriate contexts and limit, wait for its result before searching again, and do not fan out repeated parallel searches or blindly retry. Results are filtered and paginated; there is no static catalog or node-type allowlist.",
+        "Search node types actually installed in the current Houdini build across any context, including versioned names. Prefer one queries batch for several keywords, then reuse its merged results; query remains the compatible single-query form. Wait for the result instead of fanning out parallel searches or blindly retrying. Results are filtered and paginated; there is no static catalog or node-type allowlist.",
         _object(
             {
                 "query": QUERY,
+                "queries": QUERIES,
                 "contexts": {"type": "array", "items": STRING, "maxItems": 32},
                 "include_deprecated": {"type": "boolean", "default": False},
                 "offset": OFFSET,
@@ -140,16 +152,16 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_node_help",
         "dynamic_node_knowledge",
-        "Resolve installed Houdini help using one of three inputs: node_path; category plus a bare node_type; or node_type=\"Category/name\". Returns the real versioned name, context, input rules, parameter templates, definition/source hints, and installed help metadata.",
+        "Resolve installed Houdini help. Use requests to batch several targets, or the compatible single-target form with node_path, category plus a bare node_type, or node_type=\"Category/name\". Returns the real versioned name, context, input rules, parameter templates, definition/source hints, and installed help metadata.",
         _object(
             {
-                "node_path": PATH,
-                "category": STRING,
-                "node_type": STRING,
-                "include_parameters": {"type": "boolean", "default": True},
-                "parameter_query": QUERY,
-                "offset": OFFSET,
-                "limit": LIMIT,
+                **NODE_HELP_PROPERTIES,
+                "requests": {
+                    "type": "array",
+                    "items": _object(NODE_HELP_PROPERTIES),
+                    "minItems": 1,
+                    "maxItems": 16,
+                },
             }
         ),
     ),
@@ -256,7 +268,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_capture_viewport",
         "visual_feedback",
-        "Capture the current viewport or a bounded flipbook only when visual verification is needed. Restores the original camera/view state, does not open MPlay or take focus, and returns dimensions read from the produced PNG. Images stay under HIA_CACHE_DIR/screenshots.",
+        "Capture the current viewport or a bounded flipbook only when visual verification is needed. Low-resolution flipbooks default to 640 x 360. Use a same-frame flipbook for stage previews and selected key frames for animation or simulation; a flipbook range may span at most 240 frames. Restores the original camera/view, camera lock, and frame state, does not open MPlay or take focus, and returns dimensions read from the produced PNG. Images stay under HIA_CACHE_DIR/screenshots.",
         _object(
             {
                 "mode": {"type": "string", "enum": ["viewport", "flipbook"], "default": "viewport"},
@@ -266,9 +278,10 @@ TOOL_SPECS = (
                     "items": {"type": "number"},
                     "minItems": 2,
                     "maxItems": 2,
+                    "description": "Start and end frames for flipbook capture. The runtime rejects reversed ranges and spans over 240 frames; prefer same-frame milestone previews or selected key frames.",
                 },
-                "width": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 1280},
-                "height": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 720},
+                "width": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 640},
+                "height": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 360},
                 "return_image": {"type": "boolean", "default": True},
             }
         ),
@@ -276,19 +289,29 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_local_help_search",
         "local_documentation",
-        "Search high-signal snippets from the current installed Houdini catalog/help and published project skills, references, and current docs. Heavy file scanning runs outside the Houdini UI thread; historical Gate material and test reports are excluded by default. This is local-only; web research remains Codex's responsibility.",
+        "Search a project-local SQLite FTS5 index of the installed Houdini catalog/help, published project skills/references/current docs, and user-authorized documents under .runtime/knowledge/sources. Prefer one queries batch for several keywords so refreshable sources are scanned once, then reuse its merged results; query remains the compatible single-query form. The current Houdini version ranks first; every result includes provenance and verification metadata. The index refresh is incremental and runs outside the Houdini UI thread. This is local-only; web research remains Codex's responsibility.",
         _object(
             {
                 "query": {"type": "string", "minLength": 2, "maxLength": 256},
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 2, "maxLength": 256},
+                    "minItems": 1,
+                    "maxItems": 16,
+                },
                 "sources": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["houdini", "project"]},
-                    "maxItems": 2,
+                    "items": {"type": "string", "enum": ["houdini", "project", "user"]},
+                    "maxItems": 3,
                 },
                 "offset": OFFSET,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                "refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force an immediate incremental source refresh before searching.",
+                },
             },
-            required=("query",),
         ),
     ),
 )
@@ -329,6 +352,25 @@ def validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
     if not isinstance(arguments, Mapping):
         raise InputError("INVALID_ARGUMENTS", "Tool arguments must be an object")
     _validate_schema(dict(arguments), spec.input_schema, path="arguments")
+    if tool_name in {"hia_search_node_types", "hia_local_help_search"}:
+        if "query" in arguments and "queries" in arguments:
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                "Provide query or queries, not both",
+            )
+        if tool_name == "hia_local_help_search" and not (
+            "query" in arguments or "queries" in arguments
+        ):
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                "Provide query or queries",
+            )
+    if tool_name == "hia_node_help" and "requests" in arguments:
+        if set(arguments) != {"requests"}:
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                "Batch node help options belong inside each requests item",
+            )
 
 
 def _validate_schema(value: Any, schema: Mapping[str, Any], *, path: str) -> None:

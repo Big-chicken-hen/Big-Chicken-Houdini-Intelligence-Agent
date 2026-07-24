@@ -1,6 +1,6 @@
 [project]
 name = "big-chicken-houdini-intelligence-agent"
-version = "0.1.0-preview"
+version = "0.1.1-preview"
 description = "Big-Chicken Houdini Intelligence Agent: a Codex-powered Houdini plugin for natural-language creation and live editable scene work"
 requires-python = ">=3.10"
 

@@ -143,7 +143,8 @@ class HiaMcpAdapter:
             "serverInfo": {"name": SERVER_ID, "version": SERVER_VERSION},
             "instructions": (
                 "HIA MCP V2 is Codex's live Houdini perception, knowledge, execution, and validation layer. "
-                "Inspect narrowly, discover installed node types dynamically, and prefer one hia_execute_hom batch for complex edits."
+                "Batch related read queries and reuse their results; discover installed node types dynamically, "
+                "and prefer one hia_execute_hom batch for complex edits."
             ),
         }
 

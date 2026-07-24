@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.-]*$')]
-    [string]$Version = '0.1.0-preview',
+    [string]$Version = '0.1.1-preview',
     [switch]$InstallLocalSdk
 )
 
@@ -46,6 +46,7 @@ $releaseFileAllowlist = @(
     'houdini_package/python_libs/hia_mcp_runtime/__init__.py',
     'houdini_package/python_libs/hia_mcp_runtime/executor.py',
     'houdini_package/python_libs/hia_mcp_runtime/http_server.py',
+    'houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py',
     'houdini_package/python_libs/hia_panel/__init__.py',
     'houdini_package/python_libs/hia_panel/approval_card.py',
     'houdini_package/python_libs/hia_panel/attachment_store.py',

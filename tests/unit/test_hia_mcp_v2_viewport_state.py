@@ -150,6 +150,8 @@ class FakeSceneViewer:
         self.open_dialog: bool | None = None
         self.focus_calls = 0
         self.mplay_launches = 0
+        self.camera_at_flipbook: FakeCamera | None = None
+        self.camera_lock_at_flipbook: bool | None = None
 
     def curViewport(self) -> FakeViewport:  # noqa: N802
         return self.viewport
@@ -168,6 +170,8 @@ class FakeSceneViewer:
         open_dialog: bool,
     ) -> None:
         self.used_flipbook_settings = settings
+        self.camera_at_flipbook = self.viewport.camera()
+        self.camera_lock_at_flipbook = self.viewport.isCameraLockedToView()
         self.open_dialog = open_dialog
         if open_dialog:
             self.focus_calls += 1
@@ -342,6 +346,79 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertEqual("original-free-view", viewport.defaultCamera().state)
         self.assertIsNone(viewport.camera())
         self.assertEqual([], viewport.camera_restore_calls)
+
+    def test_default_stage_flipbook_is_low_resolution_and_restores_viewer_state(self) -> None:
+        original_camera = FakeCamera("/obj/original_camera")
+        capture_camera = FakeCamera("/obj/capture_camera")
+        viewport = FakeViewport(
+            original_camera=original_camera,
+            default_camera_state="original-camera-view",
+            camera_locked=True,
+            image_size=(1, 1),
+        )
+        hou_module, executor = self.make_executor(
+            viewport,
+            original_camera,
+            capture_camera,
+        )
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {
+                "mode": "flipbook",
+                "camera_path": capture_camera.path,
+                "return_image": False,
+            },
+        )
+
+        used = hou_module.scene_viewer.used_flipbook_settings
+        self.assertIsNotNone(used)
+        assert used is not None
+        self.assertEqual((12.0, 12.0), used.frame_range)
+        self.assertEqual((640, 360), used.image_resolution)
+        self.assertEqual((640, 360), (response["result"]["width"], response["result"]["height"]))
+        self.assertIs(capture_camera, hou_module.scene_viewer.camera_at_flipbook)
+        self.assertFalse(hou_module.scene_viewer.camera_lock_at_flipbook)
+        self.assertIs(original_camera, viewport.camera())
+        self.assertTrue(viewport.isCameraLockedToView())
+        self.assertEqual("original-camera-view", viewport.defaultCamera().state)
+        self.assertEqual([12.0, 12.0], hou_module.frame_history)
+        self.assertEqual(0, hou_module.scene_viewer.focus_calls)
+        self.assertEqual(0, hou_module.scene_viewer.mplay_launches)
+
+    def test_flipbook_rejects_invalid_or_excessive_ranges_before_capture(self) -> None:
+        cases = (
+            ([5, 3], "end must not precede"),
+            ([1, float("nan")], "finite numbers"),
+            ([1, 241.01], "at most 240 frames"),
+        )
+        for frame_range, expected_message in cases:
+            with self.subTest(frame_range=frame_range):
+                viewport = FakeViewport(
+                    original_camera=None,
+                    default_camera_state="original-free-view",
+                    camera_locked=False,
+                    image_size=(1, 1),
+                )
+                hou_module, executor = self.make_executor(viewport)
+
+                with self.assertRaises(HiaRuntimeError) as raised:
+                    executor.dispatch(
+                        "hia_capture_viewport",
+                        {
+                            "mode": "flipbook",
+                            "frame_range": frame_range,
+                            "return_image": False,
+                        },
+                    )
+
+                self.assertEqual("INVALID_ARGUMENTS", raised.exception.code)
+                self.assertIn(expected_message, str(raised.exception))
+                self.assertIsNone(hou_module.scene_viewer.used_flipbook_settings)
+                self.assertEqual([], hou_module.frame_history)
+                self.assertEqual(0, hou_module.scene_viewer.focus_calls)
+                screenshot_root = self.project_root / ".runtime" / "cache" / "screenshots"
+                self.assertEqual([], list(screenshot_root.glob("*.png")))
 
     def test_camera_restore_failure_does_not_skip_lock_or_frame_restore(self) -> None:
         original_camera = FakeCamera("/obj/original_camera")

@@ -75,6 +75,7 @@ class ReleasePackagingTests(unittest.TestCase):
             "schemas/codex-app-server/0.144.3/",
             "services/hia_mcp_v2/",
             "houdini_package/python_panels/houdini_intelligence.pypanel",
+            "houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py",
             "houdini_package/python_libs/hia_panel/panel.py",
             'Big-Chicken-Houdini-Intelligence-Agent-v$Version-win-x64',
             "BigChickenLauncher.exe",
@@ -138,7 +139,7 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertNotIn("steam-winter-sale", combined.lower())
         self.assertNotIn("OptionalArtwork", combined)
         self.assertNotIn("Get-HiaLauncherArtworkPath", combined)
-        self.assertIn("CREATIVE WORKSPACE", combined)
+        self.assertIn("BIG-CHICKEN", combined)
         project = ET.parse(CS_PROJECT_PATH).getroot()
         self.assertEqual([], project.findall(".//Content"))
 
@@ -155,7 +156,7 @@ class ReleasePackagingTests(unittest.TestCase):
             r".runtime\release",
             "SHA256SUMS.txt",
             "check-public-release.py",
-            "0.1.0-preview",
+            "0.1.1-preview",
         ):
             self.assertIn(required, readme)
 

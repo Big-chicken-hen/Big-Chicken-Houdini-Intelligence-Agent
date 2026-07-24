@@ -40,13 +40,15 @@ Make a short construction model: asset identity; world scale and axes; recogniti
 
 ## Use the live Houdini route
 
-Default current-scene work to HIA MCP V2 and HOM. Obtain context with `hia_context` or `hia_inspect` only as needed, then prefer one or a small number of serial, cohesive `hia_execute_hom` batches. Call `hia_search_node_types` followed by `hia_node_help` narrowly and serially only when installed node behavior is uncertain. Avoid tool forests and parallel live-scene writes.
+Default current-scene work to HIA MCP V2 and HOM. Obtain context with `hia_context` or `hia_inspect` only as needed, then prefer one or a small number of serial, cohesive `hia_execute_hom` batches. When several installed-node questions are genuinely needed, use one batched `hia_search_node_types` request, reuse its results, and batch any follow-up `hia_node_help` targets; do not fan out parallel queries. Avoid tool forests and parallel live-scene writes.
 
 Use native `hython` only when the user explicitly requests offline work, an independent HIP, batch processing, or background execution. Use FXHoudiniMCP only when the launcher was explicitly placed in that compatibility mode; never make it the default.
 
 ## Validate and hand off
 
 Require both relevant technical evidence and task-specific visual evidence before claiming a complete asset. Validate selectively; do not impose fixed tool calls, captures, iterations, scores, or gates. Do not permanently change the user's camera, viewport, pane layout, or display state. If representative visual evidence is unavailable, state that the model is technically checked but visually unverified.
+
+For a complex visual asset, follow the stage-preview contract in `$houdini-visual-research`: capture a low-resolution same-frame preview at meaningful milestones rather than after every small edit, obtain a read-only `$houdini-artifact-review`, and let the main task apply any selected fixes serially before the final completion claim.
 
 When geometry integrity is relevant, bound the check as described in [geometry-integrity.md](references/geometry-integrity.md) and recheck the same scope after any repair before claiming completion.
 

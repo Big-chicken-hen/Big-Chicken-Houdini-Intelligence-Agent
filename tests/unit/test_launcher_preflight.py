@@ -245,6 +245,150 @@ $selected | ConvertTo-Json -Depth 5 -Compress
             checks,
         )
 
+    def test_bridge_python_accepts_python_org_per_user_install(self) -> None:
+        fake_root = self.sandbox / "bridge-project"
+        fake_root.mkdir()
+        bridge = (
+            fake_root
+            / "Users"
+            / "TestUser"
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "Python"
+            / "Python311"
+            / "python.exe"
+        )
+        bridge.parent.mkdir(parents=True)
+        bridge.write_bytes(b"fake-python")
+        marker = "__HIA_LAUNCHER_PROBE__" + json.dumps(
+            {
+                "python": "3.11",
+                "executable": str(bridge),
+                "imports": ["hia_bridge", "hia_core", "hia_mcp_v2"],
+            },
+            separators=(",", ":"),
+        )
+        output = self.run_powershell(
+            f"""
+$bridgeProbe = [pscustomobject]@{{
+    started = $true
+    timed_out = $false
+    exit_code = 0
+    stdout = {_ps_literal(marker)}
+    stderr = ''
+    error = ''
+}}
+$placeholderCandidate = [pscustomobject]@{{
+    path = {_ps_literal(fake_root / 'missing' / 'houdini.exe')}
+    version = ''
+    display = ''
+    exists = $false
+    sources = @()
+}}
+$result = Invoke-HiaPreflight `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -HoudiniExe {_ps_literal(fake_root / 'missing' / 'houdini.exe')} `
+    -BridgePython {_ps_literal(bridge)} `
+    -Candidates @($placeholderCandidate) `
+    -ProbeOverrides @{{ runtime_writable = $true; loopback = $true; bridge = $bridgeProbe }}
+$result.checks | Where-Object id -eq 'bridge.python' | ConvertTo-Json -Compress
+"""
+        )
+        check = json.loads(output)
+        self.assertEqual("green", check["level"])
+
+    def test_bridge_python_rejects_unsafe_paths_and_failed_probe(self) -> None:
+        fake_root = self.sandbox / "bridge-policy-project"
+        fake_root.mkdir()
+        windows_apps = (
+            fake_root
+            / "Users"
+            / "TestUser"
+            / "AppData"
+            / "Local"
+            / "Microsoft"
+            / "WindowsApps"
+            / "python.exe"
+        )
+        ordinary_appdata = (
+            fake_root
+            / "Users"
+            / "TestUser"
+            / "AppData"
+            / "Local"
+            / "Temp"
+            / "python.exe"
+        )
+        normal_python = fake_root / "toolchain" / "python.exe"
+        for path in (windows_apps, ordinary_appdata, normal_python):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fake-python")
+
+        unsafe_paths = (
+            windows_apps,
+            ordinary_appdata,
+            Path(r"\\server\share\python.exe"),
+            Path(r"relative\python.exe"),
+            Path(str(normal_python) + ":stream"),
+            fake_root / "missing" / "python.exe",
+        )
+        successful_probe = "__HIA_LAUNCHER_PROBE__" + json.dumps(
+            {"python": "3.11", "executable": str(normal_python)},
+            separators=(",", ":"),
+        )
+        powershell_paths = ", ".join(_ps_literal(path) for path in unsafe_paths)
+        output = self.run_powershell(
+            f"""
+$bridgeProbe = [pscustomobject]@{{
+    started = $true
+    timed_out = $false
+    exit_code = 0
+    stdout = {_ps_literal(successful_probe)}
+    stderr = ''
+    error = ''
+}}
+$placeholderCandidate = [pscustomobject]@{{
+    path = {_ps_literal(fake_root / 'missing' / 'houdini.exe')}
+    version = ''
+    display = ''
+    exists = $false
+    sources = @()
+}}
+$levels = @()
+foreach ($candidate in @({powershell_paths})) {{
+    $result = Invoke-HiaPreflight `
+        -ProjectRoot {_ps_literal(fake_root)} `
+        -HoudiniExe {_ps_literal(fake_root / 'missing' / 'houdini.exe')} `
+        -BridgePython $candidate `
+        -Candidates @($placeholderCandidate) `
+        -ProbeOverrides @{{ runtime_writable = $true; loopback = $true; bridge = $bridgeProbe }}
+    $check = @($result.checks | Where-Object id -eq 'bridge.python')[0]
+    $levels += $check.level
+}}
+$failedProbe = [pscustomobject]@{{
+    started = $true
+    timed_out = $false
+    exit_code = 1
+    stdout = ''
+    stderr = 'probe failed'
+    error = ''
+}}
+$failedResult = Invoke-HiaPreflight `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -HoudiniExe {_ps_literal(fake_root / 'missing' / 'houdini.exe')} `
+    -BridgePython {_ps_literal(normal_python)} `
+    -Candidates @($placeholderCandidate) `
+    -ProbeOverrides @{{ runtime_writable = $true; loopback = $true; bridge = $failedProbe }}
+$failedCheck = @($failedResult.checks | Where-Object id -eq 'bridge.python')[0]
+[pscustomobject]@{{ unsafe = $levels; failed_probe = $failedCheck.level }} |
+    ConvertTo-Json -Compress
+"""
+        )
+        result = json.loads(output)
+        self.assertEqual(["red"] * len(unsafe_paths), result["unsafe"])
+        self.assertEqual("red", result["failed_probe"])
+
     def test_safe_repair_makes_moved_project_configs_relative(self) -> None:
         fake_root = self.sandbox / "another-drive-style-root" / "project"
         (fake_root / ".codex").mkdir(parents=True)
@@ -788,6 +932,9 @@ $fxResult = Invoke-HiaPreflight `
         required_types = {
             "LayoutRoot": "System.Windows.Controls.Grid",
             "RightVisualRail": "System.Windows.Controls.Border",
+            "BrandNodeMotif": "System.Windows.Controls.Viewbox",
+            "MainScrollViewer": "System.Windows.Controls.ScrollViewer",
+            "MainWorkspacePanel": "System.Windows.Controls.Border",
             "RecoveryCard": "System.Windows.Controls.Border",
             "RecoveryCheckpointText": "System.Windows.Controls.TextBlock",
             "RecoverCheckpointOption": "System.Windows.Controls.RadioButton",
@@ -832,8 +979,28 @@ Add-Type -AssemblyName PresentationFramework
 $reader = [Xml.XmlNodeReader]::new($xaml)
 try {{
     $window = [Windows.Markup.XamlReader]::Load($reader)
-    $window.Content.Measure([Windows.Size]::new(640, 360))
-    $window.Content.Arrange([Windows.Rect]::new(0, 0, 640, 360))
+    $launchButton = $window.FindName('LaunchButton')
+    foreach ($size in @(
+        [Windows.Size]::new(1180, 820),
+        [Windows.Size]::new(944, 656),
+        [Windows.Size]::new(820, 600),
+        [Windows.Size]::new(787, 547),
+        [Windows.Size]::new(640, 480)
+    )) {{
+        $window.Content.Measure($size)
+        $window.Content.Arrange([Windows.Rect]::new(0, 0, $size.Width, $size.Height))
+        $window.Content.UpdateLayout()
+        $launchPosition = $launchButton.TranslatePoint(
+            [Windows.Point]::new(0, 0),
+            $window.Content
+        )
+        if (
+            $launchButton.ActualWidth -le 0 -or
+            $launchButton.ActualHeight -le 0 -or
+            $launchPosition.Y -lt 0 -or
+            ($launchPosition.Y + $launchButton.ActualHeight) -gt $size.Height
+        ) {{ throw "Launch button is unreachable at $($size.Width)x$($size.Height)." }}
+    }}
     $types = [ordered]@{{}}
     foreach ($name in @({names})) {{
         $control = $window.FindName($name)
@@ -862,20 +1029,21 @@ try {{
     Update-ResponsiveLayout
     if (
         -not $script:compactLayout -or
-        [Windows.Controls.Grid]::GetColumn($rightVisualRail) -ne 0 -or
-        [Windows.Controls.Grid]::GetRow($rightVisualRail) -ne 7 -or
-        [Windows.Controls.Grid]::GetRowSpan($rightVisualRail) -ne 1 -or
-        $layoutRoot.ColumnDefinitions[2].Width.ToString() -ne '0'
+        $rightVisualRail.Width -ne 168 -or
+        $rightVisualRail.Margin.Left -ne 0 -or
+        $rightVisualRail.Margin.Top -ne 12 -or
+        $rightVisualRail.Margin.Right -ne 16 -or
+        $rightVisualRail.Margin.Bottom -ne 10
     ) {{ throw 'Compact responsive layout did not activate.' }}
-    $window.ActualWidth = 1120.0
+    $window.ActualWidth = 1180.0
     Update-ResponsiveLayout
     if (
         $script:compactLayout -or
-        [Windows.Controls.Grid]::GetColumn($rightVisualRail) -ne 2 -or
-        [Windows.Controls.Grid]::GetRow($rightVisualRail) -ne 0 -or
-        [Windows.Controls.Grid]::GetRowSpan($rightVisualRail) -ne 8 -or
-        $layoutRoot.ColumnDefinitions[0].Width.ToString() -ne '3*' -or
-        $layoutRoot.ColumnDefinitions[2].Width.ToString() -ne '2*'
+        $rightVisualRail.Width -ne 210 -or
+        $rightVisualRail.Margin.Left -ne 0 -or
+        $rightVisualRail.Margin.Top -ne 16 -or
+        $rightVisualRail.Margin.Right -ne 28 -or
+        $rightVisualRail.Margin.Bottom -ne 12
     ) {{ throw 'Wide responsive layout did not restore.' }}
     $window = $loadedWindow
     $types | ConvertTo-Json -Compress
@@ -918,11 +1086,19 @@ try {{
         self.assertRegex(xaml_source, r'MinHeight="\d+"')
         self.assertIn('x:Name="BusyProgressBar"', xaml_source)
         self.assertIn('IsIndeterminate="True"', xaml_source)
+        self.assertIn('Title="Big-Chicken Houdini Intelligence Agent"', xaml_source)
+        self.assertIn('Text="BIG-CHICKEN"', xaml_source)
+        self.assertIn('Text="Houdini Intelligence Agent"', xaml_source)
+        self.assertIn(
+            'AutomationProperties.Name="Big-Chicken Houdini Intelligence Agent"',
+            xaml_source,
+        )
+        self.assertNotIn("Big-Chicken 插件", combined)
         self.assertGreaterEqual(xaml_source.count('TextTrimming="CharacterEllipsis"'), 2)
         self.assertGreaterEqual(xaml_source.count("ToolTip="), 3)
         self.assertNotIn('x:Name="HiaLogoMark"', xaml_source)
         self.assertNotIn("小助手", combined)
-        self.assertIn('x:Key="HoudiniOrangeBrush"', xaml_source)
+        self.assertIn('x:Key="AccentGradientBrush"', xaml_source)
         self.assertIn("<LinearGradientBrush", xaml_source)
         self.assertIn("<Path", xaml_source)
         self.assertIn("<Ellipse", xaml_source)
@@ -945,6 +1121,7 @@ try {{
         forbidden = (
             "<DataGrid",
             "<MediaElement",
+            "<ImageBrush",
             "<WebBrowser",
             "ResourceDictionary Source=",
             "clr-namespace:",
@@ -960,11 +1137,33 @@ try {{
             "WindowChrome",
             "DragMove",
             "x:Class=",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
         )
         for text in forbidden:
             self.assertNotIn(text, combined)
         self.assertEqual(0, xaml_source.count("<Image"))
-        self.assertIn("CREATIVE WORKSPACE", xaml_source)
+        for brand_token in (
+            'x:Name="BrandNodeMotif"',
+            'x:Name="BrandTitleText"',
+            'x:Name="BrandSubtitleText"',
+            'x:Name="MainScrollViewer"',
+            'x:Name="MainWorkspacePanel"',
+        ):
+            self.assertIn(brand_token, xaml_source)
+        for rejected_visual in (
+            'x:Name="SystemNodePathPrimary"',
+            'x:Name="SystemNodePathAccent"',
+            'Text="DISCOVER"',
+            'Text="VERIFY"',
+            'Text="PREPARE"',
+            'Text="LAUNCH"',
+            'Text="HIA"',
+            'Text="LOCAL"',
+        ):
+            self.assertNotIn(rejected_visual, xaml_source)
         self.assertIn('x:Name="RightVisualRail"', xaml_source)
         self.assertIn("Update-ResponsiveLayout", wpf_source)
         self.assertNotIn("[System.Windows.Media.Imaging.BitmapImage]::new()", wpf_source)
@@ -977,6 +1176,103 @@ try {{
                 "http://schemas.microsoft.com/winfx/2006/xaml",
             },
             uri_set,
+        )
+
+    def test_wpf_workspace_layout_keeps_footer_fixed_and_scrollbars_dark(self) -> None:
+        tree = ET.parse(XAML_PATH)
+        root = tree.getroot()
+        presentation = "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}"
+        xaml_key = "{http://schemas.microsoft.com/winfx/2006/xaml}Key"
+        xaml_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
+        named = {
+            element.attrib.get(xaml_name): element
+            for element in root.iter()
+            if xaml_name in element.attrib
+        }
+
+        body = [
+            child
+            for child in root
+            if child.tag != f"{presentation}Window.Resources"
+        ]
+        self.assertEqual(1, len(body))
+        layout_root = body[0]
+        self.assertEqual(f"{presentation}Grid", layout_root.tag)
+        self.assertEqual("LayoutRoot", layout_root.attrib[xaml_name])
+        columns = layout_root.find(f"{presentation}Grid.ColumnDefinitions")
+        rows = layout_root.find(f"{presentation}Grid.RowDefinitions")
+        self.assertIsNotNone(columns)
+        self.assertIsNotNone(rows)
+        self.assertEqual(
+            ["*"],
+            [column.attrib["Width"] for column in list(columns)],
+        )
+        self.assertEqual(
+            ["Auto", "1", "*", "Auto"],
+            [row.attrib["Height"] for row in list(rows)],
+        )
+
+        self.assertEqual("2", named["MainScrollViewer"].attrib["Grid.Row"])
+        self.assertEqual(
+            "{StaticResource ModernScrollViewerStyle}",
+            named["MainScrollViewer"].attrib["Style"],
+        )
+        self.assertEqual(
+            "{StaticResource SectionCardStyle}",
+            named["MainWorkspacePanel"].attrib["Style"],
+        )
+
+        parent_map = {
+            child: parent for parent in root.iter() for child in list(parent)
+        }
+        cursor = named["LaunchButton"]
+        ancestor_tags = []
+        while parent_map[cursor] is not layout_root:
+            cursor = parent_map[cursor]
+            ancestor_tags.append(cursor.tag)
+        self.assertEqual("3", cursor.attrib["Grid.Row"])
+        self.assertNotIn(f"{presentation}ScrollViewer", ancestor_tags)
+
+        right_visual = named["RightVisualRail"]
+        self.assertEqual("0", right_visual.attrib["Grid.Row"])
+        self.assertNotIn("Grid.Column", right_visual.attrib)
+        self.assertNotIn("Grid.RowSpan", right_visual.attrib)
+        right_visual_source = ET.tostring(right_visual, encoding="unicode")
+        self.assertNotIn("Canvas", right_visual_source)
+        self.assertNotIn("Viewbox", right_visual_source)
+
+        scroll_viewers = list(root.iter(f"{presentation}ScrollViewer"))
+        self.assertEqual(3, len(scroll_viewers))
+        for scroll_viewer in scroll_viewers:
+            self.assertEqual(
+                "{StaticResource ModernScrollViewerStyle}",
+                scroll_viewer.attrib["Style"],
+            )
+
+        styles = list(root.iter(f"{presentation}Style"))
+        scrollbar_style = next(
+            style
+            for style in styles
+            if style.attrib.get("TargetType") == "{x:Type ScrollBar}"
+            and xaml_key not in style.attrib
+        )
+        scrollbar_source = ET.tostring(scrollbar_style, encoding="unicode")
+        for required in (
+            "ControlTemplate",
+            "PART_Track",
+            "ModernThumbStyle",
+            'Background" Value="Transparent"',
+            'BorderThickness" Value="0"',
+        ):
+            self.assertIn(required, scrollbar_source)
+        self.assertGreaterEqual(scrollbar_source.count('Opacity="0"'), 2)
+        for forbidden in ("White", "#FFFFFF", "SystemColors", "LineUpCommand"):
+            self.assertNotIn(forbidden, scrollbar_source)
+
+        xaml_source = XAML_PATH.read_text(encoding="utf-8")
+        self.assertEqual(
+            1,
+            xaml_source.count('Style="{StaticResource SectionCardStyle}"'),
         )
 
     def test_wpf_runtime_pickers_have_explicit_high_contrast_templates(self) -> None:
@@ -1026,6 +1322,13 @@ try {{
             ),
             4.5,
         )
+        self.assertGreater(
+            contrast(
+                resources["DisabledPrimaryTextBrush"],
+                resources["DisabledPrimaryBackgroundBrush"],
+            ),
+            4.5,
+        )
         self.assertGreater(contrast("#FFFFFF", resources["PickerHoverBrush"]), 7.0)
         self.assertGreater(contrast("#FFFFFF", resources["PickerSelectedBrush"]), 7.0)
 
@@ -1036,6 +1339,7 @@ try {{
         }
         combo_style = styles["DarkPickerComboBoxStyle"]
         item_style = styles["DarkPickerComboBoxItemStyle"]
+        primary_button_style = styles["PrimaryButtonStyle"]
         for required in (
             "ControlTemplate",
             "PART_Popup",
@@ -1064,6 +1368,14 @@ try {{
             "Opacity",
         ):
             self.assertIn(required, item_style)
+        for required in (
+            "IsEnabled",
+            "DisabledPrimaryBackgroundBrush",
+            "DisabledPrimaryBorderBrush",
+            "DisabledPrimaryTextBrush",
+        ):
+            self.assertIn(required, primary_button_style)
+        self.assertNotIn('Opacity" Value="0.42"', styles["ActionButtonStyle"])
 
         combo_expectations = {
             "McpBackendComboBox": "BackendPickerItemTemplate",
@@ -1108,18 +1420,39 @@ try {{
         )
         self.assertEqual(list(range(15)), tab_indices)
         self.assertLessEqual(int(root.attrib["MinWidth"]), 640)
-        self.assertLessEqual(int(root.attrib["MinHeight"]), 360)
+        self.assertLessEqual(int(root.attrib["MinHeight"]), 480)
         self.assertEqual("Cycle", root.attrib["KeyboardNavigation.TabNavigation"])
         self.assertEqual("True", root.attrib["UseLayoutRounding"])
         self.assertEqual("True", root.attrib["SnapsToDevicePixels"])
         self.assertEqual("Ideal", root.attrib["TextOptions.TextFormattingMode"])
-        self.assertIsNotNone(root.find(f"{presentation}ScrollViewer"))
+        self.assertIsNotNone(next(root.iter(f"{presentation}ScrollViewer"), None))
         self.assertIsNotNone(next(root.iter(f"{presentation}WrapPanel"), None))
         wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         self.assertIn("[System.Windows.SystemParameters]::WorkArea", wpf_source)
         self.assertIn("$window.Width = [Math]::Min", wpf_source)
         self.assertIn("$window.Height = [Math]::Min", wpf_source)
         self.assertIn("$script:compactLayout = $null", wpf_source)
+
+        named = {
+            element.attrib.get(xaml_name): element
+            for element in root.iter()
+            if xaml_name in element.attrib
+        }
+        self.assertEqual("True", named["LaunchButton"].attrib["IsDefault"])
+        self.assertEqual(
+            "{StaticResource PrimaryButtonStyle}",
+            named["LaunchButton"].attrib["Style"],
+        )
+        for secondary_name in (
+            "RescanButton",
+            "RepairButton",
+            "CleanupScreenshotsButton",
+            "CopyReportButton",
+        ):
+            self.assertEqual(
+                "{StaticResource ActionButtonStyle}",
+                named[secondary_name].attrib["Style"],
+            )
 
         for event_binding in (
             "$rescanButton.Add_Click",
@@ -1151,7 +1484,26 @@ try {{
         self.assertNotIn("OptionalArtworkPanel", named)
         self.assertNotIn("OptionalArtworkImage", named)
         xaml_source = XAML_PATH.read_text(encoding="utf-8-sig")
-        self.assertIn("CREATIVE WORKSPACE", xaml_source)
+        self.assertIn("BIG-CHICKEN", xaml_source)
+        self.assertIn("Houdini Intelligence Agent", xaml_source)
+        motif = ET.tostring(named["BrandNodeMotif"], encoding="unicode")
+        self.assertIn("Path", motif)
+        self.assertGreaterEqual(motif.count("Ellipse"), 3)
+        for resource in (
+            "AccentPinkBrush",
+            "AccentPurpleBrush",
+            "AccentCyanBrush",
+        ):
+            self.assertIn(resource, motif)
+        for forbidden_brand_element in (
+            "ChickenHead",
+            "ChickenComb",
+            "ChickenBeak",
+            "ChickenEye",
+            "Mascot",
+            "CharacterArtwork",
+        ):
+            self.assertNotIn(forbidden_brand_element, xaml_source)
         self.assertNotIn("STEAM WINTER", xaml_source.upper())
         self.assertEqual("Collapsed", named["RecoveryCard"].attrib["Visibility"])
         self.assertEqual("True", named["RecoverCheckpointOption"].attrib["IsChecked"])
@@ -1556,7 +1908,7 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertEqual("Big-Chicken Launcher", properties["AssemblyTitle"])
         self.assertEqual("Big-Chicken Houdini Intelligence Agent", properties["Product"])
         self.assertEqual("Big-Chicken", properties["Company"])
-        self.assertEqual("0.1.0-preview", properties["Version"])
+        self.assertEqual("0.1.1-preview", properties["Version"])
         self.assertEqual("win-x64", properties["RuntimeIdentifier"])
         self.assertEqual("true", properties["SelfContained"])
         self.assertEqual("true", properties["PublishSingleFile"])

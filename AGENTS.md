@@ -8,6 +8,7 @@ These permanent rules apply to development in this repository.
 - Except for a user-explicit final-output target described above, never modify the Houdini installation directory, Houdini user configuration, AppData, user-home directories, drive roots, or any path outside the project root.
 - Local services must listen only on `127.0.0.1` and must use a fresh random authentication token for each launcher session.
 - Codex is the only intelligent system. Do not build a second Agent, LLM, Planner, RAG system, vector database, or custom semantic-memory system.
+- A deterministic project-local SQLite FTS5 lexical index over explicitly allowed documentation is permitted. It must not use vectors, embeddings, another model or Agent, semantic memory, a resident service, or a scheduler, and its indexed bodies must remain under `.runtime` rather than Git.
 - Do not control Houdini through screen takeover or Computer Use. Use the Panel, Bridge, HIA MCP V2, HOM/`hou`, launcher, and native `hython` as appropriate; FXHoudiniMCP is an explicit compatibility fallback.
 - Current-scene creation and modification default to HIA MCP V2 and HOM. For complex work, prefer one or a few Codex-generated HOM batches through `hia_execute_hom`. Do not restrict Houdini to a fixed node-type allowlist or create a tool-call forest.
 

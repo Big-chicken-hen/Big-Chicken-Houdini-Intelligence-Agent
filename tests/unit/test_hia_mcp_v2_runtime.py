@@ -263,6 +263,69 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
         self.assertEqual("Cop", qualified["result"]["category"])
         self.assertEqual("wrangle", qualified["result"]["name"])
 
+    def test_node_type_batch_scans_catalog_once_and_merges_results(self) -> None:
+        installed_type = FakeHelpNodeType()
+        node_types_calls = 0
+
+        class CountingCategory(FakeNodeTypeCategory):
+            def nodeTypes(inner_self) -> dict[str, FakeHelpNodeType]:  # noqa: N802
+                nonlocal node_types_calls
+                node_types_calls += 1
+                return super().nodeTypes()
+
+        self.hou.nodeTypeCategories = lambda: {
+            "Cop": CountingCategory(installed_type)
+        }
+
+        response = self.executor.dispatch(
+            "hia_search_node_types",
+            {"queries": ["wrangle", "COP"], "limit": 10},
+        )
+
+        result = response["result"]
+        self.assertEqual(1, node_types_calls)
+        self.assertEqual(2, result["query_count"])
+        self.assertEqual(
+            ["wrangle", "COP"],
+            [item["query"] for item in result["queries"]],
+        )
+        self.assertEqual(1, result["total"])
+        self.assertEqual("wrangle", result["node_types"][0]["name"])
+
+    def test_node_help_batch_keeps_partial_errors_inside_one_response(self) -> None:
+        installed_type = FakeHelpNodeType()
+        self.hou.nodeTypeCategories = lambda: {
+            "Cop": FakeNodeTypeCategory(installed_type)
+        }
+
+        response = self.executor.dispatch(
+            "hia_node_help",
+            {
+                "requests": [
+                    {
+                        "node_type": "Cop/wrangle",
+                        "include_parameters": False,
+                    },
+                    {
+                        "node_type": "Cop/missing",
+                        "include_parameters": False,
+                    },
+                ]
+            },
+        )
+
+        result = response["result"]
+        self.assertEqual(2, result["request_count"])
+        self.assertEqual(1, result["ok_count"])
+        self.assertEqual(1, result["error_count"])
+        self.assertTrue(result["results"][0]["ok"])
+        self.assertEqual("wrangle", result["results"][0]["result"]["name"])
+        self.assertFalse(result["results"][1]["ok"])
+        self.assertEqual(
+            "NODE_TYPE_NOT_FOUND",
+            result["results"][1]["error"]["code"],
+        )
+
     def test_node_help_rejects_empty_or_conflicting_qualified_segments(self) -> None:
         for arguments in (
             {"node_type": "Cop/"},

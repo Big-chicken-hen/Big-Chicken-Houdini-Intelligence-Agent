@@ -11,12 +11,19 @@ import time
 from typing import Any, BinaryIO, TextIO
 
 from .adapter import HiaMcpAdapter
+from .tools import TOOL_BY_NAME
 from .transport import LoopbackTransport, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES
 
 
 MAX_JSON_DEPTH = 32
-MAX_CALL_WORKERS = 2
-MAX_PENDING_CALLS = 32
+MAX_READ_CALL_WORKERS = 2
+MAX_WRITE_CALL_WORKERS = 1
+MAX_CALL_WORKERS = MAX_READ_CALL_WORKERS + MAX_WRITE_CALL_WORKERS
+MAX_PENDING_READ_CALLS = 32
+MAX_PENDING_WRITE_CALLS = 8
+MAX_PENDING_CALLS = MAX_PENDING_READ_CALLS + MAX_PENDING_WRITE_CALLS
+SHUTDOWN_DRAIN_SECONDS = 0.5
+SHUTDOWN_CANCEL_SECONDS = 0.25
 _WORKER_STOP = object()
 
 
@@ -104,8 +111,16 @@ def run_stdio(
     write_lock = threading.Lock()
     diagnostic_lock = threading.Lock()
     call_lock = threading.Lock()
-    pending_calls: queue.Queue[object] = queue.Queue(maxsize=MAX_PENDING_CALLS)
+    pending_reads: queue.Queue[object] = queue.Queue(
+        maxsize=MAX_PENDING_READ_CALLS
+    )
+    pending_writes: queue.Queue[object] = queue.Queue(
+        maxsize=MAX_PENDING_WRITE_CALLS
+    )
     in_flight_ids: set[int | str] = set()
+    drained = threading.Event()
+    drained.set()
+    workers_stop = threading.Event()
     closed = threading.Event()
     output_failed = threading.Event()
 
@@ -128,9 +143,14 @@ def run_stdio(
                 output_failed.set()
                 write_diagnostic("OUTPUT_WRITE_FAILED")
 
-    def call_worker() -> None:
+    def call_worker(pending_calls: queue.Queue[object]) -> None:
         while True:
-            item = pending_calls.get()
+            try:
+                item = pending_calls.get(timeout=0.1)
+            except queue.Empty:
+                if workers_stop.is_set():
+                    return
+                continue
             try:
                 if item is _WORKER_STOP:
                     return
@@ -146,16 +166,29 @@ def run_stdio(
                 if item is not _WORKER_STOP:
                     with call_lock:
                         in_flight_ids.discard(request_id)
+                        if not in_flight_ids:
+                            drained.set()
                 pending_calls.task_done()
 
-    workers = [
+    read_workers = [
         threading.Thread(
             target=call_worker,
-            name=f"hia-mcp-v2-call-{index + 1}",
+            args=(pending_reads,),
+            name=f"hia-mcp-v2-read-{index + 1}",
             daemon=True,
         )
-        for index in range(MAX_CALL_WORKERS)
+        for index in range(MAX_READ_CALL_WORKERS)
     ]
+    write_workers = [
+        threading.Thread(
+            target=call_worker,
+            args=(pending_writes,),
+            name=f"hia-mcp-v2-write-{index + 1}",
+            daemon=True,
+        )
+        for index in range(MAX_WRITE_CALL_WORKERS)
+    ]
+    workers = [*read_workers, *write_workers]
     for worker in workers:
         worker.start()
 
@@ -191,6 +224,21 @@ def run_stdio(
                 duplicate = False
                 queue_full = False
                 pending_count = 0
+                params = message.get("params", {})
+                tool_name = params.get("name") if isinstance(params, dict) else None
+                tool_spec = TOOL_BY_NAME.get(tool_name) if isinstance(tool_name, str) else None
+                lane = "write" if tool_spec is not None and not tool_spec.read_only else "read"
+                pending_calls = pending_writes if lane == "write" else pending_reads
+                pending_capacity = (
+                    MAX_PENDING_WRITE_CALLS
+                    if lane == "write"
+                    else MAX_PENDING_READ_CALLS
+                )
+                worker_limit = (
+                    MAX_WRITE_CALL_WORKERS
+                    if lane == "write"
+                    else MAX_READ_CALL_WORKERS
+                )
                 with call_lock:
                     if request_id in in_flight_ids:
                         duplicate = True
@@ -204,6 +252,7 @@ def run_stdio(
                             pending_count = pending_calls.qsize()
                         else:
                             in_flight_ids.add(request_id)
+                            drained.clear()
                 if duplicate:
                     write(
                         {
@@ -230,9 +279,10 @@ def run_stdio(
                                 "data": {
                                     "code": "QUEUE_FULL",
                                     "details": {
-                                        "pending_capacity": MAX_PENDING_CALLS,
+                                        "lane": lane,
+                                        "pending_capacity": pending_capacity,
                                         "pending_count": pending_count,
-                                        "active_worker_limit": MAX_CALL_WORKERS,
+                                        "active_worker_limit": worker_limit,
                                     },
                                 },
                             },
@@ -243,16 +293,49 @@ def run_stdio(
             if response is not None:
                 write(response)
     finally:
-        # Accepted calls are drained before shutdown so finite stdio transcripts
-        # receive one response per request. The two long-lived workers also keep
-        # thread creation bounded during bursts.
-        pending_calls.join()
-        for _ in workers:
-            pending_calls.put(_WORKER_STOP)
+        # A normal finite transcript gets a short graceful drain. If the client
+        # disappears while a transport call is blocked, cancellation is latched
+        # for queued/active ids and shutdown remains bounded. This never kills an
+        # already-entered HOM call in Houdini's UI thread.
+        shutdown_started = time.monotonic()
+        if not drained.wait(SHUTDOWN_DRAIN_SECONDS):
+            with call_lock:
+                outstanding = list(in_flight_ids)
+            for request_id in outstanding:
+                adapter.handle_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/cancelled",
+                        "params": {
+                            "requestId": request_id,
+                            "reason": "stdio input closed",
+                        },
+                    }
+                )
+            adapter.shutdown()
+            drained.wait(SHUTDOWN_CANCEL_SECONDS)
+        else:
+            adapter.shutdown()
+        workers_stop.set()
+        for pending_calls, lane_workers in (
+            (pending_reads, read_workers),
+            (pending_writes, write_workers),
+        ):
+            for _ in lane_workers:
+                try:
+                    pending_calls.put_nowait(_WORKER_STOP)
+                except queue.Full:
+                    break
+        remaining_join = max(
+            0.0,
+            SHUTDOWN_DRAIN_SECONDS
+            + SHUTDOWN_CANCEL_SECONDS
+            - (time.monotonic() - shutdown_started),
+        )
+        join_deadline = time.monotonic() + remaining_join
         for worker in workers:
-            worker.join()
+            worker.join(timeout=max(0.0, join_deadline - time.monotonic()))
         closed.set()
-        adapter.shutdown()
     return status
 
 

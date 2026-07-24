@@ -2405,17 +2405,22 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "hia_execute_hom 批量执行",
             "hia_context/hia_inspect",
             "hia_scene_diff/hia_validate",
-            "hia_capture_viewport 仅按需视觉核对",
-            "仅主代理调用当前会话 hia_*/HOM 并写当前 HIP",
-            "子代理只做研究、脚本草案和审阅",
+            "复杂视觉里程碑（结构、材质/灯光、交付前）自动 hia_capture_viewport 640x360同帧预览",
+            "动画/模拟抽关键帧",
+            "简单任务不截图",
+            "只读 artifact-review 审阅",
+            "主任务每轮只修最大偏差",
+            "有限迭代、达标即停",
+            "仅主任务串行调用 hia_*/HOM 并写 HIP",
+            "子任务只研究、草拟、只读审阅",
             "MCP 无 caller lineage",
             "非代码级隔离",
-            "hia_search_node_types/help 等同类读取由主代理串行或少量调用",
-            "不并发扇出",
-            "遇到 QUEUE_FULL 不立即重试",
+            "多个关键词先合并为一次批量查询并复用结果",
+            "同类读取不并发扇出",
+            "QUEUE_FULL 不立即重试",
             "hia_execute_hom 等场景写入始终由主代理执行",
-            "goal_focus_mode=true 且有意义阶段成功才设一次 checkpoint_label",
-            "普通聊天、专注关闭或逐节点/参数不设",
+            "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label",
+            "聊天、关闭专注和逐参数操作不设",
             "主任务只保留原生 Goal、决定和子任务短摘要",
             "子任务详情按需查看",
             "不塞入主上下文",
@@ -2450,12 +2455,20 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                     self.assertIn(required_text, instructions)
                 if backend == "hia_v2":
                     self.assertIn(
-                        "hia_search_node_types/help 等同类读取由主代理串行或少量调用",
+                        "多个关键词先合并为一次批量查询并复用结果",
+                        instructions,
+                    )
+                    self.assertIn(
+                        "仅主任务串行调用 hia_*/HOM 并写 HIP",
                         instructions,
                     )
                     self.assertIn("不并发扇出", instructions)
                     self.assertIn(
                         "hia_execute_hom 等场景写入始终由主代理执行",
+                        instructions,
+                    )
+                    self.assertIn(
+                        "子任务只研究、草拟、只读审阅",
                         instructions,
                     )
 

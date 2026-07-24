@@ -28,6 +28,12 @@ _TARGET_FLAG_PATTERN = re.compile(
     (?:(?:"(?P<double>[^"]+)")|(?:'(?P<single>[^']+)')|(?P<bare>[^\s|;&]+))
     '''
 )
+_WRITE_TARGET_FLAG_PATTERN = re.compile(
+    r'''(?ix)
+    -(?:outfile|destination|dest|output|o)(?:\s+|=)
+    (?:(?:"(?P<double>[^"]+)")|(?:'(?P<single>[^']+)')|(?P<bare>[^\s|;&]+))
+    '''
+)
 _SYSTEM_LOCATION_REFERENCE_PATTERN = re.compile(
     r"(?i)(?:\$(?:\{(?:env:)?(?:systemdrive|userprofile|home|appdata|"
     r"localappdata|systemroot|windir)\}|(?:env:)?(?:systemdrive|userprofile|"
@@ -192,9 +198,15 @@ def _target_paths(method: str, params: Mapping[str, Any], command: str) -> list[
     return unique
 
 
-def _preferred_target(targets: list[str]) -> str:
+def _preferred_target(command: str, targets: list[str]) -> str:
     if not targets:
         return "系统盘目标"
+    explicit_write_targets = [
+        _redact_text(_match_value(match))
+        for match in _WRITE_TARGET_FLAG_PATTERN.finditer(command)
+    ]
+    if explicit_write_targets:
+        return explicit_write_targets[0]
     system_drive = (
         ntpath.splitdrive(os.environ.get("SystemRoot", ""))[0]
         or os.environ.get("SystemDrive")
@@ -227,7 +239,7 @@ def _url_label(url: str) -> str:
 
 
 def _purpose(method: str, command: str, targets: list[str], urls: list[str]) -> str:
-    target = _preferred_target(targets)
+    target = _preferred_target(command, targets)
     if method == "item/fileChange/requestApproval":
         return f"允许修改系统盘目录：{target}"
     if method == "item/permissions/requestApproval":

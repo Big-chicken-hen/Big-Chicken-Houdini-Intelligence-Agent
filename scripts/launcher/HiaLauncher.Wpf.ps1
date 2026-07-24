@@ -5,7 +5,7 @@ Add-Type -AssemblyName WindowsBase
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
     [void][System.Windows.MessageBox]::Show(
         '启动器界面需要 STA 模式。请使用 Windows PowerShell 5.1 直接运行 scripts\hia-launcher.ps1。',
-        'Big-Chicken Launcher 无法继续',
+        'Big-Chicken Houdini Intelligence Agent 无法继续',
         [System.Windows.MessageBoxButton]::OK,
         [System.Windows.MessageBoxImage]::Error
     )
@@ -24,7 +24,7 @@ try {
 } catch {
     [void][System.Windows.MessageBox]::Show(
         '无法加载项目本地 WPF 界面资源。请检查 scripts\launcher\HiaLauncher.xaml。',
-        'Big-Chicken Launcher 无法继续',
+        'Big-Chicken Houdini Intelligence Agent 无法继续',
         [System.Windows.MessageBoxButton]::OK,
         [System.Windows.MessageBoxImage]::Error
     )
@@ -160,28 +160,18 @@ function Set-OverallState {
 }
 
 function Update-ResponsiveLayout {
-    $compact = $window.ActualWidth -gt 0 -and $window.ActualWidth -lt 900
+    $compact = $window.ActualWidth -gt 0 -and $window.ActualWidth -lt 760
     if ($script:compactLayout -eq $compact) { return }
     $script:compactLayout = $compact
 
     if ($compact) {
-        $layoutRoot.ColumnDefinitions[0].Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
-        $layoutRoot.ColumnDefinitions[1].Width = [System.Windows.GridLength]::new(0)
-        $layoutRoot.ColumnDefinitions[2].Width = [System.Windows.GridLength]::new(0)
-        [System.Windows.Controls.Grid]::SetColumn($rightVisualRail, 0)
-        [System.Windows.Controls.Grid]::SetRow($rightVisualRail, 7)
-        [System.Windows.Controls.Grid]::SetRowSpan($rightVisualRail, 1)
-        $rightVisualRail.Margin = [System.Windows.Thickness]::new(20, 0, 20, 18)
+        $rightVisualRail.Width = 168
+        $rightVisualRail.Margin = [System.Windows.Thickness]::new(0, 12, 16, 10)
         return
     }
 
-    $layoutRoot.ColumnDefinitions[0].Width = [System.Windows.GridLength]::new(3, [System.Windows.GridUnitType]::Star)
-    $layoutRoot.ColumnDefinitions[1].Width = [System.Windows.GridLength]::new(16)
-    $layoutRoot.ColumnDefinitions[2].Width = [System.Windows.GridLength]::new(2, [System.Windows.GridUnitType]::Star)
-    [System.Windows.Controls.Grid]::SetColumn($rightVisualRail, 2)
-    [System.Windows.Controls.Grid]::SetRow($rightVisualRail, 0)
-    [System.Windows.Controls.Grid]::SetRowSpan($rightVisualRail, 8)
-    $rightVisualRail.Margin = [System.Windows.Thickness]::new(8, 18, 20, 18)
+    $rightVisualRail.Width = 210
+    $rightVisualRail.Margin = [System.Windows.Thickness]::new(0, 16, 28, 12)
 }
 
 function Initialize-RecoveryPrompt {

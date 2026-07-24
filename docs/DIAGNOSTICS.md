@@ -6,6 +6,8 @@ Runtime diagnostics are small local Markdown reports intended to help reproduce 
 
 An automatic report is created only when a Turn ends with a meaningful failure, such as a final MCP, HOM, `execute_python`, Bridge, node, selection, render, image-copy, or scene-validation failure. A transient warning that is still retrying does not create a report by itself.
 
+While the Turn is still active, preserve intermediate compatibility and execution errors, attempt only bounded in-scope recovery, and revalidate. If recovery succeeds and the user is satisfied, create no report; if the final outcome is a meaningful failure, merge the intermediate evidence into the same single report for that Turn.
+
 Use the Panel action `记录本次问题` when execution succeeds but the result is visually or procedurally unsatisfactory. The software does not try to judge subjective quality automatically. A successful and satisfactory Turn creates no report because there is no problem to diagnose.
 
 All evidence for the same Turn is merged into one report, including retries, recovery attempts, warnings, traceback excerpts, and optional user feedback.
