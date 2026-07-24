@@ -528,6 +528,41 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
         with mock.patch.object(knowledge_index.time, "time", return_value=1600.0):
             self.assertEqual({"user"}, index.refresh_due({"user"}))
 
+    def test_every_index_connection_is_closed_after_each_operation(self) -> None:
+        original_connect = sqlite3.connect
+        opened: list[sqlite3.Connection] = []
+
+        def tracked_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+            connection = original_connect(*args, **kwargs)
+            opened.append(connection)
+            return connection
+
+        with mock.patch.object(
+            knowledge_index.sqlite3,
+            "connect",
+            side_effect=tracked_connect,
+        ):
+            index = LocalKnowledgeIndex(self.project_root)
+            index.refresh(
+                {"project"},
+                {"houdini_version": "21.0.000"},
+                force=True,
+            )
+            index.refresh_due({"project"})
+            index.search(
+                "Needle",
+                {"project"},
+                current_houdini_version="21.0.000",
+                offset=0,
+                limit=10,
+            )
+            index.active_houdini_version()
+
+        self.assertGreaterEqual(len(opened), 5)
+        for connection in opened:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
 
 if __name__ == "__main__":
     unittest.main()

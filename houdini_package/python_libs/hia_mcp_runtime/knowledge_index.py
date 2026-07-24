@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -154,7 +155,7 @@ class LocalKnowledgeIndex:
             return groups
         now = time.time()
         due: set[str] = set()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             for group in groups:
                 value = self._meta_value_from_connection(
                     connection,
@@ -195,7 +196,7 @@ class LocalKnowledgeIndex:
 
         current_version = str(snapshot.get("houdini_version") or "unknown")
         now = time.time()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 groups = set(requested)
@@ -287,7 +288,7 @@ class LocalKnowledgeIndex:
             tokenizer == "trigram" or _is_ascii_word_query(query)
         )
         version = current_houdini_version or "unknown"
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.row_factory = sqlite3.Row
             if use_fts:
                 expression = _fts_expression(query, tokenizer)
@@ -514,7 +515,7 @@ class LocalKnowledgeIndex:
         return self._meta_value("fts_tokenizer") or "trigram"
 
     def _meta_value(self, key: str) -> str:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             return self._meta_value_from_connection(connection, key)
 
     @staticmethod
