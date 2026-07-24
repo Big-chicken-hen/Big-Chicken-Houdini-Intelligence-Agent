@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
@@ -494,7 +495,7 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
         self.assertEqual([True, True], refreshed)
         self.assertEqual(1, search(first))
 
-        with sqlite3.connect(str(first.database_path)) as connection:
+        with closing(sqlite3.connect(str(first.database_path))) as connection:
             journal_mode = connection.execute(
                 "PRAGMA journal_mode"
             ).fetchone()[0]
