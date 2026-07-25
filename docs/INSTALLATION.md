@@ -1,21 +1,29 @@
 # Installation and first run
 
-Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The tested configuration is Houdini 21.0.440 with its Python 3.11 runtime, a separate CPython 3.10+ Bridge executable, and Codex 0.144.3.
+Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The tested configuration is Houdini 21.0.440 with its Python 3.11 runtime, a separate CPython 3.10+ Bridge executable, and Codex 0.144.3. For most users, the published Preview ZIP is the recommended installation; clone the source only when you plan to develop or inspect the project.
 
-## 1. Choose an install directory
+## 1. Download and fully extract the Preview ZIP
 
-Download or clone the project into an ordinary writable local directory, for example:
+Download the
+[`Big-Chicken-Houdini-Intelligence-Agent-v0.1.1-preview-win-x64.zip`](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/download/v0.1.1-preview/Big-Chicken-Houdini-Intelligence-Agent-v0.1.1-preview-win-x64.zip)
+and its adjacent
+[`SHA256SUMS.txt`](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/download/v0.1.1-preview/SHA256SUMS.txt).
+Use **Extract All** to unpack the complete archive into an ordinary writable local directory, for example:
 
 ```text
 D:\Tools\Big-Chicken-Houdini-Intelligence-Agent
 ```
 
-The project does not require a fixed drive letter. Do not place it inside the Houdini installation directory or another protected system directory.
+The project does not require a fixed drive letter. Do not run it from inside the ZIP, and do not place it inside the Houdini installation directory or another protected system directory.
 
-If you downloaded the Preview ZIP, extract the whole archive and run
-`BigChickenLauncher.exe` from its root. Do not move the EXE away from
-the five adjacent launcher DLL files. The build commands in the README are for
-source checkouts only; the public ZIP intentionally omits the build scripts.
+Run `BigChickenLauncher.exe` from the extracted package root. Do not move the
+EXE away from its five adjacent launcher DLL files. The launcher is not currently
+code-signed, so Windows SmartScreen may report an unknown publisher. Continue
+with **More info → Run anyway** only if the ZIP came from the official Release
+above and its SHA-256 matches `SHA256SUMS.txt`.
+
+The build commands in the README are for source checkouts only; the public ZIP
+intentionally omits those maintainer scripts.
 
 ## 2. Install Houdini and Bridge Python
 
@@ -23,18 +31,27 @@ Install separately:
 
 - SideFX Houdini. Houdini 21.0.440 is the currently verified build.
 - CPython 3.10 or newer for the Bridge.
+- A valid Codex/ChatGPT sign-in and network access to the OpenAI service.
 
-Big-Chicken Houdini Intelligence Agent does not redistribute Houdini. The source checkout also does not contain Codex, credentials, or the optional FXHoudiniMCP runtime.
+A normal 64-bit Python from [python.org](https://www.python.org/downloads/windows/)
+installed **for the current user** is supported; administrator access, a
+system-wide Python installation, and a global PATH change are not required.
+The launcher can discover a per-user installation, or you can select its exact
+`python.exe` manually. Bridge Python is separate from Houdini's embedded Python.
 
-## 3. Bootstrap the pinned Codex runtime
+Big-Chicken Houdini Intelligence Agent does not redistribute Houdini. Houdini
+must already be installed and licensed. Other Houdini versions may be discovered,
+but only Houdini 21.0.440 with Python 3.11 has completed the current real-GUI
+acceptance path.
 
-From the project root:
+## 3. Install or repair the pinned Codex runtime
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-runtime.ps1
-```
+Start `BigChickenLauncher.exe`, select the Houdini executable, the Bridge
+`python.exe`, and **HIA MCP V2**, then run or refresh the checks. If the action
+button says **安装/修复 Codex**, click it. The launcher downloads and verifies
+the pinned Codex runtime, then refreshes the checks automatically.
 
-This explicit bootstrap:
+This normal first-run action:
 
 - downloads the fixed official Codex 0.144.3 Windows x64 archive;
 - verifies the pinned archive SHA-256;
@@ -42,11 +59,20 @@ This explicit bootstrap:
 - installs them only beneath `.runtime\toolchains\codex\0.144.3`;
 - leaves global PATH, the registry, the Houdini installation, and user configuration unchanged.
 
-It does not install Bridge Python. Install Python 3.10+ yourself and select its exact `python.exe` in the launcher.
+It does not install Bridge Python.
+
+### Command-line fallback
+
+If the launcher cannot complete the download, open PowerShell in the extracted
+package root and run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-runtime.ps1
+```
 
 ### Manual Codex placement for troubleshooting
 
-The bootstrap is the normal first-run path. Use the following manual steps only to diagnose a failed download or to prepare the runtime without running the bootstrap.
+The launcher action and bootstrap script are the normal first-run paths. Use the following manual steps only to diagnose a failed download or to prepare the runtime without running the bootstrap.
 
 Obtain the official Windows x64 Codex 0.144.3 archive from the
 [OpenAI Codex 0.144.3 release](https://github.com/openai/codex/releases/tag/rust-v0.144.3).
@@ -86,18 +112,28 @@ Do not commit `.runtime`; it is the local state directory.
 
 ## 4. Complete the project-local Codex login
 
-From the project root:
+After Codex installation and the automatic check refresh, a missing login changes
+the action button to **复制登录命令**. Click it, open PowerShell, paste and run
+the copied command, and complete the official device-login flow in your browser.
+The copied command contains paths but no credentials. Return to the launcher and
+click **重新扫描** when login finishes.
+
+If the clipboard action is unavailable, open PowerShell in the extracted package
+root and run:
 
 ```powershell
 $env:CODEX_HOME = (Join-Path (Get-Location) '.runtime\codex-home')
 & '.\.runtime\toolchains\codex\0.144.3\codex.exe' login --device-auth
 ```
 
-Follow the official device-login flow. The access and refresh tokens remain managed by Codex under the ignored project-local Codex Home. Never copy that directory into a Release archive or issue attachment.
+The access and refresh tokens remain managed by Codex under the ignored
+project-local Codex Home. Never copy that directory into a Release archive or
+issue attachment.
 
-## 5. Start the launcher
+## 5. Select the environment and launch Houdini
 
-The PowerShell launcher is the source checkout entry point:
+Preview ZIP users should return to the already-open `BigChickenLauncher.exe`.
+For a source checkout, start the PowerShell launcher:
 
 ```powershell
 powershell -NoProfile -Sta -ExecutionPolicy Bypass -File .\scripts\hia-launcher.ps1
@@ -108,6 +144,8 @@ The launcher discovers Houdini installations, lists available Bridge Python exec
 If more than one Houdini or Python candidate exists, choose the exact executable instead of asking the launcher to guess. **HIA MCP V2** is the recommended backend.
 
 Green checks are ready, yellow checks need attention but do not necessarily block launch, and red checks must be fixed before Houdini can start.
+
+When no red checks remain, click **Launch Houdini**.
 
 ### Optional launcher EXE (source checkout only)
 

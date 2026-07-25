@@ -239,6 +239,9 @@ class RuntimeSession:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2.0)
+        close = getattr(self.server.executor, "close", None)
+        if callable(close):
+            close()
 
 
 def start_runtime_server(

@@ -13,6 +13,8 @@ Create editable, traceable materials that serve the requested image without maki
 2. Treat a material identity, multi-channel surface, renderer-dependent shader, texture/UV problem, or material-lighting handoff as substantive LookDev and follow the workflow below.
 3. Keep the main task as the sole writer of the current HIP. When running as a material or lighting subtask, return a material plan, parameter and node choices, a script draft, and validation advice; never write the live scene in parallel.
 
+For complex, unfamiliar, or version-sensitive LookDev, read the shared [knowledge-and-memory.md](../houdini-visual-research/references/knowledge-and-memory.md) before implementation or web research. Use local knowledge and durable memory only when relevant; keep a simple direct assignment direct.
+
 ## Model the material first
 
 Before building MaterialX for a substantive task, capture a compact reasoning model:
@@ -33,9 +35,10 @@ This is a reasoning sketch, not a form or gate. Skip it for a direct edit.
 5. Check only channels the task needs: colorspace and texture channel interpretation; UVs and required primvars; normal or bump; roughness and metalness; IOR, transmission, opacity, or SSS; displacement; emission; and material assignment or binding. Keep units, scales, and renderer support explicit.
 6. For a substantive network, let the main task use one or a small number of cohesive `hia_execute_hom` batches to create or edit nodes, parameters, bindings, and layout. Avoid a forest of tiny calls.
 7. Build a procedural material when maps are unavailable and the look can be derived. When external visual or technical references materially affect the result, use `$houdini-visual-research`; prefer original or SideFX sources, record licensing, and never download unknown-license textures or code blindly.
-8. Validate selectively with existing tools such as `hia_validate`, `hia_material_render_summary`, and `hia_capture_viewport`. Check relevant node errors, bindings, texture paths, and primvars. When visual ambiguity warrants it, use suitable diagnostic lighting to expose highlight shape, roughness, transmission, normal or displacement scale, and layer mixing before judging the target camera. This is not a mandatory render or fixed two-stage ritual.
-9. When the look misses the target, classify the likely source before editing: material, geometry or bevels, UV or scale, lighting or reflection environment, camera, Karma support, or post-processing. Do not respond by blindly adding noise or grunge.
-10. Hand off an editable network with named controls, source and texture provenance, bindings, assumptions, validation evidence, and remaining limitations. Valid nodes, connected textures, and an error-free cook are implementation evidence, not proof of visual completion; a default gray material or single-color placeholder is not completion for a substantive task.
+8. Validate selectively with existing tools such as `hia_validate`, `hia_material_render_summary`, and `hia_scene_diff`. Check relevant node errors, bindings, texture paths, and primvars. When visual ambiguity warrants it, use suitable diagnostic lighting to expose highlight shape, roughness, transmission, normal or displacement scale, and layer mixing before judging the target camera.
+9. For substantive LookDev, follow the low-resolution stage-preview contract in `$houdini-visual-research` when the material or lighting response becomes meaningfully complete and before handoff if that is a distinct visible stage. Supply the preview to read-only `$houdini-artifact-review`; let the main task fix only the highest-impact visible material, exposure, transparency, lighting, or reference mismatch within a small task-specific iteration budget. Skip capture for direct assignments or visually unchanged stages, and stop as soon as the requested bar is met.
+10. When the look misses the target, classify the likely source before editing: material, geometry or bevels, UV or scale, lighting or reflection environment, camera, Karma support, or post-processing. Do not respond by blindly adding noise or grunge.
+11. Hand off an editable network with named controls, source and texture provenance, bindings, assumptions, validation evidence, and remaining limitations. Valid nodes, connected textures, and an error-free cook are implementation evidence, not proof of visual completion; a default gray material or single-color placeholder is not completion for a substantive task.
 
 ## Keep the network editable
 
@@ -46,6 +49,6 @@ This is a reasoning sketch, not a form or gate. Skip it for a direct edit.
 
 ## Guardrails
 
-- Do not add MCP tools, an Agent backend, a scoring platform, a scheduler, or a fixed approval or iteration gate.
+- Do not add MCP tools, an Agent backend, planner, summarizer, chat database, second knowledge or memory system, scoring platform, scheduler, or fixed approval or iteration gate.
 - Do not inspect every possible channel by ritual; follow the actual material and renderer requirements.
 - Do not claim visual completion from successful node creation alone. If representative visual evidence is unavailable, report that the look remains visually unverified.

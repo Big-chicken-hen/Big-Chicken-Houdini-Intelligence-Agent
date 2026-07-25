@@ -626,19 +626,19 @@ class BridgeSession:
         path = self._focus_state_path
         if path is None:
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        payload = {
-            "version": 1,
-            "active_thread_id": self._thread_id,
-            "enabled_thread_ids": sorted(self._focus_enabled_threads),
-            "goal_bindings": {
-                thread_id: self._focus_goal_bindings[thread_id]
-                for thread_id in sorted(self._focus_enabled_threads)
-                if thread_id in self._focus_goal_bindings
-            },
-        }
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            payload = {
+                "version": 1,
+                "active_thread_id": self._thread_id,
+                "enabled_thread_ids": sorted(self._focus_enabled_threads),
+                "goal_bindings": {
+                    thread_id: self._focus_goal_bindings[thread_id]
+                    for thread_id in sorted(self._focus_enabled_threads)
+                    if thread_id in self._focus_goal_bindings
+                },
+            }
             temporary.write_text(
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
                 encoding="utf-8",
@@ -656,13 +656,15 @@ class BridgeSession:
             backend_instructions = (
                 "场景默认用 HIA MCP V2 与 HOM；hia_execute_hom 批量执行。"
                 "hia_context/hia_inspect 读取，hia_scene_diff/hia_validate 验证；"
-                "hia_capture_viewport 仅按需视觉核对。"
-                "仅主代理调用当前会话 hia_*/HOM 并写当前 HIP；子代理只做研究、脚本草案和审阅；"
-                "MCP 无 caller lineage，非代码级隔离。"
-                "hia_search_node_types/help 等同类读取由主代理串行或少量调用；不并发扇出，"
-                "遇到 QUEUE_FULL 不立即重试。hia_execute_hom 等场景写入始终由主代理执行。"
-                "goal_focus_mode=true 且有意义阶段成功才设一次 checkpoint_label；"
-                "普通聊天、专注关闭或逐节点/参数不设。"
+                "复杂视觉里程碑（结构、材质/灯光、交付前）自动 hia_capture_viewport 640x360同帧预览，"
+                "动画/模拟抽关键帧；简单任务不截图。只读 artifact-review 审阅；"
+                "主任务每轮只修最大偏差，有限迭代、达标即停。"
+                "仅主任务串行调用 hia_*/HOM 并写 HIP；hia_execute_hom 等场景写入始终由主代理执行；"
+                "子任务只研究、草拟、只读审阅；MCP 无 caller lineage，非代码级隔离；"
+                "同类读取不并发扇出；多个关键词先合并为一次批量查询并复用结果；"
+                "遇到 QUEUE_FULL 不立即重试。"
+                "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label；"
+                "聊天、关闭专注和逐参数操作不设。"
             )
         else:
             backend_instructions = (
@@ -673,7 +675,7 @@ class BridgeSession:
                 "模型行为约束：主代理负责当前 HIP 写入，子代理只做研究、草案和审阅；"
                 "FX fallback 同样非代码级隔离。"
             )
-        return backend_instructions + (
+        common_instructions = (
             "外部研究先定本阶段必需 URL，优先原生 web/search；没有网页工具时才把同阶段公开页合为"
             "一次 PowerShell 只读批量读取，不逐页审批；复用已取内容，不重复抓取相近页面。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
@@ -690,6 +692,22 @@ class BridgeSession:
             "可写所选普通本地项目外目录；未指定才用 HIA_RENDER_OUTPUT_DIR，并始终报告最终路径。"
             "禁止屏幕接管。"
         )
+        if self._mcp_backend == HIA_MCP_V2_BACKEND:
+            common_instructions = (
+                "外部研究先定本阶段必需 URL，优先原生 web/search；无网页工具时把同阶段公开页合为"
+                "一次 PowerShell 只读批量读取，不逐页审批；复用已取内容，不重复抓取相近页面。"
+                "MCP 不可用就说明，不转离线 HIP；hython 仅按用户明确的离线/独立 HIP/批处理/后台渲染要求使用。"
+                "普通场景不查项目代码/文档，仅诊断 Panel/Bridge/MCP/项目代码时读取。"
+                "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，不塞入主上下文；主任务公开采纳。"
+                "上下文由 app-server 自动整理，不手动 compact 或建本地摘要/记忆。"
+                "禁止 hou.hipFile.clear/load/save 和替换当前场景；新资产置于唯一新根。"
+                "不调用 request_user_input；信息不足用合理默认，无法执行才报告。"
+                "截图写 HIA_CACHE_DIR/screenshots，预览写 previews，中间图写 tmp，文件名用时间戳和短随机后缀；"
+                "插件源码、内部缓存、自动截图/预览/附件/临时/诊断留项目内。"
+                "用户指定的最终渲染/EXR/视频/USD/模拟缓存/导出可写所选普通项目外目录；"
+                "否则用 HIA_RENDER_OUTPUT_DIR；始终报告最终路径。禁止屏幕接管。"
+            )
+        return backend_instructions + common_instructions
 
     @staticmethod
     def _sanitize_account_result(account_result: Any) -> dict[str, Any]:
@@ -899,6 +917,59 @@ class BridgeSession:
             "thread/name/set", {"threadId": thread_id, "name": name}
         )
         return {"thread_id": thread_id, "name": name, "result": result}
+
+    def delete_thread(self, thread_id: str) -> dict[str, Any]:
+        """Permanently delete one explicitly selected Codex Thread."""
+
+        thread_id = self._validated_identifier(thread_id, "thread_id")
+        with self._lock:
+            recovery_worker = self._stop_recovery_thread
+            if self._turn_status == "stopRecovering" or (
+                recovery_worker is not None and recovery_worker.is_alive()
+            ):
+                raise BridgeError(
+                    "STOP_RECOVERY_IN_PROGRESS",
+                    "The selected Thread is still recovering after Stop",
+                    http_status=409,
+                    details={
+                        "thread_id": self._thread_id,
+                        "turn_status": self._turn_status,
+                    },
+                )
+            self._require_no_active_turn_locked()
+
+        result = self._client.request(
+            "thread/delete",
+            {"threadId": thread_id},
+        )
+
+        cleanup_warning: dict[str, Any] | None = None
+        with self._lock:
+            was_selected = self._thread_id == thread_id
+            self._focus_enabled_threads.discard(thread_id)
+            self._focus_goal_bindings.pop(thread_id, None)
+            if was_selected:
+                self._thread_id = None
+                self._reset_turn_locked()
+            try:
+                self._write_focus_state_locked()
+            except BridgeError as exc:
+                cleanup_warning = exc.to_dict()["structured_error"]
+        event_fields: dict[str, Any] = {
+            "thread_id": thread_id,
+            "was_selected": was_selected,
+        }
+        response: dict[str, Any] = {
+            "thread_id": thread_id,
+            "deleted": True,
+            "was_selected": was_selected,
+            "result": result,
+        }
+        if cleanup_warning is not None:
+            event_fields["cleanup_warning"] = cleanup_warning
+            response["cleanup_warning"] = cleanup_warning
+        self._events.publish("thread_deleted", **event_fields)
+        return response
 
     def get_goal(self, expected_thread_id: str) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)
@@ -1671,6 +1742,28 @@ class BridgeSession:
                     "Codex app-server stop recovery timed out",
                     http_status=504,
                 )
+            with self._turn_condition:
+                recovery_still_current = (
+                    not self._closed
+                    and recovery_generation == self._turn_generation
+                    and self._thread_id == thread_id
+                    and self._turn_status == "stopRecovering"
+                )
+                if not recovery_still_current and not self._closed:
+                    self._initialize_result = initialize_result
+                    self._connected = True
+                    self._turn_condition.notify_all()
+                    cancelled_snapshot = self.snapshot()
+                else:
+                    cancelled_snapshot = None
+            if not recovery_still_current:
+                if cancelled_snapshot is not None:
+                    self._events.publish(
+                        "session_state",
+                        session=cancelled_snapshot,
+                    )
+                self._clear_stop_recovery_worker()
+                return
             resumed = request_with_timeout(
                 "thread/resume",
                 {
@@ -2489,6 +2582,18 @@ class BridgeSession:
                                 self._disable_focus_locked(thread_id)
                             except BridgeError:
                                 pass
+                elif method == "thread/deleted":
+                    thread_id = params.get("threadId")
+                    if isinstance(thread_id, str):
+                        self._focus_enabled_threads.discard(thread_id)
+                        self._focus_goal_bindings.pop(thread_id, None)
+                        if self._thread_id == thread_id:
+                            self._thread_id = None
+                            self._reset_turn_locked()
+                        try:
+                            self._write_focus_state_locked()
+                        except BridgeError:
+                            pass
         elif event_type == "process_exit":
             with self._turn_condition:
                 self._connected = False

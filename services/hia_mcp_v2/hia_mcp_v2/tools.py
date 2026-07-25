@@ -34,8 +34,127 @@ STRING = {"type": "string", "maxLength": 4096}
 PATH = {"type": "string", "maxLength": 4096}
 PATHS = {"type": "array", "items": PATH, "maxItems": 64}
 QUERY = {"type": "string", "maxLength": 512}
+QUERIES = {"type": "array", "items": QUERY, "minItems": 1, "maxItems": 16}
 OFFSET = {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}
+RETRIEVAL_MODE = {
+    "type": "string",
+    "enum": ["lexical", "vector", "hybrid"],
+    "default": "hybrid",
+}
+
+NODE_HELP_PROPERTIES = {
+    "node_path": PATH,
+    "category": STRING,
+    "node_type": STRING,
+    "include_parameters": {"type": "boolean", "default": True},
+    "parameter_query": QUERY,
+    "offset": OFFSET,
+    "limit": LIMIT,
+}
+
+PROJECT_MEMORY_PROPERTIES = {
+    "action": {
+        "type": "string",
+        "enum": ["record", "search", "list", "delete", "supersede"],
+    },
+    "memory_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "memory_type": {
+        "type": "string",
+        "enum": ["decision", "preference", "asset", "lesson", "workflow"],
+    },
+    "title": {"type": "string", "minLength": 1, "maxLength": 512},
+    "body": {"type": "string", "minLength": 1, "maxLength": 65_536},
+    "tags": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1, "maxLength": 128},
+        "maxItems": 32,
+    },
+    "scope": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "default": "project",
+    },
+    "source_thread_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+    },
+    "source_turn_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+    },
+    "query": {"type": "string", "minLength": 2, "maxLength": 256},
+    "mode": RETRIEVAL_MODE,
+    "include_superseded": {"type": "boolean", "default": False},
+    "offset": OFFSET,
+    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+}
+
+_PROJECT_MEMORY_ACTION_FIELDS = {
+    "record": frozenset(
+        {
+            "action",
+            "memory_type",
+            "title",
+            "body",
+            "tags",
+            "scope",
+            "source_thread_id",
+            "source_turn_id",
+        }
+    ),
+    "search": frozenset(
+        {
+            "action",
+            "query",
+            "memory_type",
+            "tags",
+            "scope",
+            "mode",
+            "include_superseded",
+            "offset",
+            "limit",
+        }
+    ),
+    "list": frozenset(
+        {
+            "action",
+            "memory_type",
+            "tags",
+            "scope",
+            "include_superseded",
+            "offset",
+            "limit",
+        }
+    ),
+    "delete": frozenset({"action", "memory_id"}),
+    "supersede": frozenset(
+        {
+            "action",
+            "memory_id",
+            "memory_type",
+            "title",
+            "body",
+            "tags",
+            "scope",
+            "source_thread_id",
+            "source_turn_id",
+        }
+    ),
+}
+
+_PROJECT_MEMORY_REQUIRED_FIELDS = {
+    "record": frozenset({"action", "memory_type", "title", "body"}),
+    "search": frozenset({"action", "query"}),
+    "list": frozenset({"action"}),
+    "delete": frozenset({"action", "memory_id"}),
+    "supersede": frozenset(
+        {"action", "memory_id", "memory_type", "title", "body"}
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -126,10 +245,11 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_search_node_types",
         "dynamic_node_knowledge",
-        "Search node types actually installed in the current Houdini build across any context, including versioned names. Use one high-signal query with appropriate contexts and limit, wait for its result before searching again, and do not fan out repeated parallel searches or blindly retry. Results are filtered and paginated; there is no static catalog or node-type allowlist.",
+        "Search node types actually installed in the current Houdini build across any context, including versioned names. Prefer one queries batch for several keywords, then reuse its merged results; query remains the compatible single-query form. Wait for the result instead of fanning out parallel searches or blindly retrying. Results are filtered and paginated; there is no static catalog or node-type allowlist.",
         _object(
             {
                 "query": QUERY,
+                "queries": QUERIES,
                 "contexts": {"type": "array", "items": STRING, "maxItems": 32},
                 "include_deprecated": {"type": "boolean", "default": False},
                 "offset": OFFSET,
@@ -140,16 +260,16 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_node_help",
         "dynamic_node_knowledge",
-        "Resolve installed Houdini help using one of three inputs: node_path; category plus a bare node_type; or node_type=\"Category/name\". Returns the real versioned name, context, input rules, parameter templates, definition/source hints, and installed help metadata.",
+        "Resolve installed Houdini help. Use requests to batch several targets, or the compatible single-target form with node_path, category plus a bare node_type, or node_type=\"Category/name\". Returns the real versioned name, context, input rules, parameter templates, definition/source hints, and installed help metadata.",
         _object(
             {
-                "node_path": PATH,
-                "category": STRING,
-                "node_type": STRING,
-                "include_parameters": {"type": "boolean", "default": True},
-                "parameter_query": QUERY,
-                "offset": OFFSET,
-                "limit": LIMIT,
+                **NODE_HELP_PROPERTIES,
+                "requests": {
+                    "type": "array",
+                    "items": _object(NODE_HELP_PROPERTIES),
+                    "minItems": 1,
+                    "maxItems": 16,
+                },
             }
         ),
     ),
@@ -256,7 +376,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_capture_viewport",
         "visual_feedback",
-        "Capture the current viewport or a bounded flipbook only when visual verification is needed. Restores the original camera/view state, does not open MPlay or take focus, and returns dimensions read from the produced PNG. Images stay under HIA_CACHE_DIR/screenshots.",
+        "Capture the current viewport or a bounded flipbook only when visual verification is needed. Low-resolution flipbooks default to 640 x 360. Use a same-frame flipbook for stage previews and selected key frames for animation or simulation; a flipbook range may span at most 240 frames. Restores the original camera/view, camera lock, and frame state, does not open MPlay or take focus, and returns dimensions read from the produced PNG. Images stay under HIA_CACHE_DIR/screenshots.",
         _object(
             {
                 "mode": {"type": "string", "enum": ["viewport", "flipbook"], "default": "viewport"},
@@ -266,9 +386,10 @@ TOOL_SPECS = (
                     "items": {"type": "number"},
                     "minItems": 2,
                     "maxItems": 2,
+                    "description": "Start and end frames for flipbook capture. The runtime rejects reversed ranges and spans over 240 frames; prefer same-frame milestone previews or selected key frames.",
                 },
-                "width": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 1280},
-                "height": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 720},
+                "width": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 640},
+                "height": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 360},
                 "return_image": {"type": "boolean", "default": True},
             }
         ),
@@ -276,20 +397,41 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_local_help_search",
         "local_documentation",
-        "Search high-signal snippets from the current installed Houdini catalog/help and published project skills, references, and current docs. Heavy file scanning runs outside the Houdini UI thread; historical Gate material and test reports are excluded by default. This is local-only; web research remains Codex's responsibility.",
+        "Search project-local Houdini help, published project references, user-authorized documents, and explicit project memories with SQLite FTS5 plus optional local Qwen embeddings. Qwen only encodes text; Codex remains the sole reasoning system. Hybrid is the default and degrades completely to lexical search when embeddings are unavailable. While the vector index is partial, semantic scoring only reranks each query's own lexical candidates; global semantic recall starts only after the index reports complete. Prefer one queries batch so refreshable sources are scanned once. Results preserve provenance and verification metadata and report requested/active embedding profiles plus any degradation reason. Index work runs outside the Houdini UI thread; web research remains Codex's responsibility.",
         _object(
             {
                 "query": {"type": "string", "minLength": 2, "maxLength": 256},
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 2, "maxLength": 256},
+                    "minItems": 1,
+                    "maxItems": 16,
+                },
                 "sources": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["houdini", "project"]},
-                    "maxItems": 2,
+                    "items": {
+                        "type": "string",
+                        "enum": ["houdini", "project", "user", "memory"],
+                    },
+                    "maxItems": 4,
                 },
+                "mode": RETRIEVAL_MODE,
                 "offset": OFFSET,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                "refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force an immediate incremental source refresh before searching.",
+                },
             },
-            required=("query",),
         ),
+    ),
+    ToolSpec(
+        "hia_project_memory",
+        "project_memory",
+        "Explicitly record, search, list, delete, or supersede durable project decisions, preferences, assets, lessons, and workflows. This is not chat history: nothing is saved automatically, and Codex supplies the final memory text. Search defaults to hybrid local retrieval with lexical fallback; Qwen only encodes text. Results report requested/active embedding profiles and any degradation reason. The runtime generates stable IDs and keeps bodies and vectors under project .runtime/knowledge.",
+        _object(PROJECT_MEMORY_PROPERTIES, required=("action",)),
+        read_only=False,
     ),
 )
 
@@ -309,6 +451,7 @@ CAPABILITY_MATRIX = (
     {"domain": "visual_feedback", "tools": ["hia_capture_viewport"], "status": "implemented"},
     {"domain": "debug_validation", "tools": ["hia_validate", "hia_scene_diff"], "status": "implemented"},
     {"domain": "local_documentation", "tools": ["hia_local_help_search"], "status": "implemented"},
+    {"domain": "project_memory", "tools": ["hia_project_memory"], "status": "implemented"},
     {
         "domain": "long_jobs",
         "tools": [],
@@ -329,6 +472,53 @@ def validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
     if not isinstance(arguments, Mapping):
         raise InputError("INVALID_ARGUMENTS", "Tool arguments must be an object")
     _validate_schema(dict(arguments), spec.input_schema, path="arguments")
+    if tool_name in {"hia_search_node_types", "hia_local_help_search"}:
+        if "query" in arguments and "queries" in arguments:
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                "Provide query or queries, not both",
+            )
+        if tool_name == "hia_local_help_search" and not (
+            "query" in arguments or "queries" in arguments
+        ):
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                "Provide query or queries",
+            )
+    if tool_name == "hia_node_help" and "requests" in arguments:
+        if set(arguments) != {"requests"}:
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                "Batch node help options belong inside each requests item",
+            )
+    if tool_name == "hia_project_memory":
+        _validate_project_memory(arguments)
+
+
+def _validate_project_memory(arguments: Mapping[str, Any]) -> None:
+    action = str(arguments["action"])
+    required = _PROJECT_MEMORY_REQUIRED_FIELDS[action]
+    missing = sorted(required.difference(arguments))
+    if missing:
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            f"hia_project_memory action {action} is missing required fields",
+            {"action": action, "missing": missing},
+        )
+    unrelated = sorted(set(arguments).difference(_PROJECT_MEMORY_ACTION_FIELDS[action]))
+    if unrelated:
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            f"hia_project_memory action {action} contains unrelated fields",
+            {"action": action, "fields": unrelated},
+        )
+    for field in required:
+        value = arguments[field]
+        if isinstance(value, str) and not value.strip():
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                f"arguments.{field} must not be blank",
+            )
 
 
 def _validate_schema(value: Any, schema: Mapping[str, Any], *, path: str) -> None:

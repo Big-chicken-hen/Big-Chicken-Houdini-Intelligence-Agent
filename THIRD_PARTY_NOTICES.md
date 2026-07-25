@@ -48,9 +48,17 @@ Houdini, HOM/`hou`, `hython`, and the PySide6 runtime used inside Houdini are su
 
 Houdini and SideFX are trademarks of Side Effects Software Inc.
 
+The public package may include original Apache-2.0 workflow cards that link to
+SideFX primary sources. It does not include SideFX help archives, documentation
+bodies, tutorial transcripts, videos, images, project files, or vector indexes.
+Installed help is read from each user's own Houdini installation at runtime.
+
 ## Artwork
 
-The public Preview uses the launcher's built-in dark gradient. It does not redistribute third-party character or promotional artwork without explicit redistribution permission.
+The public Preview includes the project-owned launcher illustration at
+`assets/launcher/launcher-hero.png`. It is distributed with this project under
+the repository's Apache-2.0 license. Third-party character or promotional
+artwork is not included.
 
 ## No endorsement
 

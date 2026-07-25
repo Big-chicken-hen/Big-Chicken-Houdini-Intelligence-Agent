@@ -109,7 +109,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         }
         self.assertEqual(list(TOOL_NAMES), names)
         self.assertEqual(set(TOOL_NAMES), matrix_names)
-        self.assertEqual(16, len(names))
+        self.assertEqual(17, len(names))
         self.assertNotIn("hia_create_node", names)
         self.assertNotIn("hia_set_parameter", names)
         self.assertNotIn("hia_connect_nodes", names)
@@ -119,18 +119,100 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             item for item in response["result"]["tools"] if item["name"] == "hia_search_node_types"
         )
         search_description = search_tool["description"].casefold()
-        self.assertIn("high-signal query", search_description)
-        self.assertIn("wait for its result", search_description)
-        self.assertIn("do not fan out", search_description)
+        self.assertIn("queries batch", search_description)
+        self.assertIn("reuse its merged results", search_description)
+        self.assertIn("fanning out parallel searches", search_description)
         self.assertIn("blindly retry", search_description)
+        self.assertEqual(
+            16,
+            search_tool["inputSchema"]["properties"]["queries"]["maxItems"],
+        )
 
         help_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_node_help"
         )
         help_description = help_tool["description"].casefold()
+        self.assertIn("requests to batch", help_description)
         self.assertIn("node_path", help_description)
         self.assertIn("category plus a bare node_type", help_description)
         self.assertIn('node_type="category/name"', help_description)
+        self.assertEqual(
+            16,
+            help_tool["inputSchema"]["properties"]["requests"]["maxItems"],
+        )
+
+        local_help_tool = next(
+            item
+            for item in response["result"]["tools"]
+            if item["name"] == "hia_local_help_search"
+        )
+        local_help_properties = local_help_tool["inputSchema"]["properties"]
+        self.assertEqual(
+            ["houdini", "project", "user", "memory"],
+            local_help_properties["sources"]["items"]["enum"],
+        )
+        self.assertEqual(4, local_help_properties["sources"]["maxItems"])
+        self.assertEqual(
+            ["lexical", "vector", "hybrid"],
+            local_help_properties["mode"]["enum"],
+        )
+        self.assertEqual("hybrid", local_help_properties["mode"]["default"])
+        self.assertEqual(16, local_help_properties["queries"]["maxItems"])
+        self.assertIn("refresh", local_help_properties)
+        self.assertIn(
+            "sqlite fts5",
+            local_help_tool["description"].casefold(),
+        )
+        self.assertIn(
+            "scanned once",
+            local_help_tool["description"].casefold(),
+        )
+        self.assertIn(
+            "queries",
+            local_help_properties,
+        )
+        local_help_description = local_help_tool["description"].casefold()
+        self.assertIn("qwen only encodes text", local_help_description)
+        self.assertIn("degrades completely to lexical", local_help_description)
+        self.assertIn("each query's own lexical candidates", local_help_description)
+        self.assertIn("index reports complete", local_help_description)
+        self.assertIn("requested/active embedding profiles", local_help_description)
+
+        memory_tool = next(
+            item
+            for item in response["result"]["tools"]
+            if item["name"] == "hia_project_memory"
+        )
+        memory_properties = memory_tool["inputSchema"]["properties"]
+        self.assertEqual(
+            ["record", "search", "list", "delete", "supersede"],
+            memory_properties["action"]["enum"],
+        )
+        self.assertEqual(
+            ["decision", "preference", "asset", "lesson", "workflow"],
+            memory_properties["memory_type"]["enum"],
+        )
+        self.assertEqual(["action"], memory_tool["inputSchema"]["required"])
+        self.assertEqual(128, memory_properties["memory_id"]["maxLength"])
+        self.assertEqual(512, memory_properties["title"]["maxLength"])
+        self.assertEqual(65_536, memory_properties["body"]["maxLength"])
+        self.assertEqual(32, memory_properties["tags"]["maxItems"])
+        self.assertEqual(128, memory_properties["tags"]["items"]["maxLength"])
+        self.assertEqual(256, memory_properties["scope"]["maxLength"])
+        self.assertEqual(256, memory_properties["source_thread_id"]["maxLength"])
+        self.assertEqual(256, memory_properties["source_turn_id"]["maxLength"])
+        self.assertEqual(100, memory_properties["limit"]["maximum"])
+        self.assertEqual("hybrid", memory_properties["mode"]["default"])
+        self.assertNotIn("model", memory_properties)
+        self.assertNotIn("model_id", memory_properties)
+        self.assertNotIn("profile", memory_properties)
+        self.assertFalse(memory_tool["annotations"]["readOnlyHint"])
+        self.assertTrue(memory_tool["annotations"]["destructiveHint"])
+        memory_description = memory_tool["description"].casefold()
+        self.assertIn("nothing is saved automatically", memory_description)
+        self.assertIn("qwen only encodes text", memory_description)
+        self.assertIn("lexical fallback", memory_description)
+        self.assertIn("requested/active embedding profiles", memory_description)
 
         execute_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_execute_hom"
@@ -142,6 +224,21 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("checkpoint", execute_description)
         self.assertIn("diff_paths", execute_properties)
         self.assertIn("checkpoint_label", execute_properties)
+
+        capture_tool = next(
+            item for item in response["result"]["tools"] if item["name"] == "hia_capture_viewport"
+        )
+        capture_description = capture_tool["description"].casefold()
+        capture_properties = capture_tool["inputSchema"]["properties"]
+        self.assertIn("640 x 360", capture_description)
+        self.assertIn("selected key frames", capture_description)
+        self.assertIn("at most 240 frames", capture_description)
+        self.assertIn("camera lock", capture_description)
+        self.assertEqual(640, capture_properties["width"]["default"])
+        self.assertEqual(360, capture_properties["height"]["default"])
+        self.assertTrue(capture_properties["return_image"]["default"])
+        self.assertIn("spans over 240 frames", capture_properties["frame_range"]["description"])
+        self.assertTrue(capture_tool["annotations"]["readOnlyHint"])
 
         codex_response = adapter.handle_message(
             rpc(3, "tools/list", {"_meta": {"progressToken": "inventory"}})
@@ -194,6 +291,177 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                 self.assertEqual("image", response["result"]["content"][1]["type"])
         self.assertEqual(4, len(transport.calls))
 
+    def test_batch_query_forms_remain_one_transport_dispatch_each(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        for request_id, name, arguments in (
+            (
+                2,
+                "hia_search_node_types",
+                {"queries": ["vellum", "pyro", "materialx"]},
+            ),
+            (
+                3,
+                "hia_node_help",
+                {
+                    "requests": [
+                        {
+                            "category": "Sop",
+                            "node_type": "vellumsolver",
+                            "include_parameters": False,
+                        },
+                        {
+                            "node_type": "Lop/karmarendersettings",
+                            "include_parameters": False,
+                        },
+                    ]
+                },
+            ),
+            (
+                4,
+                "hia_local_help_search",
+                {"queries": ["vellum", "materialx"]},
+            ),
+        ):
+            response = adapter.handle_message(
+                rpc(
+                    request_id,
+                    "tools/call",
+                    {"name": name, "arguments": arguments},
+                )
+            )
+            self.assertFalse(response["result"]["isError"])
+        self.assertEqual(
+            [
+                "hia_search_node_types",
+                "hia_node_help",
+                "hia_local_help_search",
+            ],
+            [call[0] for call in transport.calls],
+        )
+
+    def test_project_memory_actions_validate_and_dispatch_once_each(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        calls = (
+            {
+                "action": "record",
+                "memory_type": "decision",
+                "title": "Render backend",
+                "body": "Use Karma XPU for approved previews.",
+                "tags": ["render", "karma"],
+                "scope": "project",
+                "source_thread_id": "thread-1",
+                "source_turn_id": "turn-2",
+            },
+            {
+                "action": "search",
+                "query": "render backend",
+                "mode": "hybrid",
+            },
+            {"action": "list"},
+            {"action": "delete", "memory_id": "memory-1"},
+            {
+                "action": "supersede",
+                "memory_id": "memory-1",
+                "memory_type": "decision",
+                "title": "Updated render backend",
+                "body": "Use Karma CPU for final output.",
+            },
+        )
+        for request_id, arguments in enumerate(calls, start=20):
+            response = adapter.handle_message(
+                rpc(
+                    request_id,
+                    "tools/call",
+                    {"name": "hia_project_memory", "arguments": arguments},
+                )
+            )
+            self.assertFalse(response["result"]["isError"])
+
+        self.assertEqual(5, len(transport.calls))
+        self.assertTrue(
+            all(call[0] == "hia_project_memory" for call in transport.calls)
+        )
+        self.assertEqual(list(calls), [call[1] for call in transport.calls])
+
+    def test_project_memory_action_specific_fields_are_rejected_before_transport(
+        self,
+    ) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        cases = (
+            (
+                {"action": "record", "title": "Missing", "body": "Body."},
+                "INVALID_ARGUMENTS",
+            ),
+            (
+                {
+                    "action": "search",
+                    "query": "durable decision",
+                    "body": "Search must not write.",
+                },
+                "INVALID_ARGUMENTS",
+            ),
+            ({"action": "list", "query": "not a search"}, "INVALID_ARGUMENTS"),
+            ({"action": "delete"}, "INVALID_ARGUMENTS"),
+            (
+                {
+                    "action": "supersede",
+                    "memory_id": "memory-1",
+                    "title": "Missing type",
+                    "body": "Body.",
+                },
+                "INVALID_ARGUMENTS",
+            ),
+            (
+                {
+                    "action": "record",
+                    "memory_type": "lesson",
+                    "title": "No model selection",
+                    "body": "The launcher selects the active embedding profile.",
+                    "model_id": "forbidden-runtime-profile",
+                },
+                "INVALID_ARGUMENTS",
+            ),
+            (
+                {
+                    "action": "record",
+                    "memory_type": "lesson",
+                    "title": " ",
+                    "body": "Blank required strings are invalid.",
+                },
+                "INVALID_ARGUMENTS",
+            ),
+            (
+                {
+                    "action": "record",
+                    "memory_type": "lesson",
+                    "title": "x" * 513,
+                    "body": "Bounded body.",
+                },
+                "REQUEST_TOO_LARGE",
+            ),
+        )
+        for request_id, (arguments, stable_code) in enumerate(
+            cases,
+            start=40,
+        ):
+            with self.subTest(arguments=arguments):
+                response = adapter.handle_message(
+                    rpc(
+                        request_id,
+                        "tools/call",
+                        {"name": "hia_project_memory", "arguments": arguments},
+                    )
+                )
+                self.assertEqual(-32602, response["error"]["code"])
+                self.assertEqual(stable_code, response["error"]["data"]["code"])
+        self.assertEqual([], transport.calls)
+
     def test_capability_search_is_local_and_does_not_dispatch(self) -> None:
         transport = FakeTransport()
         adapter = HiaMcpAdapter(transport)
@@ -244,6 +512,46 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertEqual("INVALID_ARGUMENTS", response["error"]["data"]["code"])
         self.assertEqual([], transport.calls)
 
+    def test_ambiguous_or_missing_batch_query_forms_are_rejected_before_transport(
+        self,
+    ) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        cases = (
+            (
+                "hia_search_node_types",
+                {"query": "pyro", "queries": ["pyro"]},
+            ),
+            ("hia_local_help_search", {}),
+            (
+                "hia_local_help_search",
+                {"query": "vellum", "mode": "semantic"},
+            ),
+            (
+                "hia_node_help",
+                {
+                    "node_type": "Sop/box",
+                    "requests": [{"node_type": "Sop/box"}],
+                },
+            ),
+        )
+        for request_id, (name, arguments) in enumerate(cases, start=10):
+            with self.subTest(name=name):
+                response = adapter.handle_message(
+                    rpc(
+                        request_id,
+                        "tools/call",
+                        {"name": name, "arguments": arguments},
+                    )
+                )
+                self.assertEqual(-32602, response["error"]["code"])
+                self.assertEqual(
+                    "INVALID_ARGUMENTS",
+                    response["error"]["data"]["code"],
+                )
+        self.assertEqual([], transport.calls)
+
     def test_capture_output_path_cannot_escape_the_owned_cache(self) -> None:
         transport = FakeTransport()
         adapter = HiaMcpAdapter(transport)
@@ -255,6 +563,24 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                 {
                     "name": "hia_capture_viewport",
                     "arguments": {"output_path": "..\\outside.png"},
+                },
+            )
+        )
+        self.assertEqual(-32602, response["error"]["code"])
+        self.assertEqual("INVALID_ARGUMENTS", response["error"]["data"]["code"])
+        self.assertEqual([], transport.calls)
+
+    def test_capture_frame_range_shape_is_rejected_before_transport(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        response = adapter.handle_message(
+            rpc(
+                2,
+                "tools/call",
+                {
+                    "name": "hia_capture_viewport",
+                    "arguments": {"mode": "flipbook", "frame_range": [12]},
                 },
             )
         )

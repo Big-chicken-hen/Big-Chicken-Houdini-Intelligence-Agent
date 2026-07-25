@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "pack_id": "sidefx-official-workflows-v1",
+  "description": "Original workflow cards linked to SideFX primary sources.",
+  "publisher": "Big-Chicken contributors",
+  "card_license": "Apache-2.0",
+  "upstream_publisher": "SideFX",
+  "upstream_terms_url": "https://www.sidefx.com/legal/terms-and-conditions/",
+  "upstream_content_redistributed": false,
+  "installed_help_archives": [
+    "anim.zip",
+    "basics.zip",
+    "fluid.zip",
+    "hom.zip",
+    "model.zip",
+    "network.zip",
+    "news.zip",
+    "nodes.zip",
+    "pyro.zip",
+    "render.zip",
+    "shade.zip",
+    "solaris.zip",
+    "tops.zip",
+    "vellum.zip",
+    "vex.zip"
+  ],
+  "sources": [
+    {
+      "id": "h21-foundations",
+      "title": "H21 Foundations: end-to-end procedural shot workflow",
+      "path": "cards/h21-foundations.md",
+      "url": "https://www.sidefx.com/tutorials/h21-foundations-welcome/",
+      "houdini_version": "21",
+      "topic": "workflow"
+    },
+    {
+      "id": "vex-snippets",
+      "title": "VEX and Wrangle workflow",
+      "path": "cards/vex-snippets.md",
+      "url": "https://www.sidefx.com/docs/houdini/vex/snippets",
+      "houdini_version": "any",
+      "topic": "vex"
+    },
+    {
+      "id": "usd-basics",
+      "title": "Solaris and USD composition basics",
+      "path": "cards/usd-basics.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/usd.html",
+      "houdini_version": "any",
+      "topic": "solaris"
+    },
+    {
+      "id": "solaris-performance",
+      "title": "Solaris performance and stage organization",
+      "path": "cards/solaris-performance.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/performance.html",
+      "houdini_version": "any",
+      "topic": "solaris-performance"
+    },
+    {
+      "id": "materialx-solaris",
+      "title": "MaterialX in Solaris",
+      "path": "cards/materialx-solaris.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/materialx",
+      "houdini_version": "any",
+      "topic": "materialx"
+    },
+    {
+      "id": "karma-xpu",
+      "title": "Karma XPU workflow and compatibility checks",
+      "path": "cards/karma-xpu.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/karma_xpu.html",
+      "houdini_version": "any",
+      "topic": "karma"
+    },
+    {
+      "id": "pyro-intro",
+      "title": "Pyro sourcing, solving, caching, and rendering",
+      "path": "cards/pyro-intro.md",
+      "url": "https://www.sidefx.com/docs/houdini/pyro/intro.html",
+      "houdini_version": "any",
+      "topic": "pyro"
+    },
+    {
+      "id": "vellum-overview",
+      "title": "Vellum constraint and stability workflow",
+      "path": "cards/vellum-overview.md",
+      "url": "https://www.sidefx.com/docs/houdini/vellum/overview.html",
+      "houdini_version": "any",
+      "topic": "vellum"
+    },
+    {
+      "id": "pdg-tops",
+      "title": "PDG and TOPs dependency workflow",
+      "path": "cards/pdg-tops.md",
+      "url": "https://www.sidefx.com/docs/houdini/tops/intro.html",
+      "houdini_version": "any",
+      "topic": "pdg"
+    },
+    {
+      "id": "copernicus",
+      "title": "Copernicus image and texture workflow",
+      "path": "cards/copernicus.md",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/copernicus.html",
+      "houdini_version": "21",
+      "topic": "copernicus"
+    }
+  ]
+}

@@ -37,6 +37,885 @@ function Resolve-HiaMcpBackend {
     return $Backend
 }
 
+function Get-HiaEmbeddingContractData {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$PythonExe,
+        [int]$TimeoutSeconds = 12
+    )
+
+    if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
+        throw 'Embedding contract requires a valid Bridge Python executable.'
+    }
+    $pythonCode = @"
+import dataclasses
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root / "src"))
+from hia_core.embedding_contract import PROFILE_REGISTRY, launcher_contract, runtime_layout
+
+contract = launcher_contract()
+profiles = {key: dataclasses.asdict(value) for key, value in PROFILE_REGISTRY.items()}
+if contract.get("profiles") != profiles:
+    raise RuntimeError("launcher contract and profile registry disagree")
+print("$script:HiaProbeMarker" + json.dumps(
+    {"contract": contract, "profiles": profiles, "layout": runtime_layout(root)},
+    ensure_ascii=False,
+    sort_keys=True,
+))
+"@
+    $probe = Invoke-HiaProcess -FilePath $PythonExe -Arguments @('-I', '-B', '-c', $pythonCode, $ProjectRoot) `
+        -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $ProjectRoot -Environment @{
+            'PYTHONDONTWRITEBYTECODE' = '1'
+            'PYTHONNOUSERSITE' = '1'
+        }
+    $payload = Get-HiaProbePayload -Output ("$($probe.stdout)`n$($probe.stderr)")
+    if ([bool]$probe.timed_out -or $probe.exit_code -ne 0 -or $null -eq $payload) {
+        throw 'The project embedding contract could not be loaded by Bridge Python.'
+    }
+    if (
+        $null -eq $payload.contract -or
+        $null -eq $payload.profiles -or
+        $null -eq $payload.layout -or
+        @($payload.profiles.PSObject.Properties).Count -eq 0
+    ) {
+        throw 'The project embedding contract payload is incomplete.'
+    }
+    return $payload
+}
+
+function Get-HiaEmbeddingProfileContract {
+    param(
+        [Parameter(Mandatory = $true)]$EmbeddingData,
+        [Parameter(Mandatory = $true)][string]$Profile
+    )
+
+    $property = $EmbeddingData.profiles.PSObject.Properties[$Profile]
+    if ($null -eq $property) { throw "Unsupported embedding profile: $Profile" }
+    return $property.Value
+}
+
+function Resolve-HiaEmbeddingProfile {
+    param(
+        [Parameter(Mandatory = $true)]$EmbeddingData,
+        [AllowEmptyString()][string]$Profile = ''
+    )
+
+    $resolved = if ([string]::IsNullOrWhiteSpace($Profile)) {
+        [string]$EmbeddingData.contract.default_profile
+    } else {
+        $Profile.Trim()
+    }
+    [void](Get-HiaEmbeddingProfileContract -EmbeddingData $EmbeddingData -Profile $resolved)
+    return $resolved
+}
+
+function Resolve-HiaEmbeddingDevice {
+    param([AllowEmptyString()][string]$Device = '')
+
+    $resolved = if ([string]::IsNullOrWhiteSpace($Device)) {
+        'auto'
+    } else {
+        $Device.Trim().ToLowerInvariant()
+    }
+    if ($resolved -notin @('auto', 'cuda', 'cpu')) {
+        throw "Unsupported embedding device: $Device"
+    }
+    return $resolved
+}
+
+function Get-HiaEmbeddingDeviceChoices {
+    return @(
+        [pscustomobject]@{
+            id = 'auto'
+            display = '自动（优先 NVIDIA GPU）'
+        },
+        [pscustomobject]@{
+            id = 'cuda'
+            display = 'NVIDIA GPU（CUDA）'
+        },
+        [pscustomobject]@{
+            id = 'cpu'
+            display = 'CPU'
+        }
+    )
+}
+
+function Get-HiaEmbeddingProfileChoices {
+    param([Parameter(Mandatory = $true)]$EmbeddingData)
+
+    $defaultProfile = [string]$EmbeddingData.contract.default_profile
+    return @($EmbeddingData.profiles.PSObject.Properties | ForEach-Object {
+        $profile = $_.Value
+        $size = ([double]$profile.repository_size_gb).ToString(
+            '0.##',
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+        $tier = if ([string]$profile.profile_id -eq $defaultProfile) {
+            '默认 / 轻量'
+        } else {
+            '高质量 / 资源占用高'
+        }
+        [pscustomobject]@{
+            id = [string]$profile.profile_id
+            display = [string]$profile.label
+            detail = "$tier · 官方模型文件约 $size GB"
+            tooltip = "$($profile.model_id)；安装还需为独立 venv 与项目本地缓存预留空间。"
+        }
+    })
+}
+
+function Test-HiaEmbeddingProjectPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [ValidateSet('file', 'directory')][string]$Kind,
+        [switch]$AllowMissingLeaf
+    )
+
+    try {
+        $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+        $candidate = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+        if (
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals($candidate, $root) -and
+            -not $candidate.StartsWith(
+                $root + [System.IO.Path]::DirectorySeparatorChar,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            return $false
+        }
+        if (
+            $candidate.StartsWith('\\') -or
+            ($candidate.Length -gt 2 -and $candidate.Substring(2).Contains(':'))
+        ) {
+            return $false
+        }
+        $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+        if (
+            ([int]$rootItem.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+        ) {
+            return $false
+        }
+        $current = $root
+        $missing = $false
+        $relative = $candidate.Substring($root.Length).TrimStart('\')
+        foreach ($part in @($relative -split '[\\/]')) {
+            if (-not $part) { continue }
+            $current = Join-Path $current $part
+            if (Test-Path -LiteralPath $current -ErrorAction Stop) {
+                if ($missing) { return $false }
+                $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+                if (
+                    ([int]$item.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+                ) {
+                    return $false
+                }
+            } else {
+                if (-not $AllowMissingLeaf) { return $false }
+                $missing = $true
+            }
+        }
+        if ($missing) { return $true }
+        $pathType = if ($Kind -eq 'file') { 'Leaf' } else { 'Container' }
+        return Test-Path -LiteralPath $candidate -PathType $pathType -ErrorAction Stop
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-HiaLauncherStoragePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowEmptyString()][string]$LeafName = '',
+        [switch]$CreateDirectory,
+        [switch]$AllowMissingLeaf
+    )
+
+    $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $runtimeRoot = Join-Path $root '.runtime'
+    $launcherRoot = Join-Path $runtimeRoot 'launcher'
+    foreach ($directoryPath in @($root, $runtimeRoot, $launcherRoot)) {
+        $item = Get-Item `
+            -LiteralPath $directoryPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            if (
+                -not $CreateDirectory -or
+                [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                    $directoryPath,
+                    $root
+                )
+            ) {
+                return $null
+            }
+            [System.IO.Directory]::CreateDirectory($directoryPath) | Out-Null
+            $item = Get-Item `
+                -LiteralPath $directoryPath `
+                -Force `
+                -ErrorAction Stop
+        }
+        if (
+            $item -isnot [System.IO.DirectoryInfo] -or
+            ([int]$item.Attributes -band
+                [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                [System.IO.Path]::GetFullPath($item.FullName).TrimEnd('\'),
+                [System.IO.Path]::GetFullPath($directoryPath).TrimEnd('\')
+            )
+        ) {
+            throw 'Launcher storage path contains a reparse point or non-directory object.'
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($LeafName)) {
+        return $launcherRoot
+    }
+    if (
+        $LeafName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or
+        [System.IO.Path]::GetFileName($LeafName) -ne $LeafName
+    ) {
+        throw 'Launcher storage leaf name is invalid.'
+    }
+    $leafPath = Join-Path $launcherRoot $LeafName
+    $leaf = Get-Item `
+        -LiteralPath $leafPath `
+        -Force `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $leaf) {
+        if ($AllowMissingLeaf) { return $leafPath }
+        return $null
+    }
+    if (
+        $leaf -isnot [System.IO.FileInfo] -or
+        ([int]$leaf.Attributes -band
+            [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            [System.IO.Path]::GetFullPath($leaf.FullName),
+            [System.IO.Path]::GetFullPath($leafPath)
+        )
+    ) {
+        throw 'Launcher storage file must be an ordinary file.'
+    }
+    return $leafPath
+}
+
+function Get-HiaEmbeddingInstallLockInfo {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $lockPath = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -LeafName 'embedding-install.lock' `
+        -AllowMissingLeaf
+    if (
+        [string]::IsNullOrWhiteSpace($lockPath) -or
+        -not (Test-Path -LiteralPath $lockPath -PathType Leaf)
+    ) {
+        return $null
+    }
+
+    $probe = $null
+    try {
+        $probe = [System.IO.FileStream]::new(
+            $lockPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::Read
+        )
+        return $null
+    } catch [System.IO.IOException] {
+        $payload = $null
+        $metadataStream = $null
+        $metadataReader = $null
+        try {
+            $metadataStream = [System.IO.FileStream]::new(
+                $lockPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite
+            )
+            $metadataReader = [System.IO.StreamReader]::new(
+                $metadataStream,
+                [System.Text.UTF8Encoding]::new($false),
+                $true
+            )
+            $payload = $metadataReader.ReadToEnd() |
+                ConvertFrom-Json
+        } catch {
+        } finally {
+            if ($null -ne $metadataReader) { $metadataReader.Dispose() }
+            if ($null -ne $metadataStream) { $metadataStream.Dispose() }
+        }
+        $logPath = ''
+        if ($null -ne $payload) {
+            $property = $payload.PSObject.Properties['log_path']
+            if ($null -ne $property) {
+                $candidate = [string]$property.Value
+                if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+                    $candidateFull = [System.IO.Path]::GetFullPath($candidate)
+                    $candidateName = [System.IO.Path]::GetFileName($candidateFull)
+                    if ($candidateName -match '^embedding-install-[A-Za-z0-9-]+\.log$') {
+                        $validated = Resolve-HiaLauncherStoragePath `
+                            -ProjectRoot $ProjectRoot `
+                            -LeafName $candidateName `
+                            -AllowMissingLeaf
+                        if (
+                            [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                                $candidateFull,
+                                $validated
+                            )
+                        ) {
+                            $logPath = $validated
+                        }
+                    }
+                }
+            }
+        }
+        return [pscustomobject]@{
+            active = $true
+            lock_path = $lockPath
+            log_path = $logPath
+        }
+    } finally {
+        if ($null -ne $probe) { $probe.Dispose() }
+    }
+}
+
+function Get-HiaEmbeddingModelDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$EmbeddingData,
+        [Parameter(Mandatory = $true)]$ProfileContract
+    )
+
+    $modelsRoot = [System.IO.Path]::GetFullPath([string]$EmbeddingData.layout.models_root).TrimEnd('\')
+    $candidate = [System.IO.Path]::GetFullPath(
+        (Join-Path $ProjectRoot ([string]$ProfileContract.model_directory))
+    ).TrimEnd('\')
+    $prefix = $modelsRoot + [System.IO.Path]::DirectorySeparatorChar
+    if (
+        -not [System.StringComparer]::OrdinalIgnoreCase.Equals($candidate, $modelsRoot) -and
+        -not $candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw 'Embedding model directory escaped the contract models root.'
+    }
+    return $candidate
+}
+
+function Test-HiaEmbeddingModelInstall {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$EmbeddingData,
+        [Parameter(Mandatory = $true)]$ProfileContract
+    )
+
+    try {
+        $modelDirectory = Get-HiaEmbeddingModelDirectory `
+            -ProjectRoot $ProjectRoot `
+            -EmbeddingData $EmbeddingData `
+            -ProfileContract $ProfileContract
+        $manifestPath = Join-Path $modelDirectory '.hia-embedding-model.json'
+        $configPath = Join-Path $modelDirectory 'config.json'
+        if (
+            -not (Test-HiaEmbeddingProjectPath -ProjectRoot $ProjectRoot -Path $modelDirectory -Kind directory) -or
+            -not (Test-HiaEmbeddingProjectPath -ProjectRoot $ProjectRoot -Path $manifestPath -Kind file) -or
+            -not (Test-HiaEmbeddingProjectPath -ProjectRoot $ProjectRoot -Path $configPath -Kind file)
+        ) {
+            return $false
+        }
+        $manifestFile = Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
+        if ([long]$manifestFile.Length -le 0 -or [long]$manifestFile.Length -gt 65536) {
+            return $false
+        }
+        $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+        if (
+            [int]$manifest.contract_version -ne [int]$EmbeddingData.contract.contract_version -or
+            -not [System.StringComparer]::Ordinal.Equals(
+                [string]$manifest.profile_id,
+                [string]$ProfileContract.profile_id
+            ) -or
+            -not [System.StringComparer]::Ordinal.Equals(
+                [string]$manifest.model_id,
+                [string]$ProfileContract.model_id
+            ) -or
+            [string]::IsNullOrWhiteSpace([string]$manifest.revision)
+        ) {
+            return $false
+        }
+        $weights = @(
+            Get-ChildItem -LiteralPath $modelDirectory -File -Filter '*.safetensors' -ErrorAction Stop |
+                Where-Object {
+                    Test-HiaEmbeddingProjectPath `
+                        -ProjectRoot $ProjectRoot `
+                        -Path $_.FullName `
+                        -Kind file
+                }
+        )
+        return $weights.Count -gt 0
+    } catch {
+        return $false
+    }
+}
+
+function New-HiaKnowledgeIndexProcessPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$BridgePython,
+        [Parameter(Mandatory = $true)]$EmbeddingData,
+        [AllowEmptyString()][string]$EmbeddingProfile = '',
+        [AllowEmptyString()][string]$EmbeddingDevice = '',
+        [ValidateSet('status', 'build')][string]$Action
+    )
+
+    $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $python = [System.IO.Path]::GetFullPath($BridgePython)
+    if (
+        -not (Test-Path -LiteralPath $root -PathType Container) -or
+        -not (Test-Path -LiteralPath $python -PathType Leaf)
+    ) {
+        throw 'Knowledge index requires the project root and Bridge Python.'
+    }
+
+    $contract = $EmbeddingData.contract
+    $knowledge = $contract.knowledge_index
+    if (
+        $null -eq $knowledge -or
+        [string]$knowledge.python_role -ne 'bridge_python' -or
+        $Action -notin @($knowledge.commands)
+    ) {
+        throw 'Knowledge index launcher contract is invalid.'
+    }
+    $pythonArguments = @($knowledge.python_args | ForEach-Object { [string]$_ })
+    if (
+        $pythonArguments.Count -ne 3 -or
+        $pythonArguments[0] -ne '-B' -or
+        $pythonArguments[1] -ne '-m' -or
+        $pythonArguments[2] -ne [string]$knowledge.module
+    ) {
+        throw 'Knowledge index Python command is invalid.'
+    }
+
+    $pythonPathEntries = [System.Collections.Generic.List[string]]::new()
+    foreach ($relativePath in @($knowledge.python_path)) {
+        $relative = [string]$relativePath
+        if (
+            [string]::IsNullOrWhiteSpace($relative) -or
+            [System.IO.Path]::IsPathRooted($relative)
+        ) {
+            throw 'Knowledge index PYTHONPATH entry must be project-relative.'
+        }
+        $candidate = [System.IO.Path]::GetFullPath((Join-Path $root $relative))
+        if (-not (
+            Test-HiaEmbeddingProjectPath `
+                -ProjectRoot $root `
+                -Path $candidate `
+                -Kind directory
+        )) {
+            throw 'Knowledge index PYTHONPATH entry is unavailable or unsafe.'
+        }
+        $pythonPathEntries.Add($candidate)
+    }
+    if ($pythonPathEntries.Count -eq 0) {
+        throw 'Knowledge index PYTHONPATH is empty.'
+    }
+
+    $selectedProfile = Resolve-HiaEmbeddingProfile `
+        -EmbeddingData $EmbeddingData `
+        -Profile $EmbeddingProfile
+    $selected = Get-HiaEmbeddingProfileContract `
+        -EmbeddingData $EmbeddingData `
+        -Profile $selectedProfile
+    $dimension = [int]$selected.default_dimension
+    if (
+        $dimension -lt [int]$selected.min_mrl_dimension -or
+        $dimension -gt [int]$selected.max_dimension
+    ) {
+        throw 'Knowledge index embedding dimension is invalid.'
+    }
+
+    $environmentNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($property in @($contract.environment.PSObject.Properties)) {
+        $name = [string]$property.Value
+        if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]{0,127}$') {
+            throw 'Knowledge index embedding environment name is invalid.'
+        }
+        [void]$environmentNames.Add($name)
+    }
+    foreach ($profileProperty in @($EmbeddingData.profiles.PSObject.Properties)) {
+        foreach ($name in @(
+            [string]$profileProperty.Value.model_dir_environment,
+            [string]$profileProperty.Value.model_revision_environment
+        )) {
+            if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]{0,127}$') {
+                throw 'Knowledge index profile environment name is invalid.'
+            }
+            [void]$environmentNames.Add($name)
+        }
+    }
+
+    $environment = @{
+        'HIA_PROJECT_ROOT' = $root
+        'PYTHONDONTWRITEBYTECODE' = '1'
+        'PYTHONIOENCODING' = 'utf-8'
+        'PYTHONNOUSERSITE' = '1'
+        'PYTHONUTF8' = '1'
+        'PYTHONPATH' = ($pythonPathEntries -join [System.IO.Path]::PathSeparator)
+    }
+    foreach ($entry in @{
+        profile = $selectedProfile
+        dimension = [string]$dimension
+        device = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
+    }.GetEnumerator()) {
+        $nameProperty = $contract.environment.PSObject.Properties[[string]$entry.Key]
+        if ($null -eq $nameProperty) {
+            throw "Knowledge index embedding environment field is missing: $($entry.Key)"
+        }
+        $environment[[string]$nameProperty.Value] = [string]$entry.Value
+    }
+
+    $workerPython = [string]$EmbeddingData.layout.worker_python
+    if (
+        Test-HiaEmbeddingProjectPath `
+            -ProjectRoot $root `
+            -Path $workerPython `
+            -Kind file
+    ) {
+        $environment[[string]$contract.environment.python] = $workerPython
+    }
+    foreach ($profileProperty in @($EmbeddingData.profiles.PSObject.Properties)) {
+        $profile = $profileProperty.Value
+        if (-not (
+            Test-HiaEmbeddingModelInstall `
+                -ProjectRoot $root `
+                -EmbeddingData $EmbeddingData `
+                -ProfileContract $profile
+        )) {
+            continue
+        }
+        $modelDirectory = Get-HiaEmbeddingModelDirectory `
+            -ProjectRoot $root `
+            -EmbeddingData $EmbeddingData `
+            -ProfileContract $profile
+        $manifest = [System.IO.File]::ReadAllText(
+            (Join-Path $modelDirectory '.hia-embedding-model.json')
+        ) | ConvertFrom-Json
+        $environment[[string]$profile.model_dir_environment] = $modelDirectory
+        $environment[[string]$profile.model_revision_environment] = [string]$manifest.revision
+    }
+
+    $arguments = @($pythonArguments) + @('--project-root', $root, $Action)
+    if ($Action -eq 'build') {
+        $batchSize = [int]$knowledge.default_batch_size
+        if ($batchSize -lt 1 -or $batchSize -gt [int]$knowledge.max_batch_size) {
+            throw 'Knowledge index default batch size is invalid.'
+        }
+        $arguments += @('--batch-size', [string]$batchSize)
+    }
+    return [pscustomobject]@{
+        action = $Action
+        file_path = $python
+        arguments = @($arguments)
+        working_directory = $root
+        environment = $environment
+        clear_environment_names = @($environmentNames | Sort-Object)
+        protocol = [string]$knowledge.protocol
+    }
+}
+
+function ConvertFrom-HiaKnowledgeIndexJsonLine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Line,
+        [Parameter(Mandatory = $true)]$EmbeddingData
+    )
+
+    try {
+        $payload = $Line | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw 'Knowledge index emitted invalid JSONL.'
+    }
+    $knowledge = $EmbeddingData.contract.knowledge_index
+    if (
+        $null -eq $payload -or
+        -not [System.StringComparer]::Ordinal.Equals(
+            [string]$payload.protocol,
+            [string]$knowledge.protocol
+        ) -or
+        [string]$payload.event -notin @($knowledge.events)
+    ) {
+        throw 'Knowledge index JSONL protocol is invalid.'
+    }
+    $indexProperty = $payload.PSObject.Properties['index']
+    if ($null -eq $indexProperty -or $null -eq $indexProperty.Value) {
+        throw 'Knowledge index JSONL is missing index state.'
+    }
+    foreach ($field in @(
+        'profile_id',
+        'model_id',
+        'dim',
+        'total_chunks',
+        'vector_chunks',
+        'pending_chunks',
+        'complete',
+        'last_batch_count',
+        'chunks_indexed_this_call'
+    )) {
+        if ($null -eq $indexProperty.Value.PSObject.Properties[$field]) {
+            throw "Knowledge index JSONL field is missing: $field"
+        }
+    }
+    foreach ($field in @(
+        'dim',
+        'total_chunks',
+        'vector_chunks',
+        'pending_chunks',
+        'last_batch_count',
+        'chunks_indexed_this_call'
+    )) {
+        if ([long]$indexProperty.Value.$field -lt 0) {
+            throw "Knowledge index JSONL field is invalid: $field"
+        }
+    }
+    return $payload
+}
+
+function Get-HiaEmbeddingRuntimeState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$EmbeddingData,
+        [int]$TimeoutSeconds = 12,
+        [AllowNull()]$ProbeOverride = $null
+    )
+
+    if ($null -ne $ProbeOverride) { return $ProbeOverride }
+
+    $installedProfiles = [System.Collections.Generic.List[string]]::new()
+    foreach ($property in $EmbeddingData.profiles.PSObject.Properties) {
+        if (
+            Test-HiaEmbeddingModelInstall `
+                -ProjectRoot $ProjectRoot `
+                -EmbeddingData $EmbeddingData `
+                -ProfileContract $property.Value
+        ) {
+            $installedProfiles.Add([string]$property.Value.profile_id)
+        }
+    }
+
+    $workerPython = [string]$EmbeddingData.layout.worker_python
+    $workerReady = Test-HiaEmbeddingProjectPath `
+        -ProjectRoot $ProjectRoot `
+        -Path $workerPython `
+        -Kind file
+    $cachePathsSafe = $true
+    foreach ($cachePath in @(
+        [string]$EmbeddingData.layout.cache_root,
+        [string]$EmbeddingData.layout.huggingface_cache,
+        [string]$EmbeddingData.layout.transformers_cache,
+        [string]$EmbeddingData.layout.torch_cache,
+        [string]$EmbeddingData.layout.temp_root
+    )) {
+        if (-not (
+            Test-HiaEmbeddingProjectPath `
+                -ProjectRoot $ProjectRoot `
+                -Path $cachePath `
+                -Kind directory `
+                -AllowMissingLeaf
+        )) {
+            $cachePathsSafe = $false
+            break
+        }
+    }
+    $probePassed = $false
+    $probeMessage = if (-not $workerReady) {
+        '独立 embedding venv 尚未安装、不完整或路径不安全。'
+    } elseif (-not $cachePathsSafe) {
+        'embedding 缓存路径不在普通项目目录内，已拒绝运行探针。'
+    } else {
+        '尚未探针。'
+    }
+    if ($workerReady -and $cachePathsSafe -and $installedProfiles.Count -gt 0) {
+        $workerModule = [string]$EmbeddingData.contract.worker.module
+        $probeCode = @"
+import importlib
+import json
+import sys
+for name in (sys.argv[1], "sentence_transformers", "transformers", "torch"):
+    importlib.import_module(name)
+import torch
+cuda_available = bool(torch.cuda.is_available())
+print("$script:HiaProbeMarker" + json.dumps({
+    "imports": "ok",
+    "torch_version": str(torch.__version__),
+    "torch_cuda_build": str(torch.version.cuda or ""),
+    "cuda_available": cuda_available,
+    "device_name": str(torch.cuda.get_device_name(0)) if cuda_available else "",
+}, sort_keys=True))
+"@
+        $cacheRoot = [string]$EmbeddingData.layout.cache_root
+        $probe = Invoke-HiaProcess -FilePath $workerPython -Arguments @('-I', '-B', '-c', $probeCode, $workerModule) `
+            -TimeoutSeconds ([Math]::Max(30, $TimeoutSeconds)) -WorkingDirectory $ProjectRoot -Environment @{
+                'PYTHONDONTWRITEBYTECODE' = '1'
+                'PYTHONNOUSERSITE' = '1'
+                'HF_HOME' = [string]$EmbeddingData.layout.huggingface_cache
+                'HUGGINGFACE_HUB_CACHE' = [string]$EmbeddingData.layout.huggingface_cache
+                'TRANSFORMERS_CACHE' = [string]$EmbeddingData.layout.transformers_cache
+                'TORCH_HOME' = [string]$EmbeddingData.layout.torch_cache
+                'XDG_CACHE_HOME' = $cacheRoot
+                'HOME' = $cacheRoot
+                'USERPROFILE' = $cacheRoot
+                'APPDATA' = $cacheRoot
+                'LOCALAPPDATA' = $cacheRoot
+                'TEMP' = [string]$EmbeddingData.layout.temp_root
+                'TMP' = [string]$EmbeddingData.layout.temp_root
+            }
+        $payload = Get-HiaProbePayload -Output ("$($probe.stdout)`n$($probe.stderr)")
+        $probePassed = (
+            -not [bool]$probe.timed_out -and
+            $probe.exit_code -eq 0 -and
+            $null -ne $payload
+        )
+        $probeMessage = if ($probePassed) {
+            if ([bool]$payload.cuda_available) {
+                "独立 worker 可用；CUDA 已就绪：$([string]$payload.device_name)。"
+            } else {
+                '独立 worker 可用，但当前 PyTorch 仅能使用 CPU。'
+            }
+        } elseif ([bool]$probe.timed_out) {
+            '独立 embedding venv import 探针超时。'
+        } else {
+            '独立 embedding venv 的 worker 或必要 import 不可用。'
+        }
+    }
+    return [pscustomobject]@{
+        worker_ready = $workerReady
+        installed_profiles = @($installedProfiles)
+        probe_passed = $probePassed
+        probe_message = $probeMessage
+        torch_version = if ($probePassed) { [string]$payload.torch_version } else { '' }
+        torch_cuda_build = if ($probePassed) { [string]$payload.torch_cuda_build } else { '' }
+        cuda_available = if ($probePassed) { [bool]$payload.cuda_available } else { $false }
+        device_name = if ($probePassed) { [string]$payload.device_name } else { '' }
+    }
+}
+
+function Get-HiaEmbeddingCheckResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowNull()]$EmbeddingData,
+        [AllowEmptyString()][string]$EmbeddingProfile = '',
+        [AllowEmptyString()][string]$EmbeddingDevice = '',
+        [int]$TimeoutSeconds = 12,
+        [AllowNull()]$ProbeOverride = $null
+    )
+
+    if ($null -eq $EmbeddingData) {
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'red' `
+            -Message '无法读取项目 embedding contract；启动器无法安全构造或清除项目定义的子进程环境。' `
+            -Advice '先修复 Bridge Python 或从完整项目副本恢复 src\hia_core\embedding_contract.py。模型文件缺失仍只会降级 FTS5，不属于此阻断。'
+    }
+
+    try {
+        $selected = Resolve-HiaEmbeddingProfile -EmbeddingData $EmbeddingData -Profile $EmbeddingProfile
+    } catch {
+        $selected = [string]$EmbeddingData.contract.default_profile
+    }
+    $profile = Get-HiaEmbeddingProfileContract -EmbeddingData $EmbeddingData -Profile $selected
+    $selectedDevice = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
+    $fallbackProfile = [string]$EmbeddingData.contract.fallback_profile
+    $size = ([double]$profile.repository_size_gb).ToString(
+        '0.##',
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    $spaceNote = "官方模型文件约 $size GB；安装还需为独立 venv 与项目本地缓存预留空间。"
+    $state = Get-HiaEmbeddingRuntimeState `
+        -ProjectRoot $ProjectRoot `
+        -EmbeddingData $EmbeddingData `
+        -TimeoutSeconds $TimeoutSeconds `
+        -ProbeOverride $ProbeOverride
+    $cudaProperty = $state.PSObject.Properties['cuda_available']
+    $cudaReady = ($null -ne $cudaProperty -and [bool]$cudaProperty.Value)
+    $installed = @($state.installed_profiles)
+    $selectedInstalled = $selected -in $installed
+    $fallbackInstalled = (
+        $selected -ne $fallbackProfile -and
+        $fallbackProfile -in $installed
+    )
+
+    if (
+        $selectedDevice -eq 'cuda' -and
+        $selectedInstalled -and
+        [bool]$state.worker_ready -and
+        [bool]$state.probe_passed -and
+        -not $cudaReady
+    ) {
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'yellow' `
+            -Message "$($profile.label) 已安装，但已选择 NVIDIA GPU（CUDA），项目本地 PyTorch 的 torch.cuda.is_available()=false；向量检索将降级到 FTS5。$spaceNote" `
+            -Advice '点击“安装/修复知识向量模型”准备项目本地 CUDA PyTorch；Houdini 仍可启动。'
+    }
+
+    if ($selectedInstalled -and [bool]$state.worker_ready -and [bool]$state.probe_passed) {
+        $deviceAdvice = switch ($selectedDevice) {
+            'cuda' { '已按选择使用 NVIDIA GPU（CUDA）；无需处理。' }
+            'cpu' { '已按选择使用 CPU；无需处理。' }
+            default {
+                if ($cudaReady) {
+                    '自动选择可使用 NVIDIA GPU（CUDA）；无需处理。'
+                } else {
+                    '自动选择当前使用 CPU。若电脑有 NVIDIA 显卡，可点击“安装/修复知识向量模型”安装官方 CUDA PyTorch；不会修改全局 Python。'
+                }
+            }
+        }
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'green' `
+            -Message "$($profile.label) 已安装，$($state.probe_message) $spaceNote" `
+            -Advice "$deviceAdvice 真实模型加载若失败会给出降级原因并保留 FTS5。"
+    }
+
+    if (
+        -not $selectedInstalled -and
+        $fallbackInstalled -and
+        [bool]$state.worker_ready -and
+        [bool]$state.probe_passed
+    ) {
+        $fallback = Get-HiaEmbeddingProfileContract -EmbeddingData $EmbeddingData -Profile $fallbackProfile
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'yellow' `
+            -Message "$($profile.label) 未完整安装；可降级到已安装的 $($fallback.label)，再失败则使用 FTS5。$spaceNote" `
+            -Advice '点击“安装/修复知识向量模型”准备当前选择；Houdini 仍可启动。'
+    }
+
+    if (-not $selectedInstalled) {
+        $fallbackFailure = if ($fallbackInstalled) {
+            "轻量模型文件已安装，但 $($state.probe_message)"
+        } else {
+            '没有可用的已安装向量模型。'
+        }
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'yellow' `
+            -Message "$($profile.label) 未安装或安装不完整；$fallbackFailure 知识检索将使用 FTS5。$spaceNote" `
+            -Advice '点击“安装/修复知识向量模型”准备当前选择；Houdini 仍可启动。'
+    }
+
+    $fallbackText = if ($fallbackInstalled) {
+        '真实加载失败时将先尝试已安装的轻量模型，再降级 FTS5。'
+    } else {
+        '真实加载失败时将降级 FTS5。'
+    }
+    return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+        -Level 'yellow' `
+        -Message "$($profile.label) 模型文件已安装，但 $($state.probe_message) $fallbackText $spaceNote" `
+        -Advice '点击“安装/修复知识向量模型”修复项目本地独立 venv；Houdini 仍可启动。'
+}
+
 function New-HiaCheckResult {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
@@ -888,6 +1767,9 @@ function Invoke-HiaProjectChecks {
         [AllowEmptyString()][string]$BridgePython = '',
         [AllowEmptyString()][string]$RenderOutputDir = '',
         [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2',
+        [AllowNull()]$EmbeddingData = $null,
+        [AllowEmptyString()][string]$EmbeddingProfile = '',
+        [AllowEmptyString()][string]$EmbeddingDevice = '',
         [int]$TimeoutSeconds = 12,
         [hashtable]$ProbeOverrides = @{}
     )
@@ -961,21 +1843,32 @@ function Invoke-HiaProjectChecks {
     if ($BridgePython) {
         try {
             $bridgeFullPath = [System.IO.Path]::GetFullPath($BridgePython)
+            $pythonOrgUserInstall = (
+                $bridgeFullPath -match '(?i)\\Users\\[^\\]+\\AppData\\Local\\Programs\\Python\\[^\\]+\\python\.exe$'
+            )
             $bridgePathAllowed = (
                 $bridgeFullPath -match '^[A-Za-z]:\\' -and
                 -not $bridgeFullPath.Substring(2).Contains(':') -and
-                $bridgeFullPath -notmatch '(?i)\\(AppData|WindowsApps)\\'
+                $bridgeFullPath -notmatch '(?i)\\WindowsApps\\' -and
+                (
+                    $bridgeFullPath -notmatch '(?i)\\AppData\\' -or
+                    $pythonOrgUserInstall
+                )
             )
         } catch { }
     }
-    if (-not $BridgePython -or -not (Test-Path -LiteralPath $BridgePython -PathType Leaf)) {
+    if (-not $BridgePython) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
             -Message '尚未选择有效的 Bridge Python executable。' `
             -Advice '安装并选择 CPython 3.10+ 的 python.exe；当前测试基线为 3.10：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Python、提权或修改 PATH/注册表。'
     } elseif (-not $bridgePathAllowed) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
-            -Message 'Bridge Python 必须是普通本地盘绝对路径，且不能来自 AppData 或 WindowsApps。' `
-            -Advice '选择项目本地或受控工具链中的 python.exe，使其符合实际生命周期脚本的路径策略。'
+            -Message 'Bridge Python 必须是普通本地盘绝对路径；WindowsApps、普通 AppData 路径、UNC、相对路径和 ADS 均不接受。' `
+            -Advice '选择项目本地工具链，或 python.org 默认安装在 AppData\Local\Programs\Python 下的 python.exe。'
+    } elseif (-not (Test-Path -LiteralPath $BridgePython -PathType Leaf)) {
+        $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
+            -Message '尚未选择有效的 Bridge Python executable。' `
+            -Advice '安装并选择 CPython 3.10+ 的 python.exe；当前测试基线为 3.10：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Python、提权或修改 PATH/注册表。'
     } else {
         if ($ProbeOverrides.ContainsKey('bridge')) {
             $bridgeProbe = $ProbeOverrides.bridge
@@ -1022,6 +1915,19 @@ function Invoke-HiaProjectChecks {
             -Message $(if ($bridgeLevel -eq 'green') { "Python $($bridgePayload.python)；Bridge 与所选 MCP backend import 成功。" } elseif ([bool]$bridgeProbe.timed_out) { 'Bridge Python 探针超时。' } else { 'Bridge Python 版本、executable 身份或所选 MCP backend import 不符合项目要求。' }) `
             -Advice $(if ($bridgeLevel -eq 'green') { '无需处理。' } else { '选择 CPython 3.10+（测试基线 3.10）并按 README 验证项目 import：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装或修改系统环境。' })
     }
+
+    $embeddingOverride = if ($ProbeOverrides.ContainsKey('embedding')) {
+        $ProbeOverrides.embedding
+    } else {
+        $null
+    }
+    $checks += Get-HiaEmbeddingCheckResult `
+        -ProjectRoot $ProjectRoot `
+        -EmbeddingData $EmbeddingData `
+        -EmbeddingProfile $EmbeddingProfile `
+        -EmbeddingDevice $EmbeddingDevice `
+        -TimeoutSeconds $TimeoutSeconds `
+        -ProbeOverride $embeddingOverride
 
     $codexMatches = @(Get-HiaPinnedCodexExecutable -ProjectRoot $ProjectRoot)
     if ($codexMatches.Count -ne 1) {
@@ -1164,6 +2070,9 @@ function Invoke-HiaPreflight {
         [AllowEmptyString()][string]$BridgePython = '',
         [AllowEmptyString()][string]$RenderOutputDir = '',
         [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2',
+        [AllowNull()]$EmbeddingData = $null,
+        [AllowEmptyString()][string]$EmbeddingProfile = '',
+        [AllowEmptyString()][string]$EmbeddingDevice = '',
         [object[]]$Candidates = @(),
         [int]$TimeoutSeconds = 12,
         [hashtable]$ProbeOverrides = @{}
@@ -1173,11 +2082,54 @@ function Invoke-HiaPreflight {
     if ($Candidates.Count -eq 0) {
         $Candidates = @(Get-HiaHoudiniCandidates -ExplicitPath $HoudiniExe)
     }
+    $embeddingContractPythonAvailable = $false
+    if ($null -eq $EmbeddingData -and -not [string]::IsNullOrWhiteSpace($BridgePython)) {
+        try {
+            $embeddingContractPythonAvailable = Test-Path `
+                -LiteralPath $BridgePython `
+                -PathType Leaf `
+                -ErrorAction Stop
+        } catch {
+            $embeddingContractPythonAvailable = $false
+        }
+    }
+    if ($null -eq $EmbeddingData -and $embeddingContractPythonAvailable) {
+        try {
+            $EmbeddingData = Get-HiaEmbeddingContractData `
+                -ProjectRoot $root `
+                -PythonExe $BridgePython `
+                -TimeoutSeconds $TimeoutSeconds
+        } catch {
+            $EmbeddingData = $null
+        }
+    }
+    if ($null -ne $EmbeddingData) {
+        try {
+            $EmbeddingProfile = Resolve-HiaEmbeddingProfile `
+                -EmbeddingData $EmbeddingData `
+                -Profile $EmbeddingProfile
+        } catch {
+            $EmbeddingProfile = [string]$EmbeddingData.contract.default_profile
+        }
+    }
+    $EmbeddingDevice = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
     $checks = @()
     $checks += @(Invoke-HiaHoudiniChecks -HoudiniExe $HoudiniExe -Candidates $Candidates -TimeoutSeconds $TimeoutSeconds -ProbeOverrides $ProbeOverrides)
-    $checks += @(Invoke-HiaProjectChecks -ProjectRoot $root -HoudiniExe $HoudiniExe -BridgePython $BridgePython -RenderOutputDir $RenderOutputDir -McpBackend $McpBackend -TimeoutSeconds $TimeoutSeconds -ProbeOverrides $ProbeOverrides)
+    $checks += @(
+        Invoke-HiaProjectChecks `
+            -ProjectRoot $root `
+            -HoudiniExe $HoudiniExe `
+            -BridgePython $BridgePython `
+            -RenderOutputDir $RenderOutputDir `
+            -McpBackend $McpBackend `
+            -EmbeddingData $EmbeddingData `
+            -EmbeddingProfile $EmbeddingProfile `
+            -EmbeddingDevice $EmbeddingDevice `
+            -TimeoutSeconds $TimeoutSeconds `
+            -ProbeOverrides $ProbeOverrides
+    )
     $level = Get-HiaOverallLevel -Checks $checks
-    return [pscustomobject]@{
+    $result = [ordered]@{
         schema_version = 1
         generated_at_utc = [DateTime]::UtcNow.ToString('o')
         project_root = $root
@@ -1190,6 +2142,62 @@ function Invoke-HiaPreflight {
         checks = @($checks)
         report = [pscustomobject]@{ json_path = ''; log_path = '' }
     }
+    if ($null -ne $EmbeddingData) {
+        $result[[string]$EmbeddingData.contract.settings.profile] = $EmbeddingProfile
+        $result[[string]$EmbeddingData.contract.settings.device] = $EmbeddingDevice
+    }
+    return [pscustomobject]$result
+}
+
+function ConvertTo-HiaRedactedText {
+    param([AllowEmptyString()][string]$Text = '')
+
+    $indexEnvironmentName = (
+        '(?:' +
+        'uv_(?:config_file|default_index|extra_index_url|find_links|index|' +
+        'index_strategy|index_url|insecure_host|no_config|no_index|offline|' +
+        'torch_backend)|' +
+        'pip_(?:config_file|extra_index_url|find_links|index_url|no_index|' +
+        'trusted_host))'
+    )
+    $sensitiveName = (
+        '(?:token|cookie|api[_-]?key|authorization|password|secret|' +
+        'auth(?:orization)?[_-]?code|' +
+        $indexEnvironmentName + ')'
+    )
+    $safe = [string]$Text
+    $safe = [regex]::Replace(
+        $safe,
+        '(?i)(Authorization\s*:\s*Basic)\s+[A-Za-z0-9+/=]+',
+        '$1 [REDACTED]'
+    )
+    $safe = [regex]::Replace(
+        $safe,
+        '(?i)Bearer\s+[A-Za-z0-9._~+\-/=]+',
+        'Bearer [REDACTED]'
+    )
+    $safe = [regex]::Replace(
+        $safe,
+        '(?i)(https?://)[^@/\s]+@',
+        '$1[REDACTED]@'
+    )
+    $safe = [regex]::Replace(
+        $safe,
+        '(?i)\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}',
+        '[REDACTED]'
+    )
+    $safe = [regex]::Replace(
+        $safe,
+        '(?i)(' + $sensitiveName + '\s*[:=]\s*)[^\s",;}]+',
+        '$1[REDACTED]'
+    )
+    $safe = [regex]::Replace(
+        $safe,
+        '(?i)(' + $indexEnvironmentName +
+            '\s*[:=]\s*)(?:(?!\\[rn]|[\r\n"]).)*',
+        '$1[REDACTED]'
+    )
+    return $safe
 }
 
 function ConvertTo-HiaRedactedJson {
@@ -1204,20 +2212,25 @@ function ConvertTo-HiaRedactedJson {
     } else {
         $Value | ConvertTo-Json -Depth $Depth
     }
-    $sensitiveName = '(?:token|cookie|api[_-]?key|authorization|password|secret|auth(?:orization)?[_-]?code)'
+    $indexEnvironmentName = (
+        '(?:' +
+        'uv_(?:config_file|default_index|extra_index_url|find_links|index|' +
+        'index_strategy|index_url|insecure_host|no_config|no_index|offline|' +
+        'torch_backend)|' +
+        'pip_(?:config_file|extra_index_url|find_links|index_url|no_index|' +
+        'trusted_host))'
+    )
+    $sensitiveName = (
+        '(?:token|cookie|api[_-]?key|authorization|password|secret|' +
+        'auth(?:orization)?[_-]?code|' +
+        $indexEnvironmentName + ')'
+    )
     $json = [regex]::Replace(
         $json,
         '(?i)("[^"\r\n]*' + $sensitiveName + '[^"\r\n]*"\s*:\s*)"(?:\\.|[^"\\])*"',
         '$1"[REDACTED]"'
     )
-    $json = [regex]::Replace($json, '(?i)Bearer\s+[A-Za-z0-9._~+\-/=]+', 'Bearer [REDACTED]')
-    $json = [regex]::Replace($json, '(?i)\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}', '[REDACTED]')
-    $json = [regex]::Replace(
-        $json,
-        '(?i)(' + $sensitiveName + '\s*[:=]\s*)[^\s",;}]+',
-        '$1[REDACTED]'
-    )
-    return $json
+    return ConvertTo-HiaRedactedText -Text $json
 }
 
 function Write-HiaPreflightReport {
@@ -1227,11 +2240,18 @@ function Write-HiaPreflightReport {
         [Parameter(Mandatory = $true)][string]$ProjectRoot
     )
 
-    $reportDirectory = Join-Path $ProjectRoot '.runtime\launcher'
-    [System.IO.Directory]::CreateDirectory($reportDirectory) | Out-Null
+    $reportDirectory = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -CreateDirectory
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    $jsonPath = Join-Path $reportDirectory "preflight-$stamp.json"
-    $logPath = Join-Path $reportDirectory "preflight-$stamp.log"
+    $jsonPath = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -LeafName "preflight-$stamp.json" `
+        -AllowMissingLeaf
+    $logPath = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -LeafName "preflight-$stamp.log" `
+        -AllowMissingLeaf
     $Result.report.json_path = $jsonPath
     $Result.report.log_path = $logPath
 
@@ -1252,8 +2272,7 @@ function Write-HiaPreflightReport {
         $lines.Add("  Fix: $($check.advice)")
     }
     $logText = $lines -join [Environment]::NewLine
-    $logText = [regex]::Replace($logText, '(?i)Bearer\s+\S+', 'Bearer [REDACTED]')
-    $logText = [regex]::Replace($logText, '(?i)\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}', '[REDACTED]')
+    $logText = ConvertTo-HiaRedactedText -Text $logText
     [System.IO.File]::WriteAllText($logPath, $logText + [Environment]::NewLine, $utf8)
     return $Result.report
 }
@@ -1471,7 +2490,7 @@ function Copy-HiaLauncherRecoveryHip {
     $destination = Join-Path $recoveryDirectory (
         'recovery-{0}-{1}{2}' -f `
             $Attempt,
-            [Guid]::NewGuid().ToString('N'),
+            [Guid]::NewGuid().ToString('N').Substring(0, 16),
             [string]$suffixMatch.Groups[1].Value
     )
     [System.IO.File]::Copy($source.FullName, $destination, $false)
@@ -1645,12 +2664,24 @@ function Set-HiaLauncherRecoveryDecision {
 function Read-HiaLauncherSettings {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
-    $settingsPath = Join-Path $ProjectRoot '.runtime\launcher\settings.json'
-    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+    $settingsPath = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -LeafName 'settings.json' `
+        -AllowMissingLeaf
+    if (
+        [string]::IsNullOrWhiteSpace($settingsPath) -or
+        -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)
+    ) {
         return [pscustomobject]@{ houdini_exe = ''; bridge_python = ''; render_output_dir = ''; mcp_backend = 'hia_v2' }
     }
     try {
         $settings = [System.IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json
+        $values = [ordered]@{}
+        foreach ($property in $settings.PSObject.Properties) {
+            $values[[string]$property.Name] = $property.Value
+        }
+        $houdiniProperty = $settings.PSObject.Properties['houdini_exe']
+        $bridgeProperty = $settings.PSObject.Properties['bridge_python']
         $backendProperty = $settings.PSObject.Properties['mcp_backend']
         $backend = if ($null -eq $backendProperty) {
             'hia_v2'
@@ -1661,12 +2692,11 @@ function Read-HiaLauncherSettings {
                 'hia_v2'
             }
         }
-        return [pscustomobject]@{
-            houdini_exe = [string]$settings.houdini_exe
-            bridge_python = [string]$settings.bridge_python
-            render_output_dir = if ($null -eq $settings.PSObject.Properties['render_output_dir']) { '' } else { [string]$settings.render_output_dir }
-            mcp_backend = $backend
-        }
+        $values['houdini_exe'] = if ($null -eq $houdiniProperty) { '' } else { [string]$houdiniProperty.Value }
+        $values['bridge_python'] = if ($null -eq $bridgeProperty) { '' } else { [string]$bridgeProperty.Value }
+        $values['render_output_dir'] = if ($null -eq $settings.PSObject.Properties['render_output_dir']) { '' } else { [string]$settings.render_output_dir }
+        $values['mcp_backend'] = $backend
+        return [pscustomobject]$values
     } catch {
         return [pscustomobject]@{ houdini_exe = ''; bridge_python = ''; render_output_dir = ''; mcp_backend = 'hia_v2' }
     }
@@ -1678,12 +2708,19 @@ function Write-HiaLauncherSettings {
         [Parameter(Mandatory = $true)][string]$HoudiniExe,
         [Parameter(Mandatory = $true)][string]$BridgePython,
         [AllowEmptyString()][string]$RenderOutputDir = '',
-        [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2'
+        [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2',
+        [AllowNull()]$EmbeddingData = $null,
+        [AllowEmptyString()][string]$EmbeddingProfile = '',
+        [AllowEmptyString()][string]$EmbeddingDevice = ''
     )
 
-    $directory = Join-Path $ProjectRoot '.runtime\launcher'
-    [System.IO.Directory]::CreateDirectory($directory) | Out-Null
-    $settingsPath = Join-Path $directory 'settings.json'
+    [void](Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -CreateDirectory)
+    $settingsPath = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -LeafName 'settings.json' `
+        -AllowMissingLeaf
     $storedRenderOutput = if ([string]::IsNullOrWhiteSpace($RenderOutputDir)) {
         ''
     } else {
@@ -1692,14 +2729,78 @@ function Write-HiaLauncherSettings {
             -Path $RenderOutputDir `
             -HoudiniExe $HoudiniExe
     }
-    $settings = [ordered]@{
-        houdini_exe = [System.IO.Path]::GetFullPath($HoudiniExe)
-        bridge_python = [System.IO.Path]::GetFullPath($BridgePython)
-        render_output_dir = $storedRenderOutput
-        mcp_backend = $McpBackend
+    $settings = [ordered]@{}
+    if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+        try {
+            $existing = [System.IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json
+            foreach ($property in $existing.PSObject.Properties) {
+                $settings[[string]$property.Name] = $property.Value
+            }
+        } catch { }
+    }
+    $settings['houdini_exe'] = [System.IO.Path]::GetFullPath($HoudiniExe)
+    $settings['bridge_python'] = [System.IO.Path]::GetFullPath($BridgePython)
+    $settings['render_output_dir'] = $storedRenderOutput
+    $settings['mcp_backend'] = $McpBackend
+    if ($null -ne $EmbeddingData) {
+        $resolvedEmbedding = Resolve-HiaEmbeddingProfile `
+            -EmbeddingData $EmbeddingData `
+            -Profile $EmbeddingProfile
+        $settings[[string]$EmbeddingData.contract.settings.profile] = $resolvedEmbedding
+        $settings[[string]$EmbeddingData.contract.settings.device] = (
+            Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
+        )
     }
     $json = $settings | ConvertTo-Json
+    $settingsPath = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -LeafName 'settings.json' `
+        -AllowMissingLeaf
     [System.IO.File]::WriteAllText($settingsPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    return $settingsPath
+}
+
+function Write-HiaEmbeddingPreference {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]$EmbeddingData,
+        [Parameter(Mandatory = $true)][string]$EmbeddingProfile,
+        [AllowEmptyString()][string]$EmbeddingDevice = ''
+    )
+
+    $resolved = Resolve-HiaEmbeddingProfile `
+        -EmbeddingData $EmbeddingData `
+        -Profile $EmbeddingProfile
+    [void](Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -CreateDirectory)
+    $settingsPath = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -LeafName 'settings.json' `
+        -AllowMissingLeaf
+    $settings = [ordered]@{}
+    if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+        try {
+            $existing = [System.IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json
+            foreach ($property in $existing.PSObject.Properties) {
+                $settings[[string]$property.Name] = $property.Value
+            }
+        } catch { }
+    }
+    $settings[[string]$EmbeddingData.contract.settings.profile] = $resolved
+    $settings[[string]$EmbeddingData.contract.settings.device] = (
+        Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
+    )
+    $json = $settings | ConvertTo-Json
+    $settingsPath = Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $ProjectRoot `
+        -LeafName 'settings.json' `
+        -AllowMissingLeaf
+    [System.IO.File]::WriteAllText(
+        $settingsPath,
+        $json + [Environment]::NewLine,
+        [System.Text.UTF8Encoding]::new($false)
+    )
     return $settingsPath
 }
 
@@ -1708,7 +2809,25 @@ function Repair-HiaSafeProject {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
     $actions = [System.Collections.Generic.List[string]]::new()
-    foreach ($relative in @('.runtime', '.runtime\launcher', '.runtime\tmp')) {
+    $runtimePath = Join-Path $ProjectRoot '.runtime'
+    $launcherPath = Join-Path $runtimePath 'launcher'
+    if (
+        -not (Test-Path -LiteralPath $launcherPath -PathType Container) -and
+        $PSCmdlet.ShouldProcess(
+            $launcherPath,
+            'Create project-local launcher runtime directory'
+        )
+    ) {
+        $runtimeMissing = -not (Test-Path -LiteralPath $runtimePath -PathType Container)
+        [void](Resolve-HiaLauncherStoragePath `
+            -ProjectRoot $ProjectRoot `
+            -CreateDirectory)
+        if ($runtimeMissing) { $actions.Add('已创建 .runtime') }
+        $actions.Add('已创建 .runtime\launcher')
+    } elseif (Test-Path -LiteralPath $launcherPath) {
+        [void](Resolve-HiaLauncherStoragePath -ProjectRoot $ProjectRoot)
+    }
+    foreach ($relative in @('.runtime\tmp')) {
         $path = Join-Path $ProjectRoot $relative
         if (-not (Test-Path -LiteralPath $path -PathType Container)) {
             if ($PSCmdlet.ShouldProcess($path, 'Create project-local runtime directory')) {
@@ -1795,12 +2914,21 @@ function Repair-HiaSafeProject {
 }
 
 Export-ModuleMember -Function @(
+    'ConvertFrom-HiaKnowledgeIndexJsonLine',
     'ConvertTo-HiaProcessArgument',
     'ConvertTo-HiaRedactedJson',
+    'ConvertTo-HiaRedactedText',
     'Copy-HiaLauncherRecoveryHip',
     'Get-HiaBridgePythonCandidates',
     'Get-HiaCodexLoginCommand',
     'Get-HiaCrashRecoveryDecision',
+    'Get-HiaEmbeddingCheckResult',
+    'Get-HiaEmbeddingContractData',
+    'Get-HiaEmbeddingDeviceChoices',
+    'Get-HiaEmbeddingInstallLockInfo',
+    'Get-HiaEmbeddingProfileChoices',
+    'Get-HiaEmbeddingProfileContract',
+    'Get-HiaEmbeddingRuntimeState',
     'Get-HiaHoudiniCandidates',
     'Get-HiaLatestLauncherCheckpoint',
     'Get-HiaLatestLauncherCrashHip',
@@ -1813,14 +2941,19 @@ Export-ModuleMember -Function @(
     'Invoke-HiaScreenshotCacheCleanup',
     'Invoke-HiaPreflight',
     'Invoke-HiaProcess',
+    'New-HiaKnowledgeIndexProcessPlan',
     'Read-HiaLauncherSettings',
     'Repair-HiaSafeProject',
     'Resolve-HiaRenderOutputDirectory',
+    'Resolve-HiaLauncherStoragePath',
+    'Resolve-HiaEmbeddingDevice',
+    'Resolve-HiaEmbeddingProfile',
     'Resolve-HiaMcpBackend',
     'Set-HiaLauncherRecoveryDecision',
     'Test-HiaHoudiniProbeConsistency',
     'Test-HiaLoopbackPorts',
     'Test-HiaRuntimeWritable',
+    'Write-HiaEmbeddingPreference',
     'Write-HiaLauncherSettings',
     'Write-HiaPreflightReport'
 )

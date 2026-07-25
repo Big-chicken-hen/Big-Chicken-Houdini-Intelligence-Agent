@@ -422,6 +422,10 @@ class BridgeClientQueueTests(unittest.TestCase):
             "Houdini lookdev",
             context="history_rename:thread-a",
         )
+        client.delete_thread(
+            "thread-a",
+            context="history_delete:thread-a",
+        )
         client.resume_thread(
             "thread-a",
             service_tier="priority",
@@ -442,6 +446,12 @@ class BridgeClientQueueTests(unittest.TestCase):
                     "/v1/threads/name",
                     {"thread_id": "thread-a", "name": "Houdini lookdev"},
                     "history_rename:thread-a",
+                ),
+                (
+                    "POST",
+                    "/v1/threads/delete",
+                    {"thread_id": "thread-a"},
+                    "history_delete:thread-a",
                 ),
                 (
                     "POST",

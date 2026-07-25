@@ -17,7 +17,9 @@ SPEC.loader.exec_module(CHECKER)
 
 class PublicReleaseHygieneTests(unittest.TestCase):
     def _write_zip(self, entries: dict[str, bytes]) -> Path:
-        temporary = tempfile.TemporaryDirectory()
+        runtime_tmp = REPOSITORY_ROOT / ".runtime" / "tmp"
+        runtime_tmp.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=runtime_tmp)
         self.addCleanup(temporary.cleanup)
         archive = Path(temporary.name) / "release.zip"
         with zipfile.ZipFile(archive, "w") as package:
@@ -41,6 +43,12 @@ class PublicReleaseHygieneTests(unittest.TestCase):
         archive = self._write_zip(
             {
                 "Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview/.runtime/codex-home/auth.json": b"{}",
+                "Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview/.runtime/models/"
+                "qwen3-embedding/qwen3-embedding-8b/model.safetensors": b"weights",
+                "Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview/.runtime/toolchains/"
+                "hia-embedding/venv/pyvenv.cfg": b"home=project-local",
+                "Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview/.runtime/knowledge/"
+                "knowledge.sqlite3": b"SQLite format 3\x00",
                 "Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview/tests/unit/test_example.py": b"",
                 "Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview/docs/P2-V-GATE-B2C.md": b"",
                 "Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview/docs/TEST-REPORT.md": b"",
@@ -53,6 +61,9 @@ class PublicReleaseHygieneTests(unittest.TestCase):
         encoded = "\n".join(violations).lower()
         for expected in (
             ".runtime",
+            "model.safetensors",
+            "pyvenv.cfg",
+            "knowledge.sqlite3",
             "tests",
             "historical gate document",
             "internal test report",

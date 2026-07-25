@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/actions/workflows/tests.yml/badge.svg)](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Preview](https://img.shields.io/badge/release-v0.1.0--preview-orange.svg)](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/tag/v0.1.0-preview)
+[![Preview](https://img.shields.io/badge/release-v0.1.1--preview-orange.svg)](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/tag/v0.1.1-preview)
 
 Build and revise editable Houdini node networks with Codex, natural language, reference images, and live scene context.
 
@@ -17,6 +17,7 @@ Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It emb
 - Continue refining an active Turn without starting a separate conversation.
 - Use Goal focus mode for long, multi-step work and launcher-assisted recovery after a confirmed Houdini crash.
 - Search the live Houdini node catalog instead of relying on a fixed node whitelist.
+- Search local help and explicitly recorded project memory through SQLite FTS5, with an optional project-local Qwen text encoder for hybrid retrieval.
 - Keep screenshots, previews, attachments, diagnostics, and session data under the local project runtime directory.
 - Choose a separate delivery directory for final renders, USD, exports, or simulation caches.
 
@@ -27,60 +28,47 @@ Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It emb
 | Operating system | Windows x64 only |
 | Houdini | **21.0.440 with Python 3.11 is the tested configuration** |
 | Other Houdini versions | The launcher can discover them, but they are not yet claimed as verified |
-| Bridge Python | CPython 3.10 or newer |
+| Bridge Python | CPython 3.10 or newer; a normal python.org per-user install is supported |
 | Codex | Project-pinned Codex CLI/app-server 0.144.3 |
 | Account and network | A valid Codex/ChatGPT sign-in and access to the OpenAI service |
 | Default backend | HIA MCP V2 |
 
-Houdini, Python, and Codex are not provided by the source repository. Houdini must be installed and licensed separately.
+Houdini and Bridge Python must be installed separately, and Houdini must be licensed. The Preview ZIP launcher can install the pinned Codex runtime inside its extracted directory.
 
-## Downloaded Preview ZIP
+## Recommended download: Preview ZIP
 
 Download
-[`Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview-win-x64.zip`](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/download/v0.1.0-preview/Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview-win-x64.zip)
+[`Big-Chicken-Houdini-Intelligence-Agent-v0.1.1-preview-win-x64.zip`](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/download/v0.1.1-preview/Big-Chicken-Houdini-Intelligence-Agent-v0.1.1-preview-win-x64.zip)
 and verify it with the adjacent
-[`SHA256SUMS.txt`](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/download/v0.1.0-preview/SHA256SUMS.txt).
+[`SHA256SUMS.txt`](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/download/v0.1.1-preview/SHA256SUMS.txt).
 
-Extract the complete ZIP to an ordinary writable directory, then run
-`BigChickenLauncher.exe` from the extracted package root. Keep the EXE
-and its five adjacent DLL files together. The launcher can bootstrap the pinned
-project-local Codex runtime through its existing repair button; Houdini and
-Bridge Python remain user-installed prerequisites.
+For most users, the ZIP is the simplest installation path:
 
-The `scripts\build-launcher.ps1` and `scripts\build-release.ps1` commands below
-are for source-repository maintainers. They are not included in the downloaded
-Preview ZIP and are not required for normal use.
+1. Install and license Houdini, then install CPython 3.10 or newer for the Bridge. A regular 64-bit python.org **per-user** installation is supported; an administrator or system-wide Python installation is not required.
+2. Use **Extract All** to unpack the complete ZIP into an ordinary writable directory. Do not run the launcher from inside the ZIP, and do not move `BigChickenLauncher.exe` away from its five adjacent DLL files.
+3. Run `BigChickenLauncher.exe` from the extracted package root. The launcher is not currently code-signed, so Windows SmartScreen may show an unknown-publisher warning. Continue with **More info → Run anyway** only when the file came from this official Release and its SHA-256 matches `SHA256SUMS.txt`.
+4. Select the Houdini executable, the Bridge `python.exe`, and **HIA MCP V2**, then run or refresh the checks.
+5. If the action button says **安装/修复 Codex**, click it. The launcher downloads and verifies the pinned official Codex runtime only under the extracted package's `.runtime` directory.
+6. After the checks refresh, if the action button says **复制登录命令**, click it, paste the copied command into PowerShell, run it, and complete the official device-login flow. Return to the launcher and click **重新扫描**.
+7. When no red checks remain, click **Launch Houdini**. In Houdini, open **New Pane Tab Type → Python Panel → Big-Chicken Houdini Intelligence Agent**.
+8. Confirm that the Panel reports Codex, Houdini, and HIA MCP V2 as available. Start with the read-only verification request in [Installation](docs/INSTALLATION.md) before editing an important HIP.
 
-## Quick start
+Only Windows x64 and Houdini 21.0.440 with Python 3.11 have completed the current real-GUI acceptance path. Other Houdini versions may be discovered by the launcher but are not yet claimed as verified.
 
-1. Download or clone the repository into an ordinary writable local directory. It does not need to be on a particular drive.
-2. Install Houdini and ensure one Python 3.10+ executable is available for the Bridge.
-3. From the project root, download and verify the pinned official Codex runtime:
+See [Installation and first run](docs/INSTALLATION.md) for the expanded walkthrough and troubleshooting.
 
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-runtime.ps1
-   ```
+## Source checkout
 
-   The bootstrap pins Codex 0.144.3, verifies the archive SHA-256 and each executable's OpenAI Authenticode signature, and writes only below the ignored project `.runtime` directory.
+Cloning the source is intended for development. From the project root, install the project-local Codex runtime, complete login, and start the PowerShell launcher:
 
-4. Complete the project-local Codex login:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-runtime.ps1
+$env:CODEX_HOME = (Join-Path (Get-Location) '.runtime\codex-home')
+& '.\.runtime\toolchains\codex\0.144.3\codex.exe' login --device-auth
+powershell -NoProfile -Sta -ExecutionPolicy Bypass -File .\scripts\hia-launcher.ps1
+```
 
-   ```powershell
-   $env:CODEX_HOME = (Join-Path (Get-Location) '.runtime\codex-home')
-   & '.\.runtime\toolchains\codex\0.144.3\codex.exe' login --device-auth
-   ```
-
-5. Run the launcher:
-
-   ```powershell
-   powershell -NoProfile -Sta -ExecutionPolicy Bypass -File .\scripts\hia-launcher.ps1
-   ```
-
-6. Select the Houdini installation, Bridge Python, and **HIA MCP V2**, then run the preflight checks.
-7. Click **Launch Houdini**. In Houdini, open **New Pane Tab Type → Python Panel → Big-Chicken Houdini Intelligence Agent**.
-8. Confirm that the Panel reports Codex, Houdini, and HIA MCP V2 as available, then start a new Thread.
-
-Codex is downloaded only by the explicit bootstrap command above. Bridge Python remains a user-installed prerequisite, and the optional FXHoudiniMCP fallback is not downloaded. Manual Codex placement, launcher-EXE build, and troubleshooting steps are in [Installation](docs/INSTALLATION.md).
+The bootstrap verifies the pinned archive SHA-256 and OpenAI Authenticode signatures and writes only below `.runtime`. Build commands later in this README are for source maintainers; they are not included in the Preview ZIP or required for normal use.
 
 ## Basic use
 
@@ -93,6 +81,8 @@ You can describe the result directly:
 You do not need to name an MCP tool, a node whitelist, or an output directory. Current-scene work remains in the currently open Houdini session. Native `hython` is used only when the request explicitly asks for offline work, a separate HIP, batch processing, independent verification, a long simulation, or background rendering.
 
 Reference images and the current selection can be included from the composer. While Codex is working, **追加指令** steers the active Turn. Starting a different task in a new Thread keeps the context smaller and easier to follow.
+
+The history list also supports permanent Thread deletion. Select one idle Thread and click **Delete** twice within five seconds. An active Turn must be stopped and allowed to finish first. Deleting the currently open Thread returns the Panel to a blank state and releases its local UI references; attachment files are not deleted.
 
 ### Goal focus mode
 
@@ -110,7 +100,7 @@ User
   → current HIP
 ```
 
-Big-Chicken Houdini Intelligence Agent's local HTTP services bind to `127.0.0.1` and use fresh random credentials for each launcher session. Codex is the only AI component. Big-Chicken Houdini Intelligence Agent does not add another model, planner, RAG service, or screen-control system.
+Big-Chicken Houdini Intelligence Agent's local HTTP services bind to `127.0.0.1` and use fresh random credentials for each launcher session. Codex remains the only reasoning and planning component. An optional local Qwen encoder can deterministically encode text for retrieval, but it does not generate answers, write memory, plan, or act on Houdini.
 
 The optional FXHoudiniMCP 1.3.0 integration is a separately prepared compatibility fallback. It is not active alongside HIA MCP V2 and is not included in the source checkout or public Preview package.
 
@@ -129,12 +119,48 @@ Final renders, images, video, USD, exports, and simulation caches may use the ex
 
 See [Runtime diagnostics](docs/DIAGNOSTICS.md) for report contents and redaction behavior.
 
+## Optional local retrieval and project memory
+
+HIA MCP V2 exposes 17 tools. Existing `hia_local_help_search` calls remain compatible and default to hybrid retrieval: SQLite FTS5 always remains available, while an explicitly installed local Qwen encoder may add vector matches. If the selected encoder cannot load, the request reports why and falls back to FTS5; searching never downloads a model or dependency.
+
+The only durable memory tool is `hia_project_memory`. It supports explicit `record`, `search`, `list`, `delete`, and `supersede` actions for `decision`, `preference`, `asset`, `lesson`, and `workflow` records. Nothing copies chat history or writes a summary automatically: Codex supplies the final durable text only when it deliberately invokes a write action.
+
+The public package includes original Big-Chicken workflow cards linked to
+SideFX primary sources. When Houdini is installed, HIA also indexes selected
+text help archives directly from that local installation, including node, HOM,
+VEX, Solaris, Pyro, Vellum, FLIP, PDG, modeling, animation, shading, rendering,
+and version notes. SideFX documentation bodies and archives are never copied
+into this repository or the release; only the original cards and source
+manifest are distributed.
+
+The stable model profiles are:
+
+| Profile ID | Intended use | Repository size | Dimensions |
+|---|---|---:|---:|
+| `qwen3-embedding-0.6b` | Default | about 1.21 GB | default/max 1024 |
+| `qwen3-embedding-8b` | Higher quality; BF16 shards | about 15.2 GB | default 1024, advanced MRL max 4096 |
+
+Both official Qwen3 Embedding profiles are Apache-2.0, support a 32K context, 100+ languages, MRL dimensions, and query instructions. Only one model is loaded at a time. The 8B BF16 model is not guaranteed to fit or run reliably on a 16 GB GPU once runtime overhead is included; failure falls back only to an already installed 0.6B model and then to FTS5. No quantization framework, reranker, or third model is introduced.
+
+Models, the encoder virtual environment, caches, SQLite database, indexed bodies, and vectors all live below `.runtime` and are excluded from source and Release archives. The launcher consumes the stable contract for profile selection, project-local installation/repair, preflight, and child-process environment; neither profile is bundled or presumed installed. The settings, environment, directory, health, degradation, and repair contract is documented in [Architecture](docs/ARCHITECTURE.md) and defined by `src/hia_core/embedding_contract.py`.
+
+The launcher exposes `Automatic`, `NVIDIA GPU (CUDA)`, and `CPU` choices beside
+the embedding model. The installer is always user-initiated. In `auto` mode it reuses an existing
+CUDA-capable project-local PyTorch installation, or detects an NVIDIA GPU and
+installs the official CUDA PyTorch wheel into the dedicated embedding venv.
+`cuda` fails clearly unless `torch.cuda.is_available()` succeeds and reports a
+device name; `cpu` remains an explicit fallback. No PyTorch package is installed
+into global Python. The launcher preflight reports whether the active local
+runtime can actually use CUDA instead of treating a CPU wheel as GPU-ready.
+
+Official sources: [Qwen3-Embedding-0.6B model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B), [0.6B files](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/main), [Qwen3-Embedding-8B model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B), and [8B files](https://huggingface.co/Qwen/Qwen3-Embedding-8B/tree/main).
+
 ## Known Preview limitations
 
 - Only Windows x64 and Houdini 21.0.440/Python 3.11 have completed the current real-GUI acceptance path.
 - Once a long HOM call has entered Houdini's UI thread, Stop can stop waiting and freeze Panel output but cannot safely force-kill that Python operation.
 - Goal continuation and crash recovery are Preview features. Recovery requires a launcher-confirmed Houdini crash and a valid Thread/Goal binding.
-- The public package does not include Houdini, Codex credentials, user HIP files, or the optional FXHoudiniMCP runtime.
+- The public package does not include Houdini, Codex credentials, user HIP files, the optional FXHoudiniMCP runtime, Qwen model weights, an embedding virtual environment, the knowledge database, indexed bodies, or vectors.
 - The launcher executable is not currently code-signed, so Windows may display a SmartScreen warning.
 - Big-Chicken Houdini Intelligence Agent can modify the active scene. It does not automatically save the HIP before every change.
 
@@ -163,13 +189,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
 .\.runtime\dist\launcher\BigChickenLauncher.exe
 ```
 
-The build downloads the .NET 8 SDK only into the ignored project runtime, verifies the Microsoft archive, and does not install a global SDK. Public launcher builds use the built-in dark gradient and do not require external artwork.
+The build downloads the .NET 8 SDK only into the ignored project runtime, verifies the Microsoft archive, and does not install a global SDK. Public launcher builds include the project launcher illustration at `assets\launcher\launcher-hero.png`, so a fresh clone or Release archive shows the same startup artwork without relying on `.runtime`.
 
 Build the strict public Preview archive:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 `
-  -Version 0.1.0-preview `
+  -Version 0.1.1-preview `
   -InstallLocalSdk
 ```
 
@@ -177,7 +203,8 @@ The archive and `SHA256SUMS.txt` are written to `.runtime\release`. The build
 uses an explicit runtime allowlist, rebuilds the launcher, and runs
 `scripts\check-public-release.py` before publishing the checksum. It excludes
 project runtime state, credentials, tests, HIP files, renders, historical Gate
-reports, and unlicensed artwork.
+reports, and unlicensed artwork. The project-owned launcher illustration is
+included explicitly.
 
 ## Project status
 
