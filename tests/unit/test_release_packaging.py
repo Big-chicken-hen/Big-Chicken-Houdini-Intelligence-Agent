@@ -71,11 +71,18 @@ class ReleasePackagingTests(unittest.TestCase):
             "$releaseDirectoryAllowlist",
             "$releaseDenyPatterns",
             "scripts/bootstrap-runtime.ps1",
+            "scripts/launcher/Install-HiaEmbedding.ps1",
+            "scripts/launcher/install_hia_embedding.py",
             "contracts/codex-app-server/0.144.3/",
+            "knowledge/sidefx-official/",
             "schemas/codex-app-server/0.144.3/",
             "services/hia_mcp_v2/",
+            "src/hia_core/",
             "houdini_package/python_panels/houdini_intelligence.pypanel",
+            "houdini_package/python_libs/hia_mcp_runtime/embedding_client.py",
+            "houdini_package/python_libs/hia_mcp_runtime/hybrid_knowledge.py",
             "houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py",
+            "houdini_package/python_libs/hia_mcp_runtime/knowledge_index_cli.py",
             "houdini_package/python_libs/hia_panel/panel.py",
             'Big-Chicken-Houdini-Intelligence-Agent-v$Version-win-x64',
             "BigChickenLauncher.exe",
@@ -89,6 +96,7 @@ class ReleasePackagingTests(unittest.TestCase):
             "CreateEntryFromFile",
             "licenses\\dotnet",
             "ThirdPartyNotices.txt",
+            "assets/launcher/launcher-hero.png",
         ):
             self.assertIn(required, source)
         self.assertNotIn("'houdini_package/',", source)
@@ -118,6 +126,16 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertNotIn("Copy-Item", source)
         self.assertNotIn("Remove-Item", source)
         self.assertIsNone(re.search(r"(?i)(?:^|[\"'\s])[a-z]:[\\/]", source))
+        allowlist_source = source[
+            source.index("$releaseFileAllowlist")
+            : source.index("$releaseDenyPatterns")
+        ]
+        self.assertNotIn("'.runtime", allowlist_source)
+        self.assertNotIn('".runtime', allowlist_source)
+        self.assertLess(
+            source.index("if ($releaseFileAllowlist -contains $normalized)"),
+            source.index("foreach ($pattern in $releaseDenyPatterns)"),
+        )
 
     def test_release_launcher_build_uses_a_project_runtime_output_override(self) -> None:
         source = (
@@ -127,7 +145,7 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertIn("[System.IO.Path]::GetFullPath($OutputDirectory)", source)
         self.assertIn("Launcher output must stay under the project runtime directory", source)
 
-    def test_launcher_has_no_seasonal_artwork_runtime_dependency(self) -> None:
+    def test_launcher_bundles_project_artwork_without_third_party_names(self) -> None:
         combined = "\n".join(
             (
                 XAML_PATH.read_text(encoding="utf-8-sig"),
@@ -137,8 +155,13 @@ class ReleasePackagingTests(unittest.TestCase):
             )
         )
         self.assertNotIn("steam-winter-sale", combined.lower())
-        self.assertNotIn("OptionalArtwork", combined)
-        self.assertNotIn("Get-HiaLauncherArtworkPath", combined)
+        self.assertNotIn("sakurakouji-luna", combined.lower())
+        self.assertIn("Initialize-HiaOptionalArtwork", combined)
+        self.assertIn("launcher-hero.png", combined)
+        self.assertIn("'assets'", combined)
+        self.assertTrue(
+            (REPOSITORY_ROOT / "assets" / "launcher" / "launcher-hero.png").is_file()
+        )
         self.assertIn("BIG-CHICKEN", combined)
         project = ET.parse(CS_PROJECT_PATH).getroot()
         self.assertEqual([], project.findall(".//Content"))

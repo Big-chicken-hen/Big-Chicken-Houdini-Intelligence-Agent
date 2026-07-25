@@ -15,6 +15,7 @@ Build complete assets as readable procedural systems. More nodes do not make a m
 
 ## Load only the needed guidance
 
+- Read [knowledge-and-memory.md](../houdini-visual-research/references/knowledge-and-memory.md) before authoring a complex, unfamiliar, or version-sensitive asset and when durable project context may affect its structure. Skip it for the direct operations excluded above.
 - Read [modeling-judgment.md](references/modeling-judgment.md) to define identity, structural hierarchy, and the difference between a blockout and a complete asset.
 - Read [procedural-architecture.md](references/procedural-architecture.md) when choosing subsystems, representations, continuous paths, host dependencies, controls, repetition, performance strategy, or graph layout.
 - Read [modeling-validation.md](references/modeling-validation.md) before a substantial handoff or when deciding whether the model is genuinely complete.
@@ -40,7 +41,7 @@ Make a short construction model: asset identity; world scale and axes; recogniti
 
 ## Use the live Houdini route
 
-Default current-scene work to HIA MCP V2 and HOM. Obtain context with `hia_context` or `hia_inspect` only as needed, then prefer one or a small number of serial, cohesive `hia_execute_hom` batches. When several installed-node questions are genuinely needed, use one batched `hia_search_node_types` request, reuse its results, and batch any follow-up `hia_node_help` targets; do not fan out parallel queries. Avoid tool forests and parallel live-scene writes.
+Default current-scene work to HIA MCP V2 and HOM. For complex, unfamiliar, or version-sensitive construction, follow the shared knowledge contract before authoring: query relevant local knowledge once in a batch and search durable project memory only when it can affect the decision. Obtain context with `hia_context` or `hia_inspect` only as needed, then prefer one or a small number of serial, cohesive `hia_execute_hom` batches. When several installed-node questions are genuinely needed, use one batched `hia_search_node_types` request, reuse its results, and batch any follow-up `hia_node_help` targets; do not fan out parallel queries. Avoid tool forests and parallel live-scene writes.
 
 Use native `hython` only when the user explicitly requests offline work, an independent HIP, batch processing, or background execution. Use FXHoudiniMCP only when the launcher was explicitly placed in that compatibility mode; never make it the default.
 
@@ -65,5 +66,5 @@ Report the asset root and outputs, subsystems, principal controls, construction 
 ## Guardrails
 
 - Do not finish a complex asset as a generic primitive assembly unless the user asked for a blockout.
-- Do not add MCP tools, an Agent backend, planner, database, service, scoring system, fixed gate, approval chain, node allowlist, or one-shot apply mechanism.
+- Do not add MCP tools, an Agent backend, planner, summarizer, chat database, second knowledge or memory system, service, scoring system, fixed gate, approval chain, node allowlist, or one-shot apply mechanism.
 - Do not prescribe asset-specific recipes, fixed node counts, tool counts, capture counts, stage counts, iteration counts, or coordinate tables.

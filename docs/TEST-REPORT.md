@@ -1101,3 +1101,209 @@
 
 - 本轮没有显示真实 launcher 窗口，也没有启动 Panel 或 Houdini GUI。仍需人工确认系统缩放、实际工作区尺寸、键盘导航、滚动手感、禁用按钮视觉和真实点击流程；自动化已经覆盖 XAML 真加载、五种布局尺寸、控件可达性、AST、对比度和事件契约。
 - 未提交、推送或清理；当前 4f08 保持等待同步回 E。
+
+## 本地 hybrid 检索、显式项目记忆与双模型 contract（2026-07-24）
+
+### 最小设计与兼容边界
+
+- HIA MCP V2 registry 当前为 17 个工具。`hia_local_help_search` 保留既有单项/批量、`sources`、分页和 `refresh` 兼容形状，新增 `lexical|vector|hybrid`，默认 hybrid；SQLite FTS5 始终是硬基线。唯一新增持久记忆入口为 `hia_project_memory`，actions 为 `record/search/list/delete/supersede`，types 为 `decision/preference/asset/lesson/workflow`。只有显式 record/supersede/delete 改写记忆，不保存聊天、不从 compaction 或诊断自动总结。
+- SQLite `knowledge.sqlite3` 同时保存正文、FTS5、显式 memory 和向量行；向量行保留 `model_id` 与 `dim`。刷新按 chunk SHA-256 增量处理，来源删除同步删除正文/FTS/向量；切换 profile/revision/dimension 只重建向量层，不重建正文或 FTS5。结果保留 provenance/verification，并公开 requested/active profile、status、degraded、fallback reason 和 repair。
+- 普通 hybrid 每次最多渐进补齐 256 chunks，优先本次 lexical candidates，再处理 backlog；在 `retrieval.vector.index` 返回 `complete/vector_chunks/total_chunks/pending_chunks/chunks_indexed_this_call`，不宣称首次查询完成全量向量化。向量排名使用 SQLite 流式游标与 bounded heap，不把全库向量物化到内存。
+- encoder 是独立、持久、串行 JSONL stdio worker，使用项目内 `.runtime/toolchains/hia-embedding/venv/Scripts/python.exe` 与 `hia-embedding-stdio/1`，不会进入 Houdini Python/UI 主线程。MRL 通过构造 `SentenceTransformer` 时的 `truncate_dim=profile.dim` 实现，并在截断维度 normalize，不在 Python 返回后 slice。Codex 仍是唯一推理、规划、记忆正文和 HOM 生成主体；Qwen 只编码文本。搜索/import 不下载，不增加量化、reranker、第三模型、Agent、watcher、网络服务或 scheduler。
+
+### 双 profile 与 launcher contract
+
+- `src/hia_core/embedding_contract.py` 是轻量、无 I/O、可导入的稳定权威。默认 `qwen3-embedding-0.6b` 对应官方 `Qwen/Qwen3-Embedding-0.6B`，约 1.21 GB，默认/最大 1024 维；高质量 `qwen3-embedding-8b` 对应 `Qwen/Qwen3-Embedding-8B`，约 15.2 GB BF16 分片，默认 1024、MRL 最大 4096。两者均 Apache-2.0、32K、100+ 语言，并支持 MRL 与 query instruction。
+- 同一时刻只加载一个 profile。8B 在 16 GB 显存上可能因运行时开销无法稳定全 GPU 加载；缺失、内存/显存不足或损坏时，只降级到已安装 0.6B，再降级到 FTS5，并返回原因。0.6B 失败直接降级 FTS5。没有维度 launcher UI；高级环境可显式选择 8B 的 4096 维。
+- contract 固定 settings `embedding_profile/embedding_dimension/embedding_device`，完整 `.runtime` venv/model/cache/DB 路径，worker distribution/module/entry point，`HIA_EMBEDDING_*` 与 profile-specific model/revision 环境变量，以及 `installed/ready/degraded` 等 health 字段和 `install/repair/repair_toolchain` 动作。当前共享工作树的 launcher 已按该 contract 接入 profile 选择、项目内安装/修复、preflight 与子进程环境；不声称任一模型或 venv 已实际安装。
+- 发行边界保持严格：Release 不包含模型权重、encoder venv、缓存、SQLite DB、索引正文或向量。官方依据为 [0.6B model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)、[0.6B files](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/main)、[8B model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B) 与 [8B files](https://huggingface.co/Qwen/Qwen3-Embedding-8B/tree/main)。
+
+### 当前定向验证
+
+- embedding contract、worker 与 stdio client：22/22 通过。
+- HIA MCP V2 protocol 与第三方隔离：19/19 通过。
+- local help、渐进 hybrid/vector 排名与 project memory：18/18 通过。
+- public release packaging 与 hygiene：12/12 通过。
+- 合并定向验证共 71/71 通过，用时 3.557 秒；删减后的受影响回归 51/51 通过，用时 3.312 秒。最终完整 `tests/unit` 仅运行一次，858/858 通过，用时 40.639 秒。本轮未启动 launcher UI、Panel 或真实 Houdini GUI，也未下载/安装模型、venv 或依赖。
+
+### 真实 0.6B 安装阻断修复（2026-07-24，已解决）
+
+- 真实下载完成 12/12 后，installer 返回 `downloaded embedding model payload is incomplete`。根因是 Hugging Face snapshot 的 `config.json` 与 `*.safetensors` 通常是指向同一项目缓存 `blobs` 的 symlink，而下载源错误复用了 canonical/staging 的“必须为普通文件”校验。
+- 修复仅增加下载源 snapshot 校验：链接必须可严格解析为 Hugging Face cache 内的普通文件，并仍要求 `config.json` 与至少一个顶层 `*.safetensors`；canonical/staging 的普通文件与原子发布校验没有放宽。现有 `.runtime/cache/embedding/huggingface` 保持完整，可供下次安装直接复用，没有重下模型或粘贴下载日志。
+- 真实缓存 symlink 结构只读探针通过；installer 测试 5 项中 3 项通过，2 项因当前 Windows 会话缺少文件 symlink 创建权限（WinError 1314）明确跳过，测试代码会在具备该权限的平台验证 cache 内链接通过和逃逸链接拒绝；launcher 定向测试 47/47 通过。
+
+### 最终真实 0.6B 验收（2026-07-24，通过）
+
+- 修复后真实安装复用 `E:\houdini-intelligence-agent\.runtime\cache\embedding\huggingface`，成功原子发布 canonical 目录与 manifest；模型共 13 个普通文件、1,207,489,174 bytes。
+- 独立 worker 在 CPU/offline 下真实加载 `Qwen/Qwen3-Embedding-0.6B@main`；中文 document/query 均返回 1024 维归一化向量。
+- 临时 SQLite 知识库真实完成 project memory record → hybrid search（vector ready，1/1 chunk）→ delete；删除后不可检索，临时目录已清理。
+- 启动器真实 `-CheckOnly -Json`：选择 0.6B 时 overall 与 embedding 均为 green；选择未安装 8B 时为 yellow，明确降级到已安装 0.6B，8B 目录不存在且不阻断启动。
+- 定向 installer + launcher 52/52、最终完整 unittest 863/863，`git diff --check` exit 0；暂存区为空，`.runtime` 无跟踪文件。
+
+## Hybrid 查询延迟、partial 偏置与一次性索引 CLI（2026-07-24）
+
+- 真实问题是普通 hybrid 首次查询在 lexical candidates 之后还同步处理最多 256 个 backlog chunk，约耗时 46 秒；同时仅有 256/8722 向量时，全局扫描“当前已编码子集”会把摄入顺序偏置的 CHOP Warp 当成 `velocity advected ripple field` 的全库 semantic 结果。
+- 普通查询现只为本轮 lexical 命中的精确 chunk 补向量，总上限 32，不处理 backlog；批量 query 以 round-robin 选取待编码候选，并在排名时保留每个 query 独立的 candidate set。partial 索引只在相应 lexical candidate 文档内重排；无 lexical candidate 返回 lexical/空结果与明确 `partial_reason`；只有 `complete=true` 才恢复全局流式向量排名。
+- `HybridKnowledgeStore.status()` 与 `build_batch()` 提供有界、可恢复的回填核心。launcher 可用 Bridge Python 运行 `python -B -m hia_mcp_runtime.knowledge_index_cli --project-root <root> status` 或 `... build --batch-size 32`；JSONL 协议 `hia-knowledge-index-jsonl/1` 输出 `start/progress/completed/error`，每批提交后可在 Ctrl+C/进程结束后从缺失或 hash 变化的 chunk 继续。未新增 MCP 工具、服务、scheduler、外部向量库或模型。
+- 最终定向验证：hybrid/FTS5/memory 13/13，CLI 5/5，embedding contract 5/5，17-tool/第三方隔离 2/2，release allowlist/PowerShell 2/2，共 27/27 通过；核心优先落盘后曾先行完成 12/12。覆盖查询最多 32、无 backlog、partial 候选隔离、无候选不做偏置全局召回、完整索引恢复全局 semantic、增量 hash、模型/维度切换仅重建向量层、真实 SQLite 批次提交后中断续建、CLI status/build/resume/Ctrl+C/结构化错误、fresh subprocess 的 `-m` 启动、FTS5 降级与 memory CRUD。按任务要求未运行完整套件，未启动 Houdini GUI，也未下载或加载模型。
+- 当前默认 Python 没有安装 `pytest`；未为此下载依赖，改用仓库 README 规定的标准库 `unittest` 定向入口完成上述验证。
+
+## Launcher 本地知识索引进度与手动续建（2026-07-24）
+
+### 最小实现与安全边界
+
+- WPF 启动器在既有环境区增加紧凑的“本地知识索引”状态行，显示当前模型、已索引/总数、百分比、剩余量和状态；只有用户点击才运行 `build --batch-size 32`，运行中可取消，完成后按钮变为不可用的“索引已完成”。未安装模型时继续明确使用 FTS5 lexical，不阻断 Houdini。
+- status/build 均由所选 Bridge Python 以 contract 提供的模块、参数与项目内 `PYTHONPATH` 启动；stdout 按 `hia-knowledge-index-jsonl/1` 异步读取并逐批刷新。取消后不删除数据库或已提交批次，只重新读取 status，因此下次可继续。
+- 初版取消仅终止 CLI parent，真实审查指出 embedding worker 可能成为孤儿进程。现已统一使用 `%SystemRoot%\System32\taskkill.exe /PID <精确数值 PID> /T /F` 终止本次进程树；JSONL 异常、timer 异常、启动后初始化异常、用户取消、完成清理和窗口关闭复用同一 helper。没有 `/IM`、模糊进程名、Job Object、服务或通用进程清理器；taskkill 以 5 秒有界等待和退出码确认结果。
+
+### 实际问题与验证
+
+- 一次当前 PowerShell 会话中的直接 `Import-Module` 探针受执行策略阻止；产品未改用全局策略，后续按现有测试入口的 `-ExecutionPolicy Bypass` 子进程完成验证，已解决。
+- 新 helper 名称是旧 Stop 函数名的前缀，首个静态回归切片误命中 helper 而得到空片段；测试改为匹配含 `{` 的完整函数签名后通过，产品代码无需回退，已解决。
+- 最终 launcher + knowledge-index CLI 定向测试 55/55 通过；三个 PowerShell 文件 AST 与 XAML XML 解析通过。launcher 定向集还通过 `XamlReader.Load` 和既有多尺寸布局检查。本轮未运行完整测试，未显示真实 WPF 窗口，也未启动 Houdini。
+- 仍需人工验证真实模型已加载时的 build/progress/取消/继续、窗口关闭后 CLI 与 embedding worker 均退出，以及 100%/125%/150%/200% DPI 下文字和按钮状态。终止确认通常很快，但异常慢的进程树可能使取消或关闭最多等待 5 秒；这是有界终止的首版取舍。
+
+### 主任务真实验证（2026-07-24）
+
+- 使用 `Qwen/Qwen3-Embedding-0.6B`、1024 维进行真实检索。部分索引状态下首次查询用时 9.5 秒；无 lexical candidate 时明确返回 fallback，且不再错误返回 CHOP Warp。有 lexical candidate 的查询用时 6.477 秒，只补齐 1 个 chunk。
+- CLI 以 `batch=64` 从 1027/8724 继续构建至 8724/8724，共 121 批，约 20 分 03 秒。完整索引后，同一查询的前三项结果为 AdvectByFilaments、pyro_buildadvectionmap、shallowfields；冷查询用时 5.078 秒，热查询用时 1.268 秒。
+- 最终完整测试 875/875 通过；HIA MCP 工具集合仍为 17 个，`.runtime` 保持 Git ignored。尚未执行真实 WPF 点击验收。
+
+### Windows PowerShell 5.1 启动修复（2026-07-24）
+
+- 真实 WPF 首次状态读取显示 `0/0` 和“无法启动知识索引命令”。索引数据库、模型和命令计划均完整；根因是 Windows PowerShell 5.1 会把从 `if` 表达式返回的 `ProcessStartInfo.EnvironmentVariables` 展开成固定长度 `Object[]`，随后 `.Remove()` 抛出 `Collection was of a fixed size`，CLI 尚未启动。
+- 修复仅把两个环境集合分支改为直接赋值，未改变 CLI、数据库、模型、索引协议或构建行为，并增加防止恢复 `$processEnvironment = if` 写法的回归断言。
+- 管理员环境下以与 WPF 相同的 `ProcessStartInfo` 路径执行真实 `status` 成功，返回 `8724/8724`、`complete=true`、`pending=0`；launcher 定向测试 50/50 通过。真实窗口重新打开后的显示仍需人工确认。
+
+### 真实 WPF 二次复验诊断（2026-07-24）
+
+- 用户在重新打开启动器后仍看到旧的通用“无法启动知识索引命令”文案。相同 Bridge Python、模型 profile、环境变量和 `ProcessStartInfo` 在 Windows PowerShell 5.1 下再次独立执行成功；真实 WPF 控件刷新、`ReadLineAsync`、`ReadToEndAsync` 和 `DispatcherTimer.Start()` 也均未复现异常。
+- 原 catch 会吞掉具体异常，无法区分临时状态与第二个兼容问题。现保留简短降级说明，同时在同一状态行显示经换行压平并限制为 300 字符的真实异常消息；没有新增服务、数据库或后台日志系统。
+- 新增的异常可见性回归通过，PowerShell AST 与 `git diff --check` 通过。需要完全关闭旧启动器并重新打开；若仍失败，界面将直接给出可用于精确修复的原因，而不再只显示通用红字。
+- 真实异常显示后确认第二个根因：Windows PowerShell 5.1 不接受把 `if` 语句直接写在命令参数的括号表达式中，`Set-HiaKnowledgeIndexDisplay -Message (if (...))` 会尝试把 `if` 解析为待执行命令。现改为先把分支结果赋给 `$startMessage`，再以普通字符串参数传入；同时增加回归断言，禁止该写法重新出现。
+
+## 随 Release 分发的知识卡与本机 Houdini 全文索引（2026-07-24）
+
+- 公开仓库与 Release 新增 `knowledge/sidefx-official`：10 张项目原创工作流卡、来源 URL、适用版本和许可证元数据。卡片正文采用 Apache-2.0，不复制 SideFX 帮助正文。
+- 运行时从用户自己的 Houdini 安装目录直接读取 15 个选定帮助 ZIP，不解包、不联网，并排除 `examples`、`files`、`licenses` 和 `videos` 噪声目录。本机 Houdini 21.0.440 实测索引 7,479 篇 ZIP 文档、25,716 个 chunks；清理后的散装帮助为 190 篇、817 个 chunks。
+- 实际数据库共有 12,830 篇文档、31,794 个 chunks；随包知识卡为 10 篇、14 个 chunks。只读 FTS5 实测 `setWorldTransform`、MaterialX、Vellum substeps 和 Karma XPU 均命中对应 HOM、Solaris、Vellum 或节点帮助。
+- `knowledge.sqlite3`、SideFX 帮助 ZIP/正文、向量和模型继续只存在于 `.runtime`，不会进入 Git 或 Release。其他用户下载后先获得原创知识卡，再从其本机 Houdini 版本建立全文索引。
+- 新增 ZIP、manifest、CLI source refresh 与 Release allowlist 回归；完整测试 `879/879` 通过，`git diff --check` 通过。未启动 Houdini GUI，未删除或清理任何运行时文件。
+
+## 项目本地 CUDA embedding 修复（2026-07-24，待 GUI 验收）
+
+- 真实诊断确认 NVIDIA RTX 5080 与驱动可见，但 embedding venv 为
+  `torch 2.13.0+cpu`、`torch.version.cuda=null`、
+  `torch.cuda.is_available()=false`，因此 `auto` 只能使用 CPU。
+- 启动器在模型选择旁新增“自动（优先 NVIDIA GPU）/NVIDIA GPU（CUDA）/CPU”
+  紧凑选择并持久化到 `embedding_device`。`Install-HiaEmbedding.ps1` 支持同样的
+  `auto/cuda/cpu`。安装仍必须由用户主动点击
+  或显式运行脚本；`auto` 复用已有 CUDA-capable torch，否则仅在检测到 NVIDIA
+  GPU 时通过项目本地 Astral uv 的 `--torch-backend=cu128` 准备 CUDA torch。
+  通用依赖仍走 PyPI；项目外 Python 与 PATH 保持原样。
+- 安装后必须重新探针 `torch.cuda.is_available()` 与设备名；请求 CUDA 但验证
+  失败时安装返回错误，不把 CPU 回退伪装成 GPU 成功。预检显示真实 torch
+  版本、CUDA 可用性与设备名；CPU 可用时明确提示可通过现有安装/修复入口升级。
+- `launch-houdini.ps1` 接受 `-EmbeddingDevice auto|cuda|cpu` 并只把选择传给
+  项目 embedding worker。默认仍为 `auto`，没有新增服务、模型或全局设置。
+- 定向测试：installer transaction、contract/settings、preflight/fallback、
+  lifecycle/source 与真实 WPF XAML load 共 `12/12` 通过；5 个 PowerShell
+  文件 AST 与 XAML XML 解析无错误。
+  本轮按要求未下载 PyTorch、未加载模型、未运行真实索引、未启动 Houdini GUI。
+
+## Codex Thread 永久删除（2026-07-24，待 GUI 验收）
+
+- 固定的 Codex app-server 0.144.3 协议明确提供稳定的 `thread/delete` 请求和
+  `thread/deleted` 通知，因此本功能使用真实删除而不是本地隐藏或归档。
+- 历史列表只删除用户当前选择的一个空闲 Thread。首次点击把同一按钮改为
+  “再次点击删除”，5 秒内第二次点击才执行；未使用模态对话框。活动 Turn 会被
+  拒绝并提示先停止、等待结束。
+- 删除当前打开的 Thread 后，Panel 清除当前会话、Goal、团队、对话流、草稿及
+  附件控件中的路径引用并回到空白状态；不会删除附件文件，也不会批量删除、
+  猜测路径或操作系统盘文件。
+- 定向回归覆盖协议、Bridge session、HTTP、Panel client、Panel wiring 和
+  fake app-server，共 `226/226` 通过。`git diff --check` 通过。
+- 尚未在真实 Houdini GUI 中人工验证同按钮二次确认、焦点行为与历史下拉即时
+  刷新；未暂存、未提交、未推送。
+
+## CUDA embedding 安装改用项目本地 uv（2026-07-24，代码已解决，待真实重试）
+
+- 真实失败发生在项目 embedding venv 的 `pip 23.0.1`：它读取 PyTorch `cu128`
+  索引时把 `typing_extensions`/`typing-extensions` 与 Jinja2 名称大小写误判为
+  元数据不一致，最后返回 `ResolutionImpossible`。RTX 5080 与驱动并非根因。
+- 安装按钮现使用固定的官方 Astral uv 0.11.29。缺少时只在用户点击后从
+  `https://astral.sh/uv/0.11.29/install.ps1` 引导项目本地安装；
+  `UV_UNMANAGED_INSTALL` 指向
+  `.runtime/toolchains/hia-embedding/uv/0.11.29`，`UV_CACHE_DIR` 指向
+  `.runtime/cache/embedding/uv`，不会修改全局 PATH。CUDA torch 使用
+  `uv pip install --python <workerPython> --torch-backend=cu128`，worker 也由
+  同一个 uv 安装；通用依赖继续使用 PyPI，没有保留第二套旧 pip 安装链。
+- GUI 失败时直接显示脱敏后的真实原因，并把完整项目本地日志路径显示为
+  `.runtime/launcher/embedding-install-*.log`，可复用现有“复制报告路径”按钮。
+  下载/安装提示收敛为一条“母鸡啄米中…”，其余文案保持简短。
+- launcher 与 installer 定向回归共 59 项：57 通过，2 项因当前 Windows 会话
+  无 symlink 创建权限而按既有条件跳过；3 个 PowerShell 文件 AST 与真实 WPF
+  XAML 加载通过，`git diff --check` exit 0。未实际下载 uv/CUDA torch，也未
+  启动 Houdini；仍需用真实安装按钮复验 uv bootstrap、RTX 5080 CUDA torch
+  和失败日志显示。
+
+## CUDA embedding 安装安全收口（2026-07-24，已解决）
+
+- `.runtime\launcher` 的 project root、`.runtime`、`launcher` 现逐级拒绝
+  reparse point；既有 settings、安装日志与锁文件必须是普通文件。junction
+  诱饵测试确认没有向链接目标写入，文件 symlink 条件测试保持 fail-closed。
+- uv 子进程会清除继承的 UV/PIP index、offline、config 与 find-links 污染；
+  两次依赖安装都显式使用 `https://pypi.org/simple`，CUDA torch 只通过
+  `--torch-backend=cu128` 选择官方后端，没有把 PyTorch index 设为通用源。
+- GUI 仅在安装进程 exit 0、刷新自检成功且唯一 `embedding.runtime` 为 green
+  时显示完成；yellow、red、缺失或重复结果均显示验证失败。日志与界面脱敏新增
+  Authorization Basic/Bearer、URL userinfo 及 UV/PIP index 环境值。只读复审
+  曾发现空格分隔的多值 `UV_INDEX` 只遮住首个 URL；现改为整段值脱敏并补双 URL
+  回归。第二次复审又发现规则顺序会过度吞掉 JSON 转义换行后的普通诊断文字；
+  交换规则顺序后，JSON 可解析且下一行原文保留。post-fix 复核还发现无冒号的
+  `https://token-only@host` 未被旧 userinfo 模式覆盖；Core 与 installer 现对
+  任意 `http(s)://userinfo@` 统一脱敏，直接反例与两层日志回归通过，均标记已解决。
+- 新增项目本地 `embedding-install.lock` FileStream 独占锁；第二个窗口只提示
+  已有安装和持有者日志。离线锁回归首次发现 `File.ReadAllText()` 的共享模式
+  无法读取正在持有的写句柄；已改为显式 Read + FileShare.ReadWrite 的窄读取，
+  互斥、日志可见和释放后重试均通过，标记已解决。
+- launcher + installer 定向回归共 63 项，60 项通过；3 项因当前 Windows 会话
+  缺少文件 symlink 创建权限（WinError 1314）按既有条件跳过。junction 回归、
+  PowerShell AST、真实 WPF XAML load 与 `git diff --check` 均通过。
+- 用户报告的 PID 33448 `uv` 仍视为现存首次安装。本轮没有启动第二次安装、
+  没有终止该进程、没有清理运行时内容，也没有重试真实 CUDA 下载或启动 Houdini。
+  仍需主任务等待该安装自然结束后，在真实 WPF 中复验成功/失败文案与日志路径。
+
+## CUDA embedding 最终真实验收（2026-07-24，通过）
+
+- 项目本地 uv 为 `0.11.29`。更新后的完整 `Install-HiaEmbedding.ps1` 真实运行
+  22 秒成功，返回 `status=already_installed`、profile
+  `qwen3-embedding-0.6b`、requested/resolved device 均为 `cuda`。
+- 运行时探针确认 `torch 2.11.0+cu128`、CUDA build `12.8`、
+  `cuda_available=true`，设备为 `NVIDIA GeForce RTX 5080`。脱敏安装日志位于
+  `.runtime/launcher/embedding-install-20260724-150200-b5716ed9dac2430da46bdcb9a45d28a1.log`。
+- 项目 uv 执行 `uv --no-config pip check`，确认 43 个 packages compatible。
+  首次手工验证没有注入项目 `UV_CACHE_DIR`，误尝试用户 AppData cache 并被拒；
+  改为 `.runtime/cache/embedding/uv` 且使用管理员项目权限后通过。该问题仅属于
+  手工验证命令环境，不是生产 installer 缺陷，标记已解决。
+- launcher `-CheckOnly -Json` 返回 overall green；`embedding.runtime` 为 green
+  并明确识别 CUDA RTX 5080，期间没有启动 Houdini GUI。
+- 真实独立 worker 在 offline 模式下使用 CUDA 加载
+  `Qwen3-Embedding-0.6B`，返回 1024 维、L2 norm `1.0`、`loaded=true`，
+  7.4 秒内完成推理。
+- 最终相关 unittest `64/64` 通过；独立审计五项的 P0、P1、P2 均为 `0`。
+
+## 启动器可选露娜溶图背景（2026-07-25，通过，待真实 DPI 人工验收）
+
+- 用户提供的露娜插画已先做深靛紫夜景溶图，再保存为项目本地忽略资源
+  `.runtime/launcher/artwork/sakurakouji-luna.png`；图片不进入 Git。概览页使用
+  右侧渐显、左侧深色遮罩与裁切融合，缺失、损坏或 reparse 路径会安静回退到
+  原有渐变背景，不影响自检或 Houdini 启动。
+- 初次静态测试把 `<Image.OpacityMask>` 也计入 `<Image>` 数量而失败；改为只匹配
+  实际 `Image` 元素后通过，标记已解决。
+- 1180×820、820×656、640×480 三档离屏渲染均成功，主按钮保持可达，深色
+  ScrollBar 无白色轨道；预览保存在 `.runtime/launcher/ui-luna-blended-*.png`。
+- launcher 定向 unittest 共 59 项：58 项通过、1 项按环境条件跳过；PowerShell
+  AST、真实 `XamlReader.Load` 均通过。`-CheckOnly -Json` 返回 overall green、
+  24 项检查，未显示窗口、未启动 Houdini。
+- 尚未在真实显示器上人工验证 125%/150%/200% DPI、窗口最大化及实际交互焦点。

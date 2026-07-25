@@ -37,6 +37,11 @@ QUERY = {"type": "string", "maxLength": 512}
 QUERIES = {"type": "array", "items": QUERY, "minItems": 1, "maxItems": 16}
 OFFSET = {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}
+RETRIEVAL_MODE = {
+    "type": "string",
+    "enum": ["lexical", "vector", "hybrid"],
+    "default": "hybrid",
+}
 
 NODE_HELP_PROPERTIES = {
     "node_path": PATH,
@@ -46,6 +51,109 @@ NODE_HELP_PROPERTIES = {
     "parameter_query": QUERY,
     "offset": OFFSET,
     "limit": LIMIT,
+}
+
+PROJECT_MEMORY_PROPERTIES = {
+    "action": {
+        "type": "string",
+        "enum": ["record", "search", "list", "delete", "supersede"],
+    },
+    "memory_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "memory_type": {
+        "type": "string",
+        "enum": ["decision", "preference", "asset", "lesson", "workflow"],
+    },
+    "title": {"type": "string", "minLength": 1, "maxLength": 512},
+    "body": {"type": "string", "minLength": 1, "maxLength": 65_536},
+    "tags": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1, "maxLength": 128},
+        "maxItems": 32,
+    },
+    "scope": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "default": "project",
+    },
+    "source_thread_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+    },
+    "source_turn_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+    },
+    "query": {"type": "string", "minLength": 2, "maxLength": 256},
+    "mode": RETRIEVAL_MODE,
+    "include_superseded": {"type": "boolean", "default": False},
+    "offset": OFFSET,
+    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+}
+
+_PROJECT_MEMORY_ACTION_FIELDS = {
+    "record": frozenset(
+        {
+            "action",
+            "memory_type",
+            "title",
+            "body",
+            "tags",
+            "scope",
+            "source_thread_id",
+            "source_turn_id",
+        }
+    ),
+    "search": frozenset(
+        {
+            "action",
+            "query",
+            "memory_type",
+            "tags",
+            "scope",
+            "mode",
+            "include_superseded",
+            "offset",
+            "limit",
+        }
+    ),
+    "list": frozenset(
+        {
+            "action",
+            "memory_type",
+            "tags",
+            "scope",
+            "include_superseded",
+            "offset",
+            "limit",
+        }
+    ),
+    "delete": frozenset({"action", "memory_id"}),
+    "supersede": frozenset(
+        {
+            "action",
+            "memory_id",
+            "memory_type",
+            "title",
+            "body",
+            "tags",
+            "scope",
+            "source_thread_id",
+            "source_turn_id",
+        }
+    ),
+}
+
+_PROJECT_MEMORY_REQUIRED_FIELDS = {
+    "record": frozenset({"action", "memory_type", "title", "body"}),
+    "search": frozenset({"action", "query"}),
+    "list": frozenset({"action"}),
+    "delete": frozenset({"action", "memory_id"}),
+    "supersede": frozenset(
+        {"action", "memory_id", "memory_type", "title", "body"}
+    ),
 }
 
 
@@ -289,7 +397,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_local_help_search",
         "local_documentation",
-        "Search a project-local SQLite FTS5 index of the installed Houdini catalog/help, published project skills/references/current docs, and user-authorized documents under .runtime/knowledge/sources. Prefer one queries batch for several keywords so refreshable sources are scanned once, then reuse its merged results; query remains the compatible single-query form. The current Houdini version ranks first; every result includes provenance and verification metadata. The index refresh is incremental and runs outside the Houdini UI thread. This is local-only; web research remains Codex's responsibility.",
+        "Search project-local Houdini help, published project references, user-authorized documents, and explicit project memories with SQLite FTS5 plus optional local Qwen embeddings. Qwen only encodes text; Codex remains the sole reasoning system. Hybrid is the default and degrades completely to lexical search when embeddings are unavailable. While the vector index is partial, semantic scoring only reranks each query's own lexical candidates; global semantic recall starts only after the index reports complete. Prefer one queries batch so refreshable sources are scanned once. Results preserve provenance and verification metadata and report requested/active embedding profiles plus any degradation reason. Index work runs outside the Houdini UI thread; web research remains Codex's responsibility.",
         _object(
             {
                 "query": {"type": "string", "minLength": 2, "maxLength": 256},
@@ -301,9 +409,13 @@ TOOL_SPECS = (
                 },
                 "sources": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["houdini", "project", "user"]},
-                    "maxItems": 3,
+                    "items": {
+                        "type": "string",
+                        "enum": ["houdini", "project", "user", "memory"],
+                    },
+                    "maxItems": 4,
                 },
+                "mode": RETRIEVAL_MODE,
                 "offset": OFFSET,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
                 "refresh": {
@@ -313,6 +425,13 @@ TOOL_SPECS = (
                 },
             },
         ),
+    ),
+    ToolSpec(
+        "hia_project_memory",
+        "project_memory",
+        "Explicitly record, search, list, delete, or supersede durable project decisions, preferences, assets, lessons, and workflows. This is not chat history: nothing is saved automatically, and Codex supplies the final memory text. Search defaults to hybrid local retrieval with lexical fallback; Qwen only encodes text. Results report requested/active embedding profiles and any degradation reason. The runtime generates stable IDs and keeps bodies and vectors under project .runtime/knowledge.",
+        _object(PROJECT_MEMORY_PROPERTIES, required=("action",)),
+        read_only=False,
     ),
 )
 
@@ -332,6 +451,7 @@ CAPABILITY_MATRIX = (
     {"domain": "visual_feedback", "tools": ["hia_capture_viewport"], "status": "implemented"},
     {"domain": "debug_validation", "tools": ["hia_validate", "hia_scene_diff"], "status": "implemented"},
     {"domain": "local_documentation", "tools": ["hia_local_help_search"], "status": "implemented"},
+    {"domain": "project_memory", "tools": ["hia_project_memory"], "status": "implemented"},
     {
         "domain": "long_jobs",
         "tools": [],
@@ -370,6 +490,34 @@ def validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
             raise InputError(
                 "INVALID_ARGUMENTS",
                 "Batch node help options belong inside each requests item",
+            )
+    if tool_name == "hia_project_memory":
+        _validate_project_memory(arguments)
+
+
+def _validate_project_memory(arguments: Mapping[str, Any]) -> None:
+    action = str(arguments["action"])
+    required = _PROJECT_MEMORY_REQUIRED_FIELDS[action]
+    missing = sorted(required.difference(arguments))
+    if missing:
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            f"hia_project_memory action {action} is missing required fields",
+            {"action": action, "missing": missing},
+        )
+    unrelated = sorted(set(arguments).difference(_PROJECT_MEMORY_ACTION_FIELDS[action]))
+    if unrelated:
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            f"hia_project_memory action {action} contains unrelated fields",
+            {"action": action, "fields": unrelated},
+        )
+    for field in required:
+        value = arguments[field]
+        if isinstance(value, str) and not value.strip():
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                f"arguments.{field} must not be blank",
             )
 
 

@@ -446,6 +446,10 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 body.get("thread_id"), body.get("name")
             )
             return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/threads/delete":
+            self._require_exact_fields(body, {"thread_id"})
+            result = application.session.delete_thread(body.get("thread_id"))
+            return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/goal":
             action = body.get("action")
             if action == "clear":

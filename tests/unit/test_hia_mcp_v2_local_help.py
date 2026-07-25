@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
+import zipfile
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -276,6 +278,241 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
         self.assertEqual(reads_after_initial_index, len(self.file_read_states))
         self.assertFalse(second["result"]["index"]["refreshed"])
         self.assertEqual(0, second["result"]["files_scanned"])
+
+    def test_fts_relaxes_only_after_strict_query_has_zero_matches(self) -> None:
+        sources_root = (
+            self.project_root / ".runtime" / "knowledge" / "sources"
+        )
+        self._write(
+            sources_root / "rbd-material-fracture.md",
+            "RBD Material Fracture workflow for a detailed concrete wall.",
+        )
+        self._write(
+            sources_root / "rbd-bullet-solver.md",
+            "RBD Bullet Solver reference.",
+        )
+        index = LocalKnowledgeIndex(self.project_root)
+        index.refresh(
+            {"user"},
+            {"houdini_version": "21.0.000"},
+            force=True,
+        )
+
+        strict = index.search(
+            "RBD Material Fracture",
+            {"user"},
+            current_houdini_version="21.0.000",
+            offset=0,
+            limit=10,
+        )
+        self.assertEqual(
+            {"user:user_document:rbd-material-fracture.md"},
+            {
+                match["metadata"]["source_key"]
+                for match in strict["matches"]
+            },
+        )
+
+        relaxed = index.search(
+            (
+                "RBD Material Fracture SOP concrete wall constraints "
+                "interior detail workflow"
+            ),
+            {"user"},
+            current_houdini_version="21.0.000",
+            offset=0,
+            limit=10,
+        )
+        self.assertEqual(
+            {
+                "user:user_document:rbd-bullet-solver.md",
+                "user:user_document:rbd-material-fracture.md",
+            },
+            {
+                match["metadata"]["source_key"]
+                for match in relaxed["matches"]
+            },
+        )
+
+    def test_installed_help_archives_are_indexed_without_noise_or_reopening(
+        self,
+    ) -> None:
+        archive_path = self.help_root / "nodes.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr(
+                "sop/archive_needle.txt",
+                "ArchiveNeedle creates a tested procedural shape.",
+            )
+            archive.writestr(
+                "sop/archive_second.txt",
+                "ArchiveNeedle second installed help page.",
+            )
+            archive.writestr(
+                "examples/archive_noise.txt",
+                "ArchiveExampleNoise should not be indexed.",
+            )
+            archive.writestr(
+                "licenses/archive_noise.txt",
+                "ArchiveLicenseNoise should not be indexed.",
+            )
+
+        with mock.patch.object(
+            knowledge_index.zipfile,
+            "ZipFile",
+            wraps=zipfile.ZipFile,
+        ) as zip_file:
+            response = self._dispatch(
+                {
+                    "query": "ArchiveNeedle",
+                    "sources": ["houdini"],
+                    "limit": 10,
+                    "refresh": True,
+                }
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(2, response["result"]["total"])
+        self.assertEqual(
+            {"houdini_help_archive"},
+            {item["source"] for item in response["result"]["matches"]},
+        )
+        self.assertEqual(
+            {
+                "nodes/sop/archive_needle.txt",
+                "nodes/sop/archive_second.txt",
+            },
+            {item["title"] for item in response["result"]["matches"]},
+        )
+        self.assertEqual(2, zip_file.call_count)
+        self.assertEqual(
+            0,
+            self._dispatch(
+                {
+                    "query": "ArchiveExampleNoise",
+                    "sources": ["houdini"],
+                    "refresh": True,
+                }
+            )["result"]["total"],
+        )
+        self.assertEqual(
+            0,
+            self._dispatch(
+                {
+                    "query": "ArchiveLicenseNoise",
+                    "sources": ["houdini"],
+                    "refresh": True,
+                }
+            )["result"]["total"],
+        )
+
+    def test_bad_installed_help_archive_is_a_warning(self) -> None:
+        (self.help_root / "nodes.zip").write_bytes(b"not-a-zip")
+
+        response = self._dispatch(
+            {
+                "query": "Needle",
+                "sources": ["houdini"],
+                "refresh": True,
+            }
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(
+            any("nodes.zip" in warning for warning in response["warnings"])
+        )
+
+    def test_bundled_official_cards_use_manifest_metadata_and_stay_original(
+        self,
+    ) -> None:
+        pack_root = self.project_root / "knowledge" / "sidefx-official"
+        self._write(
+            pack_root / "cards" / "workflow.md",
+            "OriginalWorkflowCard explains a deterministic Houdini workflow.",
+        )
+        self._write(
+            pack_root / "cards" / "duplicate.md",
+            "Duplicate identifier must not create another document.",
+        )
+        self._write(
+            pack_root / "manifest.json",
+            """{
+                "schema_version": 1,
+                "pack_id": "test-pack",
+                "sources": [
+                    {
+                        "id": "workflow",
+                        "title": "Original SideFX-linked workflow card",
+                        "path": "cards/workflow.md",
+                        "url": "https://www.sidefx.com/docs/houdini/model/",
+                        "houdini_version": "21",
+                        "topic": "modeling"
+                    },
+                    {
+                        "id": "workflow",
+                        "title": "Duplicate ID",
+                        "path": "cards/duplicate.md",
+                        "url": "https://www.sidefx.com/docs/houdini/vex/",
+                        "houdini_version": "21",
+                        "topic": "vex"
+                    },
+                    {
+                        "id": "outside",
+                        "title": "Escaped path",
+                        "path": "../../outside.md",
+                        "url": "https://www.sidefx.com/docs/houdini/",
+                        "houdini_version": "21",
+                        "topic": "invalid"
+                    }
+                ]
+            }""",
+        )
+
+        response = self._dispatch(
+            {
+                "query": "OriginalWorkflowCard",
+                "sources": ["project"],
+                "refresh": True,
+            }
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(1, response["result"]["total"])
+        match = response["result"]["matches"][0]
+        self.assertEqual("bundled_knowledge_card", match["source"])
+        self.assertEqual(
+            "Original SideFX-linked workflow card",
+            match["title"],
+        )
+        self.assertEqual(
+            "https://www.sidefx.com/docs/houdini/model/",
+            match["metadata"]["url"],
+        )
+        self.assertEqual("21", match["metadata"]["houdini_version"])
+        self.assertEqual("Apache-2.0", match["metadata"]["license"])
+        self.assertEqual("unverified", match["metadata"]["verification"])
+
+    def test_release_knowledge_manifest_matches_archive_policy(self) -> None:
+        manifest_path = (
+            REPOSITORY_ROOT
+            / "knowledge"
+            / "sidefx-official"
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(manifest["upstream_content_redistributed"])
+        self.assertEqual(
+            knowledge_index.HOUDINI_HELP_ARCHIVES,
+            frozenset(manifest["installed_help_archives"]),
+        )
+        identifiers: set[str] = set()
+        for entry in manifest["sources"]:
+            self.assertNotIn(entry["id"], identifiers)
+            identifiers.add(entry["id"])
+            self.assertTrue(entry["url"].startswith("https://www.sidefx.com/"))
+            self.assertTrue(
+                (manifest_path.parent / entry["path"]).is_file()
+            )
 
     def test_pagination_and_structured_contract_are_preserved(self) -> None:
         response = self._dispatch(

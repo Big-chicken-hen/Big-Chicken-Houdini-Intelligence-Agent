@@ -626,19 +626,19 @@ class BridgeSession:
         path = self._focus_state_path
         if path is None:
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        payload = {
-            "version": 1,
-            "active_thread_id": self._thread_id,
-            "enabled_thread_ids": sorted(self._focus_enabled_threads),
-            "goal_bindings": {
-                thread_id: self._focus_goal_bindings[thread_id]
-                for thread_id in sorted(self._focus_enabled_threads)
-                if thread_id in self._focus_goal_bindings
-            },
-        }
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            payload = {
+                "version": 1,
+                "active_thread_id": self._thread_id,
+                "enabled_thread_ids": sorted(self._focus_enabled_threads),
+                "goal_bindings": {
+                    thread_id: self._focus_goal_bindings[thread_id]
+                    for thread_id in sorted(self._focus_enabled_threads)
+                    if thread_id in self._focus_goal_bindings
+                },
+            }
             temporary.write_text(
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
                 encoding="utf-8",
@@ -917,6 +917,59 @@ class BridgeSession:
             "thread/name/set", {"threadId": thread_id, "name": name}
         )
         return {"thread_id": thread_id, "name": name, "result": result}
+
+    def delete_thread(self, thread_id: str) -> dict[str, Any]:
+        """Permanently delete one explicitly selected Codex Thread."""
+
+        thread_id = self._validated_identifier(thread_id, "thread_id")
+        with self._lock:
+            recovery_worker = self._stop_recovery_thread
+            if self._turn_status == "stopRecovering" or (
+                recovery_worker is not None and recovery_worker.is_alive()
+            ):
+                raise BridgeError(
+                    "STOP_RECOVERY_IN_PROGRESS",
+                    "The selected Thread is still recovering after Stop",
+                    http_status=409,
+                    details={
+                        "thread_id": self._thread_id,
+                        "turn_status": self._turn_status,
+                    },
+                )
+            self._require_no_active_turn_locked()
+
+        result = self._client.request(
+            "thread/delete",
+            {"threadId": thread_id},
+        )
+
+        cleanup_warning: dict[str, Any] | None = None
+        with self._lock:
+            was_selected = self._thread_id == thread_id
+            self._focus_enabled_threads.discard(thread_id)
+            self._focus_goal_bindings.pop(thread_id, None)
+            if was_selected:
+                self._thread_id = None
+                self._reset_turn_locked()
+            try:
+                self._write_focus_state_locked()
+            except BridgeError as exc:
+                cleanup_warning = exc.to_dict()["structured_error"]
+        event_fields: dict[str, Any] = {
+            "thread_id": thread_id,
+            "was_selected": was_selected,
+        }
+        response: dict[str, Any] = {
+            "thread_id": thread_id,
+            "deleted": True,
+            "was_selected": was_selected,
+            "result": result,
+        }
+        if cleanup_warning is not None:
+            event_fields["cleanup_warning"] = cleanup_warning
+            response["cleanup_warning"] = cleanup_warning
+        self._events.publish("thread_deleted", **event_fields)
+        return response
 
     def get_goal(self, expected_thread_id: str) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)
@@ -1689,6 +1742,28 @@ class BridgeSession:
                     "Codex app-server stop recovery timed out",
                     http_status=504,
                 )
+            with self._turn_condition:
+                recovery_still_current = (
+                    not self._closed
+                    and recovery_generation == self._turn_generation
+                    and self._thread_id == thread_id
+                    and self._turn_status == "stopRecovering"
+                )
+                if not recovery_still_current and not self._closed:
+                    self._initialize_result = initialize_result
+                    self._connected = True
+                    self._turn_condition.notify_all()
+                    cancelled_snapshot = self.snapshot()
+                else:
+                    cancelled_snapshot = None
+            if not recovery_still_current:
+                if cancelled_snapshot is not None:
+                    self._events.publish(
+                        "session_state",
+                        session=cancelled_snapshot,
+                    )
+                self._clear_stop_recovery_worker()
+                return
             resumed = request_with_timeout(
                 "thread/resume",
                 {
@@ -2507,6 +2582,18 @@ class BridgeSession:
                                 self._disable_focus_locked(thread_id)
                             except BridgeError:
                                 pass
+                elif method == "thread/deleted":
+                    thread_id = params.get("threadId")
+                    if isinstance(thread_id, str):
+                        self._focus_enabled_threads.discard(thread_id)
+                        self._focus_goal_bindings.pop(thread_id, None)
+                        if self._thread_id == thread_id:
+                            self._thread_id = None
+                            self._reset_turn_locked()
+                        try:
+                            self._write_focus_state_locked()
+                        except BridgeError:
+                            pass
         elif event_type == "process_exit":
             with self._turn_condition:
                 self._connected = False

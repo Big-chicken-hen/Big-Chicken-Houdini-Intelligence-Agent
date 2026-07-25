@@ -168,6 +168,10 @@ class CodexProtocolContractTests(unittest.TestCase):
                 "ThreadSetNameParams",
                 "v2/ThreadSetNameResponse.json",
             ),
+            "thread/delete": (
+                "ThreadDeleteParams",
+                "v2/ThreadDeleteResponse.json",
+            ),
         }
         inventoried_requests = {
             entry["method"]: entry
@@ -192,7 +196,6 @@ class CodexProtocolContractTests(unittest.TestCase):
                     inventoried_requests[method]["declared_experimental"]
                 )
 
-        notification = "thread/name/updated"
         notification_entries = {
             entry["method"]: entry
             for entry in self.allowlist["allowed"]["server_notifications"]
@@ -201,21 +204,29 @@ class CodexProtocolContractTests(unittest.TestCase):
             entry["method"]: entry
             for entry in self.inventory["aggregates"]["server_notifications"]["methods"]
         }
-        self.assertEqual(
-            "ThreadNameUpdatedNotification",
-            notification_entries[notification]["params_definition"],
-        )
-        self.assertEqual(
-            "thread-history",
-            notification_entries[notification]["purpose"],
-        )
-        self.assertEqual(
-            "ThreadNameUpdatedNotification",
-            inventoried_notifications[notification]["params_definition"],
-        )
-        self.assertFalse(
-            inventoried_notifications[notification]["declared_experimental"]
-        )
+        expected_notifications = {
+            "thread/name/updated": "ThreadNameUpdatedNotification",
+            "thread/deleted": "ThreadDeletedNotification",
+        }
+        for notification, params_definition in expected_notifications.items():
+            with self.subTest(notification=notification):
+                self.assertEqual(
+                    params_definition,
+                    notification_entries[notification]["params_definition"],
+                )
+                self.assertEqual(
+                    "thread-history",
+                    notification_entries[notification]["purpose"],
+                )
+                self.assertEqual(
+                    params_definition,
+                    inventoried_notifications[notification]["params_definition"],
+                )
+                self.assertFalse(
+                    inventoried_notifications[notification][
+                        "declared_experimental"
+                    ]
+                )
 
         for method in expected_requests:
             for category in (

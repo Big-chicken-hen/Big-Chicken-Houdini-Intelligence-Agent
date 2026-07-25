@@ -3,6 +3,8 @@ param(
     [string]$BridgePython = '',
     [string]$HoudiniExe = '',
     [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2',
+    [AllowEmptyString()][string]$EmbeddingProfile = '',
+    [ValidateSet('auto', 'cuda', 'cpu')][string]$EmbeddingDevice = 'auto',
     [AllowEmptyString()][string]$RecoverySessionId = '',
     [AllowEmptyString()][string]$RecoveryCheckpoint = '',
     [AllowEmptyString()][string]$RecoveryDecision = ''
@@ -214,7 +216,8 @@ function Test-RecoveryHipWithHython {
         [Parameter(Mandatory = $true)][string]$HipPath,
         [Parameter(Mandatory = $true)][string]$SessionRoot,
         [Parameter(Mandatory = $true)][string]$SessionTemp,
-        [Parameter(Mandatory = $true)][string]$HoudiniPreferences
+        [Parameter(Mandatory = $true)][string]$HoudiniPreferences,
+        [Parameter(Mandatory = $true)][string[]]$EmbeddingEnvironmentNames
     )
 
     try {
@@ -247,6 +250,11 @@ function Test-RecoveryHipWithHython {
         $probeInfo.WorkingDirectory = $recoveryDirectory
         $probeInfo.UseShellExecute = $false
         $probeInfo.CreateNoWindow = $true
+        $removeEmbeddingEnvironment = @{
+            StartInfo = $probeInfo
+            Names = $EmbeddingEnvironmentNames
+        }
+        Remove-ChildEnvironment @removeEmbeddingEnvironment
         Set-ChildEnvironment -StartInfo $probeInfo -Values @{
             'TEMP' = $SessionTemp
             'TMP' = $SessionTemp
@@ -554,6 +562,438 @@ function Remove-ChildEnvironment {
     }
 }
 
+function Get-EmbeddingLauncherContract {
+    param(
+        [Parameter(Mandatory = $true)][string]$Python,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $contractPath = Assert-OrdinaryProjectPath `
+        -Path (Join-Path $Root 'src\hia_core\embedding_contract.py') `
+        -Root $Root
+    $probeSource = @'
+import json
+import dataclasses
+import runpy
+import sys
+
+module = runpy.run_path(sys.argv[1])
+contract = module["launcher_contract"]()
+layout = module["runtime_layout"](sys.argv[2])
+registry = {
+    key: dataclasses.asdict(value)
+    for key, value in module["PROFILE_REGISTRY"].items()
+}
+print(
+    json.dumps(
+        {"contract": contract, "layout": layout, "registry": registry},
+        separators=(",", ":"),
+    )
+)
+'@
+    $arguments = @('-B', '-c', $probeSource, $contractPath, $Root)
+    $probeInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $probeInfo.FileName = $Python
+    $probeInfo.Arguments = (@(
+        foreach ($argument in $arguments) {
+            ConvertTo-HiaProcessArgument -Value ([string]$argument)
+        }
+    ) -join ' ')
+    $probeInfo.WorkingDirectory = $Root
+    $probeInfo.UseShellExecute = $false
+    $probeInfo.CreateNoWindow = $true
+    $probeInfo.RedirectStandardOutput = $true
+    $probeInfo.RedirectStandardError = $true
+    if ($null -ne $probeInfo.Environment) {
+        $probeInfo.Environment.Clear()
+    } else {
+        $probeInfo.EnvironmentVariables.Clear()
+    }
+    Set-ChildEnvironment -StartInfo $probeInfo -Values @{
+        'SystemRoot' = [string]$env:SystemRoot
+        'WINDIR' = [string]$env:WINDIR
+        'PYTHONDONTWRITEBYTECODE' = '1'
+        'PYTHONNOUSERSITE' = '1'
+        'PYTHONPATH' = ''
+        'HIA_PROJECT_ROOT' = $Root
+    }
+
+    $probe = [System.Diagnostics.Process]::new()
+    $probe.StartInfo = $probeInfo
+    try {
+        if (-not $probe.Start()) {
+            throw 'Embedding contract probe did not start.'
+        }
+        $stdoutTask = $probe.StandardOutput.ReadToEndAsync()
+        $stderrTask = $probe.StandardError.ReadToEndAsync()
+        if (-not $probe.WaitForExit(15000)) {
+            $probe.Kill()
+            [void]$probe.WaitForExit(5000)
+            throw 'Embedding contract probe timed out.'
+        }
+        $stdout = $stdoutTask.Result
+        [void]$stderrTask.Result
+        if ($probe.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
+            throw 'Embedding contract probe failed.'
+        }
+        if ([System.Text.Encoding]::UTF8.GetByteCount($stdout) -gt 1048576) {
+            throw 'Embedding contract probe returned too much data.'
+        }
+        try {
+            $payload = $stdout | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw 'Embedding contract probe returned invalid JSON.'
+        }
+    } finally {
+        $probe.Dispose()
+    }
+    if (
+        $null -eq $payload -or
+        $null -eq $payload.contract -or
+        $null -eq $payload.layout -or
+        $null -eq $payload.registry -or
+        [int]$payload.contract.contract_version -ne 1
+    ) {
+        throw 'Embedding launcher contract v1 is unavailable.'
+    }
+    $serializedProfiles = ConvertTo-Json `
+        -InputObject $payload.contract.profiles `
+        -Depth 8 `
+        -Compress
+    $serializedRegistry = ConvertTo-Json `
+        -InputObject $payload.registry `
+        -Depth 8 `
+        -Compress
+    if (-not [System.StringComparer]::Ordinal.Equals(
+        $serializedProfiles,
+        $serializedRegistry
+    )) {
+        throw 'Embedding profile registry disagrees with launcher_contract.'
+    }
+    return $payload
+}
+
+function Test-EmbeddingEnvironmentName {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return (
+        $Name -match '^[A-Z][A-Z0-9_]+$' -and
+        $Name.Length -le 128
+    )
+}
+
+function Get-EmbeddingModelInstallation {
+    param(
+        [Parameter(Mandatory = $true)]$Contract,
+        [Parameter(Mandatory = $true)]$Layout,
+        [Parameter(Mandatory = $true)]$Profile,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $missing = [pscustomobject]@{
+        installed = $false
+        model_directory = $null
+        revision = 'local'
+    }
+    $relativeDirectory = [string]$Profile.model_directory
+    if (
+        [string]::IsNullOrWhiteSpace($relativeDirectory) -or
+        [System.IO.Path]::IsPathRooted($relativeDirectory)
+    ) {
+        throw 'Embedding profile model_directory must be project-relative.'
+    }
+    try {
+        $safeModelDirectory = Assert-OrdinaryProjectPath `
+            -Path (Join-Path $Root $relativeDirectory) `
+            -Root $Root `
+            -AllowMissingLeaf
+    } catch {
+        return $missing
+    }
+    $layoutPaths = @(
+        foreach ($layoutProperty in @($Layout.PSObject.Properties)) {
+            $layoutValue = [string]$layoutProperty.Value
+            if (-not [string]::IsNullOrWhiteSpace($layoutValue)) {
+                [System.IO.Path]::GetFullPath($layoutValue)
+            }
+        }
+    )
+    if (-not @($layoutPaths | Where-Object {
+        [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            $_,
+            $safeModelDirectory
+        )
+    })) {
+        throw 'Embedding profile model_directory disagrees with runtime_layout.'
+    }
+    if (-not (Test-Path -LiteralPath $safeModelDirectory -PathType Container)) {
+        return $missing
+    }
+    try {
+        $safeModelDirectory = Assert-OrdinaryProjectPath `
+            -Path $safeModelDirectory `
+            -Root $Root
+    } catch {
+        return $missing
+    }
+    $markerPath = Join-Path $safeModelDirectory '.hia-embedding-model.json'
+    $configPath = Join-Path $safeModelDirectory 'config.json'
+    foreach ($requiredFile in @($markerPath, $configPath)) {
+        try {
+            Assert-OrdinaryProjectPath `
+                -Path $requiredFile `
+                -Root $Root | Out-Null
+        } catch {
+            return $missing
+        }
+        $item = Get-Item -LiteralPath $requiredFile -Force -ErrorAction SilentlyContinue
+        if (
+            $item -isnot [System.IO.FileInfo] -or
+            ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+        ) {
+            return $missing
+        }
+    }
+    $marker = Get-Item -LiteralPath $markerPath -Force
+    if ($marker.Length -gt 65536) {
+        return $missing
+    }
+    $ordinaryWeights = @(
+        Get-ChildItem `
+            -LiteralPath $safeModelDirectory `
+            -Filter '*.safetensors' `
+            -File `
+            -Force `
+            -ErrorAction SilentlyContinue |
+        Where-Object {
+            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+        }
+    )
+    if ($ordinaryWeights.Count -lt 1) {
+        return $missing
+    }
+    try {
+        $metadata = [System.IO.File]::ReadAllText($markerPath) |
+            ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $missing
+    }
+    $actualProperties = @($metadata.PSObject.Properties.Name)
+    $requiredProperties = @(
+        'contract_version',
+        'profile_id',
+        'model_id',
+        'revision'
+    )
+    if (
+        $actualProperties.Count -ne $requiredProperties.Count -or
+        @($actualProperties | Where-Object { $_ -notin $requiredProperties }).Count -ne 0
+    ) {
+        return $missing
+    }
+    foreach ($propertyName in $requiredProperties) {
+        if ($null -eq $metadata.PSObject.Properties[$propertyName]) {
+            return $missing
+        }
+    }
+    if (
+        $metadata.contract_version -isnot [int] -and
+        $metadata.contract_version -isnot [long]
+    ) {
+        return $missing
+    }
+    try {
+        $markerContractVersion = [int]$metadata.contract_version
+    } catch {
+        return $missing
+    }
+    if (
+        $markerContractVersion -ne [int]$Contract.contract_version -or
+        -not [System.StringComparer]::Ordinal.Equals(
+            [string]$metadata.profile_id,
+            [string]$Profile.profile_id
+        ) -or
+        -not [System.StringComparer]::Ordinal.Equals(
+            [string]$metadata.model_id,
+            [string]$Profile.model_id
+        )
+    ) {
+        return $missing
+    }
+    $revision = ([string]$metadata.revision).Trim()
+    if (
+        $revision -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$' -or
+        $revision.Contains('..') -or
+        $revision.Contains('//') -or
+        $revision.EndsWith('/')
+    ) {
+        return $missing
+    }
+    return [pscustomobject]@{
+        installed = $true
+        model_directory = $safeModelDirectory
+        revision = $revision
+    }
+}
+
+function New-EmbeddingChildEnvironment {
+    param(
+        [Parameter(Mandatory = $true)]$Payload,
+        [AllowEmptyString()][string]$RequestedProfile = '',
+        [ValidateSet('auto', 'cuda', 'cpu')][string]$RequestedDevice = 'auto',
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $contract = $Payload.contract
+    $profileProperties = @($contract.profiles.PSObject.Properties)
+    if ($profileProperties.Count -ne 2) {
+        throw 'Embedding launcher contract must expose exactly two profiles.'
+    }
+    $profileIdSet = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($profileProperty in $profileProperties) {
+        $profile = $profileProperty.Value
+        if (
+            -not $profileIdSet.Add([string]$profileProperty.Name) -or
+            -not [System.StringComparer]::Ordinal.Equals(
+                [string]$profileProperty.Name,
+                [string]$profile.profile_id
+            )
+        ) {
+            throw 'Embedding launcher contract contains an invalid profile identity.'
+        }
+    }
+    $selection = if ($RequestedProfile -eq '') {
+        [string]$contract.default_profile
+    } else {
+        $RequestedProfile
+    }
+    if (-not $profileIdSet.Contains($selection)) {
+        throw [System.ArgumentException]::new(
+            'EmbeddingProfile must exactly match one of the two contract profiles.'
+        )
+    }
+    $selectedProfile = $contract.profiles.PSObject.Properties[$selection].Value
+    $dimension = 0
+    try {
+        $dimension = [int]$selectedProfile.default_dimension
+    } catch {
+        throw 'The selected embedding profile default dimension is invalid.'
+    }
+    if (
+        $dimension -lt [int]$selectedProfile.min_mrl_dimension -or
+        $dimension -gt [int]$selectedProfile.max_dimension
+    ) {
+        throw 'The selected embedding profile default dimension is outside its contract range.'
+    }
+
+    $contractEnvironmentNameSet = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($environmentProperty in @($contract.environment.PSObject.Properties)) {
+        $name = [string]$environmentProperty.Value
+        if (
+            -not (Test-EmbeddingEnvironmentName -Name $name) -or
+            -not $contractEnvironmentNameSet.Add($name)
+        ) {
+            throw 'Embedding launcher contract contains an invalid environment name.'
+        }
+    }
+    $sharedEnvironmentFields = @('profile', 'python', 'dimension', 'device')
+    $environmentNames = @{}
+    foreach ($field in $sharedEnvironmentFields) {
+        $property = $contract.environment.PSObject.Properties[$field]
+        if ($null -eq $property) {
+            throw "Embedding launcher contract environment field is missing: $field"
+        }
+        $name = [string]$property.Value
+        $environmentNames[$field] = $name
+    }
+    $values = @{}
+    $values[$environmentNames['profile']] = $selection
+    $values[$environmentNames['dimension']] = [string]$dimension
+    $values[$environmentNames['device']] = $RequestedDevice
+
+    $workerPythonValue = [string]$Payload.layout.worker_python
+    $workerPythonRelative = [string]$contract.worker.python
+    $normalizedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if (
+        [string]::IsNullOrWhiteSpace($workerPythonValue) -or
+        [string]::IsNullOrWhiteSpace($workerPythonRelative) -or
+        [System.IO.Path]::IsPathRooted($workerPythonRelative)
+    ) {
+        throw 'Embedding launcher contract worker_python is invalid.'
+    }
+    $workerPythonCandidate = [System.IO.Path]::GetFullPath($workerPythonValue)
+    $workerPythonFromContract = [System.IO.Path]::GetFullPath(
+        (Join-Path $Root $workerPythonRelative)
+    )
+    if (-not $workerPythonCandidate.StartsWith(
+        $normalizedRoot + '\',
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -or -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+        $workerPythonCandidate,
+        $workerPythonFromContract
+    )) {
+        throw 'Embedding worker Python disagrees with runtime_layout.'
+    }
+    $workerPython = $null
+    try {
+        $workerPython = Assert-OrdinaryProjectPath `
+            -Path $workerPythonCandidate `
+            -Root $Root `
+            -AllowMissingLeaf
+    } catch { }
+    if ($workerPython -and (Test-Path -LiteralPath $workerPython -PathType Leaf)) {
+        try {
+            $workerPython = Assert-OrdinaryProjectPath `
+                -Path $workerPython `
+                -Root $Root
+            $workerItem = Get-Item -LiteralPath $workerPython -Force
+            if (
+                $workerItem -is [System.IO.FileInfo] -and
+                ($workerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+            ) {
+                $values[$environmentNames['python']] = $workerPython
+            }
+        } catch { }
+    }
+
+    $profileEnvironmentNameSet = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($profileProperty in $profileProperties) {
+        $profile = $profileProperty.Value
+        $modelDirectoryEnvironment = [string]$profile.model_dir_environment
+        $modelRevisionEnvironment = [string]$profile.model_revision_environment
+        if (
+            -not (Test-EmbeddingEnvironmentName -Name $modelDirectoryEnvironment) -or
+            -not (Test-EmbeddingEnvironmentName -Name $modelRevisionEnvironment) -or
+            -not $profileEnvironmentNameSet.Add($modelDirectoryEnvironment) -or
+            -not $profileEnvironmentNameSet.Add($modelRevisionEnvironment)
+        ) {
+            throw 'Embedding launcher contract profile environment fields are invalid.'
+        }
+        [void]$contractEnvironmentNameSet.Add($modelDirectoryEnvironment)
+        [void]$contractEnvironmentNameSet.Add($modelRevisionEnvironment)
+        $installation = Get-EmbeddingModelInstallation `
+            -Contract $contract `
+            -Layout $Payload.layout `
+            -Profile $profile `
+            -Root $Root
+        if ($installation.installed) {
+            $values[$modelDirectoryEnvironment] = [string]$installation.model_directory
+            $values[$modelRevisionEnvironment] = [string]$installation.revision
+        }
+    }
+    return [pscustomobject]@{
+        requested_profile = $selection
+        values = $values
+        environment_names = @($contractEnvironmentNameSet | Sort-Object)
+    }
+}
+
 function New-CryptographicToken {
     $bytes = New-Object byte[] 32
     $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -680,6 +1120,17 @@ while ($null -ne $pythonParent) {
 }
 $normalizedPython = $resolvedPython
 $pythonDirectory = [System.IO.Path]::GetDirectoryName($normalizedPython)
+$embeddingContractPayload = Get-EmbeddingLauncherContract `
+    -Python $normalizedPython `
+    -Root $ResolvedRoot
+$embeddingSelection = New-EmbeddingChildEnvironment `
+    -Payload $embeddingContractPayload `
+    -RequestedProfile $EmbeddingProfile `
+    -RequestedDevice $EmbeddingDevice `
+    -Root $ResolvedRoot
+$EmbeddingProfile = [string]$embeddingSelection.requested_profile
+$embeddingEnvironment = $embeddingSelection.values
+$embeddingEnvironmentNames = [string[]]$embeddingSelection.environment_names
 
 Assert-OrdinaryProjectPath -Path $CodexExe -Root $ResolvedRoot | Out-Null
 Assert-OrdinaryProjectPath -Path $CodexHome -Root $ResolvedRoot | Out-Null
@@ -869,6 +1320,7 @@ if ($McpBackend -eq 'hia_v2') {
     }
     $houdiniBackendEnvironment += $bridgeBackendEnvironment
     $houdiniBackendEnvironment['HIA_MCP_V2_AUTOSTART'] = '1'
+    $houdiniBackendEnvironment += $embeddingEnvironment
 } else {
     $fxHoudiniRoot = Join-Path $ResolvedRoot '.runtime\fxhoudinimcp\1.3.0'
     $fxMcpPython = Join-Path $fxHoudiniRoot 'venv\Scripts\python.exe'
@@ -939,6 +1391,9 @@ $bridgeEnvironment = @{
 foreach ($entry in $bridgeBackendEnvironment.GetEnumerator()) {
     $bridgeEnvironment[$entry.Key] = $entry.Value
 }
+Remove-ChildEnvironment `
+    -StartInfo $bridgeInfo `
+    -Names $embeddingEnvironmentNames
 Remove-ChildEnvironment -StartInfo $bridgeInfo -Names $backendEnvironmentNames
 Set-ChildEnvironment -StartInfo $bridgeInfo -Values $bridgeEnvironment
 
@@ -1063,6 +1518,9 @@ try {
         if ($knownHipPath) {
             $houdiniInfo.Arguments = ConvertTo-HiaProcessArgument -Value $knownHipPath
         }
+        Remove-ChildEnvironment `
+            -StartInfo $houdiniInfo `
+            -Names $embeddingEnvironmentNames
         Remove-ChildEnvironment -StartInfo $houdiniInfo -Names $backendEnvironmentNames
         Set-ChildEnvironment -StartInfo $houdiniInfo -Values $houdiniEnvironment
         if ($null -ne $pendingRecovery) {
@@ -1253,7 +1711,8 @@ Only after the next meaningful stage succeeds may one hia_execute_hom batch set 
                     -HipPath $progressCopy.path `
                     -SessionRoot $sessionRoot `
                     -SessionTemp $sessionTemp `
-                    -HoudiniPreferences $houdiniPreferences
+                    -HoudiniPreferences $houdiniPreferences `
+                    -EmbeddingEnvironmentNames $embeddingEnvironmentNames
                 ) {
                     $selectedRecovery = $progressCopy
                     $selectedSourceKind = 'AI checkpoint'
@@ -1322,7 +1781,8 @@ Only after the next meaningful stage succeeds may one hia_execute_hom batch set 
                     -HipPath $copied.path `
                     -SessionRoot $sessionRoot `
                     -SessionTemp $sessionTemp `
-                    -HoudiniPreferences $houdiniPreferences
+                    -HoudiniPreferences $houdiniPreferences `
+                    -EmbeddingEnvironmentNames $embeddingEnvironmentNames
                 ) {
                     $selectedRecovery = $copied
                     $selectedSourceKind = [string]$candidate.kind

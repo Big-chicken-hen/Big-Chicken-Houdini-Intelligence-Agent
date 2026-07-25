@@ -1,8 +1,7 @@
-"""Deterministic project-local lexical knowledge index.
+"""Project-local SQLite knowledge index with an FTS5 reliability baseline.
 
-This module deliberately contains no model, embeddings, planner, semantic
-memory, service, or scheduler.  It turns explicitly allowed local sources into
-short text chunks and searches them with Python's sqlite3 FTS5 support.
+This module owns allowed-source ingestion and lexical search.  Optional vector
+encoding lives in a separate process; no model dependency is imported here.
 """
 
 from __future__ import annotations
@@ -13,16 +12,18 @@ import os
 import re
 import sqlite3
 import time
+import zipfile
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlsplit
 
 
 DATABASE_FILENAME = "knowledge.sqlite3"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 REFRESH_INTERVAL_SECONDS = 10 * 60.0
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 MAX_CHUNK_CHARS = 1200
@@ -42,6 +43,33 @@ HOUDINI_TEXT_SUFFIXES = PROJECT_TEXT_SUFFIXES
 USER_TEXT_SUFFIXES = frozenset({".md", ".txt", ".html", ".htm", ".srt", ".vtt"})
 USER_OPTIONAL_SUFFIXES = frozenset({".pdf"})
 SOURCE_GROUPS = frozenset({"houdini", "project", "user"})
+SEARCH_SOURCE_GROUPS = SOURCE_GROUPS | frozenset({"memory"})
+BUNDLED_KNOWLEDGE_MANIFEST = Path("knowledge/sidefx-official/manifest.json")
+HOUDINI_HELP_ARCHIVES = frozenset(
+    {
+        "anim.zip",
+        "basics.zip",
+        "fluid.zip",
+        "hom.zip",
+        "model.zip",
+        "network.zip",
+        "news.zip",
+        "nodes.zip",
+        "pyro.zip",
+        "render.zip",
+        "shade.zip",
+        "solaris.zip",
+        "tops.zip",
+        "vellum.zip",
+        "vex.zip",
+    }
+)
+HOUDINI_HELP_EXCLUDED_PREFIXES = (
+    "examples/",
+    "files/",
+    "licenses/",
+    "videos/",
+)
 
 
 class KnowledgeIndexError(RuntimeError):
@@ -66,6 +94,7 @@ class _Candidate:
     path: Path | None = None
     sidecar_path: Path | None = None
     inline_text: str | None = None
+    archive_member: str = ""
     stat_size: int = 0
     stat_mtime_ns: int = 0
 
@@ -272,17 +301,33 @@ class LocalKnowledgeIndex:
         current_houdini_version: str,
         offset: int,
         limit: int,
+        memory_scope: str = "",
+        include_superseded: bool = False,
     ) -> dict[str, Any]:
         groups = sorted(set(source_groups))
         if not groups:
             return {"matches": [], "total": 0, "tokenizer": self._tokenizer()}
-        invalid = set(groups).difference(SOURCE_GROUPS)
+        invalid = set(groups).difference(SEARCH_SOURCE_GROUPS)
         if invalid:
             raise KnowledgeIndexError(
                 f"Unsupported local knowledge sources: {sorted(invalid)!r}"
             )
 
         placeholders = ",".join("?" for _value in groups)
+        memory_filter = ""
+        memory_parameters: list[Any] = []
+        if "memory" in groups:
+            memory_filter = (
+                " AND (d.source_group <> 'memory' OR EXISTS ("
+                "SELECT 1 FROM project_memories pm "
+                "WHERE pm.document_id = d.id"
+            )
+            if not include_superseded:
+                memory_filter += " AND pm.status = 'active'"
+            if memory_scope:
+                memory_filter += " AND pm.scope = ?"
+                memory_parameters.append(memory_scope)
+            memory_filter += "))"
         tokenizer = self._tokenizer()
         use_fts = len(query) >= 3 and (
             tokenizer == "trigram" or _is_ascii_word_query(query)
@@ -292,11 +337,17 @@ class LocalKnowledgeIndex:
             connection.row_factory = sqlite3.Row
             if use_fts:
                 expression = _fts_expression(query, tokenizer)
+                relaxed_expression = _fts_relaxed_expression(query, tokenizer)
                 where = (
                     "knowledge_fts MATCH ? "
                     f"AND d.source_group IN ({placeholders})"
+                    f"{memory_filter}"
                 )
-                parameters: list[Any] = [expression, *groups]
+                parameters: list[Any] = [
+                    expression,
+                    *groups,
+                    *memory_parameters,
+                ]
                 count_sql = f"""
                     SELECT COUNT(DISTINCT d.id)
                     FROM knowledge_fts
@@ -305,7 +356,8 @@ class LocalKnowledgeIndex:
                     WHERE {where}
                 """
                 select_sql = f"""
-                    SELECT d.*, c.ordinal, c.body,
+                    SELECT d.*, c.id AS chunk_id, c.ordinal, c.body,
+                           c.content_hash AS chunk_hash,
                            MIN(knowledge_fts.rank) AS lexical_score
                     FROM knowledge_fts
                     JOIN chunks c ON c.id = knowledge_fts.rowid
@@ -326,6 +378,18 @@ class LocalKnowledgeIndex:
                 total = int(
                     connection.execute(count_sql, parameters).fetchone()[0]
                 )
+                if (
+                    total == 0
+                    and relaxed_expression
+                    and relaxed_expression != expression
+                ):
+                    parameters[0] = relaxed_expression
+                    total = int(
+                        connection.execute(
+                            count_sql,
+                            parameters,
+                        ).fetchone()[0]
+                    )
                 rows = connection.execute(
                     select_sql,
                     [*parameters, version, limit, offset],
@@ -337,8 +401,14 @@ class LocalKnowledgeIndex:
                     "(d.title LIKE ? ESCAPE '\\' "
                     "OR c.body LIKE ? ESCAPE '\\') "
                     f"AND d.source_group IN ({placeholders})"
+                    f"{memory_filter}"
                 )
-                parameters = [pattern, pattern, *groups]
+                parameters = [
+                    pattern,
+                    pattern,
+                    *groups,
+                    *memory_parameters,
+                ]
                 count_sql = f"""
                     SELECT COUNT(DISTINCT d.id)
                     FROM chunks c
@@ -346,7 +416,8 @@ class LocalKnowledgeIndex:
                     WHERE {where}
                 """
                 select_sql = f"""
-                    SELECT d.*, c.ordinal, c.body,
+                    SELECT d.*, c.id AS chunk_id, c.ordinal, c.body,
+                           c.content_hash AS chunk_hash,
                            MIN(
                                CASE WHEN d.title LIKE ? ESCAPE '\\'
                                     THEN -2.0 ELSE -1.0 END
@@ -397,6 +468,11 @@ class LocalKnowledgeIndex:
                     "verification": row["verification"],
                     "evidence": row["evidence"],
                     "sha256": row["sha256"],
+                    "document_id": int(row["id"]),
+                    "chunk_id": int(row["chunk_id"]),
+                    "source_key": row["source_key"],
+                    "collection": row["collection"],
+                    "content_hash": row["chunk_hash"],
                     "chunk_ordinal": int(row["ordinal"]),
                     "lexical_score": float(row["lexical_score"]),
                 }
@@ -459,8 +535,64 @@ class LocalKnowledgeIndex:
                         REFERENCES documents(id) ON DELETE CASCADE,
                     ordinal INTEGER NOT NULL,
                     body TEXT NOT NULL,
+                    content_hash TEXT NOT NULL DEFAULT '',
                     UNIQUE(document_id, ordinal)
                 );
+                """
+            )
+            chunk_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(chunks)")
+            }
+            if "content_hash" not in chunk_columns:
+                connection.execute(
+                    "ALTER TABLE chunks ADD COLUMN "
+                    "content_hash TEXT NOT NULL DEFAULT ''"
+                )
+            for chunk_id, body in connection.execute(
+                "SELECT id, body FROM chunks WHERE content_hash = ''"
+            ).fetchall():
+                connection.execute(
+                    "UPDATE chunks SET content_hash = ? WHERE id = ?",
+                    (
+                        hashlib.sha256(str(body).encode("utf-8")).hexdigest(),
+                        int(chunk_id),
+                    ),
+                )
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS chunk_vectors (
+                    chunk_id INTEGER NOT NULL
+                        REFERENCES chunks(id) ON DELETE CASCADE,
+                    model_id TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    dim INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    normalized INTEGER NOT NULL,
+                    vector_blob BLOB NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    PRIMARY KEY(chunk_id, model_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunk_vectors_model
+                    ON chunk_vectors(model_id, dim);
+                CREATE TABLE IF NOT EXISTS project_memories (
+                    id TEXT PRIMARY KEY,
+                    document_id INTEGER UNIQUE
+                        REFERENCES documents(id) ON DELETE SET NULL,
+                    memory_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    superseded_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source_thread_id TEXT NOT NULL,
+                    source_turn_id TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_project_memories_scope_status
+                    ON project_memories(scope, status);
                 """
             )
             existing_fts = connection.execute(
@@ -602,26 +734,47 @@ class LocalKnowledgeIndex:
                 resolved_help_root = help_root
             if resolved_help_root.is_dir():
                 for path in _walk_files(resolved_help_root):
-                    if path.suffix.casefold() not in HOUDINI_TEXT_SUFFIXES:
+                    relative = path.relative_to(resolved_help_root).as_posix()
+                    folded_relative = relative.casefold()
+                    if any(
+                        folded_relative.startswith(prefix)
+                        for prefix in HOUDINI_HELP_EXCLUDED_PREFIXES
+                    ):
                         continue
-                    candidate = self._path_candidate(
-                        collection=collection,
-                        source_group="houdini",
-                        source="houdini_help",
-                        root=resolved_help_root,
-                        path=path,
-                        title_prefix="",
-                        url_prefix="houdini-help://",
-                        author="SideFX",
-                        houdini_version=current_version,
-                        license_name="SideFX Houdini documentation terms",
-                        evidence=(
-                            "Installed Houdini help; unverified against live "
-                            "scene behavior"
-                        ),
-                    )
-                    if candidate is not None:
-                        candidates.append(candidate)
+                    suffix = path.suffix.casefold()
+                    if suffix in HOUDINI_TEXT_SUFFIXES:
+                        candidate = self._path_candidate(
+                            collection=collection,
+                            source_group="houdini",
+                            source="houdini_help",
+                            root=resolved_help_root,
+                            path=path,
+                            title_prefix="",
+                            url_prefix="houdini-help://",
+                            author="SideFX",
+                            houdini_version=current_version,
+                            license_name="SideFX Houdini documentation terms",
+                            evidence=(
+                                "Installed Houdini help; unverified against live "
+                                "scene behavior"
+                            ),
+                        )
+                        if candidate is not None:
+                            candidates.append(candidate)
+                    elif (
+                        suffix == ".zip"
+                        and path.name.casefold() in HOUDINI_HELP_ARCHIVES
+                    ):
+                        archive_candidates, archive_warnings = (
+                            self._archive_candidates(
+                                collection=collection,
+                                root=resolved_help_root,
+                                archive_path=path,
+                                houdini_version=current_version,
+                            )
+                        )
+                        candidates.extend(archive_candidates)
+                        warnings.extend(archive_warnings)
             else:
                 warnings.append(
                     "Houdini help root was unavailable; catalog indexing "
@@ -680,6 +833,7 @@ class LocalKnowledgeIndex:
                         if candidate is not None:
                             candidates.append(candidate)
 
+        candidates.extend(self._collect_bundled_knowledge_candidates())
         docs_root = self.project_root / "docs"
         for name in PROJECT_HELP_DOCUMENTS:
             path = docs_root / name
@@ -704,6 +858,153 @@ class LocalKnowledgeIndex:
             if candidate is not None:
                 candidates.append(candidate)
         return candidates
+
+    def _collect_bundled_knowledge_candidates(self) -> list[_Candidate]:
+        manifest_path = self.project_root / BUNDLED_KNOWLEDGE_MANIFEST
+        if not manifest_path.is_file():
+            return []
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return []
+        entries = manifest.get("sources") if isinstance(manifest, Mapping) else None
+        if not isinstance(entries, list):
+            return []
+
+        pack_root = manifest_path.parent
+        candidates: list[_Candidate] = []
+        seen_identifiers: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            relative_path = str(entry.get("path") or "")
+            identifier = str(entry.get("id") or "")
+            title = str(entry.get("title") or "")
+            upstream_url = str(entry.get("url") or "")
+            if not relative_path or not identifier or not title or not upstream_url:
+                continue
+            if identifier in seen_identifiers:
+                continue
+            parsed_url = urlsplit(upstream_url)
+            if (
+                parsed_url.scheme.casefold() != "https"
+                or (parsed_url.hostname or "").casefold()
+                not in {"sidefx.com", "www.sidefx.com"}
+            ):
+                continue
+            seen_identifiers.add(identifier)
+            path = pack_root / relative_path
+            candidate = self._path_candidate(
+                collection="project",
+                source_group="project",
+                source="bundled_knowledge_card",
+                root=pack_root,
+                path=path,
+                title_prefix="",
+                url_prefix="project://knowledge/sidefx-official/",
+                author="Big-Chicken contributors",
+                houdini_version=str(entry.get("houdini_version") or "any"),
+                license_name="Apache-2.0",
+                evidence=(
+                    "Original Big-Chicken workflow summary linked to an official "
+                    "SideFX source; verify version-sensitive behavior in the "
+                    "active Houdini session"
+                ),
+            )
+            if candidate is None:
+                continue
+            candidates.append(
+                replace(
+                    candidate,
+                    source_key=f"project:bundled_knowledge_card:{identifier}",
+                    title=title,
+                    url=upstream_url,
+                    attributes={
+                        "knowledge_pack": str(
+                            manifest.get("pack_id")
+                            or "sidefx-official-workflows"
+                        ),
+                        "topic": str(entry.get("topic") or ""),
+                        "upstream_author": "SideFX",
+                        "upstream_url": upstream_url,
+                    },
+                )
+            )
+        return candidates
+
+    @staticmethod
+    def _archive_candidates(
+        *,
+        collection: str,
+        root: Path,
+        archive_path: Path,
+        houdini_version: str,
+    ) -> tuple[list[_Candidate], list[str]]:
+        warnings: list[str] = []
+        candidates: list[_Candidate] = []
+        try:
+            resolved_root = root.resolve()
+            resolved_archive = archive_path.resolve()
+            archive_relative = resolved_archive.relative_to(
+                resolved_root
+            ).as_posix()
+            archive_stat = resolved_archive.stat()
+            with zipfile.ZipFile(resolved_archive) as archive:
+                for info in sorted(
+                    archive.infolist(),
+                    key=lambda value: value.filename.casefold(),
+                ):
+                    member = info.filename.replace("\\", "/").lstrip("/")
+                    folded_member = member.casefold()
+                    if (
+                        info.is_dir()
+                        or not folded_member.endswith(".txt")
+                        or any(
+                            folded_member.startswith(prefix)
+                            for prefix in HOUDINI_HELP_EXCLUDED_PREFIXES
+                        )
+                    ):
+                        continue
+                    candidates.append(
+                        _Candidate(
+                            collection=collection,
+                            source_group="houdini",
+                            source="houdini_help_archive",
+                            source_key=(
+                                f"{collection}:houdini_help_archive:"
+                                f"{archive_relative}!/{member}"
+                            ),
+                            title=f"{archive_path.stem}/{member}",
+                            source_path=f"{archive_relative}!/{member}",
+                            url=(
+                                f"houdini-help://{archive_path.stem}/{member}"
+                            ),
+                            author="SideFX",
+                            houdini_version=houdini_version,
+                            license_name=(
+                                "SideFX Houdini documentation terms"
+                            ),
+                            verification="unverified",
+                            evidence=(
+                                "Installed Houdini help archive matching the "
+                                "active Houdini version; unverified against "
+                                "live scene behavior"
+                            ),
+                            attributes={
+                                "archive": archive_relative,
+                                "member": member,
+                            },
+                            path=resolved_archive,
+                            archive_member=member,
+                            stat_size=int(archive_stat.st_size),
+                            stat_mtime_ns=int(archive_stat.st_mtime_ns),
+                        )
+                    )
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            warnings.append(
+                f"{archive_path.name}: installed help archive was skipped ({exc})"
+            )
+        return candidates, warnings
 
     def _collect_user_candidates(self) -> list[_Candidate]:
         candidates: list[_Candidate] = []
@@ -820,82 +1121,87 @@ class LocalKnowledgeIndex:
             ).fetchall()
         }
         present_keys = {candidate.source_key for candidate in candidates}
+        archive_cache: dict[Path, zipfile.ZipFile] = {}
 
-        for source_key, row in existing_rows.items():
-            if source_key not in present_keys:
-                self._delete_document(connection, int(row[0]))
-                stats["documents_removed"] += 1
+        try:
+            for source_key, row in existing_rows.items():
+                if source_key not in present_keys:
+                    self._delete_document(connection, int(row[0]))
+                    stats["documents_removed"] += 1
 
-        for candidate in candidates:
-            existing = existing_rows.get(candidate.source_key)
-            if candidate.path is not None:
-                stats["files_scanned"] += 1
-                if (
-                    existing is not None
-                    and int(existing[4]) == candidate.stat_size
-                    and int(existing[5]) == candidate.stat_mtime_ns
-                ):
-                    stats["documents_unchanged"] += 1
+            for candidate in candidates:
+                existing = existing_rows.get(candidate.source_key)
+                if candidate.path is not None:
+                    stats["files_scanned"] += 1
+                    if (
+                        existing is not None
+                        and int(existing[4]) == candidate.stat_size
+                        and int(existing[5]) == candidate.stat_mtime_ns
+                    ):
+                        stats["documents_unchanged"] += 1
+                        continue
+
+                text, metadata, read_warnings = self._read_candidate(
+                    candidate,
+                    archive_cache=archive_cache,
+                )
+                warnings.extend(read_warnings)
+                if text is None:
+                    continue
+                text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                metadata_json = json.dumps(
+                    metadata,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                metadata_sha256 = hashlib.sha256(
+                    metadata_json.encode("utf-8")
+                ).hexdigest()
+                if existing is not None and str(existing[2]) == text_sha256:
+                    if str(existing[3]) == metadata_sha256:
+                        connection.execute(
+                            "UPDATE documents SET stat_size = ?, "
+                            "stat_mtime_ns = ? WHERE id = ?",
+                            (
+                                candidate.stat_size,
+                                candidate.stat_mtime_ns,
+                                int(existing[0]),
+                            ),
+                        )
+                        stats["documents_unchanged"] += 1
+                    else:
+                        self._update_document_metadata(
+                            connection,
+                            candidate,
+                            metadata_sha256,
+                            metadata,
+                            int(existing[0]),
+                        )
+                        stats["documents_updated"] += 1
                     continue
 
-            text, metadata, read_warnings = self._read_candidate(candidate)
-            warnings.extend(read_warnings)
-            if text is None:
-                continue
-            text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
-            metadata_json = json.dumps(
-                metadata,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            metadata_sha256 = hashlib.sha256(
-                metadata_json.encode("utf-8")
-            ).hexdigest()
-            if (
-                existing is not None
-                and str(existing[2]) == text_sha256
-            ):
-                if str(existing[3]) == metadata_sha256:
-                    connection.execute(
-                        "UPDATE documents SET stat_size = ?, "
-                        "stat_mtime_ns = ? WHERE id = ?",
-                        (
-                            candidate.stat_size,
-                            candidate.stat_mtime_ns,
-                            int(existing[0]),
-                        ),
-                    )
-                    stats["documents_unchanged"] += 1
+                if not text.strip():
+                    if existing is not None:
+                        self._delete_document(connection, int(existing[0]))
+                        stats["documents_removed"] += 1
+                    continue
+                self._replace_document(
+                    connection,
+                    candidate,
+                    text,
+                    text_sha256,
+                    metadata_sha256,
+                    metadata,
+                    int(existing[0]) if existing is not None else None,
+                )
+                if existing is None:
+                    stats["documents_added"] += 1
                 else:
-                    self._update_document_metadata(
-                        connection,
-                        candidate,
-                        metadata_sha256,
-                        metadata,
-                        int(existing[0]),
-                    )
                     stats["documents_updated"] += 1
-                continue
-
-            if not text.strip():
-                if existing is not None:
-                    self._delete_document(connection, int(existing[0]))
-                    stats["documents_removed"] += 1
-                continue
-            self._replace_document(
-                connection,
-                candidate,
-                text,
-                text_sha256,
-                metadata_sha256,
-                metadata,
-                int(existing[0]) if existing is not None else None,
-            )
-            if existing is None:
-                stats["documents_added"] += 1
-            else:
-                stats["documents_updated"] += 1
+        finally:
+            for archive in archive_cache.values():
+                archive.close()
         return stats
 
     @staticmethod
@@ -944,6 +1250,8 @@ class LocalKnowledgeIndex:
     def _read_candidate(
         self,
         candidate: _Candidate,
+        *,
+        archive_cache: dict[Path, zipfile.ZipFile] | None = None,
     ) -> tuple[str | None, dict[str, Any], list[str]]:
         warnings: list[str] = []
         metadata = {
@@ -986,6 +1294,17 @@ class LocalKnowledgeIndex:
             return _normalize_text(candidate.inline_text), metadata, warnings
         if candidate.path is None:
             return None, metadata, warnings
+        if candidate.archive_member:
+            text, archive_warning = _read_zip_text(
+                candidate.path,
+                candidate.archive_member,
+                archive_cache=archive_cache,
+            )
+            if archive_warning:
+                warnings.append(f"{candidate.title}: {archive_warning}")
+            if text is None:
+                return None, metadata, warnings
+            return _normalize_text(text), metadata, warnings
         try:
             raw_size = candidate.path.stat().st_size
         except OSError as exc:
@@ -1032,61 +1351,118 @@ class LocalKnowledgeIndex:
         metadata: Mapping[str, Any],
         existing_id: int | None,
     ) -> None:
-        if existing_id is not None:
-            self._delete_document(connection, existing_id)
-        cursor = connection.execute(
-            """
-            INSERT INTO documents(
-                collection, source_group, source, source_key, title,
-                source_path, url, author, accessed_at, houdini_version,
-                license, verification, evidence, sha256, metadata_sha256,
-                stat_size, stat_mtime_ns, indexed_at, attributes_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                candidate.collection,
-                candidate.source_group,
-                candidate.source,
-                candidate.source_key,
-                candidate.title,
-                candidate.source_path,
-                str(metadata.get("url", candidate.url)),
-                str(metadata.get("author", candidate.author)),
-                str(metadata.get("accessed_at", _utc_now())),
-                str(
-                    metadata.get(
-                        "houdini_version",
-                        candidate.houdini_version,
-                    )
-                ),
-                str(metadata.get("license", candidate.license_name)),
-                str(metadata.get("verification", candidate.verification)),
-                str(metadata.get("evidence", candidate.evidence)),
-                text_sha256,
-                metadata_sha256,
-                candidate.stat_size,
-                candidate.stat_mtime_ns,
-                _utc_now(),
-                json.dumps(
-                    metadata.get("attributes", candidate.attributes),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
+        values = (
+            candidate.collection,
+            candidate.source_group,
+            candidate.source,
+            candidate.source_key,
+            candidate.title,
+            candidate.source_path,
+            str(metadata.get("url", candidate.url)),
+            str(metadata.get("author", candidate.author)),
+            str(metadata.get("accessed_at", _utc_now())),
+            str(metadata.get("houdini_version", candidate.houdini_version)),
+            str(metadata.get("license", candidate.license_name)),
+            str(metadata.get("verification", candidate.verification)),
+            str(metadata.get("evidence", candidate.evidence)),
+            text_sha256,
+            metadata_sha256,
+            candidate.stat_size,
+            candidate.stat_mtime_ns,
+            _utc_now(),
+            json.dumps(
+                metadata.get("attributes", candidate.attributes),
+                ensure_ascii=False,
+                sort_keys=True,
             ),
         )
-        document_id = int(cursor.lastrowid)
-        chunks = _chunk_text(text)
-        for ordinal, body in enumerate(chunks):
-            chunk_cursor = connection.execute(
-                "INSERT INTO chunks(document_id, ordinal, body) "
-                "VALUES(?, ?, ?)",
-                (document_id, ordinal, body),
+        if existing_id is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO documents(
+                    collection, source_group, source, source_key, title,
+                    source_path, url, author, accessed_at, houdini_version,
+                    license, verification, evidence, sha256, metadata_sha256,
+                    stat_size, stat_mtime_ns, indexed_at, attributes_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
             )
+            document_id = int(cursor.lastrowid)
+        else:
             connection.execute(
-                "INSERT INTO knowledge_fts(rowid, title, body) "
-                "VALUES(?, ?, ?)",
-                (int(chunk_cursor.lastrowid), candidate.title, body),
+                """
+                UPDATE documents
+                SET collection = ?, source_group = ?, source = ?,
+                    source_key = ?, title = ?, source_path = ?, url = ?,
+                    author = ?, accessed_at = ?, houdini_version = ?,
+                    license = ?, verification = ?, evidence = ?, sha256 = ?,
+                    metadata_sha256 = ?, stat_size = ?, stat_mtime_ns = ?,
+                    indexed_at = ?, attributes_json = ?
+                WHERE id = ?
+                """,
+                (*values, existing_id),
             )
+            document_id = existing_id
+        self._sync_chunks(
+            connection,
+            document_id=document_id,
+            title=candidate.title,
+            bodies=_chunk_text(text),
+        )
+
+    @staticmethod
+    def _sync_chunks(
+        connection: sqlite3.Connection,
+        *,
+        document_id: int,
+        title: str,
+        bodies: list[str],
+    ) -> None:
+        existing = {
+            int(row[1]): (int(row[0]), str(row[2]), str(row[3]))
+            for row in connection.execute(
+                "SELECT id, ordinal, body, content_hash "
+                "FROM chunks WHERE document_id = ?",
+                (document_id,),
+            ).fetchall()
+        }
+        for ordinal, body in enumerate(bodies):
+            content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            prior = existing.pop(ordinal, None)
+            if prior is not None and prior[1] == body and prior[2] == content_hash:
+                continue
+            if prior is None:
+                cursor = connection.execute(
+                    "INSERT INTO chunks(document_id, ordinal, body, content_hash) "
+                    "VALUES(?, ?, ?, ?)",
+                    (document_id, ordinal, body, content_hash),
+                )
+                chunk_id = int(cursor.lastrowid)
+            else:
+                chunk_id = prior[0]
+                connection.execute(
+                    "DELETE FROM knowledge_fts WHERE rowid = ?",
+                    (chunk_id,),
+                )
+                connection.execute(
+                    "DELETE FROM chunk_vectors WHERE chunk_id = ?",
+                    (chunk_id,),
+                )
+                connection.execute(
+                    "UPDATE chunks SET body = ?, content_hash = ? WHERE id = ?",
+                    (body, content_hash, chunk_id),
+                )
+            connection.execute(
+                "INSERT INTO knowledge_fts(rowid, title, body) VALUES(?, ?, ?)",
+                (chunk_id, title, body),
+            )
+        for chunk_id, _body, _content_hash in existing.values():
+            connection.execute(
+                "DELETE FROM knowledge_fts WHERE rowid = ?",
+                (chunk_id,),
+            )
+            connection.execute("DELETE FROM chunks WHERE id = ?", (chunk_id,))
 
     @staticmethod
     def _delete_document(
@@ -1134,6 +1510,48 @@ def _read_optional_pdf(path: Path) -> tuple[str | None, str]:
     except Exception as exc:
         return None, f"optional PDF parsing failed ({exc})"
     return "\n\n".join(parts), ""
+
+
+def _read_zip_text(
+    path: Path,
+    member: str,
+    *,
+    archive_cache: dict[Path, zipfile.ZipFile] | None = None,
+) -> tuple[str | None, str]:
+    try:
+        archive: zipfile.ZipFile
+        close_archive = archive_cache is None
+        if archive_cache is None:
+            archive = zipfile.ZipFile(path)
+        else:
+            cached_archive = archive_cache.get(path)
+            if cached_archive is None:
+                archive = zipfile.ZipFile(path)
+                archive_cache[path] = archive
+            else:
+                archive = cached_archive
+        try:
+            info = archive.getinfo(member)
+            if info.file_size > MAX_DOCUMENT_BYTES:
+                return (
+                    None,
+                    f"archive member exceeded the {MAX_DOCUMENT_BYTES} "
+                    "byte local-index limit and was skipped",
+                )
+            with archive.open(info, "r") as stream:
+                raw = stream.read(MAX_DOCUMENT_BYTES + 1)
+        finally:
+            if close_archive:
+                archive.close()
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        return None, f"installed help archive member could not be read ({exc})"
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        return (
+            None,
+            f"archive member exceeded the {MAX_DOCUMENT_BYTES} "
+            "byte local-index limit and was skipped",
+        )
+    return raw.decode("utf-8", errors="ignore"), ""
 
 
 def _html_to_text(text: str) -> str:
@@ -1215,10 +1633,24 @@ def _matching_snippet(text: str, query: str) -> str:
 def _fts_expression(query: str, tokenizer: str) -> str:
     if tokenizer == "trigram":
         return '"' + query.replace('"', '""') + '"'
-    tokens = re.findall(r"\w+", query, flags=re.UNICODE)
+    tokens = _fts_tokens(query)
     if not tokens:
         return '"' + query.replace('"', '""') + '"'
     return " AND ".join('"' + token.replace('"', '""') + '"' for token in tokens)
+
+
+def _fts_relaxed_expression(query: str, tokenizer: str) -> str:
+    tokens = _fts_tokens(query)
+    if tokenizer == "trigram":
+        tokens = tuple(token for token in tokens if len(token) >= 3)
+    return " OR ".join(
+        '"' + token.replace('"', '""') + '"'
+        for token in tokens
+    )
+
+
+def _fts_tokens(query: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"\w+", query, flags=re.UNICODE))
 
 
 def _is_ascii_word_query(query: str) -> bool:
