@@ -52,6 +52,12 @@
         "purpose": "thread-history"
       },
       {
+        "method": "thread/delete",
+        "params_definition": "ThreadDeleteParams",
+        "response_schema": "v2/ThreadDeleteResponse.json",
+        "purpose": "thread-history"
+      },
+      {
         "method": "thread/goal/get",
         "params_definition": "ThreadGoalGetParams",
         "response_schema": "v2/ThreadGoalGetResponse.json",
@@ -165,6 +171,11 @@
       {
         "method": "thread/name/updated",
         "params_definition": "ThreadNameUpdatedNotification",
+        "purpose": "thread-history"
+      },
+      {
+        "method": "thread/deleted",
+        "params_definition": "ThreadDeletedNotification",
         "purpose": "thread-history"
       },
       {

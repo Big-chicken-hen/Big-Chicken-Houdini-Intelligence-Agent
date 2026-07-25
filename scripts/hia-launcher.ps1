@@ -3,6 +3,8 @@ param(
     [AllowEmptyString()][string]$HoudiniExe = '',
     [AllowEmptyString()][string]$BridgePython = '',
     [AllowEmptyString()][string]$McpBackend = '',
+    [AllowEmptyString()][string]$EmbeddingProfile = '',
+    [ValidateSet('', 'auto', 'cuda', 'cpu')][string]$EmbeddingDevice = '',
     [AllowEmptyString()][string]$RenderOutputDir = '',
     [switch]$CheckOnly,
     [switch]$Json,
@@ -22,6 +24,8 @@ function Get-SelectedInputs {
         [AllowEmptyString()][string]$RequestedHoudini,
         [AllowEmptyString()][string]$RequestedBridge,
         [AllowEmptyString()][string]$RequestedBackend,
+        [AllowEmptyString()][string]$RequestedEmbedding,
+        [AllowEmptyString()][string]$RequestedEmbeddingDevice,
         [AllowEmptyString()][string]$RequestedRenderOutput,
         [Parameter(Mandatory = $true)]$Settings
     )
@@ -69,12 +73,71 @@ function Get-SelectedInputs {
     } else {
         [string]$Settings.render_output_dir
     }
+    $embeddingData = $null
+    $selectedEmbedding = ''
+    $embeddingContractPythonAvailable = $false
+    if ($selectedBridge) {
+        try {
+            $embeddingContractPythonAvailable = Test-Path `
+                -LiteralPath $selectedBridge `
+                -PathType Leaf `
+                -ErrorAction Stop
+        } catch {
+            $embeddingContractPythonAvailable = $false
+        }
+    }
+    if ($embeddingContractPythonAvailable) {
+        try {
+            $embeddingData = Get-HiaEmbeddingContractData `
+                -ProjectRoot $projectRoot `
+                -PythonExe $selectedBridge `
+                -TimeoutSeconds $ProbeTimeoutSeconds
+        } catch {
+            $embeddingData = $null
+        }
+        if ($null -ne $embeddingData) {
+            $savedEmbedding = ''
+            $settingKey = [string]$embeddingData.contract.settings.profile
+            $savedProperty = $Settings.PSObject.Properties[$settingKey]
+            if ($null -ne $savedProperty) { $savedEmbedding = [string]$savedProperty.Value }
+            if ($RequestedEmbedding) {
+                $selectedEmbedding = Resolve-HiaEmbeddingProfile `
+                    -EmbeddingData $embeddingData `
+                    -Profile $RequestedEmbedding
+            } else {
+                try {
+                    $selectedEmbedding = Resolve-HiaEmbeddingProfile `
+                        -EmbeddingData $embeddingData `
+                        -Profile $savedEmbedding
+                } catch {
+                    $selectedEmbedding = [string]$embeddingData.contract.default_profile
+                }
+            }
+        }
+    }
+    $savedDevice = ''
+    if ($null -ne $embeddingData) {
+        $deviceKey = [string]$embeddingData.contract.settings.device
+        $deviceProperty = $Settings.PSObject.Properties[$deviceKey]
+        if ($null -ne $deviceProperty) {
+            $savedDevice = [string]$deviceProperty.Value
+        }
+    }
+    $deviceCandidate = if ($RequestedEmbeddingDevice) {
+        $RequestedEmbeddingDevice
+    } else {
+        $savedDevice
+    }
+    $selectedEmbeddingDevice = Resolve-HiaEmbeddingDevice -Device $deviceCandidate
     return [pscustomobject]@{
         candidates = @($candidates)
         bridge_candidates = @($bridgeCandidates)
         houdini = $selectedHoudini
         bridge = $selectedBridge
         backend = $selectedBackend
+        embedding = $selectedEmbedding
+        embedding_device = $selectedEmbeddingDevice
+        embedding_data = $embeddingData
         render_output = $selectedRenderOutput
     }
 }
@@ -84,6 +147,9 @@ function Invoke-PreflightAndReport {
         [AllowEmptyString()][string]$SelectedHoudini,
         [AllowEmptyString()][string]$SelectedBridge,
         [ValidateSet('hia_v2', 'fxhoudini')][string]$SelectedBackend,
+        [AllowEmptyString()][string]$SelectedEmbedding,
+        [ValidateSet('auto', 'cuda', 'cpu')][string]$SelectedEmbeddingDevice = 'auto',
+        [AllowNull()]$EmbeddingData,
         [AllowEmptyString()][string]$SelectedRenderOutput,
         [Parameter(Mandatory = $true)][object[]]$Candidates
     )
@@ -94,6 +160,9 @@ function Invoke-PreflightAndReport {
         -BridgePython $SelectedBridge `
         -RenderOutputDir $SelectedRenderOutput `
         -McpBackend $SelectedBackend `
+        -EmbeddingData $EmbeddingData `
+        -EmbeddingProfile $SelectedEmbedding `
+        -EmbeddingDevice $SelectedEmbeddingDevice `
         -Candidates $Candidates `
         -TimeoutSeconds $ProbeTimeoutSeconds
     try {
@@ -130,6 +199,8 @@ function Start-ExistingHoudiniLauncher {
         [Parameter(Mandatory = $true)][string]$SelectedHoudini,
         [Parameter(Mandatory = $true)][string]$SelectedBridge,
         [ValidateSet('hia_v2', 'fxhoudini')][string]$SelectedBackend,
+        [AllowEmptyString()][string]$SelectedEmbedding = '',
+        [ValidateSet('auto', 'cuda', 'cpu')][string]$SelectedEmbeddingDevice = 'auto',
         [AllowEmptyString()][string]$SelectedRenderOutput = '',
         [AllowEmptyString()][string]$RecoverySessionId = '',
         [AllowEmptyString()][string]$RecoveryCheckpoint = '',
@@ -151,6 +222,10 @@ function Start-ExistingHoudiniLauncher {
         '-BridgePython', $SelectedBridge,
         '-McpBackend', $SelectedBackend
     )
+    if ($SelectedEmbedding) {
+        $arguments += @('-EmbeddingProfile', $SelectedEmbedding)
+    }
+    $arguments += @('-EmbeddingDevice', $SelectedEmbeddingDevice)
     if ($RecoveryDecision) {
         $arguments += @(
             '-RecoverySessionId', $RecoverySessionId,
@@ -187,13 +262,23 @@ if ($RepairSafeProject) {
 }
 
 $settings = Read-HiaLauncherSettings -ProjectRoot $projectRoot
-$inputs = Get-SelectedInputs -RequestedHoudini $HoudiniExe -RequestedBridge $BridgePython -RequestedBackend $McpBackend -RequestedRenderOutput $RenderOutputDir -Settings $settings
+$inputs = Get-SelectedInputs `
+    -RequestedHoudini $HoudiniExe `
+    -RequestedBridge $BridgePython `
+    -RequestedBackend $McpBackend `
+    -RequestedEmbedding $EmbeddingProfile `
+    -RequestedEmbeddingDevice $EmbeddingDevice `
+    -RequestedRenderOutput $RenderOutputDir `
+    -Settings $settings
 
 if ($CheckOnly -or $Json) {
     $result = Invoke-PreflightAndReport `
         -SelectedHoudini $inputs.houdini `
         -SelectedBridge $inputs.bridge `
         -SelectedBackend $inputs.backend `
+        -SelectedEmbedding $inputs.embedding `
+        -SelectedEmbeddingDevice $inputs.embedding_device `
+        -EmbeddingData $inputs.embedding_data `
         -SelectedRenderOutput $inputs.render_output `
         -Candidates $inputs.candidates
     if ($Json) {

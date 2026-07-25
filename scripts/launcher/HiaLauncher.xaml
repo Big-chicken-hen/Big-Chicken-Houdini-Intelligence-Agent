@@ -140,6 +140,7 @@
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
+
             </Setter>
         </Style>
 
@@ -282,6 +283,7 @@
                                     </ToggleButton>
                                 </Grid>
                             </Border>
+
                             <Popup
                                 x:Name="PART_Popup"
                                 AllowsTransparency="False"
@@ -402,6 +404,29 @@
                     Text="{Binding id, StringFormat=backend · {0}}"
                     TextTrimming="CharacterEllipsis" />
             </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="EmbeddingProfilePickerItemTemplate">
+            <Grid ToolTip="{Binding tooltip}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock
+                    Foreground="{StaticResource PickerTextBrush}"
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Text="{Binding display}"
+                    TextTrimming="CharacterEllipsis" />
+                <TextBlock
+                    Grid.Row="1"
+                    Margin="0,3,0,0"
+                    Foreground="{StaticResource PickerSecondaryTextBrush}"
+                    FontSize="11"
+                    Text="{Binding detail}"
+                    TextTrimming="CharacterEllipsis" />
+            </Grid>
+
         </DataTemplate>
 
         <Style x:Key="ActionButtonStyle" TargetType="Button">
@@ -542,617 +567,858 @@
                 </Expander>
             </Border>
         </DataTemplate>
+        <RadialGradientBrush x:Key="PinkFogBrush" Center="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
+            <GradientStop Color="#46F29BC2" Offset="0" />
+            <GradientStop Color="#12B47CFF" Offset="0.55" />
+            <GradientStop Color="#00101424" Offset="1" />
+        </RadialGradientBrush>
+        <RadialGradientBrush x:Key="PurpleFogBrush" Center="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
+            <GradientStop Color="#409282FF" Offset="0" />
+            <GradientStop Color="#145ADDD6" Offset="0.62" />
+            <GradientStop Color="#00080B11" Offset="1" />
+        </RadialGradientBrush>
+        <LinearGradientBrush x:Key="SidebarGradientBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#111526" Offset="0" />
+            <GradientStop Color="#0D1020" Offset="0.56" />
+            <GradientStop Color="#171126" Offset="1" />
+        </LinearGradientBrush>
+        <LinearGradientBrush x:Key="OverviewHeroGradientBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#19192E" Offset="0" />
+            <GradientStop Color="#111729" Offset="0.58" />
+            <GradientStop Color="#0D2024" Offset="1" />
+        </LinearGradientBrush>
+
+        <Style x:Key="DarkToolTipStyle" TargetType="{x:Type ToolTip}">
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="Background" Value="#151A2A" />
+            <Setter Property="BorderBrush" Value="#596580" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="10,8" />
+            <Setter Property="MaxWidth" Value="520" />
+            <Setter Property="Placement" Value="Mouse" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ToolTip}">
+                        <Border
+                            Padding="{TemplateBinding Padding}"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="8">
+                            <TextBlock
+                                Foreground="{TemplateBinding Foreground}"
+                                LineHeight="18"
+                                Text="{TemplateBinding Content}"
+                                TextWrapping="Wrap" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="{x:Type ToolTip}" BasedOn="{StaticResource DarkToolTipStyle}" />
+
+        <Style x:Key="NavigationButtonStyle" TargetType="RadioButton">
+            <Setter Property="Height" Value="48" />
+            <Setter Property="Margin" Value="0,0,0,6" />
+            <Setter Property="Padding" Value="18,0,12,0" />
+            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border
+                            x:Name="NavChrome"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="4" />
+                                    <ColumnDefinition Width="18" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border
+                                    x:Name="SelectedRail"
+                                    Width="3"
+                                    Height="22"
+                                    HorizontalAlignment="Left"
+                                    VerticalAlignment="Center"
+                                    Background="Transparent"
+                                    CornerRadius="0,3,3,0" />
+                                <Ellipse
+                                    x:Name="NavDot"
+                                    Grid.Column="1"
+                                    Width="7"
+                                    Height="7"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Fill="#59637A" />
+                                <ContentPresenter
+                                    Grid.Column="2"
+                                    Margin="{TemplateBinding Padding}"
+                                    HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                    VerticalAlignment="Center"
+                                    RecognizesAccessKey="True"
+                                    TextElement.Foreground="{TemplateBinding Foreground}" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="#F4F1FF" />
+                                <Setter TargetName="NavChrome" Property="Background" Value="#171C30" />
+                                <Setter TargetName="NavDot" Property="Fill" Value="{StaticResource AccentPurpleBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Foreground" Value="#FFFFFF" />
+                                <Setter TargetName="NavChrome" Property="Background" Value="#29213F" />
+                                <Setter TargetName="NavChrome" Property="BorderBrush" Value="#594473" />
+                                <Setter TargetName="NavChrome" Property="BorderThickness" Value="1" />
+                                <Setter TargetName="SelectedRail" Property="Background" Value="{StaticResource AccentPinkBrush}" />
+                                <Setter TargetName="NavDot" Property="Fill" Value="{StaticResource AccentCyanBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="NavChrome" Property="BorderBrush" Value="{StaticResource AccentCyanBrush}" />
+                                <Setter TargetName="NavChrome" Property="BorderThickness" Value="1" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                                <Setter TargetName="NavChrome" Property="Opacity" Value="0.58" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SummaryTileStyle" TargetType="Border">
+            <Setter Property="Width" Value="208" />
+            <Setter Property="MinHeight" Value="88" />
+            <Setter Property="Margin" Value="0,0,12,12" />
+            <Setter Property="Padding" Value="15,13" />
+            <Setter Property="Background" Value="#B30D1220" />
+            <Setter Property="BorderBrush" Value="#303A54" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="12" />
+        </Style>
+
+        <Style x:Key="EnvironmentLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="FlatTextBoxStyle" TargetType="TextBox">
+            <Setter Property="Foreground" Value="{StaticResource PickerTextBrush}" />
+            <Setter Property="Background" Value="{StaticResource PickerBackgroundBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource PickerBorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CaretBrush" Value="{StaticResource AccentCyanBrush}" />
+            <Setter Property="Padding" Value="12,9" />
+            <Setter Property="MinHeight" Value="40" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
     </Window.Resources>
 
     <Grid
         x:Name="LayoutRoot"
         Background="{StaticResource WorkspaceGradientBrush}">
         <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="NavigationColumn" Width="212" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="1" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+
+        <Canvas
+            Grid.ColumnSpan="2"
+            ClipToBounds="True"
+            IsHitTestVisible="False">
+            <Ellipse
+                Canvas.Left="-150"
+                Canvas.Top="520"
+                Width="430"
+                Height="360"
+                Fill="{StaticResource PinkFogBrush}"
+                Opacity="0.34" />
+            <Ellipse
+                Canvas.Right="-170"
+                Canvas.Top="-110"
+                Width="510"
+                Height="420"
+                Fill="{StaticResource PurpleFogBrush}"
+                Opacity="0.28" />
+        </Canvas>
 
         <Border
-            Grid.Row="0"
+            x:Name="NavigationRail"
             Grid.Column="0"
-            MaxWidth="1120"
-            Margin="28,16,28,12"
-            Padding="0"
-            HorizontalAlignment="Stretch"
-            Background="Transparent"
-            BorderThickness="0">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="44" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="220" />
-                </Grid.ColumnDefinitions>
-                <Viewbox
-                    x:Name="BrandNodeMotif"
-                    Width="34"
-                    Height="44"
-                    HorizontalAlignment="Left"
-                    VerticalAlignment="Center"
-                    Stretch="Uniform"
-                    IsHitTestVisible="False">
-                    <Canvas Width="34" Height="44">
-                        <Path
-                            Data="M 5,8 L 17,8 L 17,22 L 29,22 L 29,36"
-                            Stroke="{StaticResource RailLineBrush}"
-                            StrokeThickness="2" />
-                        <Ellipse Canvas.Left="1" Canvas.Top="4" Width="8" Height="8" Fill="{StaticResource AccentPinkBrush}" />
-                        <Ellipse Canvas.Left="13" Canvas.Top="18" Width="8" Height="8" Fill="{StaticResource AccentPurpleBrush}" />
-                        <Ellipse Canvas.Left="25" Canvas.Top="32" Width="8" Height="8" Fill="{StaticResource AccentCyanBrush}" />
-                    </Canvas>
-                </Viewbox>
+            Background="{StaticResource SidebarGradientBrush}"
+            BorderBrush="#293048"
+            BorderThickness="0,0,1,0">
+            <Grid x:Name="SidebarPanel" Margin="18,22,18,18">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="34" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
                 <StackPanel
-                    Grid.Column="1"
-                    Margin="13,0,16,0"
-                    AutomationProperties.Name="Big-Chicken Houdini Intelligence Agent"
-                    VerticalAlignment="Center">
+                    AutomationProperties.Name="Big-Chicken Houdini Intelligence Agent">
                     <TextBlock
                         x:Name="BrandTitleText"
                         Foreground="{StaticResource BrandGradientBrush}"
-                        FontSize="27"
+                        FontSize="19"
                         FontWeight="Bold"
-                        Text="BIG-CHICKEN" />
+                        Text="BIG-CHICKEN"
+                        TextTrimming="CharacterEllipsis" />
                     <TextBlock
                         x:Name="BrandSubtitleText"
-                        Margin="1,2,0,0"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="13"
-                        FontWeight="SemiBold"
-                        Text="Houdini Intelligence Agent" />
-                </StackPanel>
-            </Grid>
-        </Border>
-
-        <Border
-            Grid.Row="1"
-            Margin="28,0"
-            Background="{StaticResource BorderSoftBrush}" />
-
-        <ScrollViewer
-            x:Name="MainScrollViewer"
-            Grid.Row="2"
-            Style="{StaticResource ModernScrollViewerStyle}">
-            <Border
-                x:Name="MainWorkspacePanel"
-                MaxWidth="1060"
-                Margin="28,14,28,16"
-                HorizontalAlignment="Stretch"
-                Style="{StaticResource SectionCardStyle}">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="1" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-
-        <Border
-            Grid.Row="0"
-            Margin="22,18,22,16"
-            Padding="0"
-            Background="Transparent"
-            BorderThickness="0">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="106" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="76" />
-                </Grid.ColumnDefinitions>
-
-                <Grid Grid.Row="0" Grid.ColumnSpan="3" Margin="0,0,0,13">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <StackPanel>
-                        <TextBlock Foreground="{StaticResource AccentCyanBrush}" FontSize="10" FontWeight="SemiBold" Text="ENVIRONMENT" />
-                        <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="15" FontWeight="SemiBold" Text="启动环境" />
-                    </StackPanel>
-                    <TextBlock
-                        Grid.Column="1"
-                        VerticalAlignment="Bottom"
+                        Margin="1,4,0,0"
                         Foreground="{StaticResource TextMutedBrush}"
-                        FontSize="11"
-                        Text="选择变更后需重新检查" />
-                </Grid>
-
-                <TextBlock Grid.Row="1" VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Text="MCP backend" />
-                <Border Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,9" Style="{StaticResource PickerChromeStyle}">
-                    <ComboBox
-                        x:Name="McpBackendComboBox"
-                        AutomationProperties.Name="MCP backend"
-                        IsEditable="False"
-                        ItemTemplate="{StaticResource BackendPickerItemTemplate}"
-                        Style="{StaticResource DarkPickerComboBoxStyle}"
-                        TabIndex="2" />
-                </Border>
-
-                <TextBlock Grid.Row="2" VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Text="Houdini 版本" />
-                <Border Grid.Row="2" Grid.Column="1" Margin="0,0,8,0" Style="{StaticResource PickerChromeStyle}">
-                    <ComboBox
-                        x:Name="HoudiniComboBox"
-                        AutomationProperties.Name="Houdini 版本"
-                        IsEditable="False"
-                        ItemTemplate="{StaticResource HoudiniPickerItemTemplate}"
-                        Style="{StaticResource DarkPickerComboBoxStyle}"
-                        TabIndex="3" />
-                </Border>
-                <Button
-                    x:Name="BrowseHoudiniButton"
-                    Grid.Row="2"
-                    Grid.Column="2"
-                    AutomationProperties.Name="浏览 houdini.exe"
-                    Content="浏览…"
-                    Style="{StaticResource CompactButtonStyle}"
-                    TabIndex="4" />
-
-                <TextBlock
-                    Grid.Row="3"
-                    Grid.Column="1"
-                    Grid.ColumnSpan="2"
-                    x:Name="HoudiniPathText"
-                    Margin="3,4,0,8"
-                    Foreground="{StaticResource TextMutedBrush}"
-                    FontSize="11"
-                    Text="尚未选择 houdini.exe"
-                    TextTrimming="CharacterEllipsis"
-                    ToolTip="尚未选择 houdini.exe"
-                    Visibility="Collapsed" />
-
-                <TextBlock Grid.Row="4" VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Text="Bridge Python" />
-                <Border Grid.Row="4" Grid.Column="1" Margin="0,0,8,0" Style="{StaticResource PickerChromeStyle}">
-                    <ComboBox
-                        x:Name="BridgePythonComboBox"
-                        AutomationProperties.Name="Bridge Python"
-                        IsEditable="False"
-                        ItemTemplate="{StaticResource BridgePickerItemTemplate}"
-                        Style="{StaticResource DarkPickerComboBoxStyle}"
-                        TabIndex="5" />
-                </Border>
-                <Button
-                    x:Name="BrowseBridgeButton"
-                    Grid.Row="4"
-                    Grid.Column="2"
-                    AutomationProperties.Name="浏览 Bridge python.exe"
-                    Content="浏览…"
-                    Style="{StaticResource CompactButtonStyle}"
-                    TabIndex="6" />
-
-                <TextBlock
-                    Grid.Row="5"
-                    Grid.Column="1"
-                    Grid.ColumnSpan="2"
-                    x:Name="BridgePathText"
-                    Margin="3,4,0,0"
-                    Foreground="{StaticResource TextMutedBrush}"
-                    FontSize="11"
-                    Text="尚未选择 Bridge python.exe"
-                    TextTrimming="CharacterEllipsis"
-                    ToolTip="尚未选择 Bridge python.exe"
-                    Visibility="Collapsed" />
-
-                <TextBlock
-                    Grid.Row="6"
-                    Margin="0,4,0,0"
-                    VerticalAlignment="Center"
-                    Foreground="{StaticResource TextSecondaryBrush}"
-                    FontSize="11"
-                    FontWeight="SemiBold"
-                    Text="输出目录" />
-                <Border
-                    Grid.Row="6"
-                    Grid.Column="1"
-                    Margin="0,4,8,0"
-                    Background="{StaticResource PickerBackgroundBrush}"
-                    BorderBrush="{StaticResource PickerBorderBrush}"
-                    BorderThickness="1"
-                    CornerRadius="9">
-                    <TextBox
-                        x:Name="RenderOutputTextBox"
-                        Padding="11,8"
-                        AutomationProperties.Name="最终渲染输出目录"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        CaretBrush="{StaticResource AccentCyanBrush}"
-                        Foreground="{StaticResource PickerTextBrush}"
-                        TabIndex="7"
-                        ToolTip="留空时使用项目 .runtime/cache"
-                        VerticalContentAlignment="Center" />
-                </Border>
-                <Button
-                    x:Name="BrowseRenderOutputButton"
-                    Grid.Row="6"
-                    Grid.Column="2"
-                    Margin="0,4,0,0"
-                    AutomationProperties.Name="选择最终渲染输出目录"
-                    Content="选择…"
-                    Style="{StaticResource CompactButtonStyle}"
-                    TabIndex="8" />
-                <TextBlock
-                    Grid.Row="7"
-                    Grid.Column="1"
-                    Grid.ColumnSpan="2"
-                    Margin="3,5,0,0"
-                    Foreground="{StaticResource TextMutedBrush}"
-                    FontSize="11"
-                    Text="最终 EXR、图片、视频、USD、导出和模拟缓存；留空使用项目 .runtime/cache。它与内部截图、预览和临时缓存目录不同。"
-                    TextWrapping="Wrap" />
-            </Grid>
-        </Border>
-
-        <Border
-            Grid.Row="1"
-            Margin="22,0"
-            Background="{StaticResource BorderSoftBrush}" />
-
-        <Border
-            x:Name="RecoveryCard"
-            Grid.Row="2"
-            Margin="22,14,22,0"
-            Padding="14,11"
-            Background="{StaticResource YellowSurfaceBrush}"
-            BorderBrush="{StaticResource StatusYellowBrush}"
-            BorderThickness="1"
-            CornerRadius="12"
-            Visibility="Collapsed">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <StackPanel>
-                    <TextBlock
-                        Foreground="{StaticResource TextPrimaryBrush}"
-                        FontSize="14"
-                        FontWeight="SemiBold"
-                        Text="检测到可恢复副本" />
-                    <TextBlock
-                        Margin="0,3,0,0"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        Text="上次 Houdini 未正常结束。恢复会在新 session 中打开 checkpoint 副本，绝不覆盖原 HIP。"
+                        FontSize="10"
+                        LineHeight="14"
+                        Text="Houdini Intelligence Agent"
                         TextWrapping="Wrap" />
-                    <TextBlock
-                        x:Name="RecoveryCheckpointText"
-                        Margin="0,4,0,0"
-                        Foreground="{StaticResource PickerSecondaryTextBrush}"
-                        FontSize="11"
-                        TextTrimming="CharacterEllipsis" />
                 </StackPanel>
-                <WrapPanel Grid.Row="1" Margin="0,9,0,0">
+
+                <TextBlock
+                    Grid.Row="1"
+                    Margin="3,17,0,0"
+                    VerticalAlignment="Top"
+                    Foreground="#717B94"
+                    FontSize="9"
+                    FontWeight="SemiBold"
+                    Text="WORKSPACE" />
+
+                <StackPanel Grid.Row="2" Margin="0,10,0,0">
                     <RadioButton
-                        x:Name="RecoverCheckpointOption"
-                        AutomationProperties.Name="恢复副本"
-                        Content="恢复副本（推荐）"
-                        Foreground="{StaticResource TextPrimaryBrush}"
-                        GroupName="RecoveryChoice"
+                        x:Name="OverviewNavButton"
+                        AutomationProperties.Name="概览"
+                        Content="概览"
+                        GroupName="LauncherNavigation"
                         IsChecked="True"
+                        Style="{StaticResource NavigationButtonStyle}"
                         TabIndex="0" />
                     <RadioButton
-                        x:Name="NormalLaunchOption"
-                        Margin="18,0,0,0"
-                        AutomationProperties.Name="正常启动"
-                        Content="正常启动"
-                        Foreground="{StaticResource TextPrimaryBrush}"
-                        GroupName="RecoveryChoice"
+                        x:Name="EnvironmentNavButton"
+                        AutomationProperties.Name="环境"
+                        Content="环境"
+                        GroupName="LauncherNavigation"
+                        Style="{StaticResource NavigationButtonStyle}"
                         TabIndex="1" />
-                </WrapPanel>
-            </Grid>
-        </Border>
-
-        <Border
-            Grid.Row="3"
-            Margin="22,14,22,8"
-            Padding="0"
-            Background="Transparent"
-            BorderThickness="0">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Foreground="{StaticResource AccentPinkBrush}" FontSize="10" FontWeight="SemiBold" Text="PREFLIGHT" />
-                    <TextBlock Margin="10,0,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="SemiBold" Text="自检状态" />
+                    <RadioButton
+                        x:Name="PreflightNavButton"
+                        AutomationProperties.Name="自检"
+                        Content="自检"
+                        GroupName="LauncherNavigation"
+                        Style="{StaticResource NavigationButtonStyle}"
+                        TabIndex="2" />
+                    <RadioButton
+                        x:Name="ReportsSettingsNavButton"
+                        AutomationProperties.Name="报告与设置"
+                        Content="报告与设置"
+                        GroupName="LauncherNavigation"
+                        Style="{StaticResource NavigationButtonStyle}"
+                        TabIndex="3" />
                 </StackPanel>
-                <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Border Style="{StaticResource CountCardStyle}">
-                        <StackPanel Orientation="Horizontal">
-                            <Ellipse Width="7" Height="7" Margin="0,0,7,0" VerticalAlignment="Center" Fill="{StaticResource StatusGreenBrush}" />
-                            <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Text="通过 " />
-                            <TextBlock x:Name="PassCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
-                        </StackPanel>
-                    </Border>
-                    <Border Style="{StaticResource CountCardStyle}">
-                        <StackPanel Orientation="Horizontal">
-                            <Ellipse Width="7" Height="7" Margin="0,0,7,0" VerticalAlignment="Center" Fill="{StaticResource StatusYellowBrush}" />
-                            <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Text="警告 " />
-                            <TextBlock x:Name="WarningCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
-                        </StackPanel>
-                    </Border>
-                    <Border Style="{StaticResource CountCardStyle}">
-                        <StackPanel Orientation="Horizontal">
-                            <Ellipse Width="7" Height="7" Margin="0,0,7,0" VerticalAlignment="Center" Fill="{StaticResource StatusRedBrush}" />
-                            <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Text="阻断 " />
-                            <TextBlock x:Name="BlockedCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
-                        </StackPanel>
-                    </Border>
-                </WrapPanel>
-            </Grid>
-        </Border>
 
-        <Border
-            Grid.Row="4"
-            MinHeight="168"
-            MaxHeight="246"
-            Margin="22,0,16,10"
-            Padding="0"
-            Background="Transparent"
-            BorderThickness="0">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
-                <Grid Margin="2,0,5,8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="检查项" />
-                    <TextBlock Grid.Column="1" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="展开查看结果与修复建议" />
-                </Grid>
                 <Border
-                    x:Name="EmptyStateBorder"
-                    Grid.Row="1"
-                    Margin="0,8,5,8"
-                    Padding="14"
-                    HorizontalAlignment="Stretch"
-                    VerticalAlignment="Center"
-                    Background="{StaticResource NeutralSurfaceBrush}"
-                    BorderThickness="0"
-                    CornerRadius="8">
-                    <TextBlock
-                        x:Name="EmptyStateText"
-                        HorizontalAlignment="Center"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        Text="等待首次检查…"
-                        TextAlignment="Center"
-                        TextWrapping="Wrap" />
+                    x:Name="RightVisualRail"
+                    Grid.Row="3"
+                    Width="174"
+                    Margin="0,16,0,0"
+                    Padding="0"
+                    HorizontalAlignment="Center"
+                    Background="Transparent"
+                    BorderThickness="0">
+                    <Border
+                        x:Name="OverallStatusBadge"
+                        Padding="12,9"
+                        Background="{StaticResource NeutralSurfaceBrush}"
+                        BorderBrush="{StaticResource StatusNeutralBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Ellipse
+                                x:Name="OverallStatusDot"
+                                Width="7"
+                                Height="7"
+                                Margin="0,0,9,0"
+                                VerticalAlignment="Center"
+                                Fill="{StaticResource StatusNeutralBrush}" />
+                            <StackPanel Grid.Column="1">
+                                <TextBlock
+                                    x:Name="OverallStatusText"
+                                    Foreground="{StaticResource TextPrimaryBrush}"
+                                    FontSize="11"
+                                    FontWeight="SemiBold"
+                                    Text="等待检查"
+                                    TextTrimming="CharacterEllipsis" />
+                                <TextBlock
+                                    Margin="0,1,0,0"
+                                    Foreground="{StaticResource TextMutedBrush}"
+                                    FontSize="8"
+                                    Text="PREFLIGHT STATUS" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </Border>
-                <ScrollViewer
-                    Grid.Row="1"
-                    Margin="0,0,4,0"
-                    Style="{StaticResource ModernScrollViewerStyle}">
-                    <ItemsControl
-                        x:Name="ChecksListBox"
-                        AutomationProperties.Name="自检结果"
-                        ItemTemplate="{StaticResource CheckResultTemplate}" />
-                </ScrollViewer>
             </Grid>
         </Border>
 
-        <Grid Grid.Row="5" Margin="22,0,22,16">
+        <Grid x:Name="MainShell" Grid.Column="1">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
+
             <Border
-                x:Name="BusyPanel"
+                x:Name="MainShellHeader"
                 Grid.Row="0"
-                Padding="13,10"
-                Background="{StaticResource NeutralSurfaceBrush}"
-                BorderBrush="#4B5B91"
-                BorderThickness="1"
-                CornerRadius="11"
-                Visibility="Collapsed">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="150" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontWeight="SemiBold" Text="正在扫描并检查环境…" />
-                    <ProgressBar
-                        x:Name="BusyProgressBar"
-                        Grid.Column="1"
-                        Height="5"
-                        Margin="15,0,2,0"
-                        VerticalAlignment="Center"
-                        Background="#252B40"
-                        Foreground="{StaticResource AccentCyanBrush}"
-                        IsIndeterminate="True" />
-                </Grid>
+                Padding="28,17,28,14"
+                Background="#CC090D18"
+                BorderBrush="#252D43"
+                BorderThickness="0,0,0,1">
+                <StackPanel>
+                    <TextBlock
+                        x:Name="PageTitleText"
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        FontSize="22"
+                        FontWeight="SemiBold"
+                        Text="概览" />
+                    <TextBlock
+                        x:Name="PageSubtitleText"
+                        Margin="0,3,0,0"
+                        Foreground="{StaticResource TextMutedBrush}"
+                        FontSize="11"
+                        Text="启动状态、关键环境与今天的创作入口" />
+                </StackPanel>
             </Border>
-            <Border
-                x:Name="InlineStatusBorder"
-                Grid.Row="1"
-                Margin="0,8,0,0"
-                Padding="13,9"
-                Background="{StaticResource NeutralSurfaceBrush}"
-                BorderBrush="{StaticResource StatusNeutralBrush}"
-                BorderThickness="1"
-                CornerRadius="11"
-                Visibility="Collapsed">
-                <TextBlock
-                    x:Name="InlineStatusText"
-                    Foreground="{StaticResource TextPrimaryBrush}"
-                    TextWrapping="Wrap" />
-            </Border>
-        </Grid>
 
-                </Grid>
-            </Border>
-        </ScrollViewer>
-
-        <Border
-            Grid.Row="3"
-            Margin="0"
-            Padding="28,10,28,14"
-            Background="#0C101B"
-            BorderBrush="{StaticResource BorderSoftBrush}"
-            BorderThickness="0,1,0,0"
-            CornerRadius="0">
-            <Grid
-                MaxWidth="1120"
-                HorizontalAlignment="Stretch">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="7" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="8" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <Grid Grid.Row="0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Foreground="{StaticResource AccentCyanBrush}" FontSize="10" FontWeight="SemiBold" Text="ACTIONS" />
-                        <TextBlock Margin="10,0,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="SemiBold" Text="报告与启动" />
-                    </StackPanel>
-                    <TextBlock Grid.Column="1" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="红色阻断时无法启动" />
-                </Grid>
-                <Grid Grid.Row="2">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="78" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock VerticalAlignment="Center" Foreground="{StaticResource TextMutedBrush}" Text="报告路径" />
-                    <Border Grid.Column="1" Background="{StaticResource PickerBackgroundBrush}" BorderBrush="{StaticResource BorderSoftBrush}" BorderThickness="1" CornerRadius="8">
-                        <TextBox
-                            x:Name="ReportPathTextBox"
-                            Padding="9,6"
-                            AutomationProperties.Name="最新自检报告路径"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            CaretBrush="{StaticResource AccentCyanBrush}"
-                            Foreground="{StaticResource TextSecondaryBrush}"
-                            IsReadOnly="True"
-                            TabIndex="9"
-                            Text="尚未生成报告"
-                            TextWrapping="NoWrap"
-                            ToolTip="尚未生成报告" />
-                    </Border>
-                </Grid>
-                <Grid Grid.Row="4">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <WrapPanel Margin="0,0,6,-8" VerticalAlignment="Top">
-                        <Button
-                            x:Name="RescanButton"
-                            Margin="0,0,8,8"
-                            AutomationProperties.Name="重新扫描"
-                            Content="重新扫描"
-                            Style="{StaticResource ActionButtonStyle}"
-                            TabIndex="10" />
-                        <Button
-                            x:Name="RepairButton"
-                            Margin="0,0,8,8"
-                            AutomationProperties.Name="自动修复安全项"
-                            Content="自动修复安全项"
-                            Style="{StaticResource ActionButtonStyle}"
-                            TabIndex="11" />
-                        <Button
-                            x:Name="CleanupScreenshotsButton"
-                            Margin="0,0,8,8"
-                            AutomationProperties.Name="清理截图缓存"
-                            Content="清理截图缓存"
-                            Style="{StaticResource ActionButtonStyle}"
-                            TabIndex="12"
-                            ToolTip="只清理项目 .runtime\cache\screenshots 第一层的 Big-Chicken PNG 截图" />
-                        <Button
-                            x:Name="CopyReportButton"
-                            Margin="0,0,8,8"
-                            AutomationProperties.Name="复制报告路径"
-                            Content="复制报告路径"
-                            IsEnabled="False"
-                            Style="{StaticResource ActionButtonStyle}"
-                            TabIndex="13" />
-                    </WrapPanel>
-                    <Button
-                        x:Name="LaunchButton"
-                        Grid.Column="1"
-                        Margin="10,0,0,8"
-                        MinWidth="190"
-                        HorizontalAlignment="Right"
-                        VerticalAlignment="Top"
-                        AutomationProperties.Name="启动 Houdini"
-                        Content="启动 Houdini"
-                        IsDefault="True"
-                        IsEnabled="False"
-                        Style="{StaticResource PrimaryButtonStyle}"
-                        TabIndex="14" />
-                </Grid>
-            </Grid>
-        </Border>
-
-        <Border
-            x:Name="RightVisualRail"
-            Grid.Row="0"
-            Width="210"
-            Margin="0,16,28,12"
-            Padding="0"
-            HorizontalAlignment="Right"
-            VerticalAlignment="Center"
-            Background="Transparent"
-            BorderThickness="0">
+            <StackPanel Grid.Row="1" Margin="28,10,28,0">
                 <Border
-                    x:Name="OverallStatusBadge"
-                    Padding="12,8"
-                    HorizontalAlignment="Stretch"
+                    x:Name="BusyPanel"
+                    Padding="13,9"
                     Background="{StaticResource NeutralSurfaceBrush}"
-                    BorderBrush="{StaticResource StatusNeutralBrush}"
+                    BorderBrush="#53649B"
                     BorderThickness="1"
-                    CornerRadius="10">
+                    CornerRadius="10"
+                    Visibility="Collapsed">
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-                        <Ellipse
-                            x:Name="OverallStatusDot"
-                            Width="8"
-                            Height="8"
-                            Margin="0,0,10,0"
+                        <TextBlock
+                            Foreground="{StaticResource TextPrimaryBrush}"
+                            FontWeight="SemiBold"
+                            Text="正在扫描并检查环境…" />
+                        <ProgressBar
+                            x:Name="BusyProgressBar"
+                            Grid.Column="1"
+                            Height="5"
+                            Margin="18,0,2,0"
                             VerticalAlignment="Center"
-                            Fill="{StaticResource StatusNeutralBrush}" />
-                        <StackPanel Grid.Column="1">
-                            <TextBlock
-                                x:Name="OverallStatusText"
-                                Foreground="{StaticResource TextPrimaryBrush}"
-                                FontWeight="SemiBold"
-                                Text="等待检查" />
-                            <TextBlock
-                                Margin="0,2,0,0"
-                                Foreground="{StaticResource TextMutedBrush}"
-                                FontSize="9"
-                                Text="PREFLIGHT STATUS" />
-                        </StackPanel>
+                            Background="#252B40"
+                            BorderThickness="0"
+                            Foreground="{StaticResource AccentCyanBrush}"
+                            IsIndeterminate="True" />
                     </Grid>
                 </Border>
-        </Border>
+                <Border
+                    x:Name="InlineStatusBorder"
+                    Margin="0,7,0,0"
+                    Padding="13,9"
+                    Background="{StaticResource NeutralSurfaceBrush}"
+                    BorderBrush="{StaticResource StatusNeutralBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <TextBlock
+                        x:Name="InlineStatusText"
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        TextWrapping="Wrap" />
+                </Border>
+            </StackPanel>
+
+            <ScrollViewer
+                x:Name="MainScrollViewer"
+                Grid.Row="2"
+                Style="{StaticResource ModernScrollViewerStyle}">
+                <Border
+                    x:Name="MainWorkspacePanel"
+                    MaxWidth="1040"
+                    Margin="28,18,28,22"
+                    HorizontalAlignment="Stretch"
+                    Background="Transparent"
+                    BorderThickness="0">
+                    <Grid x:Name="PageHost">
+                        <Grid x:Name="OverviewPage">
+                            <StackPanel>
+                                <Border
+                                    MinHeight="210"
+                                    Padding="0"
+                                    Background="{StaticResource OverviewHeroGradientBrush}"
+                                    BorderBrush="#3C4563"
+                                    BorderThickness="1"
+                                    ClipToBounds="True"
+                                    CornerRadius="18">
+                                    <Grid>
+                                        <Border
+                                            x:Name="OptionalArtworkPanel"
+                                            Width="570"
+                                            HorizontalAlignment="Right"
+                                            Background="Transparent"
+                                            ClipToBounds="True"
+                                            IsHitTestVisible="False"
+                                            Visibility="Collapsed">
+                                            <Image
+                                                x:Name="OptionalArtworkImage"
+                                                HorizontalAlignment="Stretch"
+                                                VerticalAlignment="Stretch"
+                                                Opacity="0.9"
+                                                RenderOptions.BitmapScalingMode="HighQuality"
+                                                SnapsToDevicePixels="True"
+                                                Stretch="UniformToFill">
+                                                <Image.OpacityMask>
+                                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                        <GradientStop Color="#00FFFFFF" Offset="0" />
+                                                        <GradientStop Color="#3AFFFFFF" Offset="0.18" />
+                                                        <GradientStop Color="#D8FFFFFF" Offset="0.42" />
+                                                        <GradientStop Color="#FFFFFFFF" Offset="0.68" />
+                                                    </LinearGradientBrush>
+                                                </Image.OpacityMask>
+                                            </Image>
+                                        </Border>
+                                        <Border IsHitTestVisible="False">
+                                            <Border.Background>
+                                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                    <GradientStop Color="#F518192E" Offset="0" />
+                                                    <GradientStop Color="#EC15182A" Offset="0.42" />
+                                                    <GradientStop Color="#B8151725" Offset="0.66" />
+                                                    <GradientStop Color="#42101520" Offset="1" />
+                                                </LinearGradientBrush>
+                                            </Border.Background>
+                                        </Border>
+                                        <StackPanel
+                                            MaxWidth="520"
+                                            Margin="26,22"
+                                            HorizontalAlignment="Left"
+                                            VerticalAlignment="Center">
+                                            <TextBlock
+                                                Foreground="{StaticResource AccentPinkBrush}"
+                                                FontSize="10"
+                                                FontWeight="SemiBold"
+                                                Text="SESSION OVERVIEW" />
+                                            <TextBlock
+                                                x:Name="OverviewOverallHeadline"
+                                                Margin="0,8,0,0"
+                                                Foreground="{StaticResource TextPrimaryBrush}"
+                                                FontSize="27"
+                                                FontWeight="SemiBold"
+                                                LineHeight="34"
+                                                Text="等你检查环境"
+                                                TextWrapping="Wrap" />
+                                            <TextBlock
+                                                x:Name="OverviewOverallDetail"
+                                                Margin="0,8,0,0"
+                                                Foreground="{StaticResource TextSecondaryBrush}"
+                                                LineHeight="19"
+                                                Text="选择工作环境后，Big-Chicken 会把启动前的关键状态整理在这里。"
+                                                TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+
+                                <WrapPanel Margin="0,16,-12,0">
+                                    <Border Style="{StaticResource SummaryTileStyle}">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse x:Name="OverviewHoudiniDot" Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource StatusNeutralBrush}" />
+                                                <TextBlock Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="HOUDINI" />
+                                            </StackPanel>
+                                            <TextBlock x:Name="OverviewHoudiniValueText" Grid.Row="1" Margin="0,7,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="等待扫描" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock x:Name="OverviewHoudiniDetailText" Grid.Row="2" Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="版本与 hython" TextTrimming="CharacterEllipsis" ToolTip="版本与 hython" />
+                                        </Grid>
+                                    </Border>
+                                    <Border Style="{StaticResource SummaryTileStyle}">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse x:Name="OverviewMcpDot" Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource StatusNeutralBrush}" />
+                                                <TextBlock Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="MCP BACKEND" />
+                                            </StackPanel>
+                                            <TextBlock x:Name="OverviewMcpValueText" Grid.Row="1" Margin="0,7,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="HIA MCP V2" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock x:Name="OverviewMcpDetailText" Grid.Row="2" Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="等待检查运行时" TextTrimming="CharacterEllipsis" ToolTip="等待检查运行时" />
+                                        </Grid>
+                                    </Border>
+                                    <Border Style="{StaticResource SummaryTileStyle}">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse x:Name="OverviewCodexDot" Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource StatusNeutralBrush}" />
+                                                <TextBlock Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="CODEX" />
+                                            </StackPanel>
+                                            <TextBlock x:Name="OverviewCodexValueText" Grid.Row="1" Margin="0,7,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="等待扫描" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock x:Name="OverviewCodexDetailText" Grid.Row="2" Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="项目本地登录状态" TextTrimming="CharacterEllipsis" ToolTip="项目本地登录状态" />
+                                        </Grid>
+                                    </Border>
+                                    <Border Style="{StaticResource SummaryTileStyle}">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse x:Name="OverviewEmbeddingDot" Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource StatusNeutralBrush}" />
+                                                <TextBlock Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="LOCAL KNOWLEDGE" />
+                                            </StackPanel>
+                                            <TextBlock x:Name="OverviewEmbeddingValueText" Grid.Row="1" Margin="0,7,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="等待扫描" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock x:Name="OverviewEmbeddingDetailText" Grid.Row="2" Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="模型与计算设备" TextTrimming="CharacterEllipsis" ToolTip="模型与计算设备" />
+                                        </Grid>
+                                    </Border>
+                                </WrapPanel>
+
+                                <Border
+                                    x:Name="RecoveryCard"
+                                    Margin="0,4,0,14"
+                                    Padding="16,13"
+                                    Background="{StaticResource YellowSurfaceBrush}"
+                                    BorderBrush="{StaticResource StatusYellowBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="12"
+                                    Visibility="Collapsed">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="检测到可恢复副本" />
+                                            <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextSecondaryBrush}" Text="上次 Houdini 未正常结束。恢复会在新 session 中打开 checkpoint 副本，绝不覆盖原 HIP。" TextWrapping="Wrap" />
+                                            <TextBlock x:Name="RecoveryCheckpointText" Margin="0,5,0,0" Foreground="{StaticResource PickerSecondaryTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <WrapPanel Grid.Row="1" Margin="0,10,0,0">
+                                            <RadioButton x:Name="RecoverCheckpointOption" AutomationProperties.Name="恢复副本" Content="恢复副本（推荐）" Foreground="{StaticResource TextPrimaryBrush}" GroupName="RecoveryChoice" IsChecked="True" TabIndex="4" />
+                                            <RadioButton x:Name="NormalLaunchOption" Margin="18,0,0,0" AutomationProperties.Name="正常启动" Content="正常启动" Foreground="{StaticResource TextPrimaryBrush}" GroupName="RecoveryChoice" TabIndex="5" />
+                                        </WrapPanel>
+                                    </Grid>
+                                </Border>
+
+                                <Border
+                                    Padding="2,13,2,0"
+                                    BorderBrush="{StaticResource BorderSoftBrush}"
+                                    BorderThickness="0,1,0,0">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="13" FontWeight="SemiBold" Text="启动前自检" />
+                                            <TextBlock Margin="0,3,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="详细结果在“自检”页展开查看" />
+                                        </StackPanel>
+                                        <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                            <Border Style="{StaticResource CountCardStyle}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Ellipse Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource StatusGreenBrush}" />
+                                                    <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Text="通过 " />
+                                                    <TextBlock x:Name="PassCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
+                                                </StackPanel>
+                                            </Border>
+                                            <Border Style="{StaticResource CountCardStyle}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Ellipse Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource StatusYellowBrush}" />
+                                                    <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Text="警告 " />
+                                                    <TextBlock x:Name="WarningCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
+                                                </StackPanel>
+                                            </Border>
+                                            <Border Style="{StaticResource CountCardStyle}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Ellipse Width="7" Height="7" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource StatusRedBrush}" />
+                                                    <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Text="阻断 " />
+                                                    <TextBlock x:Name="BlockedCountText" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" Text="0" />
+                                                </StackPanel>
+                                            </Border>
+                                        </WrapPanel>
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid x:Name="EnvironmentPage" Visibility="Collapsed">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource AccentCyanBrush}" FontSize="10" FontWeight="SemiBold" Text="ENVIRONMENT" />
+                                        <TextBlock Margin="0,5,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="18" FontWeight="SemiBold" Text="选择启动环境" />
+                                        <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="11" Text="每次改变选择后，请重新扫描一次。" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <Border
+                                    Background="#A80D1220"
+                                    BorderBrush="{StaticResource BorderSoftBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="16">
+                                    <StackPanel>
+                                        <Grid Margin="18,15">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="108" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="MCP backend" />
+                                            <ComboBox x:Name="McpBackendComboBox" Grid.Column="1" AutomationProperties.Name="MCP backend" IsEditable="False" ItemTemplate="{StaticResource BackendPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="6" />
+                                        </Grid>
+                                        <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
+                                        <Grid Margin="18,15">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="108" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="知识向量模型" />
+                                            <ComboBox x:Name="EmbeddingProfileComboBox" Grid.Column="1" AutomationProperties.Name="知识向量模型" IsEditable="False" ItemTemplate="{StaticResource EmbeddingProfilePickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="7" />
+                                        </Grid>
+                                        <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
+                                        <Grid Margin="18,15">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="108" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="向量计算设备" />
+                                            <ComboBox x:Name="EmbeddingDeviceComboBox" Grid.Column="1" AutomationProperties.Name="知识向量计算设备" IsEditable="False" ItemTemplate="{StaticResource BackendPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="8" />
+                                        </Grid>
+                                        <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
+                                        <Grid Margin="18,15">
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="108" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="78" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="Houdini 版本" />
+                                            <ComboBox x:Name="HoudiniComboBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="Houdini 版本" IsEditable="False" ItemTemplate="{StaticResource HoudiniPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="9" />
+                                            <Button x:Name="BrowseHoudiniButton" Grid.Column="2" AutomationProperties.Name="浏览 houdini.exe" Content="浏览…" Style="{StaticResource CompactButtonStyle}" TabIndex="10" />
+                                            <TextBlock x:Name="HoudiniPathText" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,6,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="尚未选择 houdini.exe" TextTrimming="CharacterEllipsis" ToolTip="尚未选择 houdini.exe" />
+                                        </Grid>
+                                        <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
+                                        <Grid Margin="18,15">
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="108" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="78" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="Bridge Python" />
+                                            <ComboBox x:Name="BridgePythonComboBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="Bridge Python" IsEditable="False" ItemTemplate="{StaticResource BridgePickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="11" />
+                                            <Button x:Name="BrowseBridgeButton" Grid.Column="2" AutomationProperties.Name="浏览 Bridge python.exe" Content="浏览…" Style="{StaticResource CompactButtonStyle}" TabIndex="12" />
+                                            <TextBlock x:Name="BridgePathText" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,6,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="尚未选择 Bridge python.exe" TextTrimming="CharacterEllipsis" ToolTip="尚未选择 Bridge python.exe" />
+                                        </Grid>
+                                        <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
+                                        <Grid Margin="18,15">
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="108" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="78" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="最终输出目录" />
+                                            <TextBox x:Name="RenderOutputTextBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="最终渲染输出目录" Style="{StaticResource FlatTextBoxStyle}" TabIndex="13" ToolTip="留空时使用项目 .runtime/cache" />
+                                            <Button x:Name="BrowseRenderOutputButton" Grid.Column="2" AutomationProperties.Name="选择最终渲染输出目录" Content="选择…" Style="{StaticResource CompactButtonStyle}" TabIndex="14" />
+                                            <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,6,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="最终 EXR、图片、视频、USD、导出和模拟缓存可放这里；留空使用项目 .runtime/cache。它与内部截图、预览和临时缓存目录不同。" TextWrapping="Wrap" />
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                        <Grid x:Name="PreflightPage" Visibility="Collapsed">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <Grid Margin="0,0,0,14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource AccentPinkBrush}" FontSize="10" FontWeight="SemiBold" Text="PREFLIGHT" />
+                                        <TextBlock Margin="0,5,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="18" FontWeight="SemiBold" Text="启动前检查" />
+                                        <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="11" Text="展开条目查看技术细节与一条明确修复建议。" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" VerticalAlignment="Bottom" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="绿色通过 · 黄色提醒 · 红色阻断" />
+                                </Grid>
+                                <Border
+                                    Grid.Row="1"
+                                    MinHeight="250"
+                                    Background="#850D1220"
+                                    BorderBrush="{StaticResource BorderSoftBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="14">
+                                    <Grid Margin="12">
+                                        <Border
+                                            x:Name="EmptyStateBorder"
+                                            Padding="20"
+                                            HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Center"
+                                            Background="{StaticResource NeutralSurfaceBrush}"
+                                            BorderThickness="0"
+                                            CornerRadius="10">
+                                            <TextBlock x:Name="EmptyStateText" HorizontalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" Text="等待首次检查…" TextAlignment="Center" TextWrapping="Wrap" />
+                                        </Border>
+                                        <ScrollViewer Margin="0,2,0,2" Style="{StaticResource ModernScrollViewerStyle}">
+                                            <ItemsControl x:Name="ChecksListBox" AutomationProperties.Name="自检结果" ItemTemplate="{StaticResource CheckResultTemplate}" />
+                                        </ScrollViewer>
+                                    </Grid>
+                                </Border>
+                            </Grid>
+                        </Grid>
+
+                        <Grid x:Name="ReportsSettingsPage" Visibility="Collapsed">
+                            <StackPanel>
+                                <StackPanel Margin="0,0,0,15">
+                                    <TextBlock Foreground="{StaticResource AccentPurpleBrush}" FontSize="10" FontWeight="SemiBold" Text="REPORTS &amp; OPERATIONS" />
+                                    <TextBlock Margin="0,5,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="18" FontWeight="SemiBold" Text="报告与安全操作" />
+                                    <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="11" Text="这里集中放置可重复执行的项目本地动作。" />
+                                </StackPanel>
+
+                                <Border
+                                    x:Name="KnowledgeIndexPanel"
+                                    Padding="17,15"
+                                    Background="#9B0D1220"
+                                    BorderBrush="{StaticResource BorderSoftBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="14">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="110" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="142" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="12" FontWeight="SemiBold" Text="本地知识索引" />
+                                            <TextBlock Margin="0,3,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="9" Text="MANUAL BUILD" />
+                                        </StackPanel>
+                                        <Grid Grid.Column="1" Margin="4,0,14,0">
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock x:Name="KnowledgeIndexModelText" Foreground="{StaticResource TextPrimaryBrush}" FontSize="11" FontWeight="SemiBold" Text="尚未读取模型" TextTrimming="CharacterEllipsis" ToolTip="尚未读取模型" />
+                                                <TextBlock x:Name="KnowledgeIndexCountText" Grid.Column="1" Margin="10,0,0,0" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Text="0 / 0" />
+                                            </Grid>
+                                            <ProgressBar x:Name="KnowledgeIndexProgressBar" Grid.Row="1" Height="5" Margin="0,7,0,0" Background="#252B40" BorderThickness="0" Foreground="{StaticResource AccentCyanBrush}" Maximum="100" Minimum="0" Value="0" />
+                                            <TextBlock x:Name="KnowledgeIndexStatusText" Grid.Row="2" Margin="0,6,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="重新扫描后显示索引进度" TextTrimming="CharacterEllipsis" ToolTip="重新扫描后显示索引进度" />
+                                        </Grid>
+                                        <Button x:Name="KnowledgeIndexActionButton" Grid.Column="2" MinWidth="132" VerticalAlignment="Center" AutomationProperties.Name="构建或继续本地知识索引" Content="构建/继续索引" IsEnabled="False" Style="{StaticResource ActionButtonStyle}" TabIndex="15" />
+                                    </Grid>
+                                </Border>
+
+                                <Border Height="1" Margin="0,18" Background="{StaticResource BorderSoftBrush}" />
+
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="104" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Text="最新报告 / 日志" />
+                                    <TextBox x:Name="ReportPathTextBox" Grid.Column="1" AutomationProperties.Name="最新自检报告路径" IsReadOnly="True" Style="{StaticResource FlatTextBoxStyle}" TabIndex="16" Text="尚未生成报告" TextWrapping="NoWrap" ToolTip="尚未生成报告" />
+                                    <TextBlock Grid.Row="1" Grid.Column="1" Margin="3,5,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="安装失败时也会在这里显示脱敏日志路径。" />
+                                </Grid>
+
+                                <WrapPanel Margin="0,18,-8,-8">
+                                    <Button x:Name="RescanButton" Margin="0,0,8,8" AutomationProperties.Name="重新扫描" Content="重新扫描" Style="{StaticResource ActionButtonStyle}" TabIndex="17" />
+                                    <Button x:Name="RepairButton" Margin="0,0,8,8" AutomationProperties.Name="自动修复安全项" Content="自动修复安全项" Style="{StaticResource ActionButtonStyle}" TabIndex="18" />
+                                    <Button x:Name="CleanupScreenshotsButton" Margin="0,0,8,8" AutomationProperties.Name="清理截图缓存" Content="清理截图缓存" Style="{StaticResource ActionButtonStyle}" TabIndex="19" ToolTip="只清理项目 .runtime/cache/screenshots 第一层的 Big-Chicken PNG 截图" />
+                                    <Button x:Name="CopyReportButton" Margin="0,0,8,8" AutomationProperties.Name="复制报告路径" Content="复制报告路径" IsEnabled="False" Style="{StaticResource ActionButtonStyle}" TabIndex="20" />
+                                </WrapPanel>
+
+                                <TextBlock Margin="0,15,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" LineHeight="17" Text="安全修复只处理项目本地运行环境；截图清理会先预览并再次确认精确目标。" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </ScrollViewer>
+
+            <Border
+                x:Name="FooterBar"
+                Grid.Row="3"
+                Padding="24,12,24,14"
+                Background="#F00A0E18"
+                BorderBrush="{StaticResource BorderSoftBrush}"
+                BorderThickness="0,1,0,0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Margin="0,0,14,0" VerticalAlignment="Center">
+                        <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="11" FontWeight="SemiBold" Text="准备好后，从这里进入 Houdini" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Margin="0,3,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="9.5" Text="红色阻断会禁用启动；黄色提醒仍可继续。" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                    <Button
+                        x:Name="LaunchButton"
+                        Grid.Column="1"
+                        MinWidth="188"
+                        AutomationProperties.Name="启动 Houdini"
+                        Content="启动 Houdini"
+                        IsDefault="True"
+                        IsEnabled="False"
+                        Style="{StaticResource PrimaryButtonStyle}"
+                        TabIndex="21" />
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

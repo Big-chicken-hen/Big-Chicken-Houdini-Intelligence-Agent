@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hia_embedding_worker"
+version = "0.1.0"
+description = "Project-local deterministic embedding worker for HIA MCP V2"
+requires-python = ">=3.10"
+dependencies = [
+    "sentence-transformers>=2.7.0",
+    "transformers>=4.51.0",
+]
+
+[project.scripts]
+hia_embedding_worker = "hia_embedding_worker.__main__:main"
+
+[tool.setuptools]
+packages = ["hia_embedding_worker"]

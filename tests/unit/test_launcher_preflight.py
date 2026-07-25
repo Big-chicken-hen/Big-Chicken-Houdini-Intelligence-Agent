@@ -21,6 +21,13 @@ LAUNCHER_PATH = REPOSITORY_ROOT / "scripts" / "hia-launcher.ps1"
 WPF_SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Wpf.ps1"
 XAML_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.xaml"
 LIFECYCLE_PATH = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+EMBEDDING_CONTRACT_PATH = REPOSITORY_ROOT / "src" / "hia_core" / "embedding_contract.py"
+EMBEDDING_INSTALLER_PATH = (
+    REPOSITORY_ROOT / "scripts" / "launcher" / "Install-HiaEmbedding.ps1"
+)
+EMBEDDING_INSTALLER_HELPER_PATH = (
+    REPOSITORY_ROOT / "scripts" / "launcher" / "install_hia_embedding.py"
+)
 EXE_PROJECT_ROOT = REPOSITORY_ROOT / "launcher" / "HoudiniIntelligenceLauncher"
 EXE_PROJECT_PATH = EXE_PROJECT_ROOT / "HoudiniIntelligenceLauncher.csproj"
 EXE_APP_PATH = EXE_PROJECT_ROOT / "App.xaml.cs"
@@ -463,16 +470,48 @@ $value = [pscustomobject]@{
     token = 'token-value-must-not-survive'
     cookie = 'cookie-value-must-not-survive'
     api_key = 'sk-abcdefghijklmnop'
-    note = 'Authorization: Bearer bearer-value-must-not-survive'
+    UV_INDEX_URL = 'https://private-index.example/simple'
+    note = @'
+Authorization: Basic dXNlcjpwYXNz
+Authorization: Bearer bearer-value-must-not-survive
+https://url-user:url-password@example.test/simple
+https://token-only-core@example.test/simple
+PIP_EXTRA_INDEX_URL=https://pip-secret.example/simple
+UV_INDEX=https://first-index.example/simple https://second-index.example/simple
+next-line-visible
+'@
 }
 ConvertTo-HiaRedactedJson -Value $value -Compress
 """
         )
+        payload = json.loads(output)
         self.assertNotIn("token-value-must-not-survive", output)
         self.assertNotIn("cookie-value-must-not-survive", output)
         self.assertNotIn("sk-abcdefghijklmnop", output)
         self.assertNotIn("bearer-value-must-not-survive", output)
+        self.assertNotIn("dXNlcjpwYXNz", output)
+        self.assertNotIn("url-user", output)
+        self.assertNotIn("url-password", output)
+        self.assertNotIn("token-only-core", output)
+        self.assertIn("https://[REDACTED]@example.test/simple", output)
+        self.assertNotIn("private-index.example", output)
+        self.assertNotIn("pip-secret.example", output)
+        self.assertNotIn("first-index.example", output)
+        self.assertNotIn("second-index.example", output)
+        self.assertIn("next-line-visible", payload["note"])
         self.assertIn("[REDACTED]", output)
+
+    def test_core_text_redacts_token_only_url_userinfo(self) -> None:
+        output = self.run_powershell(
+            """
+ConvertTo-HiaRedactedText `
+    -Text 'https://token-only@example.test/simple'
+"""
+        )
+        self.assertEqual(
+            "https://[REDACTED]@example.test/simple",
+            output,
+        )
 
     def test_check_only_json_runs_without_starting_houdini_gui(self) -> None:
         missing_houdini = self.sandbox / "never-started" / "houdini.exe"
@@ -581,6 +620,1355 @@ $choices = @(Get-HiaMcpBackendChoices)
         self.assertEqual(
             ["hia_v2", "fxhoudini"],
             [choice["id"] for choice in payload["choices"]],
+        )
+
+    def test_launcher_settings_and_install_logs_reject_reparse_parents(
+        self,
+    ) -> None:
+        for level in ("runtime", "launcher"):
+            with self.subTest(level=level):
+                case_root = self.sandbox / f"launcher-storage-{level}"
+                project = case_root / "project"
+                lure = case_root / "lure"
+                project.mkdir(parents=True)
+                lure.mkdir()
+                marker = lure / "keep.txt"
+                marker.write_text("keep", encoding="utf-8")
+                if level == "runtime":
+                    link = project / ".runtime"
+                    target = lure
+                else:
+                    (project / ".runtime").mkdir()
+                    link = project / ".runtime" / "launcher"
+                    target = lure
+                expected_log = (
+                    project
+                    / ".runtime"
+                    / "launcher"
+                    / "embedding-install-junction.log"
+                )
+                output = self.run_powershell(
+                    f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(EMBEDDING_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'Install-HiaEmbedding.ps1 did not parse.' }}
+$requiredFunctions = @(
+    'Test-HiaEmbeddingOrdinaryFile',
+    'Resolve-HiaEmbeddingLauncherDirectory',
+    'Resolve-HiaEmbeddingInstallLogPath'
+)
+foreach ($name in $requiredFunctions) {{
+    $definition = @($ast.FindAll({{
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name
+    }}, $true))
+    if ($definition.Count -ne 1) {{ throw "missing function: $name" }}
+    Invoke-Expression $definition[0].Extent.Text
+}}
+
+$link = {_ps_literal(link)}
+$created = $false
+try {{
+    New-Item -ItemType Junction -Path $link -Target {_ps_literal(target)} | Out-Null
+    $created = $true
+    $settingsFailure = ''
+    try {{
+        Write-HiaLauncherSettings `
+            -ProjectRoot {_ps_literal(project)} `
+            -HoudiniExe {_ps_literal(project / 'Houdini' / 'houdini.exe')} `
+            -BridgePython {_ps_literal(project / 'Python' / 'python.exe')} | Out-Null
+    }} catch {{
+        $settingsFailure = [string]$_.Exception.Message
+    }}
+    $logFailure = ''
+    try {{
+        [void](Resolve-HiaEmbeddingInstallLogPath `
+            -ProjectRoot {_ps_literal(project)} `
+            -RequestedPath {_ps_literal(expected_log)})
+    }} catch {{
+        $logFailure = [string]$_.Exception.Message
+    }}
+    [pscustomobject]@{{
+        settings_failure = $settingsFailure
+        log_failure = $logFailure
+        marker = [System.IO.File]::ReadAllText({_ps_literal(marker)})
+        lure_settings = Test-Path `
+            -LiteralPath (Join-Path {_ps_literal(lure)} 'settings.json') `
+            -PathType Leaf
+        lure_log = Test-Path `
+            -LiteralPath (Join-Path {_ps_literal(lure)} 'embedding-install-junction.log') `
+            -PathType Leaf
+    }} | ConvertTo-Json -Compress
+}} finally {{
+    if ($created) {{
+        $item = Get-Item -LiteralPath $link -Force -ErrorAction Stop
+        if (
+            ([int]$item.Attributes -band
+                [int][System.IO.FileAttributes]::ReparsePoint) -eq 0
+        ) {{
+            throw 'Test junction unexpectedly lost its reparse-point attribute.'
+        }}
+        [System.IO.Directory]::Delete($link, $false)
+    }}
+}}
+"""
+                )
+                payload = json.loads(output)
+                self.assertIn("reparse", payload["settings_failure"].lower())
+                self.assertIn("reparse", payload["log_failure"].lower())
+                self.assertEqual("keep", payload["marker"])
+                self.assertFalse(payload["lure_settings"])
+                self.assertFalse(payload["lure_log"])
+
+    def test_launcher_settings_and_install_logs_reject_file_symlinks(
+        self,
+    ) -> None:
+        project = self.sandbox / "launcher-storage-file-link"
+        launcher = project / ".runtime" / "launcher"
+        launcher.mkdir(parents=True)
+        lure_settings = self.sandbox / "outside-settings.json"
+        lure_log = self.sandbox / "outside-install.log"
+        lure_settings.write_text('{"keep":"settings"}\n', encoding="utf-8")
+        lure_log.write_text("keep-log\n", encoding="utf-8")
+        settings_link = launcher / "settings.json"
+        log_link = launcher / "embedding-install-linked.log"
+        try:
+            settings_link.symlink_to(lure_settings)
+            log_link.symlink_to(lure_log)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest(
+                    "Windows file symlink creation requires elevated privilege"
+                )
+            raise
+
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(EMBEDDING_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'Install-HiaEmbedding.ps1 did not parse.' }}
+$requiredFunctions = @(
+    'Test-HiaEmbeddingOrdinaryFile',
+    'Resolve-HiaEmbeddingLauncherDirectory',
+    'Resolve-HiaEmbeddingInstallLogPath'
+)
+foreach ($name in $requiredFunctions) {{
+    $definition = @($ast.FindAll({{
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name
+    }}, $true))
+    if ($definition.Count -ne 1) {{ throw "missing function: $name" }}
+    Invoke-Expression $definition[0].Extent.Text
+}}
+
+$readFailure = ''
+try {{
+    [void](Read-HiaLauncherSettings -ProjectRoot {_ps_literal(project)})
+}} catch {{
+    $readFailure = [string]$_.Exception.Message
+}}
+$writeFailure = ''
+try {{
+    Write-HiaLauncherSettings `
+        -ProjectRoot {_ps_literal(project)} `
+        -HoudiniExe {_ps_literal(project / 'Houdini' / 'houdini.exe')} `
+        -BridgePython {_ps_literal(project / 'Python' / 'python.exe')} | Out-Null
+}} catch {{
+    $writeFailure = [string]$_.Exception.Message
+}}
+$logFailure = ''
+try {{
+    [void](Resolve-HiaEmbeddingInstallLogPath `
+        -ProjectRoot {_ps_literal(project)} `
+        -RequestedPath {_ps_literal(log_link)})
+}} catch {{
+    $logFailure = [string]$_.Exception.Message
+}}
+[pscustomobject]@{{
+    read_failure = $readFailure
+    write_failure = $writeFailure
+    log_failure = $logFailure
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertIn("ordinary file", payload["read_failure"])
+        self.assertIn("ordinary file", payload["write_failure"])
+        self.assertIn("ordinary file", payload["log_failure"])
+        self.assertEqual(
+            '{"keep":"settings"}\n',
+            lure_settings.read_text(encoding="utf-8"),
+        )
+        self.assertEqual("keep-log\n", lure_log.read_text(encoding="utf-8"))
+
+    def test_embedding_contract_drives_choices_default_sizes_and_portable_setting(self) -> None:
+        fake_root = self.sandbox / "embedding-settings"
+        fake_root.mkdir()
+        output = self.run_powershell(
+            f"""
+$data = Get-HiaEmbeddingContractData `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -PythonExe {_ps_literal(sys.executable)}
+$default = [string]$data.contract.default_profile
+$alternate = @($data.profiles.PSObject.Properties.Name | Where-Object {{ $_ -ne $default }})[0]
+$choices = @(Get-HiaEmbeddingProfileChoices -EmbeddingData $data)
+Write-HiaEmbeddingPreference `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $alternate `
+    -EmbeddingDevice 'cuda' | Out-Null
+$settings = Read-HiaLauncherSettings -ProjectRoot {_ps_literal(fake_root)}
+$key = [string]$data.contract.settings.profile
+$deviceKey = [string]$data.contract.settings.device
+[pscustomobject]@{{
+    default = $default
+    alternate = $alternate
+    selected = [string]$settings.PSObject.Properties[$key].Value
+    device = [string]$settings.PSObject.Properties[$deviceKey].Value
+    profile_count = @($data.profiles.PSObject.Properties).Count
+    choices = $choices
+    setting_key = $key
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+        )
+        payload = json.loads(output)
+        contract = runpy.run_path(str(EMBEDDING_CONTRACT_PATH))
+        public = contract["launcher_contract"]()
+        self.assertEqual(public["default_profile"], payload["default"])
+        self.assertEqual(2, payload["profile_count"])
+        self.assertEqual(payload["alternate"], payload["selected"])
+        self.assertEqual("cuda", payload["device"])
+        self.assertEqual(public["settings"]["profile"], payload["setting_key"])
+        self.assertEqual(
+            set(public["profiles"]),
+            {choice["id"] for choice in payload["choices"]},
+        )
+        details = " ".join(choice["detail"] for choice in payload["choices"])
+        self.assertIn("1.21 GB", details)
+        self.assertIn("15.2 GB", details)
+        self.assertIn("默认 / 轻量", details)
+        self.assertIn("高质量 / 资源占用高", details)
+        settings_path = fake_root / ".runtime" / "launcher" / "settings.json"
+        self.assertTrue(settings_path.is_file())
+        self.assertFalse((self.sandbox / "AppData").exists())
+
+    def test_embedding_device_choices_are_bounded_and_cuda_repair_is_project_local(self) -> None:
+        output = self.run_powershell(
+            """
+[pscustomobject]@{
+    empty = Resolve-HiaEmbeddingDevice -Device ''
+    auto = Resolve-HiaEmbeddingDevice -Device 'auto'
+    cuda = Resolve-HiaEmbeddingDevice -Device 'CUDA'
+    cpu = Resolve-HiaEmbeddingDevice -Device 'cpu'
+} | ConvertTo-Json -Compress
+"""
+        )
+        self.assertEqual(
+            {
+                "empty": "auto",
+                "auto": "auto",
+                "cuda": "cuda",
+                "cpu": "cpu",
+            },
+            json.loads(output),
+        )
+        installer_source = EMBEDDING_INSTALLER_PATH.read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn("[ValidateSet('auto', 'cuda', 'cpu')]", installer_source)
+        self.assertIn(
+            "https://astral.sh/uv/0.11.29/install.ps1",
+            installer_source,
+        )
+        self.assertIn("UV_UNMANAGED_INSTALL", installer_source)
+        self.assertIn("UV_CACHE_DIR", installer_source)
+        self.assertIn("--torch-backend=cu128", installer_source)
+        self.assertIn("'--python', $workerPython", installer_source)
+        self.assertEqual(2, installer_source.count("'--default-index'"))
+        self.assertIn("https://pypi.org/simple", installer_source)
+        self.assertEqual(
+            2,
+            installer_source.count("-FilePath ([string]$uv.exe)"),
+        )
+        self.assertNotIn("https://download.pytorch.org", installer_source)
+        self.assertNotIn("--index-url", installer_source)
+        self.assertNotIn("'-m',\n            'pip'", installer_source)
+        uv_ready = installer_source.index("$uv = Get-HiaProjectLocalUv")
+        cuda_torch = installer_source.index(
+            "$cudaTorchResult = Invoke-HiaEmbeddingChildProcess",
+            uv_ready,
+        )
+        worker_install = installer_source.index(
+            "$workerInstallResult = Invoke-HiaEmbeddingChildProcess",
+            cuda_torch,
+        )
+        self.assertLess(uv_ready, cuda_torch)
+        self.assertLess(cuda_torch, worker_install)
+        self.assertIn("torch.cuda.is_available()", installer_source)
+        self.assertIn("device_name", installer_source)
+        self.assertIn("project-local embedding environment", installer_source)
+        self.assertNotIn("--user", installer_source)
+
+    def test_embedding_installer_accepts_verified_cuda_without_nvidia_smi(self) -> None:
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(EMBEDDING_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'Install-HiaEmbedding.ps1 did not parse.' }}
+$definition = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Resolve-HiaEmbeddingInstallDevice'
+}}, $true))
+if ($definition.Count -ne 1) {{ throw 'CUDA device decision helper is missing.' }}
+Invoke-Expression $definition[0].Extent.Text
+$cudaTorch = [pscustomobject]@{{ cuda_available = $true }}
+$cpuTorch = [pscustomobject]@{{ cuda_available = $false }}
+$failure = ''
+try {{
+    [void](Resolve-HiaEmbeddingInstallDevice `
+        -RequestedDevice cuda `
+        -TorchProbe $cpuTorch `
+        -NvidiaAvailable $false)
+}} catch {{
+    $failure = [string]$_.Exception.Message
+}}
+[pscustomobject]@{{
+    explicit_cuda = Resolve-HiaEmbeddingInstallDevice `
+        -RequestedDevice cuda `
+        -TorchProbe $cudaTorch `
+        -NvidiaAvailable $false
+    automatic_cuda = Resolve-HiaEmbeddingInstallDevice `
+        -RequestedDevice auto `
+        -TorchProbe $cudaTorch `
+        -NvidiaAvailable $false
+    repair_cuda = Resolve-HiaEmbeddingInstallDevice `
+        -RequestedDevice cuda `
+        -TorchProbe $cpuTorch `
+        -NvidiaAvailable $true
+    automatic_cpu = Resolve-HiaEmbeddingInstallDevice `
+        -RequestedDevice auto `
+        -TorchProbe $cpuTorch `
+        -NvidiaAvailable $false
+    failure = $failure
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual("cuda", payload["explicit_cuda"])
+        self.assertEqual("cuda", payload["automatic_cuda"])
+        self.assertEqual("cuda", payload["repair_cuda"])
+        self.assertEqual("cpu", payload["automatic_cpu"])
+        self.assertIn("neither CUDA-enabled PyTorch", payload["failure"])
+
+        installer_source = EMBEDDING_INSTALLER_PATH.read_text(encoding="utf-8-sig")
+        decision_call = installer_source.index(
+            "$resolvedDevice = Resolve-HiaEmbeddingInstallDevice"
+        )
+        cuda_install = installer_source.index(
+            "$cudaTorchResult = Invoke-HiaEmbeddingChildProcess",
+            decision_call,
+        )
+        self.assertIn(
+            "-not $torchCudaAvailable",
+            installer_source[decision_call:cuda_install],
+        )
+        self.assertIn(
+            "$resolvedDevice -eq 'cuda' -and -not [bool]$verifiedTorch.cuda_available",
+            installer_source,
+        )
+
+    def test_embedding_install_uses_project_log_and_gui_surfaces_safe_reason(
+        self,
+    ) -> None:
+        fake_root = self.sandbox / "embedding-install-log"
+        fake_root.mkdir()
+        expected_log = (
+            fake_root
+            / ".runtime"
+            / "launcher"
+            / "embedding-install-test.log"
+        )
+        outside_log = fake_root / "outside.log"
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(EMBEDDING_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'Install-HiaEmbedding.ps1 did not parse.' }}
+$requiredFunctions = @(
+    'Test-HiaEmbeddingOrdinaryFile',
+    'ConvertTo-HiaEmbeddingSafeLogText',
+    'Resolve-HiaEmbeddingLauncherDirectory',
+    'Resolve-HiaEmbeddingInstallLogPath'
+)
+foreach ($name in $requiredFunctions) {{
+    $definition = @($ast.FindAll({{
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name
+    }}, $true))
+    if ($definition.Count -ne 1) {{ throw "missing function: $name" }}
+    Invoke-Expression $definition[0].Extent.Text
+}}
+$inside = Resolve-HiaEmbeddingInstallLogPath `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -RequestedPath {_ps_literal(expected_log)}
+$outsideFailure = ''
+try {{
+    [void](Resolve-HiaEmbeddingInstallLogPath `
+        -ProjectRoot {_ps_literal(fake_root)} `
+        -RequestedPath {_ps_literal(outside_log)})
+}} catch {{
+    $outsideFailure = [string]$_.Exception.Message
+}}
+[pscustomobject]@{{
+    inside = $inside
+    inside_exists = Test-Path -LiteralPath $inside -PathType Leaf
+    outside_exists = Test-Path -LiteralPath {_ps_literal(outside_log)}
+    outside_failure = $outsideFailure
+    safe = ConvertTo-HiaEmbeddingSafeLogText `
+        -Text @'
+Authorization: Basic dXNlcjpwYXNz
+Authorization: Bearer abcdefghi
+https://url-user:url-password@example.test/simple
+https://token-only-installer@example.test/simple
+UV_INDEX_URL=https://uv-secret.example/simple
+PIP_EXTRA_INDEX_URL=https://pip-secret.example/simple
+UV_INDEX=https://first-index.example/simple https://second-index.example/simple
+next-line-visible
+sk-abcdefghijk
+'@
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual(expected_log, Path(payload["inside"]))
+        self.assertTrue(payload["inside_exists"])
+        self.assertFalse(payload["outside_exists"])
+        self.assertIn("project-local launcher log", payload["outside_failure"])
+        self.assertNotIn("secret", payload["safe"])
+        self.assertNotIn("abcdefghi", payload["safe"])
+        self.assertNotIn("dXNlcjpwYXNz", payload["safe"])
+        self.assertNotIn("url-user", payload["safe"])
+        self.assertNotIn("url-password", payload["safe"])
+        self.assertNotIn("token-only-installer", payload["safe"])
+        self.assertIn(
+            "https://[REDACTED]@example.test/simple",
+            payload["safe"],
+        )
+        self.assertNotIn("uv-secret.example", payload["safe"])
+        self.assertNotIn("pip-secret.example", payload["safe"])
+        self.assertNotIn("first-index.example", payload["safe"])
+        self.assertNotIn("second-index.example", payload["safe"])
+        self.assertIn("next-line-visible", payload["safe"])
+        self.assertIn("[REDACTED]", payload["safe"])
+
+        installer_source = EMBEDDING_INSTALLER_PATH.read_text(
+            encoding="utf-8-sig"
+        )
+        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        for required in (
+            "[string]$LogPath = ''",
+            "Write-HiaEmbeddingInstallLog",
+            "[System.IO.FileMode]::CreateNew",
+            "ConvertTo-HiaEmbeddingSafeLogText",
+        ):
+            self.assertIn(required, installer_source)
+        for required in (
+            "New-HiaEmbeddingInstallLogPath",
+            "Get-HiaEmbeddingInstallFailureSummary",
+            "'-LogPath', $script:embeddingInstallLogPath",
+            "ConvertTo-HiaRedactedJson",
+            "这次安装没完成",
+            "安装日志",
+        ):
+            self.assertIn(required, wpf_source)
+        self.assertNotIn(
+            "请在 PowerShell 中运行 scripts\\launcher\\Install-HiaEmbedding.ps1",
+            wpf_source,
+        )
+        self.assertEqual(1, wpf_source.count("母鸡啄米中"))
+        complete = wpf_source[
+            wpf_source.index("function Complete-HiaEmbeddingInstall"):
+            wpf_source.index("$script:embeddingTimer.Add_Tick")
+        ]
+        self.assertLess(
+            complete.index("Invoke-GuiScan"),
+            complete.index("$runtimeReady"),
+        )
+        self.assertIn(
+            "if ($exitCode -eq 0 -and $runtimeReady)",
+            complete,
+        )
+        self.assertIn("$script:preflightFailed", complete)
+        self.assertIn(
+            "$script:lastReportPath = $validatedInstallLog",
+            complete,
+        )
+
+    def test_embedding_install_exit_zero_requires_green_runtime_refresh(
+        self,
+    ) -> None:
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(WPF_SCRIPT_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'HiaLauncher.Wpf.ps1 did not parse.' }}
+$definition = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Test-HiaEmbeddingRuntimeReady'
+}}, $true))
+if ($definition.Count -ne 1) {{ throw 'runtime verification helper is missing' }}
+Invoke-Expression $definition[0].Extent.Text
+
+function New-TestResult([object[]]$Checks) {{
+    return [pscustomobject]@{{ checks = $Checks }}
+}}
+$green = New-TestResult @(
+    [pscustomobject]@{{ id = 'embedding.runtime'; level = 'green' }}
+)
+$yellow = New-TestResult @(
+    [pscustomobject]@{{ id = 'embedding.runtime'; level = 'yellow' }}
+)
+$red = New-TestResult @(
+    [pscustomobject]@{{ id = 'embedding.runtime'; level = 'red' }}
+)
+$missing = New-TestResult @(
+    [pscustomobject]@{{ id = 'other'; level = 'green' }}
+)
+$duplicate = New-TestResult @(
+    [pscustomobject]@{{ id = 'embedding.runtime'; level = 'green' }},
+    [pscustomobject]@{{ id = 'embedding.runtime'; level = 'green' }}
+)
+[pscustomobject]@{{
+    green = Test-HiaEmbeddingRuntimeReady -Result $green
+    yellow = Test-HiaEmbeddingRuntimeReady -Result $yellow
+    red = Test-HiaEmbeddingRuntimeReady -Result $red
+    missing = Test-HiaEmbeddingRuntimeReady -Result $missing
+    duplicate = Test-HiaEmbeddingRuntimeReady -Result $duplicate
+    null_result = Test-HiaEmbeddingRuntimeReady -Result $null
+}} | ConvertTo-Json -Compress
+"""
+        )
+        self.assertEqual(
+            {
+                "green": True,
+                "yellow": False,
+                "red": False,
+                "missing": False,
+                "duplicate": False,
+                "null_result": False,
+            },
+            json.loads(output),
+        )
+
+    def test_embedding_install_lock_blocks_second_launcher_and_releases(
+        self,
+    ) -> None:
+        fake_root = self.sandbox / "embedding-install-lock"
+        fake_root.mkdir()
+        log_one = (
+            fake_root
+            / ".runtime"
+            / "launcher"
+            / "embedding-install-owner.log"
+        )
+        log_two = (
+            fake_root
+            / ".runtime"
+            / "launcher"
+            / "embedding-install-next.log"
+        )
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(EMBEDDING_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'Install-HiaEmbedding.ps1 did not parse.' }}
+$requiredFunctions = @(
+    'Test-HiaEmbeddingOrdinaryFile',
+    'Resolve-HiaEmbeddingLauncherDirectory',
+    'Resolve-HiaEmbeddingInstallLogPath',
+    'Enter-HiaEmbeddingInstallLock'
+)
+foreach ($name in $requiredFunctions) {{
+    $definition = @($ast.FindAll({{
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name
+    }}, $true))
+    if ($definition.Count -ne 1) {{ throw "missing function: $name" }}
+    Invoke-Expression $definition[0].Extent.Text
+}}
+
+$logOne = Resolve-HiaEmbeddingInstallLogPath `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -RequestedPath {_ps_literal(log_one)}
+$logTwo = Resolve-HiaEmbeddingInstallLogPath `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -RequestedPath {_ps_literal(log_two)}
+$lockPath = Join-Path {_ps_literal(fake_root)} `
+    '.runtime\\launcher\\embedding-install.lock'
+$first = Enter-HiaEmbeddingInstallLock `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -InstallLogPath $logOne
+try {{
+    $active = Get-HiaEmbeddingInstallLockInfo `
+        -ProjectRoot {_ps_literal(fake_root)}
+    $secondFailure = ''
+    try {{
+        $unexpected = Enter-HiaEmbeddingInstallLock `
+            -ProjectRoot {_ps_literal(fake_root)} `
+            -InstallLogPath $logTwo
+        $unexpected.Dispose()
+    }} catch {{
+        $secondFailure = [string]$_.Exception.Message
+    }}
+}} finally {{
+    $first.Dispose()
+}}
+$inactive = Get-HiaEmbeddingInstallLockInfo `
+    -ProjectRoot {_ps_literal(fake_root)}
+$third = Enter-HiaEmbeddingInstallLock `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -InstallLogPath $logTwo
+$third.Dispose()
+$lockItem = Get-Item -LiteralPath $lockPath -Force
+$lockPayload = [System.IO.File]::ReadAllText($lockPath) | ConvertFrom-Json
+[pscustomobject]@{{
+    active = [bool]$active.active
+    active_log = [string]$active.log_path
+    second_failure = $secondFailure
+    inactive_after_release = $null -eq $inactive
+    lock_is_file = $lockItem -is [System.IO.FileInfo]
+    lock_is_reparse = (
+        ([int]$lockItem.Attributes -band
+            [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+    )
+    latest_log = [string]$lockPayload.log_path
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertTrue(payload["active"])
+        self.assertTrue(payload["inactive_after_release"])
+        self.assertTrue(payload["lock_is_file"])
+        self.assertFalse(payload["lock_is_reparse"])
+        self.assertIn("already running", payload["second_failure"])
+        self.assertEqual(log_one, Path(payload["active_log"]))
+        self.assertIn(str(Path(payload["active_log"])), payload["second_failure"])
+        self.assertEqual(log_two, Path(payload["latest_log"]))
+        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        start = wpf_source[
+            wpf_source.index("function Start-HiaEmbeddingInstall"):
+            wpf_source.index("function Update-HiaKnowledgeIndexFromEvent")
+        ]
+        self.assertIn("Get-HiaEmbeddingInstallLockInfo", start)
+        self.assertIn("Show-HiaEmbeddingInstallAlreadyRunning", start)
+        self.assertIn("已有知识向量安装正在运行", wpf_source)
+        self.assertLess(
+            start.index("Get-HiaEmbeddingInstallLockInfo"),
+            start.index("New-HiaEmbeddingInstallLogPath"),
+        )
+        self.assertLess(
+            start.index("Get-HiaEmbeddingInstallLockInfo"),
+            start.index("$script:embeddingProcess.Start()"),
+        )
+
+    def test_embedding_device_is_threaded_through_preflight_and_cpu_torch_is_not_cuda_ready(
+        self,
+    ) -> None:
+        fake_root = self.sandbox / "device-aware-preflight"
+        fake_root.mkdir()
+        output = self.run_powershell(
+            f"""
+$data = Get-HiaEmbeddingContractData `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -PythonExe {_ps_literal(sys.executable)}
+$profile = [string]$data.contract.default_profile
+$deviceKey = [string]$data.contract.settings.device
+$cpuOnly = [pscustomobject]@{{
+    worker_ready = $true
+    installed_profiles = @($profile)
+    probe_passed = $true
+    probe_message = '独立 worker 可用，但当前 PyTorch 仅能使用 CPU。'
+    torch_version = 'test'
+    torch_cuda_build = ''
+    cuda_available = $false
+    device_name = ''
+}}
+$cudaReady = [pscustomobject]@{{
+    worker_ready = $true
+    installed_profiles = @($profile)
+    probe_passed = $true
+    probe_message = '独立 worker 可用；CUDA 已就绪：Test GPU。'
+    torch_version = 'test'
+    torch_cuda_build = 'test'
+    cuda_available = $true
+    device_name = 'Test GPU'
+}}
+$auto = Get-HiaEmbeddingCheckResult `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $profile `
+    -EmbeddingDevice auto `
+    -ProbeOverride $cpuOnly
+$cpu = Get-HiaEmbeddingCheckResult `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $profile `
+    -EmbeddingDevice cpu `
+    -ProbeOverride $cpuOnly
+$cudaCpuOnly = Get-HiaEmbeddingCheckResult `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $profile `
+    -EmbeddingDevice cuda `
+    -ProbeOverride $cpuOnly
+$cuda = Get-HiaEmbeddingCheckResult `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $profile `
+    -EmbeddingDevice cuda `
+    -ProbeOverride $cudaReady
+$preflight = Invoke-HiaPreflight `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $profile `
+    -EmbeddingDevice cuda `
+    -ProbeOverrides @{{
+        embedding = $cpuOnly
+        runtime_writable = $true
+        loopback = $true
+    }}
+$preflightEmbedding = @(
+    $preflight.checks | Where-Object id -eq 'embedding.runtime'
+)[0]
+[pscustomobject]@{{
+    auto = $auto
+    cpu = $cpu
+    cuda_cpu_only = $cudaCpuOnly
+    cuda = $cuda
+    preflight_check = $preflightEmbedding
+    preflight_device = [string]$preflight.PSObject.Properties[$deviceKey].Value
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual("green", payload["auto"]["level"])
+        self.assertEqual("green", payload["cpu"]["level"])
+        self.assertEqual("yellow", payload["cuda_cpu_only"]["level"])
+        self.assertIn(
+            "torch.cuda.is_available()=false",
+            payload["cuda_cpu_only"]["message"],
+        )
+        self.assertIn("安装/修复", payload["cuda_cpu_only"]["advice"])
+        self.assertIn("Houdini 仍可启动", payload["cuda_cpu_only"]["advice"])
+        self.assertEqual("green", payload["cuda"]["level"])
+        self.assertEqual("yellow", payload["preflight_check"]["level"])
+        self.assertEqual("cuda", payload["preflight_device"])
+
+        launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
+        report_function = launcher_source[
+            launcher_source.index("function Invoke-PreflightAndReport"):
+            launcher_source.index("function Write-ConsoleSummary")
+        ]
+        self.assertIn("$SelectedEmbeddingDevice", report_function)
+        self.assertIn(
+            "-EmbeddingDevice $SelectedEmbeddingDevice",
+            report_function,
+        )
+        check_only_call = launcher_source[
+            launcher_source.index("if ($CheckOnly -or $Json) {"):
+            launcher_source.index("$wpfUiPath =")
+        ]
+        self.assertIn(
+            "-SelectedEmbeddingDevice $inputs.embedding_device",
+            check_only_call,
+        )
+
+        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        self.assertEqual(
+            2,
+            wpf_source.count(
+                "-SelectedEmbeddingDevice $selectedEmbeddingDevice"
+            ),
+        )
+        busy_function = wpf_source[
+            wpf_source.index("function Set-BusyState"):
+            wpf_source.index("function Test-CurrentRedCheck")
+        ]
+        self.assertIn(
+            "$embeddingDeviceCombo.IsEnabled = "
+            "(-not $Busy -and $null -ne $script:embeddingData)",
+            busy_function,
+        )
+
+    def test_embedding_preflight_is_nonblocking_and_explains_fallback_states(self) -> None:
+        launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8")
+        core_source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "[ValidateRange(2, 60)][int]$ProbeTimeoutSeconds = 12",
+            launcher_source,
+        )
+        self.assertIn(
+            "-TimeoutSeconds ([Math]::Max(30, $TimeoutSeconds))",
+            core_source,
+        )
+
+        output = self.run_powershell(
+            f"""
+$data = Get-HiaEmbeddingContractData `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -PythonExe {_ps_literal(sys.executable)}
+$default = [string]$data.contract.default_profile
+$alternate = @($data.profiles.PSObject.Properties.Name | Where-Object {{ $_ -ne $default }})[0]
+$missing = Get-HiaEmbeddingCheckResult `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $default `
+    -ProbeOverride ([pscustomobject]@{{
+        worker_ready = $false
+        installed_profiles = @()
+        probe_passed = $false
+        probe_message = 'missing'
+    }})
+$fallback = Get-HiaEmbeddingCheckResult `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $alternate `
+    -ProbeOverride ([pscustomobject]@{{
+        worker_ready = $true
+        installed_profiles = @($default)
+        probe_passed = $true
+        probe_message = 'ready'
+    }})
+$ready = Get-HiaEmbeddingCheckResult `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $alternate `
+    -ProbeOverride ([pscustomobject]@{{
+        worker_ready = $true
+        installed_profiles = @($alternate)
+        probe_passed = $true
+        probe_message = '独立 worker 与必要 import 可用；预检不会加载模型。'
+    }})
+$broken = Get-HiaEmbeddingCheckResult `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $default `
+    -ProbeOverride ([pscustomobject]@{{
+        worker_ready = $true
+        installed_profiles = @($default)
+        probe_passed = $false
+        probe_message = 'import failed'
+    }})
+[pscustomobject]@{{
+    missing = $missing
+    fallback = $fallback
+    ready = $ready
+    broken = $broken
+    missing_overall = Get-HiaOverallLevel -Checks @($missing)
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual("yellow", payload["missing"]["level"])
+        self.assertEqual("yellow", payload["missing_overall"])
+        self.assertIn("FTS5", payload["missing"]["message"])
+        self.assertIn("Houdini 仍可启动", payload["missing"]["advice"])
+        self.assertEqual("yellow", payload["fallback"]["level"])
+        self.assertIn("降级", payload["fallback"]["message"])
+        self.assertIn("FTS5", payload["fallback"]["message"])
+        self.assertEqual("green", payload["ready"]["level"])
+        self.assertIn("预检不会加载模型", payload["ready"]["message"])
+        self.assertEqual("yellow", payload["broken"]["level"])
+        self.assertIn("import failed", payload["broken"]["message"])
+
+    def test_knowledge_index_process_plan_uses_bridge_contract_and_project_paths(
+        self,
+    ) -> None:
+        fake_root = self.sandbox / "knowledge-index-plan"
+        contract_target = fake_root / "src" / "hia_core" / "embedding_contract.py"
+        contract_target.parent.mkdir(parents=True)
+        shutil.copy2(EMBEDDING_CONTRACT_PATH, contract_target)
+        (fake_root / "houdini_package" / "python_libs").mkdir(parents=True)
+        output = self.run_powershell(
+            f"""
+$data = Get-HiaEmbeddingContractData `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -PythonExe {_ps_literal(sys.executable)}
+$profile = [string]$data.contract.default_profile
+$status = New-HiaKnowledgeIndexProcessPlan `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -BridgePython {_ps_literal(sys.executable)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $profile `
+    -Action status
+$build = New-HiaKnowledgeIndexProcessPlan `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -BridgePython {_ps_literal(sys.executable)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile $profile `
+    -Action build
+[pscustomobject]@{{
+    status = $status
+    build = $build
+}} | ConvertTo-Json -Depth 12 -Compress
+"""
+        )
+        payload = json.loads(output)
+        public = runpy.run_path(str(EMBEDDING_CONTRACT_PATH))["launcher_contract"]()
+        module = public["knowledge_index"]["module"]
+        root = str(fake_root)
+        base_arguments = ["-B", "-m", module, "--project-root", root]
+        self.assertEqual(
+            [*base_arguments, "status"],
+            payload["status"]["arguments"],
+        )
+        self.assertEqual(
+            [*base_arguments, "build", "--batch-size", "32"],
+            payload["build"]["arguments"],
+        )
+        self.assertEqual(Path(sys.executable), Path(payload["status"]["file_path"]))
+        self.assertEqual(root, payload["status"]["working_directory"])
+        self.assertEqual(
+            os.pathsep.join(
+                (
+                    str(fake_root / "houdini_package" / "python_libs"),
+                    str(fake_root / "src"),
+                )
+            ),
+            payload["status"]["environment"]["PYTHONPATH"],
+        )
+        environment = payload["status"]["environment"]
+        self.assertEqual(root, environment["HIA_PROJECT_ROOT"])
+        self.assertEqual("utf-8", environment["PYTHONIOENCODING"])
+        self.assertNotIn(public["environment"]["python"], environment)
+        for profile in public["profiles"].values():
+            self.assertNotIn(profile["model_dir_environment"], environment)
+            self.assertNotIn(profile["model_revision_environment"], environment)
+        self.assertEqual(
+            set(public["environment"].values()),
+            set(payload["status"]["clear_environment_names"]),
+        )
+
+    def test_knowledge_index_jsonl_parser_handles_progress_completion_and_error(
+        self,
+    ) -> None:
+        public = runpy.run_path(str(EMBEDDING_CONTRACT_PATH))["launcher_contract"]()
+        protocol = public["knowledge_index"]["protocol"]
+        base_index = {
+            "available": True,
+            "profile_id": public["default_profile"],
+            "model_id": public["profiles"][public["default_profile"]]["model_id"],
+            "dim": 1024,
+            "total_chunks": 5,
+            "vector_chunks": 3,
+            "pending_chunks": 2,
+            "complete": False,
+            "last_batch_count": 2,
+            "chunks_indexed_this_call": 2,
+        }
+        progress = {
+            "protocol": protocol,
+            "event": "progress",
+            "action": "build",
+            "batch_number": 2,
+            "indexed_this_batch": 2,
+            "index": base_index,
+        }
+        completed_index = {**base_index}
+        completed_index.update(
+            vector_chunks=5,
+            pending_chunks=0,
+            complete=True,
+        )
+        completed = {
+            "protocol": protocol,
+            "event": "completed",
+            "action": "build",
+            "batches": 3,
+            "index": completed_index,
+        }
+        error = {
+            "protocol": protocol,
+            "event": "error",
+            "action": "build",
+            "code": "VECTOR_INDEX_NO_PROGRESS",
+            "message": "no progress",
+            "recoverable": True,
+            "index": base_index,
+        }
+        invalid_protocol = {**progress, "protocol": "wrong/1"}
+        missing_index = {key: value for key, value in progress.items() if key != "index"}
+        negative_index = {**base_index, "pending_chunks": -1}
+        negative = {**progress, "index": negative_index}
+        lines = [progress, completed, error]
+        invalid_lines = [invalid_protocol, missing_index, negative]
+        ps_lines = ",\n".join(
+            _ps_literal(json.dumps(item, ensure_ascii=False))
+            for item in lines
+        )
+        ps_invalid = ",\n".join(
+            _ps_literal(json.dumps(item, ensure_ascii=False))
+            for item in invalid_lines
+        )
+        output = self.run_powershell(
+            f"""
+$data = Get-HiaEmbeddingContractData `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -PythonExe {_ps_literal(sys.executable)}
+$events = @(
+    @({ps_lines}) | ForEach-Object {{
+        ConvertFrom-HiaKnowledgeIndexJsonLine -Line $_ -EmbeddingData $data
+    }}
+)
+$rejected = @(
+    @({ps_invalid}) | ForEach-Object {{
+        try {{
+            [void](ConvertFrom-HiaKnowledgeIndexJsonLine -Line $_ -EmbeddingData $data)
+            'accepted'
+        }} catch {{
+            [string]$_.Exception.Message
+        }}
+    }}
+)
+[pscustomobject]@{{
+    events = $events
+    rejected = $rejected
+}} | ConvertTo-Json -Depth 12 -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual(
+            ["progress", "completed", "error"],
+            [event["event"] for event in payload["events"]],
+        )
+        self.assertEqual(3, payload["events"][0]["index"]["vector_chunks"])
+        self.assertTrue(payload["events"][1]["index"]["complete"])
+        self.assertEqual(
+            "VECTOR_INDEX_NO_PROGRESS",
+            payload["events"][2]["code"],
+        )
+        self.assertTrue(all(message != "accepted" for message in payload["rejected"]))
+
+    def test_embedding_preflight_rejects_reparse_ancestors_before_worker_probe(self) -> None:
+        fake_root = self.sandbox / "embedding-reparse-project"
+        lure_root = self.sandbox / "embedding-reparse-lure"
+        fake_root.mkdir()
+        lure_root.mkdir()
+        output = self.run_powershell(
+            f"""
+$data = Get-HiaEmbeddingContractData `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -PythonExe {_ps_literal(sys.executable)}
+$baseRoot = {_ps_literal(fake_root)}
+$lure = {_ps_literal(lure_root)}
+$workerRelative = [string]$data.contract.worker.python
+
+$workerRoot = Join-Path $baseRoot 'worker-case'
+$workerRuntime = Join-Path $workerRoot '.runtime'
+[System.IO.Directory]::CreateDirectory($workerRuntime) | Out-Null
+$workerPath = Join-Path $workerRoot $workerRelative
+$lureWorker = Join-Path $lure 'toolchains'
+[System.IO.Directory]::CreateDirectory($lureWorker) | Out-Null
+New-Item -ItemType Junction -Path (Join-Path $workerRuntime 'toolchains') -Target $lureWorker | Out-Null
+$data.layout.worker_python = $workerPath
+$data.layout.models_root = Join-Path $workerRuntime 'models\\qwen3-embedding'
+$data.layout.cache_root = Join-Path $workerRuntime 'cache\\embedding'
+$data.layout.huggingface_cache = Join-Path $workerRuntime 'cache\\embedding\\huggingface'
+$data.layout.transformers_cache = Join-Path $workerRuntime 'cache\\embedding\\transformers'
+$data.layout.torch_cache = Join-Path $workerRuntime 'cache\\embedding\\torch'
+$data.layout.temp_root = Join-Path $workerRuntime 'cache\\embedding\\tmp'
+$workerState = Get-HiaEmbeddingRuntimeState `
+    -ProjectRoot $workerRoot `
+    -EmbeddingData $data
+
+$cacheRoot = Join-Path $baseRoot 'cache-case'
+$cacheRuntime = Join-Path $cacheRoot '.runtime'
+$cacheWorker = Join-Path $cacheRoot $workerRelative
+[System.IO.Directory]::CreateDirectory(
+    [System.IO.Path]::GetDirectoryName($cacheWorker)
+) | Out-Null
+[System.IO.File]::WriteAllBytes($cacheWorker, [byte[]](1))
+$lureCache = Join-Path $lure 'cache'
+[System.IO.Directory]::CreateDirectory($lureCache) | Out-Null
+New-Item -ItemType Junction -Path (Join-Path $cacheRuntime 'cache') -Target $lureCache | Out-Null
+$data.layout.worker_python = $cacheWorker
+$data.layout.models_root = Join-Path $cacheRuntime 'models\\qwen3-embedding'
+$data.layout.cache_root = Join-Path $cacheRuntime 'cache\\embedding'
+$data.layout.huggingface_cache = Join-Path $cacheRuntime 'cache\\embedding\\huggingface'
+$data.layout.transformers_cache = Join-Path $cacheRuntime 'cache\\embedding\\transformers'
+$data.layout.torch_cache = Join-Path $cacheRuntime 'cache\\embedding\\torch'
+$data.layout.temp_root = Join-Path $cacheRuntime 'cache\\embedding\\tmp'
+$cacheState = Get-HiaEmbeddingRuntimeState `
+    -ProjectRoot $cacheRoot `
+    -EmbeddingData $data
+[pscustomobject]@{{
+    worker_ready = [bool]$workerState.worker_ready
+    cache_worker_ready = [bool]$cacheState.worker_ready
+    cache_probe_passed = [bool]$cacheState.probe_passed
+    cache_message = [string]$cacheState.probe_message
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertFalse(payload["worker_ready"])
+        self.assertTrue(payload["cache_worker_ready"])
+        self.assertFalse(payload["cache_probe_passed"])
+        self.assertIn("缓存路径不在普通项目目录内", payload["cache_message"])
+
+    def test_embedding_installer_plan_is_contract_selected_and_project_local(self) -> None:
+        installer = runpy.run_path(str(EMBEDDING_INSTALLER_HELPER_PATH))
+        contract = runpy.run_path(str(EMBEDDING_CONTRACT_PATH))
+        public = contract["launcher_contract"]()
+        profiles = list(public["profiles"])
+        self.assertEqual(2, len(profiles))
+
+        default_plan = installer["build_plan"](
+            project_root=REPOSITORY_ROOT,
+            requested_profile=None,
+            requested_revision=None,
+        )
+        alternate = next(
+            profile
+            for profile in profiles
+            if profile != public["default_profile"]
+        )
+        alternate_plan = installer["build_plan"](
+            project_root=REPOSITORY_ROOT,
+            requested_profile=alternate,
+            requested_revision=None,
+        )
+        self.assertEqual(public["default_profile"], default_plan["profile_id"])
+        self.assertEqual(alternate, alternate_plan["profile_id"])
+        self.assertNotEqual(default_plan["model_dir"], alternate_plan["model_dir"])
+        for plan in (default_plan, alternate_plan):
+            self.assertTrue(
+                Path(plan["model_dir"]).is_relative_to(REPOSITORY_ROOT / ".runtime")
+            )
+            self.assertTrue(
+                Path(plan["layout"]["worker_python"]).is_relative_to(
+                    REPOSITORY_ROOT / ".runtime"
+                )
+            )
+            for directory in plan["required_directories"]:
+                self.assertTrue(Path(directory).is_relative_to(REPOSITORY_ROOT))
+            uv_cache = Path(plan["child_environment"]["UV_CACHE_DIR"])
+            self.assertTrue(uv_cache.is_relative_to(REPOSITORY_ROOT / ".runtime"))
+            self.assertIn(str(uv_cache), plan["required_directories"])
+            self.assertEqual(
+                "never",
+                plan["child_environment"]["UV_PYTHON_DOWNLOADS"],
+            )
+            self.assertTrue(
+                {
+                    "UV_INDEX",
+                    "UV_DEFAULT_INDEX",
+                    "UV_EXTRA_INDEX_URL",
+                    "UV_INDEX_URL",
+                    "UV_NO_INDEX",
+                    "UV_OFFLINE",
+                    "PIP_INDEX_URL",
+                    "PIP_EXTRA_INDEX_URL",
+                    "PIP_NO_INDEX",
+                }.issubset(set(plan["remove_environment"]))
+            )
+
+    def test_embedding_launcher_sources_consume_contract_without_copied_model_values(self) -> None:
+        contract = runpy.run_path(str(EMBEDDING_CONTRACT_PATH))
+        public = contract["launcher_contract"]()
+        source_paths = (
+            MODULE_PATH,
+            LAUNCHER_PATH,
+            WPF_SCRIPT_PATH,
+            XAML_PATH,
+            LIFECYCLE_PATH,
+            EMBEDDING_INSTALLER_PATH,
+            EMBEDDING_INSTALLER_HELPER_PATH,
+        )
+        combined = "\n".join(
+            path.read_text(encoding="utf-8-sig") for path in source_paths
+        )
+        for profile_id, profile in public["profiles"].items():
+            self.assertNotIn(profile_id, combined)
+            self.assertNotIn(profile["model_id"], combined)
+            self.assertNotIn(profile["model_directory"], combined)
+        for environment_name in public["environment"].values():
+            self.assertNotIn(environment_name, combined)
+        self.assertIn("launcher_contract", combined)
+        self.assertIn("PROFILE_REGISTRY", combined)
+        self.assertIn("runtime_layout", combined)
+        self.assertIn("default_dimension", LIFECYCLE_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("EmbeddingDimension", combined)
+        self.assertNotIn("reranker", combined.lower())
+        self.assertNotIn("quantization", combined.lower())
+        helper_source = EMBEDDING_INSTALLER_HELPER_PATH.read_text(encoding="utf-8")
+        self.assertGreater(
+            helper_source.index("from huggingface_hub import snapshot_download"),
+            helper_source.index("def download_selected_model"),
+        )
+
+    def test_lifecycle_injects_only_complete_contract_embedding_installations(self) -> None:
+        fake_root = self.sandbox / "embedding-lifecycle"
+        fake_root.mkdir()
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(LIFECYCLE_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'launch-houdini.ps1 did not parse' }}
+$requiredFunctions = @(
+    'Assert-OrdinaryProjectPath',
+    'Test-EmbeddingEnvironmentName',
+    'Get-EmbeddingModelInstallation',
+    'New-EmbeddingChildEnvironment'
+)
+$definitions = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -in $requiredFunctions
+}}, $true))
+foreach ($name in $requiredFunctions) {{
+    $definition = @($definitions | Where-Object Name -eq $name)
+    if ($definition.Count -ne 1) {{ throw "missing lifecycle function: $name" }}
+    Invoke-Expression $definition[0].Extent.Text
+}}
+
+$data = Get-HiaEmbeddingContractData `
+    -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
+    -PythonExe {_ps_literal(sys.executable)}
+$root = {_ps_literal(fake_root)}
+$default = [string]$data.contract.default_profile
+$alternate = @($data.contract.profiles.PSObject.Properties.Name | Where-Object {{ $_ -ne $default }})[0]
+$defaultProfile = $data.contract.profiles.PSObject.Properties[$default].Value
+$alternateProfile = $data.contract.profiles.PSObject.Properties[$alternate].Value
+$workerPython = Join-Path $root ([string]$data.contract.worker.python)
+$layoutMap = [ordered]@{{ worker_python = $workerPython }}
+$index = 0
+foreach ($profileProperty in @($data.contract.profiles.PSObject.Properties)) {{
+    $layoutMap["model_$index"] = Join-Path $root ([string]$profileProperty.Value.model_directory)
+    $index += 1
+}}
+$payload = [pscustomobject]@{{
+    contract = $data.contract
+    layout = [pscustomobject]$layoutMap
+}}
+
+function Add-TestModel([object]$Profile, [bool]$Complete) {{
+    $directory = Join-Path $root ([string]$Profile.model_directory)
+    [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $directory 'config.json'), '{{}}')
+    [System.IO.File]::WriteAllBytes((Join-Path $directory 'model.safetensors'), [byte[]](1, 2, 3))
+    if ($Complete) {{
+        $manifest = [ordered]@{{
+            contract_version = [int]$data.contract.contract_version
+            profile_id = [string]$Profile.profile_id
+            model_id = [string]$Profile.model_id
+            revision = 'main'
+        }}
+        [System.IO.File]::WriteAllText(
+            (Join-Path $directory '.hia-embedding-model.json'),
+            ($manifest | ConvertTo-Json)
+        )
+    }}
+}}
+
+$empty = New-EmbeddingChildEnvironment -Payload $payload -RequestedProfile $alternate -Root $root
+[System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($workerPython)) | Out-Null
+[System.IO.File]::WriteAllBytes($workerPython, [byte[]](1))
+Add-TestModel -Profile $alternateProfile -Complete $false
+$half = New-EmbeddingChildEnvironment -Payload $payload -RequestedProfile $alternate -Root $root
+Add-TestModel -Profile $defaultProfile -Complete $true
+$fallback = New-EmbeddingChildEnvironment -Payload $payload -RequestedProfile $alternate -Root $root
+$alternateDirectory = Join-Path $root ([string]$alternateProfile.model_directory)
+$alternateManifest = [ordered]@{{
+    contract_version = [int]$data.contract.contract_version
+    profile_id = [string]$alternateProfile.profile_id
+    model_id = [string]$alternateProfile.model_id
+    revision = 'main'
+}}
+[System.IO.File]::WriteAllText(
+    (Join-Path $alternateDirectory '.hia-embedding-model.json'),
+    ($alternateManifest | ConvertTo-Json)
+)
+$full = New-EmbeddingChildEnvironment -Payload $payload -RequestedProfile $alternate -RequestedDevice cpu -Root $root
+$environment = $data.contract.environment
+[pscustomobject]@{{
+    empty_keys = @($empty.values.Keys)
+    empty_has_python = $empty.values.ContainsKey([string]$environment.python)
+    half_has_python = $half.values.ContainsKey([string]$environment.python)
+    half_has_alternate = $half.values.ContainsKey([string]$alternateProfile.model_dir_environment)
+    fallback_has_default = $fallback.values.ContainsKey([string]$defaultProfile.model_dir_environment)
+    fallback_has_alternate = $fallback.values.ContainsKey([string]$alternateProfile.model_dir_environment)
+    full_has_alternate = $full.values.ContainsKey([string]$alternateProfile.model_dir_environment)
+    full_requested = [string]$full.requested_profile
+    full_dimension = [int]$full.values[[string]$environment.dimension]
+    expected_dimension = [int]$alternateProfile.default_dimension
+    full_device = [string]$full.values[[string]$environment.device]
+    cleared_environment_count = @($full.environment_names).Count
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual(3, len(payload["empty_keys"]))
+        self.assertFalse(payload["empty_has_python"])
+        self.assertTrue(payload["half_has_python"])
+        self.assertFalse(payload["half_has_alternate"])
+        self.assertTrue(payload["fallback_has_default"])
+        self.assertFalse(payload["fallback_has_alternate"])
+        self.assertTrue(payload["full_has_alternate"])
+        contract = runpy.run_path(str(EMBEDDING_CONTRACT_PATH))["launcher_contract"]()
+        self.assertEqual(
+            next(
+                profile
+                for profile in contract["profiles"]
+                if profile != contract["default_profile"]
+            ),
+            payload["full_requested"],
+        )
+        self.assertEqual(payload["expected_dimension"], payload["full_dimension"])
+        self.assertEqual("cpu", payload["full_device"])
+        self.assertEqual(
+            len(set(contract["environment"].values())),
+            payload["cleared_environment_count"],
         )
 
     def test_render_output_directory_defaults_validates_and_creates_writable_local_path(self) -> None:
@@ -927,14 +2315,172 @@ $fxResult = Invoke-HiaPreflight `
         self.assertIn("fxhoudinimcp.runtime", payload["fx"])
         self.assertNotIn("hia_mcp_v2.runtime", payload["fx"])
 
+    def test_wpf_knowledge_index_is_manual_async_resumable_and_nonblocking(
+        self,
+    ) -> None:
+        xaml_source = XAML_PATH.read_text(encoding="utf-8")
+        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        module_source = MODULE_PATH.read_text(encoding="utf-8-sig")
+        for required in (
+            'x:Name="KnowledgeIndexPanel"',
+            'x:Name="KnowledgeIndexModelText"',
+            'x:Name="KnowledgeIndexCountText"',
+            'x:Name="KnowledgeIndexProgressBar"',
+            'x:Name="KnowledgeIndexStatusText"',
+            'x:Name="KnowledgeIndexActionButton"',
+            "本地知识索引",
+            "构建/继续索引",
+        ):
+            self.assertIn(required, xaml_source)
+
+        for required in (
+            "New-HiaKnowledgeIndexProcessPlan",
+            "ConvertFrom-HiaKnowledgeIndexJsonLine",
+            "ReadLineAsync()",
+            "ReadToEndAsync()",
+            "StandardOutputEncoding",
+            "clear_environment_names",
+            "本次构建已取消；已提交批次保留",
+            "FTS5 lexical 检索可继续工作，Houdini 仍可启动",
+            "索引已完成",
+            "$script:knowledgeIndexTimer.Add_Tick",
+        ):
+            self.assertIn(required, wpf_source)
+        self.assertIn("PYTHONPATH", module_source)
+        self.assertIn("default_batch_size", module_source)
+        self.assertIn("Test-HiaEmbeddingModelInstall", module_source)
+
+        handler_start = wpf_source.index("$knowledgeIndexActionButton.Add_Click")
+        handler_end = wpf_source.index(
+            "$mcpBackendCombo.Add_SelectionChanged",
+            handler_start,
+        )
+        action_handler = wpf_source[handler_start:handler_end]
+        self.assertIn("Stop-HiaKnowledgeIndexProcess", action_handler)
+        self.assertIn(
+            "Start-HiaKnowledgeIndexProcess -Action 'build'",
+            action_handler,
+        )
+        self.assertEqual(
+            1,
+            wpf_source.count("Start-HiaKnowledgeIndexProcess -Action 'build'"),
+        )
+
+        start_function_start = wpf_source.index(
+            "function Start-HiaKnowledgeIndexProcess"
+        )
+        start_function = wpf_source[
+            start_function_start:
+            wpf_source.index(
+                "function Stop-HiaKnowledgeIndexProcess {",
+                start_function_start,
+            )
+        ]
+        self.assertNotIn("Set-BusyState", start_function)
+        self.assertNotIn("Remove-Item", start_function)
+        self.assertNotIn("$processEnvironment = if", start_function)
+        self.assertIn(
+            "$processEnvironment = $startInfo.EnvironmentVariables",
+            start_function,
+        )
+        self.assertIn("$knowledgeIndexFailure = $_", start_function)
+        self.assertIn(
+            "$failureDetail = [string]$knowledgeIndexFailure.Exception.Message",
+            start_function,
+        )
+        self.assertIn("-Message $failureMessage", start_function)
+        self.assertIn("$startMessage = if ($Action -eq 'build')", start_function)
+        self.assertIn(
+            "Set-HiaKnowledgeIndexDisplay -Message $startMessage",
+            start_function,
+        )
+        self.assertNotIn("Set-HiaKnowledgeIndexDisplay -Message (", start_function)
+        tree_stop_function = wpf_source[
+            wpf_source.index("function Stop-HiaKnowledgeIndexProcessTree"):
+            wpf_source.index("function Complete-HiaKnowledgeIndexProcess")
+        ]
+        for required in (
+            "$Process.Id",
+            "Join-Path $env:SystemRoot 'System32\\taskkill.exe'",
+            '"/PID $processId /T /F"',
+            "UseShellExecute = $false",
+            "CreateNoWindow = $true",
+            "WaitForExit(5000)",
+            "$terminator.ExitCode -ne 0",
+        ):
+            self.assertIn(required, tree_stop_function)
+        self.assertNotIn("/IM", tree_stop_function.upper())
+        self.assertNotIn(".Kill()", wpf_source)
+        self.assertIn("Stop-HiaKnowledgeIndexProcessTree", start_function)
+        complete_function = wpf_source[
+            wpf_source.index("function Complete-HiaKnowledgeIndexProcess"):
+            wpf_source.index("function Read-HiaKnowledgeIndexOutput")
+        ]
+        self.assertIn(
+            "Stop-HiaKnowledgeIndexProcessTree -Process $process",
+            complete_function,
+        )
+        cancelled = complete_function[complete_function.index("if ($cancelled)"):]
+        self.assertIn("Start-HiaKnowledgeIndexProcess -Action 'status'", cancelled)
+        stop_function = wpf_source[
+            wpf_source.index("function Stop-HiaKnowledgeIndexProcess {"):
+            wpf_source.index("function Get-PathIndex")
+        ]
+        self.assertIn("Stop-HiaKnowledgeIndexProcessTree", stop_function)
+        read_function = wpf_source[
+            wpf_source.index("function Read-HiaKnowledgeIndexOutput"):
+            wpf_source.index("function Test-HiaKnowledgeIndexProcessComplete")
+        ]
+        self.assertIn("Stop-HiaKnowledgeIndexProcessTree", read_function)
+        timer_handler = wpf_source[
+            wpf_source.index("$script:knowledgeIndexTimer.Add_Tick"):
+            wpf_source.index("function Start-HiaKnowledgeIndexProcess")
+        ]
+        self.assertIn("Stop-HiaKnowledgeIndexProcessTree", timer_handler)
+        closed_handler = wpf_source[wpf_source.index("$window.Add_Closed"):]
+        self.assertIn("Stop-HiaKnowledgeIndexProcessTree", closed_handler)
+        self.assertNotIn("knowledge.sqlite3", wpf_source)
+        self.assertNotIn("Invoke-WebRequest", start_function)
+        self.assertNotIn("ShowDialog", start_function)
+
     def test_wpf_xaml_loads_and_exposes_required_controls(self) -> None:
         ET.parse(XAML_PATH)
         required_types = {
             "LayoutRoot": "System.Windows.Controls.Grid",
+            "NavigationColumn": "System.Windows.Controls.ColumnDefinition",
+            "NavigationRail": "System.Windows.Controls.Border",
+            "SidebarPanel": "System.Windows.Controls.Grid",
+            "MainShell": "System.Windows.Controls.Grid",
             "RightVisualRail": "System.Windows.Controls.Border",
-            "BrandNodeMotif": "System.Windows.Controls.Viewbox",
             "MainScrollViewer": "System.Windows.Controls.ScrollViewer",
             "MainWorkspacePanel": "System.Windows.Controls.Border",
+            "PageHost": "System.Windows.Controls.Grid",
+            "OverviewNavButton": "System.Windows.Controls.RadioButton",
+            "EnvironmentNavButton": "System.Windows.Controls.RadioButton",
+            "PreflightNavButton": "System.Windows.Controls.RadioButton",
+            "ReportsSettingsNavButton": "System.Windows.Controls.RadioButton",
+            "OverviewPage": "System.Windows.Controls.Grid",
+            "EnvironmentPage": "System.Windows.Controls.Grid",
+            "PreflightPage": "System.Windows.Controls.Grid",
+            "ReportsSettingsPage": "System.Windows.Controls.Grid",
+            "PageTitleText": "System.Windows.Controls.TextBlock",
+            "PageSubtitleText": "System.Windows.Controls.TextBlock",
+            "OverviewOverallHeadline": "System.Windows.Controls.TextBlock",
+            "OverviewOverallDetail": "System.Windows.Controls.TextBlock",
+            "OptionalArtworkPanel": "System.Windows.Controls.Border",
+            "OptionalArtworkImage": "System.Windows.Controls.Image",
+            "OverviewHoudiniDot": "System.Windows.Shapes.Ellipse",
+            "OverviewHoudiniValueText": "System.Windows.Controls.TextBlock",
+            "OverviewHoudiniDetailText": "System.Windows.Controls.TextBlock",
+            "OverviewMcpDot": "System.Windows.Shapes.Ellipse",
+            "OverviewMcpValueText": "System.Windows.Controls.TextBlock",
+            "OverviewMcpDetailText": "System.Windows.Controls.TextBlock",
+            "OverviewCodexDot": "System.Windows.Shapes.Ellipse",
+            "OverviewCodexValueText": "System.Windows.Controls.TextBlock",
+            "OverviewCodexDetailText": "System.Windows.Controls.TextBlock",
+            "OverviewEmbeddingDot": "System.Windows.Shapes.Ellipse",
+            "OverviewEmbeddingValueText": "System.Windows.Controls.TextBlock",
+            "OverviewEmbeddingDetailText": "System.Windows.Controls.TextBlock",
             "RecoveryCard": "System.Windows.Controls.Border",
             "RecoveryCheckpointText": "System.Windows.Controls.TextBlock",
             "RecoverCheckpointOption": "System.Windows.Controls.RadioButton",
@@ -943,6 +2489,8 @@ $fxResult = Invoke-HiaPreflight `
             "OverallStatusDot": "System.Windows.Shapes.Ellipse",
             "OverallStatusText": "System.Windows.Controls.TextBlock",
             "McpBackendComboBox": "System.Windows.Controls.ComboBox",
+            "EmbeddingProfileComboBox": "System.Windows.Controls.ComboBox",
+            "EmbeddingDeviceComboBox": "System.Windows.Controls.ComboBox",
             "HoudiniComboBox": "System.Windows.Controls.ComboBox",
             "BrowseHoudiniButton": "System.Windows.Controls.Button",
             "HoudiniPathText": "System.Windows.Controls.TextBlock",
@@ -951,6 +2499,12 @@ $fxResult = Invoke-HiaPreflight `
             "BridgePathText": "System.Windows.Controls.TextBlock",
             "RenderOutputTextBox": "System.Windows.Controls.TextBox",
             "BrowseRenderOutputButton": "System.Windows.Controls.Button",
+            "KnowledgeIndexPanel": "System.Windows.Controls.Border",
+            "KnowledgeIndexModelText": "System.Windows.Controls.TextBlock",
+            "KnowledgeIndexCountText": "System.Windows.Controls.TextBlock",
+            "KnowledgeIndexProgressBar": "System.Windows.Controls.ProgressBar",
+            "KnowledgeIndexStatusText": "System.Windows.Controls.TextBlock",
+            "KnowledgeIndexActionButton": "System.Windows.Controls.Button",
             "PassCountText": "System.Windows.Controls.TextBlock",
             "WarningCountText": "System.Windows.Controls.TextBlock",
             "BlockedCountText": "System.Windows.Controls.TextBlock",
@@ -1009,6 +2563,8 @@ try {{
     }}
     $loadedWindow = $window
     $layoutRoot = $loadedWindow.FindName('LayoutRoot')
+    $navigationColumn = $loadedWindow.FindName('NavigationColumn')
+    $sidebarPanel = $loadedWindow.FindName('SidebarPanel')
     $rightVisualRail = $loadedWindow.FindName('RightVisualRail')
     $wpfSource = [IO.File]::ReadAllText({_ps_literal(WPF_SCRIPT_PATH)})
     $tokens = $null
@@ -1018,32 +2574,86 @@ try {{
         [ref]$tokens,
         [ref]$errors
     )
-    $responsiveFunction = @($ast.FindAll({{
+    if ($errors.Count -gt 0) {{ throw 'HiaLauncher.Wpf.ps1 did not parse.' }}
+    $requiredFunctions = @(
+        'Set-HiaLauncherPage',
+        'Update-ResponsiveLayout'
+    )
+    $definitions = @($ast.FindAll({{
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Update-ResponsiveLayout'
-    }}, $true))[0]
-    . ([scriptblock]::Create($responsiveFunction.Extent.Text))
+            $node.Name -in $requiredFunctions
+    }}, $true))
+    foreach ($name in $requiredFunctions) {{
+        $definition = @($definitions | Where-Object Name -eq $name)
+        if ($definition.Count -ne 1) {{ throw "Missing WPF function: $name" }}
+        . ([scriptblock]::Create($definition[0].Extent.Text))
+    }}
+
+    $overviewPage = $loadedWindow.FindName('OverviewPage')
+    $environmentPage = $loadedWindow.FindName('EnvironmentPage')
+    $preflightPage = $loadedWindow.FindName('PreflightPage')
+    $reportsSettingsPage = $loadedWindow.FindName('ReportsSettingsPage')
+    $overviewNavButton = $loadedWindow.FindName('OverviewNavButton')
+    $environmentNavButton = $loadedWindow.FindName('EnvironmentNavButton')
+    $preflightNavButton = $loadedWindow.FindName('PreflightNavButton')
+    $reportsSettingsNavButton = $loadedWindow.FindName('ReportsSettingsNavButton')
+    $pageTitleText = $loadedWindow.FindName('PageTitleText')
+    $pageSubtitleText = $loadedWindow.FindName('PageSubtitleText')
+    $mainScrollViewer = $loadedWindow.FindName('MainScrollViewer')
+    foreach ($page in @('overview', 'environment', 'preflight', 'reports')) {{
+        Set-HiaLauncherPage -Page $page
+        $visiblePages = @(
+            @(
+                $overviewPage,
+                $environmentPage,
+                $preflightPage,
+                $reportsSettingsPage
+            ) | Where-Object Visibility -eq ([System.Windows.Visibility]::Visible)
+        )
+        $checkedNavigation = @(
+            @(
+                $overviewNavButton,
+                $environmentNavButton,
+                $preflightNavButton,
+                $reportsSettingsNavButton
+            ) | Where-Object {{ $_.IsChecked -eq $true }}
+        )
+        if ($visiblePages.Count -ne 1 -or $checkedNavigation.Count -ne 1) {{
+            throw "Page navigation did not select exactly one page: $page"
+        }}
+    }}
+
     $script:compactLayout = $null
     $window = [pscustomobject]@{{ ActualWidth = 640.0 }}
     Update-ResponsiveLayout
     if (
         -not $script:compactLayout -or
-        $rightVisualRail.Width -ne 168 -or
+        $navigationColumn.Width.Value -ne 190 -or
+        $sidebarPanel.Margin.Left -ne 14 -or
+        $sidebarPanel.Margin.Top -ne 18 -or
+        $sidebarPanel.Margin.Right -ne 14 -or
+        $sidebarPanel.Margin.Bottom -ne 14 -or
+        $rightVisualRail.Width -ne 160 -or
         $rightVisualRail.Margin.Left -ne 0 -or
         $rightVisualRail.Margin.Top -ne 12 -or
-        $rightVisualRail.Margin.Right -ne 16 -or
-        $rightVisualRail.Margin.Bottom -ne 10
+        $rightVisualRail.Margin.Right -ne 0 -or
+        $rightVisualRail.Margin.Bottom -ne 0
     ) {{ throw 'Compact responsive layout did not activate.' }}
     $window.ActualWidth = 1180.0
     Update-ResponsiveLayout
     if (
         $script:compactLayout -or
-        $rightVisualRail.Width -ne 210 -or
+        $navigationColumn.Width.Value -ne 212 -or
+        $sidebarPanel.Margin.Left -ne 18 -or
+        $sidebarPanel.Margin.Top -ne 22 -or
+        $sidebarPanel.Margin.Right -ne 18 -or
+        $sidebarPanel.Margin.Bottom -ne 18 -or
+        $rightVisualRail.Width -ne 174 -or
         $rightVisualRail.Margin.Left -ne 0 -or
         $rightVisualRail.Margin.Top -ne 16 -or
-        $rightVisualRail.Margin.Right -ne 28 -or
-        $rightVisualRail.Margin.Bottom -ne 12
+        $rightVisualRail.Margin.Right -ne 0 -or
+        $rightVisualRail.Margin.Bottom -ne 0
     ) {{ throw 'Wide responsive layout did not restore.' }}
     $window = $loadedWindow
     $types | ConvertTo-Json -Compress
@@ -1100,8 +2710,6 @@ try {{
         self.assertNotIn("小助手", combined)
         self.assertIn('x:Key="AccentGradientBrush"', xaml_source)
         self.assertIn("<LinearGradientBrush", xaml_source)
-        self.assertIn("<Path", xaml_source)
-        self.assertIn("<Ellipse", xaml_source)
         self.assertIn("CornerRadius=", xaml_source)
         for text in (
             "最终渲染输出目录",
@@ -1137,16 +2745,25 @@ try {{
             "WindowChrome",
             "DragMove",
             "x:Class=",
-            ".png",
             ".jpg",
             ".jpeg",
             ".webp",
+            ".svg",
         )
         for text in forbidden:
             self.assertNotIn(text, combined)
-        self.assertEqual(0, xaml_source.count("<Image"))
+        self.assertEqual(1, len(re.findall(r"<Image(?:\s|>)", xaml_source)))
+        self.assertNotIn('Source="', ET.tostring(
+            next(
+                element
+                for element in ET.parse(XAML_PATH).getroot().iter()
+                if element.attrib.get(
+                    "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
+                ) == "OptionalArtworkImage"
+            ),
+            encoding="unicode",
+        ))
         for brand_token in (
-            'x:Name="BrandNodeMotif"',
             'x:Name="BrandTitleText"',
             'x:Name="BrandSubtitleText"',
             'x:Name="MainScrollViewer"',
@@ -1154,6 +2771,8 @@ try {{
         ):
             self.assertIn(brand_token, xaml_source)
         for rejected_visual in (
+            'x:Name="BrandNodeMotif"',
+            'x:Name="AssistantAvatarSlot"',
             'x:Name="SystemNodePathPrimary"',
             'x:Name="SystemNodePathAccent"',
             'Text="DISCOVER"',
@@ -1166,7 +2785,9 @@ try {{
             self.assertNotIn(rejected_visual, xaml_source)
         self.assertIn('x:Name="RightVisualRail"', xaml_source)
         self.assertIn("Update-ResponsiveLayout", wpf_source)
-        self.assertNotIn("[System.Windows.Media.Imaging.BitmapImage]::new()", wpf_source)
+        self.assertIn("[System.Windows.Media.Imaging.BitmapImage]::new()", wpf_source)
+        self.assertEqual(1, wpf_source.count("launcher-hero.png"))
+        self.assertIn("Initialize-HiaOptionalArtwork", wpf_source)
         self.assertIsNone(re.search(r"(?i)(?:^|[\"'>\s])[a-z]:\\", combined))
         self.assertNotIn(r"\\", xaml_source)
         uri_set = set(re.findall(r"(?:https?|file|pack)://[^\"\s<]+", xaml_source))
@@ -1202,14 +2823,22 @@ try {{
         columns = layout_root.find(f"{presentation}Grid.ColumnDefinitions")
         rows = layout_root.find(f"{presentation}Grid.RowDefinitions")
         self.assertIsNotNone(columns)
-        self.assertIsNotNone(rows)
+        self.assertIsNone(rows)
         self.assertEqual(
-            ["*"],
+            ["212", "*"],
             [column.attrib["Width"] for column in list(columns)],
         )
+        self.assertEqual("212", named["NavigationColumn"].attrib["Width"])
+
+        navigation_rail = named["NavigationRail"]
+        main_shell = named["MainShell"]
+        self.assertEqual("0", navigation_rail.attrib["Grid.Column"])
+        self.assertEqual("1", main_shell.attrib["Grid.Column"])
+        main_rows = main_shell.find(f"{presentation}Grid.RowDefinitions")
+        self.assertIsNotNone(main_rows)
         self.assertEqual(
-            ["Auto", "1", "*", "Auto"],
-            [row.attrib["Height"] for row in list(rows)],
+            ["Auto", "Auto", "*", "Auto"],
+            [row.attrib["Height"] for row in list(main_rows)],
         )
 
         self.assertEqual("2", named["MainScrollViewer"].attrib["Grid.Row"])
@@ -1217,9 +2846,58 @@ try {{
             "{StaticResource ModernScrollViewerStyle}",
             named["MainScrollViewer"].attrib["Style"],
         )
+        self.assertEqual("Transparent", named["MainWorkspacePanel"].attrib["Background"])
+        self.assertEqual("0", named["MainWorkspacePanel"].attrib["BorderThickness"])
+
+        page_names = (
+            "OverviewPage",
+            "EnvironmentPage",
+            "PreflightPage",
+            "ReportsSettingsPage",
+        )
+        page_host = named["PageHost"]
         self.assertEqual(
-            "{StaticResource SectionCardStyle}",
-            named["MainWorkspacePanel"].attrib["Style"],
+            set(page_names),
+            {
+                child.attrib[xaml_name]
+                for child in list(page_host)
+                if xaml_name in child.attrib
+            },
+        )
+        self.assertTrue(
+            all(named[name].tag == f"{presentation}Grid" for name in page_names)
+        )
+        self.assertEqual(
+            ["Visible", "Collapsed", "Collapsed", "Collapsed"],
+            [
+                named[name].attrib.get("Visibility", "Visible")
+                for name in page_names
+            ],
+        )
+
+        navigation_names = (
+            "OverviewNavButton",
+            "EnvironmentNavButton",
+            "PreflightNavButton",
+            "ReportsSettingsNavButton",
+        )
+        navigation_items = [named[name] for name in navigation_names]
+        self.assertTrue(
+            all(
+                item.tag == f"{presentation}RadioButton"
+                for item in navigation_items
+            )
+        )
+        self.assertEqual(
+            {"LauncherNavigation"},
+            {item.attrib["GroupName"] for item in navigation_items},
+        )
+        self.assertEqual("True", navigation_items[0].attrib["IsChecked"])
+        self.assertTrue(
+            all("IsChecked" not in item.attrib for item in navigation_items[1:])
+        )
+        self.assertTrue(
+            all("AutomationProperties.Name" in item.attrib for item in navigation_items)
         )
 
         parent_map = {
@@ -1227,14 +2905,16 @@ try {{
         }
         cursor = named["LaunchButton"]
         ancestor_tags = []
-        while parent_map[cursor] is not layout_root:
+        while parent_map[cursor] is not main_shell:
             cursor = parent_map[cursor]
             ancestor_tags.append(cursor.tag)
+        self.assertEqual("FooterBar", cursor.attrib[xaml_name])
         self.assertEqual("3", cursor.attrib["Grid.Row"])
         self.assertNotIn(f"{presentation}ScrollViewer", ancestor_tags)
 
         right_visual = named["RightVisualRail"]
-        self.assertEqual("0", right_visual.attrib["Grid.Row"])
+        self.assertEqual("3", right_visual.attrib["Grid.Row"])
+        self.assertEqual("174", right_visual.attrib["Width"])
         self.assertNotIn("Grid.Column", right_visual.attrib)
         self.assertNotIn("Grid.RowSpan", right_visual.attrib)
         right_visual_source = ET.tostring(right_visual, encoding="unicode")
@@ -1242,7 +2922,7 @@ try {{
         self.assertNotIn("Viewbox", right_visual_source)
 
         scroll_viewers = list(root.iter(f"{presentation}ScrollViewer"))
-        self.assertEqual(3, len(scroll_viewers))
+        self.assertGreaterEqual(len(scroll_viewers), 3)
         for scroll_viewer in scroll_viewers:
             self.assertEqual(
                 "{StaticResource ModernScrollViewerStyle}",
@@ -1270,9 +2950,9 @@ try {{
             self.assertNotIn(forbidden, scrollbar_source)
 
         xaml_source = XAML_PATH.read_text(encoding="utf-8")
-        self.assertEqual(
-            1,
+        self.assertLessEqual(
             xaml_source.count('Style="{StaticResource SectionCardStyle}"'),
+            1,
         )
 
     def test_wpf_runtime_pickers_have_explicit_high_contrast_templates(self) -> None:
@@ -1329,6 +3009,10 @@ try {{
             ),
             4.5,
         )
+        self.assertGreater(
+            contrast(resources["TextPrimaryBrush"], "#151A2A"),
+            4.5,
+        )
         self.assertGreater(contrast("#FFFFFF", resources["PickerHoverBrush"]), 7.0)
         self.assertGreater(contrast("#FFFFFF", resources["PickerSelectedBrush"]), 7.0)
 
@@ -1340,6 +3024,8 @@ try {{
         combo_style = styles["DarkPickerComboBoxStyle"]
         item_style = styles["DarkPickerComboBoxItemStyle"]
         primary_button_style = styles["PrimaryButtonStyle"]
+        tooltip_style = styles["DarkToolTipStyle"]
+        navigation_style = styles["NavigationButtonStyle"]
         for required in (
             "ControlTemplate",
             "PART_Popup",
@@ -1375,10 +3061,44 @@ try {{
             "DisabledPrimaryTextBrush",
         ):
             self.assertIn(required, primary_button_style)
+        for required in (
+            "ControlTemplate",
+            "Background",
+            "Foreground",
+            "BorderBrush",
+            "Padding",
+            "MaxWidth",
+            "Placement",
+            "TextWrapping",
+        ):
+            self.assertIn(required, tooltip_style)
+        for required in (
+            "ControlTemplate",
+            "IsMouseOver",
+            "IsChecked",
+            "IsKeyboardFocused",
+            "IsEnabled",
+            "SelectedRail",
+            "NavDot",
+        ):
+            self.assertIn(required, navigation_style)
+        implicit_tooltip_styles = [
+            style
+            for style in root.iter(f"{presentation}Style")
+            if style.attrib.get("TargetType") == "{x:Type ToolTip}"
+            and xaml_key not in style.attrib
+        ]
+        self.assertEqual(1, len(implicit_tooltip_styles))
+        self.assertEqual(
+            "{StaticResource DarkToolTipStyle}",
+            implicit_tooltip_styles[0].attrib["BasedOn"],
+        )
         self.assertNotIn('Opacity" Value="0.42"', styles["ActionButtonStyle"])
 
         combo_expectations = {
             "McpBackendComboBox": "BackendPickerItemTemplate",
+            "EmbeddingProfileComboBox": "EmbeddingProfilePickerItemTemplate",
+            "EmbeddingDeviceComboBox": "BackendPickerItemTemplate",
             "HoudiniComboBox": "HoudiniPickerItemTemplate",
             "BridgePythonComboBox": "BridgePickerItemTemplate",
         }
@@ -1412,13 +3132,54 @@ try {{
         self.assertIn("version", templates["HoudiniPickerItemTemplate"])
         self.assertIn("StringFormat=Houdini {0}", templates["HoudiniPickerItemTemplate"])
         self.assertIn("source", templates["BridgePickerItemTemplate"])
+        embedding_template = templates["EmbeddingProfilePickerItemTemplate"]
+        self.assertGreaterEqual(embedding_template.count("TextBlock"), 2)
+        self.assertIn("display", embedding_template)
+        self.assertIn("detail", embedding_template)
+        self.assertIn("tooltip", embedding_template)
+        self.assertIn("PickerTextBrush", embedding_template)
+        self.assertIn("PickerSecondaryTextBrush", embedding_template)
 
         tab_indices = sorted(
             int(element.attrib["TabIndex"])
             for element in root.iter()
             if "TabIndex" in element.attrib
         )
-        self.assertEqual(list(range(15)), tab_indices)
+        self.assertEqual(list(range(22)), tab_indices)
+        expected_tab_order = {
+            "OverviewNavButton": 0,
+            "EnvironmentNavButton": 1,
+            "PreflightNavButton": 2,
+            "ReportsSettingsNavButton": 3,
+            "RecoverCheckpointOption": 4,
+            "NormalLaunchOption": 5,
+            "McpBackendComboBox": 6,
+            "EmbeddingProfileComboBox": 7,
+            "EmbeddingDeviceComboBox": 8,
+            "HoudiniComboBox": 9,
+            "BrowseHoudiniButton": 10,
+            "BridgePythonComboBox": 11,
+            "BrowseBridgeButton": 12,
+            "RenderOutputTextBox": 13,
+            "BrowseRenderOutputButton": 14,
+            "KnowledgeIndexActionButton": 15,
+            "ReportPathTextBox": 16,
+            "RescanButton": 17,
+            "RepairButton": 18,
+            "CleanupScreenshotsButton": 19,
+            "CopyReportButton": 20,
+            "LaunchButton": 21,
+        }
+        named_tab_order = {
+            element.attrib[xaml_name]: int(element.attrib["TabIndex"])
+            for element in root.iter()
+            if xaml_name in element.attrib and "TabIndex" in element.attrib
+        }
+        self.assertEqual(expected_tab_order, named_tab_order)
+        self.assertEqual(
+            len(named_tab_order),
+            len(set(named_tab_order.values())),
+        )
         self.assertLessEqual(int(root.attrib["MinWidth"]), 640)
         self.assertLessEqual(int(root.attrib["MinHeight"]), 480)
         self.assertEqual("Cycle", root.attrib["KeyboardNavigation.TabNavigation"])
@@ -1443,7 +3204,15 @@ try {{
             "{StaticResource PrimaryButtonStyle}",
             named["LaunchButton"].attrib["Style"],
         )
+        primary_buttons = [
+            element.attrib.get(xaml_name)
+            for element in root.iter(f"{presentation}Button")
+            if element.attrib.get("Style")
+            == "{StaticResource PrimaryButtonStyle}"
+        ]
+        self.assertEqual(["LaunchButton"], primary_buttons)
         for secondary_name in (
+            "KnowledgeIndexActionButton",
             "RescanButton",
             "RepairButton",
             "CleanupScreenshotsButton",
@@ -1455,7 +3224,12 @@ try {{
             )
 
         for event_binding in (
+            "$overviewNavButton.Add_Click",
+            "$environmentNavButton.Add_Click",
+            "$preflightNavButton.Add_Click",
+            "$reportsSettingsNavButton.Add_Click",
             "$rescanButton.Add_Click",
+            "$knowledgeIndexActionButton.Add_Click",
             "$mcpBackendCombo.Add_SelectionChanged",
             "$houdiniCombo.Add_SelectionChanged",
             "$bridgeCombo.Add_SelectionChanged",
@@ -1471,8 +3245,12 @@ try {{
             "$window.Add_ContentRendered",
         ):
             self.assertEqual(1, wpf_source.count(event_binding), event_binding)
+        self.assertEqual(
+            1,
+            wpf_source.count("function Set-HiaLauncherPage"),
+        )
 
-    def test_builtin_visual_and_recovery_ui_are_nonblocking_and_explicit(self) -> None:
+    def test_optional_artwork_and_recovery_ui_are_nonblocking_and_explicit(self) -> None:
         tree = ET.parse(XAML_PATH)
         root = tree.getroot()
         xaml_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
@@ -1481,20 +3259,35 @@ try {{
             for element in root.iter()
             if xaml_name in element.attrib
         }
-        self.assertNotIn("OptionalArtworkPanel", named)
-        self.assertNotIn("OptionalArtworkImage", named)
+        self.assertIn("OptionalArtworkPanel", named)
+        self.assertIn("OptionalArtworkImage", named)
+        self.assertEqual("Collapsed", named["OptionalArtworkPanel"].attrib["Visibility"])
+        self.assertEqual("False", named["OptionalArtworkPanel"].attrib["IsHitTestVisible"])
+        self.assertEqual(
+            "UniformToFill",
+            named["OptionalArtworkImage"].attrib["Stretch"],
+        )
+        self.assertNotIn("Source", named["OptionalArtworkImage"].attrib)
         xaml_source = XAML_PATH.read_text(encoding="utf-8-sig")
         self.assertIn("BIG-CHICKEN", xaml_source)
         self.assertIn("Houdini Intelligence Agent", xaml_source)
-        motif = ET.tostring(named["BrandNodeMotif"], encoding="unicode")
-        self.assertIn("Path", motif)
-        self.assertGreaterEqual(motif.count("Ellipse"), 3)
-        for resource in (
-            "AccentPinkBrush",
-            "AccentPurpleBrush",
-            "AccentCyanBrush",
-        ):
-            self.assertIn(resource, motif)
+        self.assertEqual(
+            "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}TextBlock",
+            named["BrandTitleText"].tag,
+        )
+        self.assertEqual(
+            "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}TextBlock",
+            named["BrandSubtitleText"].tag,
+        )
+        self.assertNotIn("BrandNodeMotif", named)
+        self.assertNotIn("AssistantAvatarSlot", named)
+        header_source = ET.tostring(named["MainShellHeader"], encoding="unicode")
+        overview_source = ET.tostring(named["OverviewPage"], encoding="unicode")
+        right_rail_source = ET.tostring(named["RightVisualRail"], encoding="unicode")
+        for abstract_visual in ("Canvas", "Path", "Viewbox"):
+            self.assertNotIn(abstract_visual, header_source)
+            self.assertNotIn(abstract_visual, overview_source)
+            self.assertNotIn(abstract_visual, right_rail_source)
         for forbidden_brand_element in (
             "ChickenHead",
             "ChickenComb",
@@ -1502,6 +3295,8 @@ try {{
             "ChickenEye",
             "Mascot",
             "CharacterArtwork",
+            "BrandNodeMotif",
+            "AssistantAvatarSlot",
         ):
             self.assertNotIn(forbidden_brand_element, xaml_source)
         self.assertNotIn("STEAM WINTER", xaml_source.upper())
@@ -1517,6 +3312,24 @@ try {{
         launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
         self.assertNotIn("Get-HiaLauncherArtworkPath", wpf_source)
         self.assertNotIn("steam-winter-sale", wpf_source)
+        artwork_function = wpf_source[
+            wpf_source.index("function Initialize-HiaOptionalArtwork"):
+            wpf_source.index("function Set-OverallState")
+        ]
+        for required in (
+            "$projectRoot",
+            "'assets'",
+            "'launcher'",
+            "'launcher-hero.png'",
+            "BitmapCacheOption]::OnLoad",
+            "BitmapCreateOptions]::IgnoreImageCache",
+            "FileAttributes]::ReparsePoint",
+            "$optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Visible",
+            "$optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Collapsed",
+        ):
+            self.assertIn(required, artwork_function)
+        self.assertIn("try {", artwork_function)
+        self.assertIn("} catch {", artwork_function)
         for required in (
             "Get-HiaRecoverableLauncherSession -ProjectRoot $projectRoot",
             "$recoverCheckpointOption.IsChecked = $true",
@@ -1956,7 +3769,17 @@ Add-Type -TypeDefinition $source -Language CSharp
             for root_path in (EXE_PROJECT_ROOT, XAML_PATH.parent)
             for path in root_path.rglob("*")
             if path.suffix.lower()
-            in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico", ".mp4"}
+            in {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".webp",
+                ".gif",
+                ".bmp",
+                ".ico",
+                ".svg",
+                ".mp4",
+            }
         ]
         self.assertEqual([], launcher_assets)
         self.assertNotIn(
@@ -2035,6 +3858,7 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertIn("HiaLauncher.xaml", wpf_source)
         for control_name in (
             "McpBackendComboBox",
+            "EmbeddingProfileComboBox",
             "RescanButton",
             "RepairButton",
             "CleanupScreenshotsButton",
@@ -2042,6 +3866,8 @@ Add-Type -TypeDefinition $source -Language CSharp
             "LaunchButton",
             "RenderOutputTextBox",
             "BrowseRenderOutputButton",
+            "KnowledgeIndexPanel",
+            "KnowledgeIndexActionButton",
         ):
             self.assertIn(f'x:Name="{control_name}"', xaml_source)
         self.assertEqual(
@@ -2055,11 +3881,15 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertNotIn("HIA_BRIDGE_TOKEN", launcher_source + wpf_source)
         self.assertNotIn("HIA_BRIDGE_URL", launcher_source + wpf_source)
         self.assertIn("[AllowEmptyString()][string]$RenderOutputDir = ''", launcher_source)
+        self.assertIn("[AllowEmptyString()][string]$EmbeddingProfile = ''", launcher_source)
         self.assertIn("'HIA_RENDER_OUTPUT_DIR'", launcher_source)
         self.assertNotIn("'-RenderOutputDir'", launcher_source)
         self.assertNotIn("$env:HIA_RENDER_OUTPUT_DIR =", combined)
         self.assertIn("Invoke-HiaScreenshotCacheCleanup", wpf_source)
         self.assertIn("Start-HiaCodexBootstrap", wpf_source)
+        self.assertIn("Start-HiaEmbeddingInstall", wpf_source)
+        self.assertIn("Write-HiaEmbeddingPreference", wpf_source)
+        self.assertIn("FTS5 无需重建", wpf_source)
         self.assertIn("[System.Diagnostics.ProcessStartInfo]::new()", wpf_source)
         self.assertIn("[System.Windows.Threading.DispatcherTimer]::new()", wpf_source)
         self.assertIn("Get-HiaCodexLoginCommand", wpf_source)

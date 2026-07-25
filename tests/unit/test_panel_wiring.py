@@ -490,6 +490,7 @@ class _BridgeClientShim:
         self.thread_list_requests = 0
         self.thread_read_requests: list[tuple[str, str]] = []
         self.thread_rename_requests: list[tuple[str, str, str]] = []
+        self.thread_delete_requests: list[tuple[str, str]] = []
         self.goal_get_requests: list[str] = []
         self.goal_set_requests: list[tuple[str, str, str, int | None]] = []
         self.goal_clear_requests: list[str] = []
@@ -562,6 +563,9 @@ class _BridgeClientShim:
 
     def rename_thread(self, thread_id: str, name: str, *, context: str) -> None:
         self.thread_rename_requests.append((thread_id, name, context))
+
+    def delete_thread(self, thread_id: str, *, context: str) -> None:
+        self.thread_delete_requests.append((thread_id, context))
 
     def get_goal(self, thread_id: str) -> None:
         self.goal_get_requests.append(thread_id)
@@ -771,6 +775,9 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
         if isinstance(selected_thread_id, str)
         else []
     )
+    panel._thread_delete_confirm_id = None
+    panel._thread_delete_confirm_not_before = None
+    panel._thread_delete_pending = None
     panel._goal_action_context = None
     panel._current_goal = None
     panel._goal_turn_id = None
@@ -813,6 +820,9 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._last_report_path = None
     panel._diagnostic_writer_error = None
     panel._reconnect_timer = _ManualTimer(panel._attempt_bridge_reconnect)
+    panel._thread_delete_confirm_timer = _ManualTimer(
+        panel._reset_thread_delete_confirmation
+    )
     panel._diagnostic_writer = _DiagnosticWriterShim()
     panel._scene_executor_token = "executor-secret"
     panel._poll_timer = _TimerShim()
@@ -842,6 +852,7 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.thread_name_edit = _Widget("Current thread")
     panel.rename_thread_button = _Widget()
     panel.copy_thread_id_button = _Widget()
+    panel.delete_thread_button = _Widget("删除")
     panel.new_thread_button = _Widget()
     panel.resume_thread_button = _Widget()
     panel.send_button = _Widget()
@@ -4324,6 +4335,226 @@ class PanelWiringTests(unittest.TestCase):
             {"thread_id": thread_id, "name": name},
         )
         self.assertIn("用户命名", panel.history_combo.itemText(1))
+
+    def test_thread_delete_ignores_double_click_and_requires_deliberate_second_click(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel_time = HoudiniIntelligencePanel._delete_thread.__globals__["time"]
+
+        with mock.patch.object(
+            panel_time,
+            "monotonic",
+            side_effect=(10.0, 10.1, 10.8),
+        ):
+            panel._delete_thread()
+
+            self.assertEqual([], panel._client.thread_delete_requests)
+            self.assertEqual("thread-1", panel._thread_delete_confirm_id)
+            self.assertEqual("再次点击删除", panel.delete_thread_button.text())
+            self.assertTrue(panel._thread_delete_confirm_timer.isActive())
+
+            panel._delete_thread()
+            self.assertEqual([], panel._client.thread_delete_requests)
+            self.assertEqual("再次点击删除", panel.delete_thread_button.text())
+
+            panel._delete_thread()
+        self.assertEqual(1, len(panel._client.thread_delete_requests))
+        thread_id, context = panel._client.thread_delete_requests[0]
+        self.assertEqual("thread-1", thread_id)
+        self.assertTrue(context.startswith("thread_delete:"))
+        self.assertTrue(panel._session_action_pending)
+        self.assertIsNone(panel._thread_delete_confirm_id)
+        self.assertEqual(context, panel._thread_delete_pending["context"])
+
+    def test_active_turn_rejects_thread_delete_and_prompts_stop(self) -> None:
+        panel = _make_panel()
+        self.assertTrue(panel._turn_state.begin_start("thread-1"))
+
+        panel._delete_thread()
+
+        self.assertEqual([], panel._client.thread_delete_requests)
+        self.assertIn(
+            "请先停止并等待结束",
+            panel.conversation.toPlainText(),
+        )
+
+    def test_deleting_current_thread_clears_only_panel_memory_references(self) -> None:
+        panel = _make_panel()
+        panel.input_edit.setPlainText("draft")
+        attachment = r"E:\project\.runtime\attachments\thread-1\reference.png"
+        panel.attachment_strip.add_path(attachment)
+        panel.conversation.add_user_message("existing", ())
+        panel._team_records["child"] = {
+            "root_thread_id": "thread-1",
+            "status": "completed",
+        }
+        panel._current_goal = {"objective": "current goal", "status": "active"}
+        panel._focus_mode = True
+        panel._session_action_pending = True
+        panel._thread_delete_pending = {
+            "context": "thread_delete:request",
+            "thread_id": "thread-1",
+            "notification_seen": False,
+        }
+        panel._crash_recovery_observation = {
+            "thread_id": "thread-1",
+            "prompt_id": "launcher-prompt",
+        }
+
+        panel._on_action_completed(
+            "thread_delete:request",
+            {
+                "thread_id": "thread-1",
+                "deleted": True,
+                "was_selected": True,
+            },
+        )
+
+        self.assertIsNone(panel._selected_thread_id)
+        self.assertFalse(panel._session_action_pending)
+        self.assertEqual([], panel._thread_history)
+        self.assertEqual("", panel.conversation.toPlainText())
+        self.assertEqual("", panel.input_edit.toPlainText())
+        self.assertEqual([], panel.attachment_strip.paths())
+        self.assertEqual({}, panel._team_records)
+        self.assertIsNone(panel._current_goal)
+        self.assertFalse(panel._focus_mode)
+        self.assertIsNone(panel._crash_recovery_observation)
+        self.assertIsNone(panel._thread_delete_pending)
+        self.assertEqual("Thread：未选择", panel.thread_status_label.text())
+        self.assertEqual("暂无历史会话", panel.history_combo.itemText(0))
+        deleted_notification = {
+            "type": "codex_notification",
+            "method": "thread/deleted",
+            "params": {"threadId": "thread-1"},
+        }
+        panel._render_event(deleted_notification)
+        panel._render_event(deleted_notification)
+        self.assertEqual("", panel.conversation.toPlainText())
+        self.assertIsNone(panel._selected_thread_id)
+
+    def test_delete_notification_and_response_are_idempotent_after_thread_switch(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        context = "thread_delete:request"
+        panel._session_action_pending = True
+        panel._thread_delete_pending = {
+            "context": context,
+            "thread_id": "thread-1",
+            "notification_seen": False,
+        }
+
+        deleted_notification = {
+            "type": "codex_notification",
+            "method": "thread/deleted",
+            "params": {"threadId": "thread-1"},
+        }
+        panel._render_event(deleted_notification)
+        self.assertIsNone(panel._selected_thread_id)
+        self.assertTrue(panel._thread_delete_pending["notification_seen"])
+
+        panel._selected_thread_id = "thread-2"
+        panel._thread_history = [
+            {
+                "thread_id": "thread-2",
+                "name": "Second thread",
+                "preview": "",
+                "updated_at": 2,
+            }
+        ]
+        panel.input_edit.setPlainText("new draft")
+        attachment = r"E:\project\.runtime\attachments\thread-2\reference.png"
+        panel.attachment_strip.add_path(attachment)
+        panel._apply_threads(panel._thread_history)
+
+        panel._on_action_completed(
+            context,
+            {
+                "thread_id": "thread-1",
+                "deleted": True,
+                "was_selected": True,
+            },
+        )
+        panel._render_event(deleted_notification)
+        panel._on_action_completed(
+            context,
+            {
+                "thread_id": "thread-1",
+                "deleted": True,
+                "was_selected": True,
+            },
+        )
+
+        self.assertEqual("thread-2", panel._selected_thread_id)
+        self.assertEqual("new draft", panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+        self.assertEqual(["thread-2"], [
+            record["thread_id"] for record in panel._thread_history
+        ])
+        self.assertIsNone(panel._thread_delete_pending)
+
+    def test_delete_cleanup_warning_reports_success_without_retry_language(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        context = "thread_delete:request"
+        panel._session_action_pending = True
+        panel._thread_delete_pending = {
+            "context": context,
+            "thread_id": "thread-1",
+            "notification_seen": False,
+        }
+
+        panel._on_action_completed(
+            context,
+            {
+                "thread_id": "thread-1",
+                "deleted": True,
+                "cleanup_warning": {
+                    "code": "FOCUS_STATE_UNAVAILABLE",
+                    "message": "focus state unavailable",
+                },
+            },
+        )
+
+        text = panel.conversation.toPlainText()
+        self.assertIn("Thread 已永久删除", text)
+        self.assertIn("无需重试删除", text)
+        self.assertNotIn("删除 Thread 失败", text)
+
+    def test_deleted_or_switched_thread_ignores_late_crash_recheck(self) -> None:
+        panel = _make_panel()
+        panel._crash_recovery_observation = {
+            "thread_id": "thread-1",
+            "prompt_id": _RECOVERY_PROMPT_ID,
+            "terminal_turn_id": "launcher-recovery-turn",
+            "terminal_status": "completed",
+        }
+
+        panel._apply_deleted_thread("thread-1")
+        self.assertIsNone(panel._crash_recovery_observation)
+
+        panel._selected_thread_id = "thread-2"
+        panel._crash_recovery_observation = {
+            "thread_id": "thread-1",
+            "prompt_id": _RECOVERY_PROMPT_ID,
+            "terminal_turn_id": "launcher-recovery-turn",
+            "terminal_status": "completed",
+        }
+        panel._on_action_completed(
+            "thread_read:crash_recovery_recheck",
+            _recovery_read_payload(include_launcher_prompt=True),
+        )
+        panel._on_action_completed(
+            "thread_read:crash_recovery_recheck",
+            _recovery_read_payload(include_launcher_prompt=True),
+        )
+
+        self.assertIsNone(panel._crash_recovery_observation)
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertIsNone(panel._goal_continuation_boundary)
 
     def test_initial_and_reopened_panel_stay_empty_until_manual_open(self) -> None:
         first = _make_panel(selected_thread_id=None)

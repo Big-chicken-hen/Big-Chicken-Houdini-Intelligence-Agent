@@ -26,8 +26,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from .hybrid_knowledge import HybridKnowledgeError, HybridKnowledgeStore
 from .knowledge_index import (
     LocalKnowledgeIndex,
+    SEARCH_SOURCE_GROUPS,
     SOURCE_GROUPS,
 )
 
@@ -82,6 +84,7 @@ class HoudiniExecutor:
         "hia_scene_diff",
         "hia_capture_viewport",
         "hia_local_help_search",
+        "hia_project_memory",
     )
 
     def __init__(
@@ -138,6 +141,7 @@ class HoudiniExecutor:
         self._scene_revision = 0
         self._snapshots: dict[str, _Snapshot] = {}
         self._knowledge_index: LocalKnowledgeIndex | None = None
+        self._hybrid_knowledge: HybridKnowledgeStore | None = None
         self._handlers: dict[str, Callable[[Mapping[str, Any]], dict[str, Any]]] = {
             "hia_context": self._context,
             "hia_inspect": self._inspect,
@@ -166,6 +170,8 @@ class HoudiniExecutor:
         copied_arguments = dict(arguments)
         if tool_name == "hia_local_help_search":
             return self._dispatch_local_help(copied_arguments)
+        if tool_name == "hia_project_memory":
+            return self._dispatch_project_memory(copied_arguments)
         handler = self._handlers.get(tool_name)
         if handler is None:
             raise HiaRuntimeError("TOOL_NOT_FOUND", "Unknown HIA MCP V2 runtime tool", {"tool": tool_name})
@@ -1288,17 +1294,17 @@ class HoudiniExecutor:
         )
         raw_sources = arguments.get("sources")
         if raw_sources is None:
-            sources = set(SOURCE_GROUPS)
+            sources = set(SEARCH_SOURCE_GROUPS)
         elif not isinstance(raw_sources, (list, tuple, set)):
             raise HiaRuntimeError(
                 "INVALID_ARGUMENTS",
                 "sources must be an array",
             )
         elif not raw_sources:
-            sources = set(SOURCE_GROUPS)
+            sources = set(SEARCH_SOURCE_GROUPS)
         else:
             sources = {str(value) for value in raw_sources}
-        invalid_sources = sources.difference(SOURCE_GROUPS)
+        invalid_sources = sources.difference(SEARCH_SOURCE_GROUPS)
         if invalid_sources:
             raise HiaRuntimeError(
                 "INVALID_ARGUMENTS",
@@ -1313,10 +1319,18 @@ class HoudiniExecutor:
             )
         offset = _bounded_int(arguments.get("offset", 0), 0, 1_000_000)
         limit = _bounded_int(arguments.get("limit", 10), 1, 50)
+        mode = str(arguments.get("mode") or "hybrid").casefold()
+        if mode not in {"lexical", "vector", "hybrid"}:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "mode must be lexical, vector, or hybrid",
+            )
         try:
-            knowledge_index = self._local_knowledge_index()
+            hybrid_knowledge = self._hybrid_knowledge_store()
+            knowledge_index = hybrid_knowledge.index
+            refreshable_sources = sources.intersection(SOURCE_GROUPS)
             refresh_groups = knowledge_index.refresh_due(
-                sources,
+                refreshable_sources,
                 force=refresh_requested,
             )
             indexed_houdini_version = (
@@ -1383,15 +1397,16 @@ class HoudiniExecutor:
                 force=refresh_requested,
             )
             refresh_finished = time.monotonic()
+            search_results = hybrid_knowledge.search_many(
+                queries,
+                sources,
+                current_houdini_version=current_houdini_version,
+                offset=offset,
+                limit=limit,
+                mode=mode,
+            )
             query_results = []
-            for query in queries:
-                search_result = knowledge_index.search(
-                    query,
-                    sources,
-                    current_houdini_version=current_houdini_version,
-                    offset=offset,
-                    limit=limit,
-                )
+            for query, search_result in zip(queries, search_results):
                 query_results.append(
                     {
                         "query": query,
@@ -1401,11 +1416,13 @@ class HoudiniExecutor:
                         "limit": limit,
                         "files_scanned": refresh_stats["files_scanned"],
                         "web_searched": False,
+                        "retrieval": search_result["retrieval"],
                         "index": {
                             **refresh_stats,
                             "database": knowledge_index.relative_database_path,
                             "fts": "FTS5",
                             "tokenizer": search_result["tokenizer"],
+                            "vector": search_result["retrieval"]["vector"],
                         },
                     }
                 )
@@ -1424,9 +1441,15 @@ class HoudiniExecutor:
             for query_result in query_results:
                 query = str(query_result["query"])
                 for match in query_result["matches"]:
+                    metadata = match.get("metadata")
+                    source_key = (
+                        metadata.get("source_key")
+                        if isinstance(metadata, Mapping)
+                        else ""
+                    )
                     key = (
-                        str(match.get("source", "")),
-                        str(match.get("title", "")),
+                        str(source_key)
+                        or f"{match.get('source', '')}:{match.get('title', '')}"
                     )
                     existing = merged_index.get(key)
                     if existing is None:
@@ -1443,11 +1466,13 @@ class HoudiniExecutor:
                 "total": len(merged),
                 "files_scanned": refresh_stats["files_scanned"],
                 "web_searched": False,
+                "retrieval": query_results[0]["retrieval"],
                 "index": {
                     **refresh_stats,
                     "database": knowledge_index.relative_database_path,
                     "fts": "FTS5",
                     "tokenizer": query_results[0]["index"]["tokenizer"],
+                    "vector": query_results[0]["retrieval"]["vector"],
                 },
             }
         result = {
@@ -1478,11 +1503,70 @@ class HoudiniExecutor:
         }
         return result
 
-    def _local_knowledge_index(self) -> LocalKnowledgeIndex:
+    def _dispatch_project_memory(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            payload = self._hybrid_knowledge_store().project_memory(arguments)
+        except HybridKnowledgeError as exc:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                _bounded_text(_redact_text(str(exc)), 2048),
+            ) from exc
+        except Exception as exc:
+            raise HiaRuntimeError(
+                "PROJECT_MEMORY_FAILED",
+                _bounded_text(_redact_text(str(exc)), 2048),
+            ) from exc
+        scene = self._run_on_main_thread(
+            lambda: {
+                "revision": self.scene_revision,
+                "dirty": self._dirty(),
+            }
+        )
+        fallback_reason = ""
+        retrieval = payload.get("retrieval")
+        if isinstance(retrieval, Mapping):
+            vector = retrieval.get("vector")
+            if isinstance(vector, Mapping):
+                fallback_reason = str(vector.get("fallback_reason") or "")
+        return {
+            "ok": True,
+            "result": payload,
+            "stdout": "",
+            "warnings": (
+                [
+                    "Project memory was stored in SQLite/FTS5; optional "
+                    f"vector encoding degraded: {fallback_reason}"
+                ]
+                if fallback_reason
+                else []
+            ),
+            "errors": [],
+            "revision": int(scene["revision"]),
+            "dirty": bool(scene["dirty"]),
+        }
+
+    def _hybrid_knowledge_store(self) -> HybridKnowledgeStore:
         with self._state_lock:
-            if self._knowledge_index is None:
-                self._knowledge_index = LocalKnowledgeIndex(self._project_root)
-            return self._knowledge_index
+            if self._hybrid_knowledge is None:
+                if self._knowledge_index is None:
+                    self._knowledge_index = LocalKnowledgeIndex(
+                        self._project_root
+                    )
+                self._hybrid_knowledge = HybridKnowledgeStore(
+                    self._project_root,
+                    index=self._knowledge_index,
+                )
+            return self._hybrid_knowledge
+
+    def close(self) -> None:
+        with self._state_lock:
+            hybrid = self._hybrid_knowledge
+            self._hybrid_knowledge = None
+        if hybrid is not None:
+            hybrid.close()
 
     def _success(self, result: Any, *, warnings: list[str] | None = None) -> dict[str, Any]:
         return {

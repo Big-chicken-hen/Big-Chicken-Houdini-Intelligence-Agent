@@ -13,6 +13,8 @@ Create editable, traceable materials that serve the requested image without maki
 2. Treat a material identity, multi-channel surface, renderer-dependent shader, texture/UV problem, or material-lighting handoff as substantive LookDev and follow the workflow below.
 3. Keep the main task as the sole writer of the current HIP. When running as a material or lighting subtask, return a material plan, parameter and node choices, a script draft, and validation advice; never write the live scene in parallel.
 
+For complex, unfamiliar, or version-sensitive LookDev, read the shared [knowledge-and-memory.md](../houdini-visual-research/references/knowledge-and-memory.md) before implementation or web research. Use local knowledge and durable memory only when relevant; keep a simple direct assignment direct.
+
 ## Model the material first
 
 Before building MaterialX for a substantive task, capture a compact reasoning model:
@@ -47,6 +49,6 @@ This is a reasoning sketch, not a form or gate. Skip it for a direct edit.
 
 ## Guardrails
 
-- Do not add MCP tools, an Agent backend, a scoring platform, a scheduler, or a fixed approval or iteration gate.
+- Do not add MCP tools, an Agent backend, planner, summarizer, chat database, second knowledge or memory system, scoring platform, scheduler, or fixed approval or iteration gate.
 - Do not inspect every possible channel by ritual; follow the actual material and renderer requirements.
 - Do not claim visual completion from successful node creation alone. If representative visual evidence is unavailable, report that the look remains visually unverified.

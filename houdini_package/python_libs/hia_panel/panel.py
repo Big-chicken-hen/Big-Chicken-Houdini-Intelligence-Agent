@@ -44,6 +44,8 @@ _THREAD_READ_CONTEXT_PREFIX = "thread_read:"
 _CRASH_RECOVERY_READ_CONTEXT = "thread_read:crash_recovery"
 _CRASH_RECOVERY_RECHECK_CONTEXT = "thread_read:crash_recovery_recheck"
 _THREAD_RENAME_CONTEXT_PREFIX = "thread_rename:"
+_THREAD_DELETE_CONTEXT_PREFIX = "thread_delete:"
+_THREAD_DELETE_CONFIRM_MIN_SECONDS = 0.75
 _GOAL_GET_CONTEXT = "goal_get"
 _GOAL_SET_CONTEXT = "goal_set"
 _GOAL_CLEAR_CONTEXT = "goal_clear"
@@ -167,6 +169,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._models_resolved = False
         self._threads_requested = False
         self._thread_history: list[dict[str, Any]] = []
+        self._thread_delete_confirm_id: str | None = None
+        self._thread_delete_confirm_not_before: float | None = None
+        self._thread_delete_pending: dict[str, Any] | None = None
         self._goal_action_context: str | None = None
         self._current_goal: dict[str, Any] | None = None
         self._goal_turn_id: str | None = None
@@ -230,6 +235,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._reconnect_timer = QtCore.QTimer(self)
         self._reconnect_timer.setSingleShot(True)
         self._reconnect_timer.timeout.connect(self._attempt_bridge_reconnect)
+        self._thread_delete_confirm_timer = QtCore.QTimer(self)
+        self._thread_delete_confirm_timer.setSingleShot(True)
+        self._thread_delete_confirm_timer.setInterval(5_000)
+        self._thread_delete_confirm_timer.timeout.connect(
+            self._reset_thread_delete_confirmation
+        )
         self._build_ui()
         self._initialize_houdini_read_adapter(hou_module)
         self._refresh_selection_status()
@@ -378,8 +389,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         history_name_row = QtWidgets.QHBoxLayout()
         self.rename_thread_button = QtWidgets.QPushButton("重命名")
         self.copy_thread_id_button = QtWidgets.QPushButton("复制 ID")
+        self.delete_thread_button = QtWidgets.QPushButton("删除")
+        self.delete_thread_button.setToolTip("永久删除当前明确选中的 Codex Thread")
         history_name_row.addWidget(self.rename_thread_button)
         history_name_row.addWidget(self.copy_thread_id_button)
+        history_name_row.addWidget(self.delete_thread_button)
         left_layout.addLayout(history_name_row)
         self.thread_id_edit = QtWidgets.QLineEdit()
         self.thread_id_edit.setVisible(False)
@@ -632,6 +646,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.refresh_threads_button.clicked.connect(self._refresh_threads)
         self.rename_thread_button.clicked.connect(self._rename_thread)
         self.copy_thread_id_button.clicked.connect(self._copy_thread_id)
+        self.delete_thread_button.clicked.connect(self._delete_thread)
         self._refresh_controls()
 
     @staticmethod
@@ -1124,6 +1139,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             history_available and not self._turn_state.busy and session_enabled
         )
         self.copy_thread_id_button.setEnabled(history_available)
+        self.delete_thread_button.setEnabled(
+            self._connected
+            and history_available
+            and not self._session_action_pending
+        )
         self.send_button.setEnabled(
             (controls.send or steer_available) and request_ready
         )
@@ -2546,6 +2566,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._on_history_index_changed(selected_index)
 
     def _on_history_index_changed(self, _index: int = -1) -> None:
+        self._reset_thread_delete_confirmation()
         record = self._selected_history_record()
         thread_id = record.get("thread_id") if record is not None else None
         name = record.get("name") if record is not None else None
@@ -2604,6 +2625,133 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._append_system(f"复制 Thread ID 失败：{type(exc).__name__}: {exc}")
             return
         self._append_system("Thread ID 已复制。")
+
+    def _reset_thread_delete_confirmation(self) -> None:
+        self._thread_delete_confirm_id = None
+        self._thread_delete_confirm_not_before = None
+        timer = getattr(self, "_thread_delete_confirm_timer", None)
+        if timer is not None:
+            timer.stop()
+        button = getattr(self, "delete_thread_button", None)
+        if button is not None:
+            button.setText("删除")
+            button.setToolTip("永久删除当前明确选中的 Codex Thread")
+
+    def _delete_thread(self) -> None:
+        record = self._selected_history_record()
+        thread_id = record.get("thread_id") if record is not None else None
+        if not isinstance(thread_id, str):
+            self._reset_thread_delete_confirmation()
+            return
+        if self._turn_state.busy:
+            self._reset_thread_delete_confirmation()
+            self._append_system("当前 Thread 仍有活动 Turn，请先停止并等待结束。")
+            return
+        if (
+            self._client is None
+            or not self._connected
+            or self._session_action_pending
+            or self._stop_recovery_state is not None
+        ):
+            return
+        now = time.monotonic()
+        if self._thread_delete_confirm_id != thread_id:
+            self._thread_delete_confirm_id = thread_id
+            self._thread_delete_confirm_not_before = (
+                now + _THREAD_DELETE_CONFIRM_MIN_SECONDS
+            )
+            self.delete_thread_button.setText("再次点击删除")
+            self.delete_thread_button.setToolTip(
+                f"再次点击将永久删除：{self._history_title(thread_id, full=True)}"
+            )
+            self._thread_delete_confirm_timer.start()
+            return
+        not_before = self._thread_delete_confirm_not_before
+        if not isinstance(not_before, (int, float)) or now < not_before:
+            return
+
+        self._reset_thread_delete_confirmation()
+        context = f"{_THREAD_DELETE_CONTEXT_PREFIX}{uuid.uuid4().hex}"
+        self._thread_delete_pending = {
+            "context": context,
+            "thread_id": thread_id,
+            "notification_seen": False,
+        }
+        self._session_action_pending = True
+        self._refresh_controls()
+        self._client.delete_thread(
+            thread_id,
+            context=context,
+        )
+
+    def _apply_deleted_thread(
+        self,
+        thread_id: Any,
+    ) -> bool:
+        if not isinstance(thread_id, str):
+            return False
+        was_listed = any(
+            record.get("thread_id") == thread_id
+            for record in self._thread_history
+        )
+        was_current = self._selected_thread_id == thread_id
+        self._thread_history = [
+            record
+            for record in self._thread_history
+            if record.get("thread_id") != thread_id
+        ]
+        marker = self._crash_recovery_marker
+        if isinstance(marker, dict) and marker.get("thread_id") == thread_id:
+            self._discard_crash_recovery_candidate()
+        observation = self._crash_recovery_observation
+        if isinstance(observation, dict) and observation.get("thread_id") == thread_id:
+            self._crash_recovery_observation = None
+        if was_current:
+            self._selected_thread_id = None
+            self._turn_state = PanelTurnState()
+            self._turn_start_tokens.clear()
+            self._pending_turn_drafts.clear()
+            self._active_turn_start_context = None
+            self._turn_start_request_pending = False
+            self._turn_steer_tokens.clear()
+            self._pending_steer_drafts.clear()
+            self._active_turn_steer_context = None
+            self._turn_steer_request_pending = False
+            self._stream_thread_id = None
+            self._stream_turn_id = None
+            self._interrupt_tokens.clear()
+            self._active_interrupt_context = None
+            self._interrupt_pending = False
+            self._stopping_turn_token = None
+            self._stop_recovery_state = None
+            self._stopped_source_turn = None
+            self._reconciliation_tokens.clear()
+            self._goal_action_context = None
+            self._focus_mode = False
+            self._clear_goal_display("当前 Thread 已删除")
+            focus_checkbox = getattr(self, "goal_focus_checkbox", None)
+            if focus_checkbox is not None:
+                focus_checkbox.blockSignals(True)
+                focus_checkbox.setChecked(False)
+                focus_checkbox.blockSignals(False)
+            focus_hint = getattr(self, "goal_focus_hint_label", None)
+            if focus_hint is not None:
+                focus_hint.setText("已关闭：普通聊天，不自动恢复或续做。")
+            self._team_records.clear()
+            self._refresh_team_combo()
+            self._clear_turn_performance()
+            self._clear_diagnostic_context()
+            self._discard_crash_recovery_candidate()
+            self.attachment_strip.clear()
+            self.input_edit.clear()
+            if hasattr(self.conversation, "clear_messages"):
+                self.conversation.clear_messages()
+            self.welcome_group.setVisible(True)
+            self.thread_id_edit.setText("")
+            self.thread_status_label.setText("Thread：未选择")
+            self.thread_status_label.setToolTip("当前未选择 Codex Thread")
+        self._apply_threads(self._thread_history)
+        return was_listed or was_current
 
     def _update_history_name(self, thread_id: Any, name: Any) -> None:
         if not isinstance(thread_id, str):
@@ -2818,6 +2966,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         valid = (
             isinstance(thread, dict)
             and thread.get("id") == thread_id
+            and self._selected_thread_id == thread_id
             and isinstance(marker_prompt, str)
             and bool(marker_prompt)
             and self._thread_read_has_recovery_prompt(payload, marker_prompt)
@@ -4232,6 +4381,35 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._append_system("会话名称已更新。")
             self._refresh_controls()
             return
+        if context.startswith(_THREAD_DELETE_CONTEXT_PREFIX):
+            pending = self._thread_delete_pending
+            if (
+                not isinstance(pending, dict)
+                or pending.get("context") != context
+            ):
+                return
+            expected_thread_id = pending.get("thread_id")
+            thread_id = payload.get("thread_id")
+            self._thread_delete_pending = None
+            self._session_action_pending = False
+            if (
+                not isinstance(expected_thread_id, str)
+                or thread_id != expected_thread_id
+            ):
+                self._append_system("删除响应与所选 Thread 不匹配；状态尚未确认。")
+                self._refresh_controls()
+                return
+            self._apply_deleted_thread(thread_id)
+            cleanup_warning = payload.get("cleanup_warning")
+            if isinstance(cleanup_warning, dict):
+                code = cleanup_warning.get("code")
+                code_text = code if isinstance(code, str) else "LOCAL_CLEANUP_FAILED"
+                self._append_system(
+                    "Thread 已永久删除，但本地专注状态未能持久化"
+                    f"（{code_text}）；无需重试删除。"
+                )
+            self._refresh_controls()
+            return
 
         if context.startswith(_SESSION_RECONCILE_CONTEXT_PREFIX):
             if self._complete_steer_reconciliation(context, payload):
@@ -4637,6 +4815,17 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 return
             if method == "thread/goal/cleared":
                 self._apply_goal(params.get("threadId"), None)
+                return
+            if method == "thread/deleted":
+                thread_id = params.get("threadId")
+                pending = self._thread_delete_pending
+                if (
+                    isinstance(thread_id, str)
+                    and isinstance(pending, dict)
+                    and pending.get("thread_id") == thread_id
+                ):
+                    pending["notification_seen"] = True
+                self._apply_deleted_thread(thread_id)
                 return
             if method in {"item/started", "item/completed"}:
                 if self._update_team_item(method, params):
@@ -5340,6 +5529,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._append_system(f"重命名失败：{formatted_error}")
             self._refresh_controls()
             return
+        if context.startswith(_THREAD_DELETE_CONTEXT_PREFIX):
+            pending = self._thread_delete_pending
+            if (
+                not isinstance(pending, dict)
+                or pending.get("context") != context
+            ):
+                return
+            self._thread_delete_pending = None
+            self._session_action_pending = False
+            self._reset_thread_delete_confirmation()
+            if pending.get("notification_seen") is True:
+                self._apply_deleted_thread(pending.get("thread_id"))
+            else:
+                self._append_system(f"删除 Thread 失败：{formatted_error}")
+            self._refresh_controls()
+            return
         if (
             context in {"session_start", "session_resume"}
             and error_code in _SESSION_WAIT_TIMEOUT_CODES
@@ -5840,6 +6045,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "_houdini_heartbeat_timer",
             "_scene_work_timer",
             "_reconnect_timer",
+            "_thread_delete_confirm_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:
@@ -5849,6 +6055,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._active_interrupt_context = None
         self._reconciliation_tokens.clear()
         self._stopping_turn_token = None
+        self._thread_delete_pending = None
         self._goal_continuation_boundary = None
         self._goal_auto_turn_token = None
         conversation = getattr(self, "conversation", None)
