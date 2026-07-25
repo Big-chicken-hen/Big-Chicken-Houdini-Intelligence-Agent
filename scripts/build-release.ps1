@@ -33,6 +33,7 @@ $releaseFileAllowlist = @(
     'SECURITY.md',
     'THIRD_PARTY_NOTICES.md',
     'pyproject.toml',
+    'assets/launcher/launcher-hero.png',
     'docs/ARCHITECTURE.md',
     'docs/DIAGNOSTICS.md',
     'docs/HIA-MCP-V2.md',
@@ -44,9 +45,12 @@ $releaseFileAllowlist = @(
     'houdini_package/python3.11libs/uiready.py',
     'houdini_package/python_panels/houdini_intelligence.pypanel',
     'houdini_package/python_libs/hia_mcp_runtime/__init__.py',
+    'houdini_package/python_libs/hia_mcp_runtime/embedding_client.py',
     'houdini_package/python_libs/hia_mcp_runtime/executor.py',
+    'houdini_package/python_libs/hia_mcp_runtime/hybrid_knowledge.py',
     'houdini_package/python_libs/hia_mcp_runtime/http_server.py',
     'houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py',
+    'houdini_package/python_libs/hia_mcp_runtime/knowledge_index_cli.py',
     'houdini_package/python_libs/hia_panel/__init__.py',
     'houdini_package/python_libs/hia_panel/approval_card.py',
     'houdini_package/python_libs/hia_panel/attachment_store.py',
@@ -64,11 +68,14 @@ $releaseFileAllowlist = @(
     'scripts/launch-houdini.ps1',
     'scripts/launcher/HiaLauncher.Core.psm1',
     'scripts/launcher/HiaLauncher.Wpf.ps1',
-    'scripts/launcher/HiaLauncher.xaml'
+    'scripts/launcher/HiaLauncher.xaml',
+    'scripts/launcher/Install-HiaEmbedding.ps1',
+    'scripts/launcher/install_hia_embedding.py'
 )
 $releaseDirectoryAllowlist = @(
     '.agents/skills/',
     'contracts/codex-app-server/0.144.3/',
+    'knowledge/sidefx-official/',
     'schemas/codex-app-server/0.144.3/',
     'schemas/houdini-mcp/0.2.0/',
     'services/bridge/',
@@ -122,10 +129,10 @@ function Test-ReleasePathAllowed {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
 
     $normalized = $RelativePath.Replace('\', '/').TrimStart('/')
+    if ($releaseFileAllowlist -contains $normalized) { return $true }
     foreach ($pattern in $releaseDenyPatterns) {
         if ($normalized -match $pattern) { return $false }
     }
-    if ($releaseFileAllowlist -contains $normalized) { return $true }
     foreach ($prefix in $releaseDirectoryAllowlist) {
         if ($normalized.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
             return $true
@@ -299,4 +306,4 @@ try {
 Write-Output "[release] archive: $archivePath"
 Write-Output "[release] sha256: $archiveHash"
 Write-Output "[release] checksums: $checksumsPath"
-Write-Output '[release] Steam seasonal artwork, runtime state, tests, HIP files, renders, credentials, and historical Gate reports were not packaged.'
+Write-Output '[release] Bundled launcher artwork was included; Steam seasonal artwork, runtime state, tests, HIP files, renders, credentials, and historical Gate reports were not packaged.'

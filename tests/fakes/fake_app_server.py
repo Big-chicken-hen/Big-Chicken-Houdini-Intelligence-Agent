@@ -179,6 +179,16 @@ def handle_request(message: dict[str, Any]) -> None:
                 },
             }
         )
+    elif method == "thread/delete":
+        result(request_id, {"receivedParams": params})
+        emit(
+            {
+                "method": "thread/deleted",
+                "params": {
+                    "threadId": params.get("threadId", THREAD_ID),
+                },
+            }
+        )
     elif method == "thread/goal/get":
         thread_id = params.get("threadId", THREAD_ID)
         result(request_id, {"goal": _goals.get(thread_id)})

@@ -17,6 +17,7 @@ Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It emb
 - Continue refining an active Turn without starting a separate conversation.
 - Use Goal focus mode for long, multi-step work and launcher-assisted recovery after a confirmed Houdini crash.
 - Search the live Houdini node catalog instead of relying on a fixed node whitelist.
+- Search local help and explicitly recorded project memory through SQLite FTS5, with an optional project-local Qwen text encoder for hybrid retrieval.
 - Keep screenshots, previews, attachments, diagnostics, and session data under the local project runtime directory.
 - Choose a separate delivery directory for final renders, USD, exports, or simulation caches.
 
@@ -81,6 +82,8 @@ You do not need to name an MCP tool, a node whitelist, or an output directory. C
 
 Reference images and the current selection can be included from the composer. While Codex is working, **追加指令** steers the active Turn. Starting a different task in a new Thread keeps the context smaller and easier to follow.
 
+The history list also supports permanent Thread deletion. Select one idle Thread and click **Delete** twice within five seconds. An active Turn must be stopped and allowed to finish first. Deleting the currently open Thread returns the Panel to a blank state and releases its local UI references; attachment files are not deleted.
+
 ### Goal focus mode
 
 Goal focus mode is optional. Enter a concise outcome, save it to the current Thread, and enable **目标专注模式** when Codex should continue a long task across multiple Turns. Pressing Stop pauses automatic continuation. Normal launcher starts still open with no conversation selected; only a launcher-confirmed crash recovery may restore the exact bound Thread and continue its active Goal.
@@ -97,7 +100,7 @@ User
   → current HIP
 ```
 
-Big-Chicken Houdini Intelligence Agent's local HTTP services bind to `127.0.0.1` and use fresh random credentials for each launcher session. Codex is the only AI component. Big-Chicken Houdini Intelligence Agent does not add another model, planner, RAG service, or screen-control system.
+Big-Chicken Houdini Intelligence Agent's local HTTP services bind to `127.0.0.1` and use fresh random credentials for each launcher session. Codex remains the only reasoning and planning component. An optional local Qwen encoder can deterministically encode text for retrieval, but it does not generate answers, write memory, plan, or act on Houdini.
 
 The optional FXHoudiniMCP 1.3.0 integration is a separately prepared compatibility fallback. It is not active alongside HIA MCP V2 and is not included in the source checkout or public Preview package.
 
@@ -116,12 +119,48 @@ Final renders, images, video, USD, exports, and simulation caches may use the ex
 
 See [Runtime diagnostics](docs/DIAGNOSTICS.md) for report contents and redaction behavior.
 
+## Optional local retrieval and project memory
+
+HIA MCP V2 exposes 17 tools. Existing `hia_local_help_search` calls remain compatible and default to hybrid retrieval: SQLite FTS5 always remains available, while an explicitly installed local Qwen encoder may add vector matches. If the selected encoder cannot load, the request reports why and falls back to FTS5; searching never downloads a model or dependency.
+
+The only durable memory tool is `hia_project_memory`. It supports explicit `record`, `search`, `list`, `delete`, and `supersede` actions for `decision`, `preference`, `asset`, `lesson`, and `workflow` records. Nothing copies chat history or writes a summary automatically: Codex supplies the final durable text only when it deliberately invokes a write action.
+
+The public package includes original Big-Chicken workflow cards linked to
+SideFX primary sources. When Houdini is installed, HIA also indexes selected
+text help archives directly from that local installation, including node, HOM,
+VEX, Solaris, Pyro, Vellum, FLIP, PDG, modeling, animation, shading, rendering,
+and version notes. SideFX documentation bodies and archives are never copied
+into this repository or the release; only the original cards and source
+manifest are distributed.
+
+The stable model profiles are:
+
+| Profile ID | Intended use | Repository size | Dimensions |
+|---|---|---:|---:|
+| `qwen3-embedding-0.6b` | Default | about 1.21 GB | default/max 1024 |
+| `qwen3-embedding-8b` | Higher quality; BF16 shards | about 15.2 GB | default 1024, advanced MRL max 4096 |
+
+Both official Qwen3 Embedding profiles are Apache-2.0, support a 32K context, 100+ languages, MRL dimensions, and query instructions. Only one model is loaded at a time. The 8B BF16 model is not guaranteed to fit or run reliably on a 16 GB GPU once runtime overhead is included; failure falls back only to an already installed 0.6B model and then to FTS5. No quantization framework, reranker, or third model is introduced.
+
+Models, the encoder virtual environment, caches, SQLite database, indexed bodies, and vectors all live below `.runtime` and are excluded from source and Release archives. The launcher consumes the stable contract for profile selection, project-local installation/repair, preflight, and child-process environment; neither profile is bundled or presumed installed. The settings, environment, directory, health, degradation, and repair contract is documented in [Architecture](docs/ARCHITECTURE.md) and defined by `src/hia_core/embedding_contract.py`.
+
+The launcher exposes `Automatic`, `NVIDIA GPU (CUDA)`, and `CPU` choices beside
+the embedding model. The installer is always user-initiated. In `auto` mode it reuses an existing
+CUDA-capable project-local PyTorch installation, or detects an NVIDIA GPU and
+installs the official CUDA PyTorch wheel into the dedicated embedding venv.
+`cuda` fails clearly unless `torch.cuda.is_available()` succeeds and reports a
+device name; `cpu` remains an explicit fallback. No PyTorch package is installed
+into global Python. The launcher preflight reports whether the active local
+runtime can actually use CUDA instead of treating a CPU wheel as GPU-ready.
+
+Official sources: [Qwen3-Embedding-0.6B model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B), [0.6B files](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/main), [Qwen3-Embedding-8B model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B), and [8B files](https://huggingface.co/Qwen/Qwen3-Embedding-8B/tree/main).
+
 ## Known Preview limitations
 
 - Only Windows x64 and Houdini 21.0.440/Python 3.11 have completed the current real-GUI acceptance path.
 - Once a long HOM call has entered Houdini's UI thread, Stop can stop waiting and freeze Panel output but cannot safely force-kill that Python operation.
 - Goal continuation and crash recovery are Preview features. Recovery requires a launcher-confirmed Houdini crash and a valid Thread/Goal binding.
-- The public package does not include Houdini, Codex credentials, user HIP files, or the optional FXHoudiniMCP runtime.
+- The public package does not include Houdini, Codex credentials, user HIP files, the optional FXHoudiniMCP runtime, Qwen model weights, an embedding virtual environment, the knowledge database, indexed bodies, or vectors.
 - The launcher executable is not currently code-signed, so Windows may display a SmartScreen warning.
 - Big-Chicken Houdini Intelligence Agent can modify the active scene. It does not automatically save the HIP before every change.
 
@@ -150,7 +189,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
 .\.runtime\dist\launcher\BigChickenLauncher.exe
 ```
 
-The build downloads the .NET 8 SDK only into the ignored project runtime, verifies the Microsoft archive, and does not install a global SDK. Public launcher builds use the built-in dark gradient and do not require external artwork.
+The build downloads the .NET 8 SDK only into the ignored project runtime, verifies the Microsoft archive, and does not install a global SDK. Public launcher builds include the project launcher illustration at `assets\launcher\launcher-hero.png`, so a fresh clone or Release archive shows the same startup artwork without relying on `.runtime`.
 
 Build the strict public Preview archive:
 
@@ -164,7 +203,8 @@ The archive and `SHA256SUMS.txt` are written to `.runtime\release`. The build
 uses an explicit runtime allowlist, rebuilds the launcher, and runs
 `scripts\check-public-release.py` before publishing the checksum. It excludes
 project runtime state, credentials, tests, HIP files, renders, historical Gate
-reports, and unlicensed artwork.
+reports, and unlicensed artwork. The project-owned launcher illustration is
+included explicitly.
 
 ## Project status
 

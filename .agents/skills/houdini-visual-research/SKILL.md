@@ -15,10 +15,11 @@ Apply professional visual judgment without making small requests heavyweight. Ke
 4. Use deep research when the user cites ShaderToy, GLSL, a paper, or an unfamiliar technique, or when Houdini/version behavior is uncertain. Continue automatically across as many research rounds and sources as the evidence needs; prefer original sources and current SideFX material.
 5. Treat an ordinary HOM/tool syntax or runtime error as execution diagnosis, not visual research by itself. Preserve the exact error and fix it directly; use [visual-validation.md](references/visual-validation.md) for failed complex visual work or explicit dissatisfaction, and research only when the failure exposes an unfamiliar or version-sensitive technical question.
 
-Searching this repository's src, services, docs, or contracts is software development, not visual research. Read project source only when the user explicitly asks to develop or debug the plugin.
+Manually searching this repository's src, services, or contracts is software development, not visual research. A relevant `hia_local_help_search` match from published Skills or approved current project documentation is local knowledge retrieval; it does not authorize reading ordinary project source. Read that source only when the user explicitly asks to develop or debug the plugin.
 
 ## Load only the needed guidance
 
+- Read [knowledge-and-memory.md](references/knowledge-and-memory.md) before implementing or browsing for a complex, unfamiliar, or version-sensitive task, and when durable project context may affect the decision. Skip it for direct simple operations.
 - Read [technique-selection.md](references/technique-selection.md) for complex tasks, reference-driven assets, or uncertainty between SOP/VEX, COP, MaterialX, DOP/solvers, Solaris/LOPs, and Karma.
 - Read [research-and-sources.md](references/research-and-sources.md) whenever external sources or reference works are involved.
 - Read [shader-translation.md](references/shader-translation.md) for ShaderToy, GLSL, screen-space effects, ray marching, or shader-inspired work.
@@ -29,7 +30,7 @@ Keep references one level deep; do not load unrelated references.
 ## Execute complex visual work
 
 1. Define the intended image or asset in observable terms: silhouette, proportions, scale, motion, material response, composition, and required editability. Separate user constraints from assumptions.
-2. Obtain only the context needed for the decision with `hia_context` or `hia_inspect`. When node knowledge is genuinely missing, combine related keywords or help targets into one batch and reuse the result. Do not impose a fixed node-type allowlist.
+2. Before implementation or external web research on a complex, unfamiliar, or version-sensitive task, use one relevant batch through `hia_local_help_search` as described in [knowledge-and-memory.md](references/knowledge-and-memory.md). Reuse its results, then obtain only the scene context needed with `hia_context` or `hia_inspect`. When node knowledge is genuinely missing, combine related keywords or help targets into one batch and reuse the result. Do not impose a fixed node-type allowlist.
 3. Research required references iteratively, maintain the complete source ledger from [research-and-sources.md](references/research-and-sources.md), then choose the Houdini context from the actual visual and technical requirements.
 4. For substantial modeling, provide reference decomposition, technique choices, and visual iteration guidance to `$houdini-procedural-modeling`; let it own model structure, controls, and network editability. For other visual work, build a parameterized, inspectable network in coherent stages.
 5. Prefer one or a small number of cohesive HOM Python batches through `hia_execute_hom` for complex creation or modification. Use narrower HIA tools only for necessary inspection, isolated edits, help, and verification; avoid a tool forest.
@@ -46,4 +47,4 @@ For the active scene, default to HIA MCP V2 and HOM. Keep the main task as the s
 - Prefer original authors, SideFX documentation/tutorials, original papers, and original projects. Do not copy substantial code when licensing is absent or unclear.
 - Preserve the current scene and report partial changes after failures. Avoid unbounded retries; produce the diagnostic report described in visual-validation.md when its trigger is met.
 - Leave Fast/serviceTier selection, conversation history, and disconnect/reconnect handling to the Panel and Bridge; do not simulate or implement them in this skill.
-- Do not create another agent, planner, semantic memory, database, monitoring service, or network service.
+- Do not create another agent, planner, summarizer, chat database, knowledge or memory system, monitoring service, or network service. The user-selected local Qwen embedding encoder only supplies retrieval vectors; Codex remains the sole decision-maker.

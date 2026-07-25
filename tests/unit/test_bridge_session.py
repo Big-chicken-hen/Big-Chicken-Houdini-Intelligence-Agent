@@ -90,6 +90,7 @@ class _ThreadHistoryClient(_ClientStub):
         super().__init__()
         self.list_response = list_response
         self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.on_delete: Any = None
 
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.requests.append((method, dict(params)))
@@ -97,6 +98,10 @@ class _ThreadHistoryClient(_ClientStub):
             return self.list_response
         if method == "thread/name/set":
             return {}
+        if method == "thread/delete":
+            if callable(self.on_delete):
+                self.on_delete()
+            return {"deleted": True}
         return super().request(method, params)
 
 
@@ -1084,6 +1089,168 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
             },
             result,
         )
+
+    def test_delete_selected_idle_thread_clears_bridge_session(self) -> None:
+        client = _ThreadHistoryClient({"data": []})
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+        session.start_thread()
+        client.requests.clear()
+
+        result = session.delete_thread("thread-test")
+
+        self.assertEqual(
+            ("thread/delete", {"threadId": "thread-test"}),
+            client.requests[-1],
+        )
+        self.assertTrue(result["deleted"])
+        self.assertTrue(result["was_selected"])
+        self.assertIsNone(session.snapshot()["thread_id"])
+        self.assertFalse(session.snapshot()["turn_active"])
+
+    def test_delete_nonselected_thread_keeps_current_selection(self) -> None:
+        client = _ThreadHistoryClient({"data": []})
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+        session.start_thread()
+        client.requests.clear()
+
+        result = session.delete_thread("thread-other")
+
+        self.assertFalse(result["was_selected"])
+        self.assertEqual("thread-test", session.snapshot()["thread_id"])
+
+    def test_delete_response_does_not_clear_thread_selected_during_rpc(self) -> None:
+        client = _ThreadHistoryClient({"data": []})
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+        session.start_thread()
+        client.requests.clear()
+        client.on_delete = lambda: session.resume_thread("thread-new")
+
+        result = session.delete_thread("thread-test")
+        client.emit_notification("thread/deleted", {"threadId": "thread-test"})
+        client.emit_notification("thread/deleted", {"threadId": "thread-test"})
+
+        self.assertFalse(result["was_selected"])
+        self.assertEqual("thread-new", session.snapshot()["thread_id"])
+        self.assertEqual(
+            1,
+            sum(method == "thread/delete" for method, _params in client.requests),
+        )
+
+    def test_delete_is_rejected_during_stop_recovery(self) -> None:
+        client = _ThreadHistoryClient({"data": []})
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+        session.start_thread()
+        client.requests.clear()
+        with session._lock:
+            session._turn_status = "stopRecovering"
+            session._stop_recovery_thread = threading.current_thread()
+
+        with self.assertRaises(BridgeError) as caught:
+            session.delete_thread("thread-test")
+
+        self.assertEqual("STOP_RECOVERY_IN_PROGRESS", caught.exception.code)
+        self.assertEqual(409, caught.exception.http_status)
+        self.assertEqual([], client.requests)
+
+    def test_deleted_thread_is_not_resumed_by_stop_recovery(self) -> None:
+        client = _StopRecoveryClient(complete_during_interrupt=False)
+        events = EventBuffer()
+        session = BridgeSession(REPOSITORY_ROOT, client, events)
+        session.start_thread()
+        with session._turn_condition:
+            session._connected = False
+            session._turn_generation += 1
+            recovery_generation = session._turn_generation
+            session._turn_status = "stopRecovering"
+            session._turn_active = False
+            session._stop_recovery_thread = threading.current_thread()
+
+        def initialize_and_delete(timeout_seconds: float) -> dict[str, Any]:
+            client.initialize_timeouts.append(timeout_seconds)
+            client.emit_notification(
+                "thread/deleted",
+                {"threadId": "thread-test"},
+            )
+            return {"userAgent": "fake-codex/0.144.3"}
+
+        with mock.patch.object(
+            client,
+            "initialize_with_timeout",
+            side_effect=initialize_and_delete,
+        ):
+            session._recover_app_server_after_stop(
+                "thread-test",
+                recovery_generation,
+            )
+
+        self.assertIsNone(session.snapshot()["thread_id"])
+        self.assertTrue(session.snapshot()["connected"])
+        self.assertIsNone(session._stop_recovery_thread)
+        self.assertFalse(any(
+            method == "thread/resume"
+            for method, _params, _timeout in client.timed_requests
+        ))
+
+    def test_focus_write_failure_after_delete_returns_success_warning(self) -> None:
+        client = _ThreadHistoryClient({"data": []})
+        events = EventBuffer()
+        session = BridgeSession(REPOSITORY_ROOT, client, events)
+        session.start_thread()
+        with session._lock:
+            session._focus_enabled_threads.add("thread-test")
+            session._focus_goal_bindings["thread-test"] = "a" * 64
+        client.requests.clear()
+        failure = BridgeError(
+            "FOCUS_STATE_UNAVAILABLE",
+            "Target focus mode could not be persisted inside the project",
+            http_status=503,
+        )
+
+        with mock.patch.object(
+            session,
+            "_write_focus_state_locked",
+            side_effect=failure,
+        ):
+            result = session.delete_thread("thread-test")
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(
+            "FOCUS_STATE_UNAVAILABLE",
+            result["cleanup_warning"]["code"],
+        )
+        self.assertIsNone(session.snapshot()["thread_id"])
+        self.assertNotIn("thread-test", session._focus_enabled_threads)
+        self.assertNotIn("thread-test", session._focus_goal_bindings)
+        self.assertEqual(
+            1,
+            sum(method == "thread/delete" for method, _params in client.requests),
+        )
+        deleted_events = [
+            event
+            for event in events.poll(0, timeout=0)["events"]
+            if event["type"] == "thread_deleted"
+        ]
+        self.assertEqual(1, len(deleted_events))
+        self.assertEqual(
+            "FOCUS_STATE_UNAVAILABLE",
+            deleted_events[0]["cleanup_warning"]["code"],
+        )
+
+    def test_delete_is_rejected_while_a_turn_is_active(self) -> None:
+        client = _ThreadHistoryClient({"data": []})
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+        session.start_thread()
+        with session._lock:
+            session._turn_id = "turn-active"
+            session._turn_status = "inProgress"
+            session._turn_active = True
+        client.requests.clear()
+
+        with self.assertRaises(BridgeError) as caught:
+            session.delete_thread("thread-test")
+
+        self.assertEqual("TURN_ALREADY_ACTIVE", caught.exception.code)
+        self.assertEqual([], client.requests)
 
 
 class BridgeSessionGoalTests(unittest.TestCase):

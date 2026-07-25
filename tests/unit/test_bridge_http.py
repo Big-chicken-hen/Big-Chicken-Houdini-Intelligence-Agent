@@ -229,7 +229,7 @@ class BridgeHTTPTests(unittest.TestCase):
                     set(effort),
                 )
 
-    def test_thread_history_list_and_rename_routes(self) -> None:
+    def test_thread_history_list_rename_and_delete_routes(self) -> None:
         listed = self.request("GET", "/v1/threads")
 
         self.assertEqual(
@@ -259,6 +259,18 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(
             {"threadId": "thread-fake", "name": name},
             renamed["result"]["receivedParams"],
+        )
+
+        deleted = self.request(
+            "POST",
+            "/v1/threads/delete",
+            {"thread_id": "thread-fake"},
+        )
+        self.assertTrue(deleted["deleted"])
+        self.assertFalse(deleted["was_selected"])
+        self.assertEqual(
+            {"threadId": "thread-fake"},
+            deleted["result"]["receivedParams"],
         )
 
     def test_native_goal_routes_use_the_selected_thread(self) -> None:

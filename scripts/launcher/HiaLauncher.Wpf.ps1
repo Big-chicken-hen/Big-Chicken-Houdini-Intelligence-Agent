@@ -51,6 +51,8 @@ $overallStatusBadge = Get-RequiredControl -Name 'OverallStatusBadge'
 $overallStatusDot = Get-RequiredControl -Name 'OverallStatusDot'
 $overallStatusText = Get-RequiredControl -Name 'OverallStatusText'
 $mcpBackendCombo = Get-RequiredControl -Name 'McpBackendComboBox'
+$embeddingProfileCombo = Get-RequiredControl -Name 'EmbeddingProfileComboBox'
+$embeddingDeviceCombo = Get-RequiredControl -Name 'EmbeddingDeviceComboBox'
 $houdiniCombo = Get-RequiredControl -Name 'HoudiniComboBox'
 $browseHoudiniButton = Get-RequiredControl -Name 'BrowseHoudiniButton'
 $houdiniPathText = Get-RequiredControl -Name 'HoudiniPathText'
@@ -59,6 +61,12 @@ $browseBridgeButton = Get-RequiredControl -Name 'BrowseBridgeButton'
 $bridgePathText = Get-RequiredControl -Name 'BridgePathText'
 $renderOutputTextBox = Get-RequiredControl -Name 'RenderOutputTextBox'
 $browseRenderOutputButton = Get-RequiredControl -Name 'BrowseRenderOutputButton'
+$knowledgeIndexPanel = Get-RequiredControl -Name 'KnowledgeIndexPanel'
+$knowledgeIndexModelText = Get-RequiredControl -Name 'KnowledgeIndexModelText'
+$knowledgeIndexCountText = Get-RequiredControl -Name 'KnowledgeIndexCountText'
+$knowledgeIndexProgressBar = Get-RequiredControl -Name 'KnowledgeIndexProgressBar'
+$knowledgeIndexStatusText = Get-RequiredControl -Name 'KnowledgeIndexStatusText'
+$knowledgeIndexActionButton = Get-RequiredControl -Name 'KnowledgeIndexActionButton'
 $passCountText = Get-RequiredControl -Name 'PassCountText'
 $warningCountText = Get-RequiredControl -Name 'WarningCountText'
 $blockedCountText = Get-RequiredControl -Name 'BlockedCountText'
@@ -80,6 +88,36 @@ $recoverCheckpointOption = Get-RequiredControl -Name 'RecoverCheckpointOption'
 $normalLaunchOption = Get-RequiredControl -Name 'NormalLaunchOption'
 $layoutRoot = Get-RequiredControl -Name 'LayoutRoot'
 $rightVisualRail = Get-RequiredControl -Name 'RightVisualRail'
+$navigationColumn = Get-RequiredControl -Name 'NavigationColumn'
+$navigationRail = Get-RequiredControl -Name 'NavigationRail'
+$sidebarPanel = Get-RequiredControl -Name 'SidebarPanel'
+$mainScrollViewer = Get-RequiredControl -Name 'MainScrollViewer'
+$overviewNavButton = Get-RequiredControl -Name 'OverviewNavButton'
+$environmentNavButton = Get-RequiredControl -Name 'EnvironmentNavButton'
+$preflightNavButton = Get-RequiredControl -Name 'PreflightNavButton'
+$reportsSettingsNavButton = Get-RequiredControl -Name 'ReportsSettingsNavButton'
+$overviewPage = Get-RequiredControl -Name 'OverviewPage'
+$environmentPage = Get-RequiredControl -Name 'EnvironmentPage'
+$preflightPage = Get-RequiredControl -Name 'PreflightPage'
+$reportsSettingsPage = Get-RequiredControl -Name 'ReportsSettingsPage'
+$pageTitleText = Get-RequiredControl -Name 'PageTitleText'
+$pageSubtitleText = Get-RequiredControl -Name 'PageSubtitleText'
+$overviewOverallHeadline = Get-RequiredControl -Name 'OverviewOverallHeadline'
+$overviewOverallDetail = Get-RequiredControl -Name 'OverviewOverallDetail'
+$overviewHoudiniDot = Get-RequiredControl -Name 'OverviewHoudiniDot'
+$overviewHoudiniValueText = Get-RequiredControl -Name 'OverviewHoudiniValueText'
+$overviewHoudiniDetailText = Get-RequiredControl -Name 'OverviewHoudiniDetailText'
+$overviewMcpDot = Get-RequiredControl -Name 'OverviewMcpDot'
+$overviewMcpValueText = Get-RequiredControl -Name 'OverviewMcpValueText'
+$overviewMcpDetailText = Get-RequiredControl -Name 'OverviewMcpDetailText'
+$overviewCodexDot = Get-RequiredControl -Name 'OverviewCodexDot'
+$overviewCodexValueText = Get-RequiredControl -Name 'OverviewCodexValueText'
+$overviewCodexDetailText = Get-RequiredControl -Name 'OverviewCodexDetailText'
+$overviewEmbeddingDot = Get-RequiredControl -Name 'OverviewEmbeddingDot'
+$overviewEmbeddingValueText = Get-RequiredControl -Name 'OverviewEmbeddingValueText'
+$overviewEmbeddingDetailText = Get-RequiredControl -Name 'OverviewEmbeddingDetailText'
+$optionalArtworkPanel = Get-RequiredControl -Name 'OptionalArtworkPanel'
+$optionalArtworkImage = Get-RequiredControl -Name 'OptionalArtworkImage'
 
 $brushGreen = $window.FindResource('StatusGreenBrush')
 $brushYellow = $window.FindResource('StatusYellowBrush')
@@ -103,8 +141,22 @@ $script:isBusy = $false
 $script:initialScanStarted = $false
 $script:pendingRecovery = $null
 $script:compactLayout = $null
+$script:currentPage = 'overview'
 $script:bootstrapProcess = $null
 $script:bootstrapPreferences = $null
+$script:embeddingData = $inputs.embedding_data
+$script:embeddingProcess = $null
+$script:embeddingPreferences = $null
+$script:embeddingInstallLogPath = ''
+$script:knowledgeIndexProcess = $null
+$script:knowledgeIndexProcessAction = ''
+$script:knowledgeIndexOutputTask = $null
+$script:knowledgeIndexErrorTask = $null
+$script:knowledgeIndexLastEvent = $null
+$script:knowledgeIndexLastIndex = $null
+$script:knowledgeIndexProtocolError = ''
+$script:knowledgeIndexCancelRequested = $false
+$script:knowledgeIndexWindowClosing = $false
 $renderOutputTextBox.Text = [string]$inputs.render_output
 $renderOutputTextBox.ToolTip = if ($renderOutputTextBox.Text) {
     $renderOutputTextBox.Text
@@ -121,6 +173,72 @@ $script:inlineStatusTimer.Add_Tick({
 
 $script:bootstrapTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:bootstrapTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:embeddingTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:embeddingTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:knowledgeIndexTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:knowledgeIndexTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+
+function Initialize-HiaOptionalArtwork {
+    $optionalArtworkImage.Source = $null
+    $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Collapsed
+    try {
+        $root = [System.IO.Path]::GetFullPath($projectRoot).TrimEnd('\')
+        $assetsRoot = Join-Path $root 'assets'
+        $artworkRoot = Join-Path $assetsRoot 'launcher'
+        $artworkPath = [System.IO.Path]::GetFullPath(
+            (Join-Path $artworkRoot 'launcher-hero.png')
+        )
+        if (-not (Test-Path -LiteralPath $artworkPath -PathType Leaf)) { return }
+        if (
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                [System.IO.Path]::GetDirectoryName($artworkPath).TrimEnd('\'),
+                [System.IO.Path]::GetFullPath($artworkRoot).TrimEnd('\')
+            )
+        ) {
+            throw 'Launcher artwork escaped its project-local directory.'
+        }
+        $paths = @($root, $assetsRoot, $artworkRoot, $artworkPath)
+        for ($index = 0; $index -lt $paths.Count; $index++) {
+            $expectedPath = [System.IO.Path]::GetFullPath($paths[$index]).TrimEnd('\')
+            $item = Get-Item -LiteralPath $expectedPath -Force -ErrorAction Stop
+            if (
+                ([int]$item.Attributes -band
+                    [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                    [System.IO.Path]::GetFullPath($item.FullName).TrimEnd('\'),
+                    $expectedPath
+                )
+            ) {
+                throw 'Launcher artwork path is not an ordinary project-local path.'
+            }
+            if (
+                $index -lt ($paths.Count - 1) -and
+                $item -isnot [System.IO.DirectoryInfo]
+            ) {
+                throw 'Launcher artwork parent is not a directory.'
+            }
+            if (
+                $index -eq ($paths.Count - 1) -and
+                $item -isnot [System.IO.FileInfo]
+            ) {
+                throw 'Launcher artwork is not an ordinary file.'
+            }
+        }
+
+        $bitmap = [System.Windows.Media.Imaging.BitmapImage]::new()
+        $bitmap.BeginInit()
+        $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
+        $bitmap.UriSource = [System.Uri]::new($artworkPath, [System.UriKind]::Absolute)
+        $bitmap.EndInit()
+        $bitmap.Freeze()
+        $optionalArtworkImage.Source = $bitmap
+        $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Visible
+    } catch {
+        $optionalArtworkImage.Source = $null
+        $optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Collapsed
+    }
+}
 
 function Set-OverallState {
     param([Parameter(Mandatory = $true)][ValidateSet('green', 'yellow', 'red', 'neutral', 'busy')][string]$State)
@@ -131,47 +249,272 @@ function Set-OverallState {
             $overallStatusDot.Fill = $brushGreen
             $overallStatusBadge.BorderBrush = $brushGreen
             $overallStatusBadge.Background = $surfaceGreen
+            $overviewOverallHeadline.Text = '今天也可以顺利开工'
+            $overviewOverallDetail.Text = '关键启动条件已经就绪。进入 Houdini 前仍会按当前选择再确认一次。'
         }
         'yellow' {
             $overallStatusText.Text = '存在警告'
             $overallStatusDot.Fill = $brushYellow
             $overallStatusBadge.BorderBrush = $brushYellow
             $overallStatusBadge.Background = $surfaceYellow
+            $overviewOverallHeadline.Text = '有几项提醒，仍可继续'
+            $overviewOverallDetail.Text = '黄色项目不会无故拦住启动；展开自检项即可看到对应建议。'
         }
         'red' {
             $overallStatusText.Text = '需要处理'
             $overallStatusDot.Fill = $brushRed
             $overallStatusBadge.BorderBrush = $brushRed
             $overallStatusBadge.Background = $surfaceRed
+            $overviewOverallHeadline.Text = '先处理阻断项再出发'
+            $overviewOverallDetail.Text = '红色项目确实会影响启动。前往自检或报告页查看原因与安全修复入口。'
         }
         'busy' {
             $overallStatusText.Text = '正在检查'
             $overallStatusDot.Fill = $brushCyan
             $overallStatusBadge.BorderBrush = $brushPurple
             $overallStatusBadge.Background = $surfaceNeutral
+            $overviewOverallHeadline.Text = '正在梳理启动环境'
+            $overviewOverallDetail.Text = 'Big-Chicken 正在核对 Houdini、Bridge、Codex、MCP 与本地知识环境。'
         }
         default {
             $overallStatusText.Text = '等待检查'
             $overallStatusDot.Fill = $brushNeutral
             $overallStatusBadge.BorderBrush = $brushNeutral
             $overallStatusBadge.Background = $surfaceNeutral
+            $overviewOverallHeadline.Text = '等你检查环境'
+            $overviewOverallDetail.Text = '选择工作环境后，Big-Chicken 会把启动前的关键状态整理在这里。'
         }
     }
 }
 
+function Set-HiaLauncherPage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('overview', 'environment', 'preflight', 'reports')]
+        [string]$Page
+    )
+
+    $overviewPage.Visibility = [System.Windows.Visibility]::Collapsed
+    $environmentPage.Visibility = [System.Windows.Visibility]::Collapsed
+    $preflightPage.Visibility = [System.Windows.Visibility]::Collapsed
+    $reportsSettingsPage.Visibility = [System.Windows.Visibility]::Collapsed
+    $overviewNavButton.IsChecked = $false
+    $environmentNavButton.IsChecked = $false
+    $preflightNavButton.IsChecked = $false
+    $reportsSettingsNavButton.IsChecked = $false
+
+    switch ($Page) {
+        'environment' {
+            $environmentPage.Visibility = [System.Windows.Visibility]::Visible
+            $environmentNavButton.IsChecked = $true
+            $pageTitleText.Text = '环境'
+            $pageSubtitleText.Text = '选择 Houdini、Bridge、MCP 与本地知识配置'
+        }
+        'preflight' {
+            $preflightPage.Visibility = [System.Windows.Visibility]::Visible
+            $preflightNavButton.IsChecked = $true
+            $pageTitleText.Text = '自检'
+            $pageSubtitleText.Text = '逐项查看启动条件、结果与修复建议'
+        }
+        'reports' {
+            $reportsSettingsPage.Visibility = [System.Windows.Visibility]::Visible
+            $reportsSettingsNavButton.IsChecked = $true
+            $pageTitleText.Text = '报告与设置'
+            $pageSubtitleText.Text = '项目本地报告、索引与安全操作'
+        }
+        default {
+            $overviewPage.Visibility = [System.Windows.Visibility]::Visible
+            $overviewNavButton.IsChecked = $true
+            $pageTitleText.Text = '概览'
+            $pageSubtitleText.Text = '启动状态、关键环境与今天的创作入口'
+        }
+    }
+
+    $script:currentPage = $Page
+    $mainScrollViewer.ScrollToTop()
+}
+
+function Get-HiaOverviewCheckState {
+    param([Parameter(Mandatory = $true)][string]$IdPattern)
+
+    if ($null -eq $script:currentResult) {
+        return [pscustomobject]@{
+            level = 'neutral'
+            label = '等待扫描'
+            message = '等待检查结果'
+        }
+    }
+
+    $matches = @($script:currentResult.checks | Where-Object {
+        [string]$_.id -match $IdPattern
+    })
+    if ($matches.Count -eq 0) {
+        return [pscustomobject]@{
+            level = 'neutral'
+            label = '未检查'
+            message = '本次结果未包含该项目'
+        }
+    }
+
+    $level = 'green'
+    if (@($matches | Where-Object level -eq 'red').Count -gt 0) {
+        $level = 'red'
+    } elseif (@($matches | Where-Object level -eq 'yellow').Count -gt 0) {
+        $level = 'yellow'
+    }
+    $messageCheck = @($matches | Where-Object level -eq $level)[0]
+    $label = if ($level -eq 'red') {
+        '需要处理'
+    } elseif ($level -eq 'yellow') {
+        '部分可用'
+    } else {
+        '已就绪'
+    }
+    return [pscustomobject]@{
+        level = $level
+        label = $label
+        message = [string]$messageCheck.message
+    }
+}
+
+function Set-HiaOverviewTile {
+    param(
+        [Parameter(Mandatory = $true)]$Dot,
+        [Parameter(Mandatory = $true)]$ValueText,
+        [Parameter(Mandatory = $true)]$DetailText,
+        [Parameter(Mandatory = $true)][string]$Level,
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Detail
+    )
+
+    $Dot.Fill = if ($Level -eq 'green') {
+        $brushGreen
+    } elseif ($Level -eq 'yellow') {
+        $brushYellow
+    } elseif ($Level -eq 'red') {
+        $brushRed
+    } else {
+        $brushNeutral
+    }
+    $ValueText.Text = $Value
+    $ValueText.ToolTip = $Value
+    $DetailText.Text = $Detail
+    $DetailText.ToolTip = $Detail
+}
+
+function Get-HiaSelectedDisplay {
+    param(
+        [Parameter(Mandatory = $true)]$Combo,
+        [Parameter(Mandatory = $true)][string]$Fallback
+    )
+
+    $selected = $Combo.SelectedItem
+    if ($null -eq $selected) { return $Fallback }
+    foreach ($propertyName in @('display', 'version', 'source', 'id')) {
+        $property = $selected.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and [string]$property.Value) {
+            return [string]$property.Value
+        }
+    }
+    return $Fallback
+}
+
+function Update-HiaOverviewSummary {
+    param([AllowEmptyString()][string]$FailureMessage = '')
+
+    if ($FailureMessage) {
+        Set-HiaOverviewTile `
+            -Dot $overviewHoudiniDot `
+            -ValueText $overviewHoudiniValueText `
+            -DetailText $overviewHoudiniDetailText `
+            -Level 'red' `
+            -Value '检查未完成' `
+            -Detail $FailureMessage
+        Set-HiaOverviewTile `
+            -Dot $overviewMcpDot `
+            -ValueText $overviewMcpValueText `
+            -DetailText $overviewMcpDetailText `
+            -Level 'red' `
+            -Value '检查未完成' `
+            -Detail $FailureMessage
+        Set-HiaOverviewTile `
+            -Dot $overviewCodexDot `
+            -ValueText $overviewCodexValueText `
+            -DetailText $overviewCodexDetailText `
+            -Level 'red' `
+            -Value '检查未完成' `
+            -Detail $FailureMessage
+        Set-HiaOverviewTile `
+            -Dot $overviewEmbeddingDot `
+            -ValueText $overviewEmbeddingValueText `
+            -DetailText $overviewEmbeddingDetailText `
+            -Level 'red' `
+            -Value '检查未完成' `
+            -Detail $FailureMessage
+        return
+    }
+
+    $houdiniState = Get-HiaOverviewCheckState -IdPattern '^(houdini|hython)\.'
+    $houdiniDisplay = Get-HiaSelectedDisplay -Combo $houdiniCombo -Fallback $houdiniState.label
+    if ($houdiniDisplay -ne $houdiniState.label -and $houdiniDisplay -notmatch '^Houdini ') {
+        $houdiniDisplay = "Houdini $houdiniDisplay"
+    }
+    Set-HiaOverviewTile `
+        -Dot $overviewHoudiniDot `
+        -ValueText $overviewHoudiniValueText `
+        -DetailText $overviewHoudiniDetailText `
+        -Level $houdiniState.level `
+        -Value $houdiniDisplay `
+        -Detail $houdiniState.message
+
+    $mcpState = Get-HiaOverviewCheckState -IdPattern '^(hia_mcp_v2|fxhoudinimcp|mcp)\.'
+    Set-HiaOverviewTile `
+        -Dot $overviewMcpDot `
+        -ValueText $overviewMcpValueText `
+        -DetailText $overviewMcpDetailText `
+        -Level $mcpState.level `
+        -Value (Get-HiaSelectedDisplay -Combo $mcpBackendCombo -Fallback $mcpState.label) `
+        -Detail $mcpState.message
+
+    $codexState = Get-HiaOverviewCheckState -IdPattern '^codex\.'
+    Set-HiaOverviewTile `
+        -Dot $overviewCodexDot `
+        -ValueText $overviewCodexValueText `
+        -DetailText $overviewCodexDetailText `
+        -Level $codexState.level `
+        -Value $codexState.label `
+        -Detail $codexState.message
+
+    $embeddingState = Get-HiaOverviewCheckState -IdPattern '^embedding\.'
+    $embeddingDisplay = Get-HiaSelectedDisplay `
+        -Combo $embeddingProfileCombo `
+        -Fallback $embeddingState.label
+    Set-HiaOverviewTile `
+        -Dot $overviewEmbeddingDot `
+        -ValueText $overviewEmbeddingValueText `
+        -DetailText $overviewEmbeddingDetailText `
+        -Level $embeddingState.level `
+        -Value $embeddingDisplay `
+        -Detail $embeddingState.message
+}
+
 function Update-ResponsiveLayout {
-    $compact = $window.ActualWidth -gt 0 -and $window.ActualWidth -lt 760
+    $compact = $window.ActualWidth -gt 0 -and $window.ActualWidth -lt 820
     if ($script:compactLayout -eq $compact) { return }
     $script:compactLayout = $compact
 
     if ($compact) {
-        $rightVisualRail.Width = 168
-        $rightVisualRail.Margin = [System.Windows.Thickness]::new(0, 12, 16, 10)
+        $navigationColumn.Width = [System.Windows.GridLength]::new(190)
+        $sidebarPanel.Margin = [System.Windows.Thickness]::new(14, 18, 14, 14)
+        $rightVisualRail.Width = 160
+        $rightVisualRail.Margin = [System.Windows.Thickness]::new(0, 12, 0, 0)
         return
     }
 
-    $rightVisualRail.Width = 210
-    $rightVisualRail.Margin = [System.Windows.Thickness]::new(0, 16, 28, 12)
+    $navigationColumn.Width = [System.Windows.GridLength]::new(212)
+    $sidebarPanel.Margin = [System.Windows.Thickness]::new(18, 22, 18, 18)
+    $rightVisualRail.Width = 174
+    $rightVisualRail.Margin = [System.Windows.Thickness]::new(0, 16, 0, 0)
 }
 
 function Initialize-RecoveryPrompt {
@@ -247,8 +590,184 @@ function Get-ComboBackend {
     return Resolve-HiaMcpBackend -Backend ([string]$idProperty.Value)
 }
 
+function Get-ComboEmbeddingProfile {
+    $selected = $embeddingProfileCombo.SelectedItem
+    if ($null -ne $selected) {
+        $idProperty = $selected.PSObject.Properties['id']
+        if ($null -ne $idProperty) { return [string]$idProperty.Value }
+    }
+    if ($null -ne $script:embeddingData) {
+        return [string]$script:embeddingData.contract.default_profile
+    }
+    return ''
+}
+
+function Get-ComboEmbeddingDevice {
+    $selected = $embeddingDeviceCombo.SelectedItem
+    if ($null -eq $selected) { return 'auto' }
+    $idProperty = $selected.PSObject.Properties['id']
+    if ($null -eq $idProperty) { return 'auto' }
+    return Resolve-HiaEmbeddingDevice -Device ([string]$idProperty.Value)
+}
+
 function Get-RenderOutputPath {
     return ([string]$renderOutputTextBox.Text).Trim()
+}
+
+function Get-HiaKnowledgeIndexValue {
+    param(
+        [AllowNull()]$Index,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()]$Default = $null
+    )
+
+    if ($null -eq $Index) { return $Default }
+    $property = $Index.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $Default }
+    return $property.Value
+}
+
+function Get-HiaKnowledgeIndexSelectedModelLabel {
+    if ($null -eq $script:embeddingData) { return '尚未读取模型' }
+    try {
+        $profile = Get-HiaEmbeddingProfileContract `
+            -EmbeddingData $script:embeddingData `
+            -Profile (Get-ComboEmbeddingProfile)
+        return [string]$profile.label
+    } catch {
+        return '尚未读取模型'
+    }
+}
+
+function Update-HiaKnowledgeIndexActionButton {
+    if ($null -ne $script:knowledgeIndexProcess) {
+        if ($script:knowledgeIndexProcessAction -eq 'build') {
+            $knowledgeIndexActionButton.Content = '取消'
+            $knowledgeIndexActionButton.IsEnabled = $true
+            [System.Windows.Automation.AutomationProperties]::SetName(
+                $knowledgeIndexActionButton,
+                '取消本次本地知识索引构建'
+            )
+        } else {
+            $knowledgeIndexActionButton.Content = '正在刷新…'
+            $knowledgeIndexActionButton.IsEnabled = $false
+        }
+        return
+    }
+
+    $available = [bool](Get-HiaKnowledgeIndexValue `
+        -Index $script:knowledgeIndexLastIndex `
+        -Name 'available' `
+        -Default $false)
+    $complete = [bool](Get-HiaKnowledgeIndexValue `
+        -Index $script:knowledgeIndexLastIndex `
+        -Name 'complete' `
+        -Default $false)
+    if ($available -and $complete) {
+        $knowledgeIndexActionButton.Content = '索引已完成'
+        $knowledgeIndexActionButton.IsEnabled = $false
+        [System.Windows.Automation.AutomationProperties]::SetName(
+            $knowledgeIndexActionButton,
+            '本地知识索引已完成'
+        )
+        return
+    }
+
+    $knowledgeIndexActionButton.Content = '构建/继续索引'
+    $knowledgeIndexActionButton.IsEnabled = ($available -and -not $script:isBusy)
+    [System.Windows.Automation.AutomationProperties]::SetName(
+        $knowledgeIndexActionButton,
+        '构建或继续本地知识索引'
+    )
+}
+
+function Set-HiaKnowledgeIndexDisplay {
+    param(
+        [AllowNull()]$Index = $null,
+        [AllowEmptyString()][string]$Message = '',
+        [switch]$Reset
+    )
+
+    if ($Reset) {
+        $script:knowledgeIndexLastIndex = $null
+        $script:knowledgeIndexLastEvent = $null
+    } elseif ($null -ne $Index) {
+        $script:knowledgeIndexLastIndex = $Index
+    }
+    $current = $script:knowledgeIndexLastIndex
+
+    $model = [string](Get-HiaKnowledgeIndexValue `
+        -Index $current `
+        -Name 'model_id' `
+        -Default '')
+    if (-not $model) { $model = Get-HiaKnowledgeIndexSelectedModelLabel }
+    $dimension = [long](Get-HiaKnowledgeIndexValue `
+        -Index $current `
+        -Name 'dim' `
+        -Default 0)
+    $modelDisplay = if ($dimension -gt 0) { "$model · ${dimension}D" } else { $model }
+    $knowledgeIndexModelText.Text = $modelDisplay
+    $knowledgeIndexModelText.ToolTip = $modelDisplay
+
+    $total = [long](Get-HiaKnowledgeIndexValue -Index $current -Name 'total_chunks' -Default 0)
+    $vector = [long](Get-HiaKnowledgeIndexValue -Index $current -Name 'vector_chunks' -Default 0)
+    $pending = [long](Get-HiaKnowledgeIndexValue -Index $current -Name 'pending_chunks' -Default 0)
+    $complete = [bool](Get-HiaKnowledgeIndexValue -Index $current -Name 'complete' -Default $false)
+    $available = [bool](Get-HiaKnowledgeIndexValue -Index $current -Name 'available' -Default $false)
+    $percentage = if ($total -gt 0) {
+        [Math]::Min(100, [Math]::Floor(($vector * 100.0) / $total))
+    } elseif ($complete -and $available) {
+        100
+    } else {
+        0
+    }
+    $knowledgeIndexCountText.Text = "$vector / $total · $percentage% · 剩余 $pending"
+    $knowledgeIndexProgressBar.Value = [double]$percentage
+    $knowledgeIndexProgressBar.Foreground = if ($complete -and $available) {
+        $brushGreen
+    } else {
+        $brushCyan
+    }
+
+    if (-not $Message) {
+        if ($null -ne $script:knowledgeIndexProcess) {
+            $Message = if ($script:knowledgeIndexProcessAction -eq 'build') {
+                '正在构建索引；每个已提交批次都会保留。'
+            } else {
+                '正在读取索引状态…'
+            }
+        } elseif ($null -eq $current) {
+            $Message = '重新扫描后显示索引进度。'
+        } elseif (-not $available) {
+            $reason = [string](Get-HiaKnowledgeIndexValue `
+                -Index $current `
+                -Name 'fallback_reason' `
+                -Default '')
+            $Message = '向量模型暂不可用；FTS5 lexical 检索可继续工作，Houdini 仍可启动。'
+            if ($reason) { $Message += " 原因：$reason" }
+        } elseif ($complete) {
+            $Message = '索引已完成。'
+        } else {
+            $Message = "索引未完成；剩余 $pending 个，可手动继续。"
+        }
+    }
+    $knowledgeIndexStatusText.Text = $Message
+    $knowledgeIndexStatusText.ToolTip = $Message
+    $knowledgeIndexStatusText.Foreground = if (
+        $null -ne $script:knowledgeIndexLastEvent -and
+        [string]$script:knowledgeIndexLastEvent.event -eq 'error'
+    ) {
+        $brushRed
+    } elseif ($null -ne $script:knowledgeIndexProcess) {
+        $brushCyan
+    } elseif (-not $available -and $null -ne $current) {
+        $brushYellow
+    } elseif ($complete -and $available) {
+        $brushGreen
+    } else {
+        $brushTextSecondary
+    }
+    Update-HiaKnowledgeIndexActionButton
 }
 
 function Format-HiaByteCount {
@@ -299,6 +818,8 @@ function Set-BusyState {
     $window.Cursor = if ($Busy) { [System.Windows.Input.Cursors]::Wait } else { $null }
 
     $mcpBackendCombo.IsEnabled = -not $Busy
+    $embeddingProfileCombo.IsEnabled = (-not $Busy -and $null -ne $script:embeddingData)
+    $embeddingDeviceCombo.IsEnabled = (-not $Busy -and $null -ne $script:embeddingData)
     $houdiniCombo.IsEnabled = -not $Busy
     $bridgeCombo.IsEnabled = -not $Busy
     $renderOutputTextBox.IsEnabled = -not $Busy
@@ -334,6 +855,7 @@ function Set-BusyState {
             Set-OverallState -State 'neutral'
         }
     }
+    Update-HiaKnowledgeIndexActionButton
 }
 
 function Test-CurrentRedCheck {
@@ -345,12 +867,26 @@ function Test-CurrentRedCheck {
     }).Count -gt 0
 }
 
+function Test-CurrentNonGreenCheck {
+    param([Parameter(Mandatory = $true)][string]$Id)
+
+    if ($null -eq $script:currentResult) { return $false }
+    return @($script:currentResult.checks | Where-Object {
+        [string]$_.id -eq $Id -and [string]$_.level -ne 'green'
+    }).Count -gt 0
+}
+
 function Update-RepairButton {
     $label = '修复安全项目'
     if (Test-CurrentRedCheck -Id 'codex.executable') {
         $label = '安装/修复 Codex'
     } elseif (Test-CurrentRedCheck -Id 'codex.login') {
         $label = '复制登录命令'
+    } elseif (
+        $null -ne $script:embeddingData -and
+        (Test-CurrentNonGreenCheck -Id 'embedding.runtime')
+    ) {
+        $label = '安装/修复知识向量模型'
     }
     $repairButton.Content = $label
     [System.Windows.Automation.AutomationProperties]::SetName($repairButton, $label)
@@ -423,6 +959,7 @@ function Show-Result {
     } else {
         Set-OverallState -State 'red'
     }
+    Update-HiaOverviewSummary
     Update-RepairButton
 }
 
@@ -442,6 +979,7 @@ function Show-PreflightFailure {
     $warningCountText.Text = '0'
     $blockedCountText.Text = '1'
     Set-OverallState -State 'red'
+    Update-HiaOverviewSummary -FailureMessage '自检过程未能完成'
     Update-RepairButton
     Show-InlineStatus -Kind 'error' -Text '自检失败；未启动 Houdini。请使用控制台检查模式定位问题。'
 }
@@ -458,8 +996,14 @@ function Mark-SelectionNeedsCheck {
     $warningCountText.Text = '0'
     $blockedCountText.Text = '0'
     Set-OverallState -State 'neutral'
+    Update-HiaOverviewSummary
     Update-RepairButton
     Update-PathSummaries
+    if ($null -eq $script:knowledgeIndexProcess) {
+        Set-HiaKnowledgeIndexDisplay `
+            -Reset `
+            -Message '环境选择已变化，重新扫描后刷新索引状态。'
+    }
     Set-BusyState -Busy $false
     Show-InlineStatus -Kind 'warning' -Text '环境选择已变化，请点击“重新扫描”完成检查。'
 }
@@ -487,7 +1031,9 @@ function Complete-HiaCodexBootstrap {
     Invoke-GuiScan `
         -PreferredHoudini ([string]$preferences.houdini) `
         -PreferredBridge ([string]$preferences.bridge) `
-        -PreferredBackend ([string]$preferences.backend)
+        -PreferredBackend ([string]$preferences.backend) `
+        -PreferredEmbedding ([string]$preferences.embedding) `
+        -PreferredEmbeddingDevice ([string]$preferences.embedding_device)
 
     if ($exitCode -eq 0 -and -not $repairFailed) {
         Show-InlineStatus -Kind 'success' -Transient -Text 'Codex 已安装到项目 .runtime；自检已自动刷新。'
@@ -511,6 +1057,8 @@ function Start-HiaCodexBootstrap {
         houdini = Get-ComboPath -Combo $houdiniCombo
         bridge = Get-ComboPath -Combo $bridgeCombo
         backend = Get-ComboBackend
+        embedding = Get-ComboEmbeddingProfile
+        embedding_device = Get-ComboEmbeddingDevice
     }
     $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -536,6 +1084,640 @@ function Start-HiaCodexBootstrap {
         $script:bootstrapPreferences = $null
         Set-BusyState -Busy $false
         Show-InlineStatus -Kind 'error' -Text ("无法启动 Codex 项目本地安装：{0}" -f $_.Exception.Message)
+    }
+}
+
+function New-HiaEmbeddingInstallLogPath {
+    $leafName = 'embedding-install-{0}-{1}.log' -f
+        [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'),
+        [Guid]::NewGuid().ToString('N')
+    return Resolve-HiaLauncherStoragePath `
+        -ProjectRoot $projectRoot `
+        -LeafName $leafName `
+        -CreateDirectory `
+        -AllowMissingLeaf
+}
+
+function Resolve-HiaEmbeddingInstallLogForRead {
+    param([AllowEmptyString()][string]$InstallLogPath = '')
+
+    if ([string]::IsNullOrWhiteSpace($InstallLogPath)) { return '' }
+    try {
+        $candidate = [System.IO.Path]::GetFullPath($InstallLogPath)
+        $leafName = [System.IO.Path]::GetFileName($candidate)
+        if ($leafName -notmatch '^embedding-install-[A-Za-z0-9-]+\.log$') {
+            return ''
+        }
+        $validated = Resolve-HiaLauncherStoragePath `
+            -ProjectRoot $projectRoot `
+            -LeafName $leafName `
+            -AllowMissingLeaf
+        if (
+            [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                $candidate,
+                $validated
+            ) -and
+            (Test-Path -LiteralPath $validated -PathType Leaf)
+        ) {
+            return $validated
+        }
+    } catch { }
+    return ''
+}
+
+function Get-HiaEmbeddingInstallFailureSummary {
+    param(
+        [AllowEmptyString()][string]$InstallLogPath = '',
+        [int]$ExitCode = 1
+    )
+
+    $detail = ''
+    $validatedLogPath = Resolve-HiaEmbeddingInstallLogForRead `
+        -InstallLogPath $InstallLogPath
+    if (-not [string]::IsNullOrWhiteSpace($validatedLogPath)) {
+        try {
+            $errorLines = @(
+                [System.IO.File]::ReadAllLines($validatedLogPath) |
+                    Where-Object { $_ -match '\sERROR\s' }
+            )
+            if ($errorLines.Count -gt 0) {
+                $detail = [string]$errorLines[-1]
+                $detail = ($detail -replace
+                    '^\S+\s+ERROR\s+',
+                    ''
+                ).Trim()
+            }
+        } catch { }
+    }
+    if ([string]::IsNullOrWhiteSpace($detail)) {
+        $detail = "安装进程退出码 $ExitCode"
+    }
+    try {
+        $safeJson = ConvertTo-HiaRedactedJson `
+            -Value ([pscustomobject]@{ message = $detail }) `
+            -Depth 2 `
+            -Compress
+        $detail = [string](($safeJson | ConvertFrom-Json).message)
+    } catch {
+        $detail = "安装进程退出码 $ExitCode"
+    }
+    $detail = ([regex]::Replace($detail, '[\r\n]+', ' ')).Trim()
+    if ($detail.Length -gt 360) {
+        $detail = $detail.Substring(0, 360) + '…'
+    }
+    return $detail
+}
+
+function Test-HiaEmbeddingRuntimeReady {
+    param([AllowNull()]$Result)
+
+    if ($null -eq $Result) { return $false }
+    $checks = @($Result.checks | Where-Object {
+        [string]$_.id -eq 'embedding.runtime'
+    })
+    return (
+        $checks.Count -eq 1 -and
+        [string]$checks[0].level -eq 'green'
+    )
+}
+
+function Get-HiaEmbeddingRuntimeVerificationFailure {
+    param([AllowNull()]$Result)
+
+    if ($null -eq $Result) {
+        return '安装命令已结束，但自检刷新未完成。'
+    }
+    $checks = @($Result.checks | Where-Object {
+        [string]$_.id -eq 'embedding.runtime'
+    })
+    if ($checks.Count -ne 1) {
+        return '安装命令已结束，但自检没有返回唯一的 embedding.runtime 结果。'
+    }
+    $detail = [string]$checks[0].message
+    if ([string]::IsNullOrWhiteSpace($detail)) {
+        $detail = 'embedding.runtime 尚未通过。'
+    }
+    return ConvertTo-HiaRedactedText -Text $detail
+}
+
+function Show-HiaEmbeddingInstallAlreadyRunning {
+    param([Parameter(Mandatory = $true)]$LockInfo)
+
+    $ownerLog = Resolve-HiaEmbeddingInstallLogForRead `
+        -InstallLogPath ([string]$LockInfo.log_path)
+    if (-not [string]::IsNullOrWhiteSpace($ownerLog)) {
+        $script:lastReportPath = $ownerLog
+        $reportPathTextBox.Text = $ownerLog
+        $reportPathTextBox.ToolTip = $ownerLog
+        $copyReportButton.IsEnabled = $true
+        Show-InlineStatus `
+            -Kind 'neutral' `
+            -Text "已有知识向量安装正在运行。日志：$ownerLog"
+        return
+    }
+    Show-InlineStatus `
+        -Kind 'neutral' `
+        -Text '已有知识向量安装正在运行；完成后重新扫描即可。'
+}
+
+function Complete-HiaEmbeddingInstall {
+    if ($null -eq $script:embeddingProcess -or -not $script:embeddingProcess.HasExited) { return }
+
+    $script:embeddingTimer.Stop()
+    $exitCode = $script:embeddingProcess.ExitCode
+    $script:embeddingProcess.Dispose()
+    $script:embeddingProcess = $null
+    $preferences = $script:embeddingPreferences
+    $script:embeddingPreferences = $null
+    $installLogPath = $script:embeddingInstallLogPath
+    $script:embeddingInstallLogPath = ''
+
+    Set-BusyState -Busy $false
+    Invoke-GuiScan `
+        -PreferredHoudini ([string]$preferences.houdini) `
+        -PreferredBridge ([string]$preferences.bridge) `
+        -PreferredBackend ([string]$preferences.backend) `
+        -PreferredEmbedding ([string]$preferences.embedding) `
+        -PreferredEmbeddingDevice ([string]$preferences.embedding_device)
+
+    $runtimeReady = (
+        -not $script:preflightFailed -and
+        (Test-HiaEmbeddingRuntimeReady -Result $script:currentResult)
+    )
+    if ($exitCode -eq 0 -and $runtimeReady) {
+        Show-InlineStatus -Kind 'success' -Transient -Text '知识向量环境准备好了，自检已刷新。'
+        return
+    }
+
+    if ($exitCode -ne 0) {
+        try {
+            $activeInstall = Get-HiaEmbeddingInstallLockInfo `
+                -ProjectRoot $projectRoot
+            if ($null -ne $activeInstall -and [bool]$activeInstall.active) {
+                Show-HiaEmbeddingInstallAlreadyRunning -LockInfo $activeInstall
+                return
+            }
+        } catch { }
+    }
+
+    $failureSummary = if ($exitCode -eq 0) {
+        Get-HiaEmbeddingRuntimeVerificationFailure `
+            -Result $script:currentResult
+    } else {
+        Get-HiaEmbeddingInstallFailureSummary `
+            -InstallLogPath $installLogPath `
+            -ExitCode $exitCode
+    }
+    $validatedInstallLog = Resolve-HiaEmbeddingInstallLogForRead `
+        -InstallLogPath $installLogPath
+    if (-not [string]::IsNullOrWhiteSpace($validatedInstallLog)) {
+        $script:lastReportPath = $validatedInstallLog
+        $reportPathTextBox.Text = $validatedInstallLog
+        $reportPathTextBox.ToolTip = $validatedInstallLog
+        $copyReportButton.IsEnabled = $true
+    }
+    $failurePrefix = if ($exitCode -eq 0) {
+        '安装命令已结束，但刷新验证未通过'
+    } else {
+        '这次安装没完成'
+    }
+    $logDisplay = if ([string]::IsNullOrWhiteSpace($validatedInstallLog)) {
+        '未生成'
+    } else {
+        $validatedInstallLog
+    }
+    Show-InlineStatus `
+        -Kind 'error' `
+        -Text (
+            '{0}：{1}。安装日志：{2}' -f
+                $failurePrefix,
+                $failureSummary,
+                $logDisplay
+        )
+}
+
+$script:embeddingTimer.Add_Tick({ Complete-HiaEmbeddingInstall })
+
+function Start-HiaEmbeddingInstall {
+    if ($null -ne $script:embeddingProcess) { return }
+
+    $installerScript = Join-Path $projectRoot 'scripts\launcher\Install-HiaEmbedding.ps1'
+    $selectedProfile = Get-ComboEmbeddingProfile
+    $selectedBridge = Get-ComboPath -Combo $bridgeCombo
+    if (
+        $null -eq $script:embeddingData -or
+        -not $selectedProfile -or
+        -not (Test-Path -LiteralPath $selectedBridge -PathType Leaf)
+    ) {
+        Show-InlineStatus -Kind 'error' -Text '请先选择有效 Bridge Python 并重新扫描，再安装知识向量模型。'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $installerScript -PathType Leaf)) {
+        Show-InlineStatus -Kind 'error' -Text '缺少项目本地 embedding 安装脚本，无法继续。'
+        return
+    }
+    try {
+        $activeInstall = Get-HiaEmbeddingInstallLockInfo `
+            -ProjectRoot $projectRoot
+    } catch {
+        Show-InlineStatus `
+            -Kind 'error' `
+            -Text '无法安全检查项目本地安装锁；请检查 .runtime\launcher 路径。'
+        return
+    }
+    if ($null -ne $activeInstall -and [bool]$activeInstall.active) {
+        Show-HiaEmbeddingInstallAlreadyRunning -LockInfo $activeInstall
+        return
+    }
+
+    try {
+        $selectedDevice = Get-ComboEmbeddingDevice
+        Write-HiaEmbeddingPreference `
+            -ProjectRoot $projectRoot `
+            -EmbeddingData $script:embeddingData `
+            -EmbeddingProfile $selectedProfile `
+            -EmbeddingDevice $selectedDevice | Out-Null
+    } catch {
+        Show-InlineStatus -Kind 'error' -Text '无法保存知识向量模型选择；未开始安装。'
+        return
+    }
+
+    $script:embeddingPreferences = [pscustomobject]@{
+        houdini = Get-ComboPath -Combo $houdiniCombo
+        bridge = $selectedBridge
+        backend = Get-ComboBackend
+        embedding = $selectedProfile
+        embedding_device = $selectedDevice
+    }
+    try {
+        $script:embeddingInstallLogPath = New-HiaEmbeddingInstallLogPath
+    } catch {
+        $script:embeddingPreferences = $null
+        Show-InlineStatus `
+            -Kind 'error' `
+            -Text '无法创建项目本地安装日志，请检查 .runtime\launcher 是否可写。'
+        return
+    }
+    $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = @(
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $installerScript,
+        '-ProjectRoot', $projectRoot,
+        '-Profile', $selectedProfile,
+        '-BootstrapPython', $selectedBridge,
+        '-Device', $selectedDevice,
+        '-LogPath', $script:embeddingInstallLogPath
+    )
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $powershellExe
+    $startInfo.Arguments = (@($arguments | ForEach-Object {
+        ConvertTo-HiaProcessArgument -Value ([string]$_)
+    }) -join ' ')
+    $startInfo.WorkingDirectory = $projectRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+
+    try {
+        $script:embeddingProcess = [System.Diagnostics.Process]::new()
+        $script:embeddingProcess.StartInfo = $startInfo
+        if (-not $script:embeddingProcess.Start()) {
+            throw '无法启动 embedding 安装进程。'
+        }
+        Set-BusyState -Busy $true
+        $overallStatusText.Text = '正在准备向量环境'
+        $choice = Get-HiaEmbeddingProfileContract `
+            -EmbeddingData $script:embeddingData `
+            -Profile $selectedProfile
+        $size = ([double]$choice.repository_size_gb).ToString(
+            '0.##',
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+        Show-InlineStatus -Kind 'neutral' -Text ("母鸡啄米中… 正在准备 {0}（官方模型文件约 {1} GB）和 {2} 计算环境；uv、依赖与缓存都留在项目 .runtime。" -f $choice.label, $size, $selectedDevice)
+        $script:embeddingTimer.Start()
+    } catch {
+        if ($null -ne $script:embeddingProcess) {
+            $script:embeddingProcess.Dispose()
+            $script:embeddingProcess = $null
+        }
+        $script:embeddingPreferences = $null
+        $script:embeddingInstallLogPath = ''
+        Set-BusyState -Busy $false
+        Show-InlineStatus -Kind 'error' -Text ("无法启动知识向量模型项目本地安装：{0}" -f $_.Exception.Message)
+    }
+}
+
+function Update-HiaKnowledgeIndexFromEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $script:knowledgeIndexLastEvent = $Event
+    $index = $Event.index
+    $message = ''
+    switch ([string]$Event.event) {
+        'start' {
+            $message = if ([string]$Event.action -eq 'build') {
+                '正在构建索引；每个已提交批次都会保留。'
+            } else {
+                '正在读取索引状态…'
+            }
+        }
+        'progress' {
+            $batch = [long](Get-HiaKnowledgeIndexValue -Index $Event -Name 'batch_number' -Default 0)
+            $indexed = [long](Get-HiaKnowledgeIndexValue -Index $Event -Name 'indexed_this_batch' -Default 0)
+            $message = "正在构建索引：第 $batch 批已提交 $indexed 个。"
+        }
+        'error' {
+            $code = [string](Get-HiaKnowledgeIndexValue -Index $Event -Name 'code' -Default 'UNKNOWN')
+            $detail = [string](Get-HiaKnowledgeIndexValue -Index $Event -Name 'message' -Default '索引命令失败')
+            $message = "索引命令失败（$code）：$detail"
+        }
+    }
+    Set-HiaKnowledgeIndexDisplay -Index $index -Message $message
+}
+
+function Stop-HiaKnowledgeIndexProcessTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process
+    )
+
+    if ($Process.HasExited) { return }
+    $processId = [int]$Process.Id
+    if ($processId -le 0) {
+        throw '知识索引 CLI 没有可终止的有效 PID。'
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$env:SystemRoot)) {
+        throw '无法解析 Windows 系统目录，未终止知识索引进程树。'
+    }
+    $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    if (-not (Test-Path -LiteralPath $taskkillPath -PathType Leaf)) {
+        throw '找不到 Windows taskkill.exe，未终止知识索引进程树。'
+    }
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $taskkillPath
+    $startInfo.Arguments = "/PID $processId /T /F"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $terminator = [System.Diagnostics.Process]::new()
+    $terminator.StartInfo = $startInfo
+    try {
+        if (-not $terminator.Start()) {
+            throw '无法启动 Windows taskkill.exe。'
+        }
+        if (-not $terminator.WaitForExit(5000)) {
+            throw 'Windows taskkill.exe 未在限定时间内完成。'
+        }
+        if ($terminator.ExitCode -ne 0) {
+            if ($Process.HasExited) { return }
+            throw "Windows taskkill.exe 终止进程树失败（exit $($terminator.ExitCode)）。"
+        }
+    } finally {
+        $terminator.Dispose()
+    }
+}
+
+function Complete-HiaKnowledgeIndexProcess {
+    if ($null -eq $script:knowledgeIndexProcess) { return }
+
+    $script:knowledgeIndexTimer.Stop()
+    $process = $script:knowledgeIndexProcess
+    $exitCode = [int]$process.ExitCode
+    $cancelled = $script:knowledgeIndexCancelRequested
+    $protocolError = $script:knowledgeIndexProtocolError
+    $lastEvent = $script:knowledgeIndexLastEvent
+    Stop-HiaKnowledgeIndexProcessTree -Process $process
+    $process.Dispose()
+    $script:knowledgeIndexProcess = $null
+    $script:knowledgeIndexProcessAction = ''
+    $script:knowledgeIndexOutputTask = $null
+    $script:knowledgeIndexErrorTask = $null
+    $script:knowledgeIndexCancelRequested = $false
+    $script:knowledgeIndexProtocolError = ''
+
+    if ($script:knowledgeIndexWindowClosing) { return }
+    if ($cancelled) {
+        $script:knowledgeIndexLastEvent = $null
+        Set-HiaKnowledgeIndexDisplay `
+            -Index $script:knowledgeIndexLastIndex `
+            -Message '本次构建已取消；已提交批次保留，正在刷新实际进度…'
+        Start-HiaKnowledgeIndexProcess -Action 'status'
+        return
+    }
+    if ($protocolError) {
+        $script:knowledgeIndexLastEvent = [pscustomobject]@{ event = 'error' }
+        Set-HiaKnowledgeIndexDisplay `
+            -Index $script:knowledgeIndexLastIndex `
+            -Message $protocolError
+        return
+    }
+    if (
+        $exitCode -ne 0 -or
+        $null -eq $lastEvent -or
+        [string]$lastEvent.event -ne 'completed'
+    ) {
+        if ($null -eq $lastEvent -or [string]$lastEvent.event -ne 'error') {
+            $script:knowledgeIndexLastEvent = [pscustomobject]@{ event = 'error' }
+            Set-HiaKnowledgeIndexDisplay `
+                -Index $script:knowledgeIndexLastIndex `
+                -Message ("索引命令未正常完成（退出码 {0}）；可稍后继续，FTS5 仍可用。" -f $exitCode)
+        } else {
+            Update-HiaKnowledgeIndexActionButton
+        }
+        return
+    }
+    Set-HiaKnowledgeIndexDisplay -Index $lastEvent.index
+}
+
+function Read-HiaKnowledgeIndexOutput {
+    while (
+        $null -ne $script:knowledgeIndexOutputTask -and
+        $script:knowledgeIndexOutputTask.IsCompleted
+    ) {
+        try {
+            $line = $script:knowledgeIndexOutputTask.Result
+        } catch {
+            $script:knowledgeIndexProtocolError = '无法读取知识索引进程输出。'
+            $script:knowledgeIndexOutputTask = $null
+            break
+        }
+        if ($null -eq $line) {
+            $script:knowledgeIndexOutputTask = $null
+            break
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
+            try {
+                $event = ConvertFrom-HiaKnowledgeIndexJsonLine `
+                    -Line ([string]$line) `
+                    -EmbeddingData $script:embeddingData
+                Update-HiaKnowledgeIndexFromEvent -Event $event
+            } catch {
+                $script:knowledgeIndexProtocolError = [string]$_.Exception.Message
+                try {
+                    if ($null -ne $script:knowledgeIndexProcess) {
+                        Stop-HiaKnowledgeIndexProcessTree `
+                            -Process $script:knowledgeIndexProcess
+                    }
+                } catch { }
+                $script:knowledgeIndexOutputTask = $null
+                break
+            }
+        }
+        if ($null -ne $script:knowledgeIndexProcess) {
+            $script:knowledgeIndexOutputTask = $script:knowledgeIndexProcess.StandardOutput.ReadLineAsync()
+        }
+    }
+}
+
+function Test-HiaKnowledgeIndexProcessComplete {
+    if ($null -eq $script:knowledgeIndexProcess) { return }
+    Read-HiaKnowledgeIndexOutput
+    if (
+        $script:knowledgeIndexProcess.HasExited -and
+        $null -eq $script:knowledgeIndexOutputTask -and
+        $null -ne $script:knowledgeIndexErrorTask -and
+        $script:knowledgeIndexErrorTask.IsCompleted
+    ) {
+        Complete-HiaKnowledgeIndexProcess
+    }
+}
+
+$script:knowledgeIndexTimer.Add_Tick({
+    try {
+        Test-HiaKnowledgeIndexProcessComplete
+    } catch {
+        $script:knowledgeIndexProtocolError = '知识索引进程状态无法读取。'
+        try {
+            if ($null -ne $script:knowledgeIndexProcess) {
+                Stop-HiaKnowledgeIndexProcessTree `
+                    -Process $script:knowledgeIndexProcess
+            }
+        } catch { }
+    }
+})
+
+function Start-HiaKnowledgeIndexProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('status', 'build')]
+        [string]$Action
+    )
+
+    if ($null -ne $script:knowledgeIndexProcess) { return }
+    $bridgePython = Get-ComboPath -Combo $bridgeCombo
+    if (
+        $null -eq $script:embeddingData -or
+        [string]::IsNullOrWhiteSpace($bridgePython)
+    ) {
+        Set-HiaKnowledgeIndexDisplay `
+            -Reset `
+            -Message '暂时读不到索引状态；FTS5 lexical 检索可继续工作，Houdini 仍可启动。'
+        return
+    }
+
+    try {
+        $plan = New-HiaKnowledgeIndexProcessPlan `
+            -ProjectRoot $projectRoot `
+            -BridgePython $bridgePython `
+            -EmbeddingData $script:embeddingData `
+            -EmbeddingProfile (Get-ComboEmbeddingProfile) `
+            -EmbeddingDevice (Get-ComboEmbeddingDevice) `
+            -Action $Action
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = [string]$plan.file_path
+        $startInfo.Arguments = (@($plan.arguments | ForEach-Object {
+            ConvertTo-HiaProcessArgument -Value ([string]$_)
+        }) -join ' ')
+        $startInfo.WorkingDirectory = [string]$plan.working_directory
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+        # Assign the environment collection directly in each branch.  In
+        # Windows PowerShell 5.1, returning StringDictionary from an `if`
+        # expression enumerates it into a fixed-size Object[]; Remove() below
+        # would then fail before the CLI can start.
+        if ($null -ne $startInfo.Environment) {
+            $processEnvironment = $startInfo.Environment
+        } else {
+            $processEnvironment = $startInfo.EnvironmentVariables
+        }
+        foreach ($name in @($plan.clear_environment_names)) {
+            [void]$processEnvironment.Remove([string]$name)
+        }
+        foreach ($entry in $plan.environment.GetEnumerator()) {
+            $processEnvironment[[string]$entry.Key] = [string]$entry.Value
+        }
+
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) {
+            throw '知识索引进程未启动。'
+        }
+        $script:knowledgeIndexProcess = $process
+        $script:knowledgeIndexProcessAction = $Action
+        $script:knowledgeIndexCancelRequested = $false
+        $script:knowledgeIndexProtocolError = ''
+        $script:knowledgeIndexLastEvent = $null
+        $script:knowledgeIndexOutputTask = $process.StandardOutput.ReadLineAsync()
+        $script:knowledgeIndexErrorTask = $process.StandardError.ReadToEndAsync()
+        $startMessage = if ($Action -eq 'build') {
+            '正在构建索引；每个已提交批次都会保留。'
+        } else {
+            '正在读取索引状态…'
+        }
+        Set-HiaKnowledgeIndexDisplay -Message $startMessage
+        $script:knowledgeIndexTimer.Start()
+    } catch {
+        $knowledgeIndexFailure = $_
+        if ($null -ne $script:knowledgeIndexProcess) {
+            try {
+                Stop-HiaKnowledgeIndexProcessTree `
+                    -Process $script:knowledgeIndexProcess
+            } catch { }
+            $script:knowledgeIndexProcess.Dispose()
+            $script:knowledgeIndexProcess = $null
+        }
+        $script:knowledgeIndexProcessAction = ''
+        $script:knowledgeIndexOutputTask = $null
+        $script:knowledgeIndexErrorTask = $null
+        $script:knowledgeIndexLastEvent = [pscustomobject]@{ event = 'error' }
+        $failureDetail = [string]$knowledgeIndexFailure.Exception.Message
+        $failureDetail = ($failureDetail -replace '[\r\n]+', ' ').Trim()
+        if ($failureDetail.Length -gt 300) {
+            $failureDetail = $failureDetail.Substring(0, 300) + '…'
+        }
+        $failureMessage = '无法启动知识索引命令'
+        if ($failureDetail) {
+            $failureMessage += "：$failureDetail"
+        }
+        $failureMessage += '；FTS5 lexical 检索可继续工作，Houdini 仍可启动。'
+        Set-HiaKnowledgeIndexDisplay `
+            -Message $failureMessage
+    }
+}
+
+function Stop-HiaKnowledgeIndexProcess {
+    if (
+        $null -eq $script:knowledgeIndexProcess -or
+        $script:knowledgeIndexProcessAction -ne 'build'
+    ) {
+        return
+    }
+    $script:knowledgeIndexCancelRequested = $true
+    $knowledgeIndexActionButton.Content = '正在取消…'
+    $knowledgeIndexActionButton.IsEnabled = $false
+    $knowledgeIndexStatusText.Text = '正在取消本次 CLI；已提交批次不会删除。'
+    $knowledgeIndexStatusText.ToolTip = $knowledgeIndexStatusText.Text
+    try {
+        Stop-HiaKnowledgeIndexProcessTree `
+            -Process $script:knowledgeIndexProcess
+    } catch {
+        $script:knowledgeIndexCancelRequested = $false
+        Set-HiaKnowledgeIndexDisplay -Message '无法终止本次索引 CLI 进程树；进程退出后可继续。'
     }
 }
 
@@ -570,11 +1752,41 @@ function Get-BackendIndex {
     return -1
 }
 
+function Get-EmbeddingIndex {
+    param([AllowEmptyString()][string]$Profile = '')
+
+    if (-not $Profile) { return -1 }
+    for ($index = 0; $index -lt $embeddingProfileCombo.Items.Count; $index++) {
+        $item = $embeddingProfileCombo.Items[$index]
+        $property = $item.PSObject.Properties['id']
+        if ($null -ne $property -and [string]$property.Value -eq $Profile) {
+            return $index
+        }
+    }
+    return -1
+}
+
+function Get-EmbeddingDeviceIndex {
+    param([AllowEmptyString()][string]$Device = '')
+
+    $resolved = Resolve-HiaEmbeddingDevice -Device $Device
+    for ($index = 0; $index -lt $embeddingDeviceCombo.Items.Count; $index++) {
+        $item = $embeddingDeviceCombo.Items[$index]
+        $property = $item.PSObject.Properties['id']
+        if ($null -ne $property -and [string]$property.Value -eq $resolved) {
+            return $index
+        }
+    }
+    return -1
+}
+
 function Invoke-GuiScan {
     param(
         [AllowEmptyString()][string]$PreferredHoudini = '',
         [AllowEmptyString()][string]$PreferredBridge = '',
-        [AllowEmptyString()][string]$PreferredBackend = ''
+        [AllowEmptyString()][string]$PreferredBackend = '',
+        [AllowEmptyString()][string]$PreferredEmbedding = '',
+        [AllowEmptyString()][string]$PreferredEmbeddingDevice = ''
     )
 
     Set-BusyState -Busy $true
@@ -654,6 +1866,73 @@ function Invoke-GuiScan {
             } else {
                 $bridgeCombo.SelectedIndex = -1
             }
+
+            $script:embeddingData = $null
+            $selectedBridgeForContract = Get-ComboPath -Combo $bridgeCombo
+            $contractPythonAvailable = $false
+            if (-not [string]::IsNullOrWhiteSpace($selectedBridgeForContract)) {
+                try {
+                    $contractPythonAvailable = Test-Path `
+                        -LiteralPath $selectedBridgeForContract `
+                        -PathType Leaf `
+                        -ErrorAction Stop
+                } catch {
+                    $contractPythonAvailable = $false
+                }
+            }
+            if ($contractPythonAvailable) {
+                try {
+                    $script:embeddingData = Get-HiaEmbeddingContractData `
+                        -ProjectRoot $projectRoot `
+                        -PythonExe $selectedBridgeForContract `
+                        -TimeoutSeconds $ProbeTimeoutSeconds
+                } catch {
+                    $script:embeddingData = $null
+                }
+            }
+            $embeddingProfileCombo.Items.Clear()
+            $embeddingDeviceCombo.Items.Clear()
+            if ($null -ne $script:embeddingData) {
+                $embeddingChoice = $PreferredEmbedding
+                if (-not $embeddingChoice) {
+                    $settingKey = [string]$script:embeddingData.contract.settings.profile
+                    $settingProperty = $settings.PSObject.Properties[$settingKey]
+                    if ($null -ne $settingProperty) {
+                        $embeddingChoice = [string]$settingProperty.Value
+                    }
+                }
+                try {
+                    $embeddingChoice = Resolve-HiaEmbeddingProfile `
+                        -EmbeddingData $script:embeddingData `
+                        -Profile $embeddingChoice
+                } catch {
+                    $embeddingChoice = [string]$script:embeddingData.contract.default_profile
+                }
+                foreach ($candidate in @(Get-HiaEmbeddingProfileChoices -EmbeddingData $script:embeddingData)) {
+                    [void]$embeddingProfileCombo.Items.Add($candidate)
+                }
+                $embeddingIndex = Get-EmbeddingIndex -Profile $embeddingChoice
+                if ($embeddingIndex -lt 0) {
+                    throw 'The selected embedding profile is unavailable.'
+                }
+                $embeddingProfileCombo.SelectedIndex = $embeddingIndex
+                $deviceChoice = if ($PreferredEmbeddingDevice) {
+                    $PreferredEmbeddingDevice
+                } else {
+                    [string]$inputs.embedding_device
+                }
+                foreach ($candidate in @(Get-HiaEmbeddingDeviceChoices)) {
+                    [void]$embeddingDeviceCombo.Items.Add($candidate)
+                }
+                $deviceIndex = Get-EmbeddingDeviceIndex -Device $deviceChoice
+                if ($deviceIndex -lt 0) {
+                    throw 'The selected embedding device is unavailable.'
+                }
+                $embeddingDeviceCombo.SelectedIndex = $deviceIndex
+            } else {
+                $embeddingProfileCombo.SelectedIndex = -1
+                $embeddingDeviceCombo.SelectedIndex = -1
+            }
         } finally {
             $script:suppressSelectionCheck = $false
         }
@@ -662,11 +1941,16 @@ function Invoke-GuiScan {
         $selectedHoudini = Get-ComboPath -Combo $houdiniCombo
         $selectedBridge = Get-ComboPath -Combo $bridgeCombo
         $selectedBackend = Get-ComboBackend
+        $selectedEmbedding = Get-ComboEmbeddingProfile
+        $selectedEmbeddingDevice = Get-ComboEmbeddingDevice
         $selectedRenderOutput = Get-RenderOutputPath
         $script:currentResult = Invoke-PreflightAndReport `
             -SelectedHoudini $selectedHoudini `
             -SelectedBridge $selectedBridge `
             -SelectedBackend $selectedBackend `
+            -SelectedEmbedding $selectedEmbedding `
+            -SelectedEmbeddingDevice $selectedEmbeddingDevice `
+            -EmbeddingData $script:embeddingData `
             -SelectedRenderOutput $selectedRenderOutput `
             -Candidates $script:currentCandidates
         Show-Result -Result $script:currentResult
@@ -676,6 +1960,7 @@ function Invoke-GuiScan {
         $script:suppressSelectionCheck = $false
         Set-BusyState -Busy $false
     }
+    Start-HiaKnowledgeIndexProcess -Action 'status'
 }
 
 function Add-OrSelectHoudiniCandidate {
@@ -724,14 +2009,69 @@ function Add-OrSelectBridgeCandidate {
     Mark-SelectionNeedsCheck
 }
 
+$overviewNavButton.Add_Click({ Set-HiaLauncherPage -Page 'overview' })
+$environmentNavButton.Add_Click({ Set-HiaLauncherPage -Page 'environment' })
+$preflightNavButton.Add_Click({ Set-HiaLauncherPage -Page 'preflight' })
+$reportsSettingsNavButton.Add_Click({ Set-HiaLauncherPage -Page 'reports' })
+
 $rescanButton.Add_Click({
     Invoke-GuiScan `
         -PreferredHoudini (Get-ComboPath -Combo $houdiniCombo) `
         -PreferredBridge (Get-ComboPath -Combo $bridgeCombo) `
-        -PreferredBackend (Get-ComboBackend)
+        -PreferredBackend (Get-ComboBackend) `
+        -PreferredEmbedding (Get-ComboEmbeddingProfile) `
+        -PreferredEmbeddingDevice (Get-ComboEmbeddingDevice)
+})
+
+$knowledgeIndexActionButton.Add_Click({
+    if (
+        $null -ne $script:knowledgeIndexProcess -and
+        $script:knowledgeIndexProcessAction -eq 'build'
+    ) {
+        Stop-HiaKnowledgeIndexProcess
+        return
+    }
+    if ($null -eq $script:knowledgeIndexProcess) {
+        Start-HiaKnowledgeIndexProcess -Action 'build'
+    }
 })
 
 $mcpBackendCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
+$embeddingProfileCombo.Add_SelectionChanged({
+    if ($script:suppressSelectionCheck -or $script:isBusy) { return }
+    $selectedProfile = Get-ComboEmbeddingProfile
+    if ($null -ne $script:embeddingData -and $selectedProfile) {
+        try {
+            Write-HiaEmbeddingPreference `
+                -ProjectRoot $projectRoot `
+                -EmbeddingData $script:embeddingData `
+                -EmbeddingProfile $selectedProfile `
+                -EmbeddingDevice (Get-ComboEmbeddingDevice) | Out-Null
+        } catch {
+            Show-InlineStatus -Kind 'error' -Text '无法保存知识向量模型选择。'
+            return
+        }
+    }
+    Mark-SelectionNeedsCheck
+    Show-InlineStatus -Kind 'warning' -Text '知识向量模型已切换；FTS5 无需重建，向量索引将在使用新模型时按模型重建。请重新扫描。'
+})
+$embeddingDeviceCombo.Add_SelectionChanged({
+    if ($script:suppressSelectionCheck -or $script:isBusy) { return }
+    if ($null -ne $script:embeddingData) {
+        try {
+            Write-HiaEmbeddingPreference `
+                -ProjectRoot $projectRoot `
+                -EmbeddingData $script:embeddingData `
+                -EmbeddingProfile (Get-ComboEmbeddingProfile) `
+                -EmbeddingDevice (Get-ComboEmbeddingDevice) | Out-Null
+        } catch {
+            Show-InlineStatus -Kind 'error' -Text '无法保存知识向量计算设备选择。'
+            return
+        }
+    }
+    Mark-SelectionNeedsCheck
+    Show-InlineStatus -Kind 'warning' -Text '知识向量计算设备已切换；重新扫描后生效。'
+})
 $houdiniCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
 $bridgeCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
 $renderOutputTextBox.Add_TextChanged({ Mark-SelectionNeedsCheck })
@@ -807,9 +2147,18 @@ $repairButton.Add_Click({
         }
         return
     }
+    if (
+        $null -ne $script:embeddingData -and
+        (Test-CurrentNonGreenCheck -Id 'embedding.runtime')
+    ) {
+        Start-HiaEmbeddingInstall
+        return
+    }
     $preferredHoudini = Get-ComboPath -Combo $houdiniCombo
     $preferredBridge = Get-ComboPath -Combo $bridgeCombo
     $preferredBackend = Get-ComboBackend
+    $preferredEmbedding = Get-ComboEmbeddingProfile
+    $preferredEmbeddingDevice = Get-ComboEmbeddingDevice
     Set-BusyState -Busy $true
     try {
         $actions = @(Repair-HiaSafeProject -ProjectRoot $projectRoot)
@@ -819,7 +2168,12 @@ $repairButton.Add_Click({
         return
     }
     Set-BusyState -Busy $false
-    Invoke-GuiScan -PreferredHoudini $preferredHoudini -PreferredBridge $preferredBridge -PreferredBackend $preferredBackend
+    Invoke-GuiScan `
+        -PreferredHoudini $preferredHoudini `
+        -PreferredBridge $preferredBridge `
+        -PreferredBackend $preferredBackend `
+        -PreferredEmbedding $preferredEmbedding `
+        -PreferredEmbeddingDevice $preferredEmbeddingDevice
     if ($null -ne $script:currentResult) {
         $detail = if ($actions.Count -gt 0) { ' ' + ($actions -join '；') } else { '' }
         Show-InlineStatus -Kind 'success' -Transient -Text ("安全项目修复完成。$detail")
@@ -902,6 +2256,8 @@ $launchButton.Add_Click({
     $selectedHoudini = Get-ComboPath -Combo $houdiniCombo
     $selectedBridge = Get-ComboPath -Combo $bridgeCombo
     $selectedBackend = Get-ComboBackend
+    $selectedEmbedding = Get-ComboEmbeddingProfile
+    $selectedEmbeddingDevice = Get-ComboEmbeddingDevice
     $selectedRenderOutput = Get-RenderOutputPath
     Set-BusyState -Busy $true
     try {
@@ -910,6 +2266,9 @@ $launchButton.Add_Click({
                 -SelectedHoudini $selectedHoudini `
                 -SelectedBridge $selectedBridge `
                 -SelectedBackend $selectedBackend `
+                -SelectedEmbedding $selectedEmbedding `
+                -SelectedEmbeddingDevice $selectedEmbeddingDevice `
+                -EmbeddingData $script:embeddingData `
                 -SelectedRenderOutput $selectedRenderOutput `
                 -Candidates $script:currentCandidates
             Show-Result -Result $script:currentResult
@@ -924,11 +2283,16 @@ $launchButton.Add_Click({
                 -HoudiniExe $selectedHoudini `
                 -BridgePython $selectedBridge `
                 -RenderOutputDir $selectedRenderOutput `
-                -McpBackend $selectedBackend | Out-Null
+                -McpBackend $selectedBackend `
+                -EmbeddingData $script:embeddingData `
+                -EmbeddingProfile $selectedEmbedding `
+                -EmbeddingDevice $selectedEmbeddingDevice | Out-Null
             $launchParameters = @{
                 SelectedHoudini = $selectedHoudini
                 SelectedBridge = $selectedBridge
                 SelectedBackend = $selectedBackend
+                SelectedEmbedding = $selectedEmbedding
+                SelectedEmbeddingDevice = $selectedEmbeddingDevice
                 SelectedRenderOutput = $selectedRenderOutput
             }
             if ($null -ne $script:pendingRecovery) {
@@ -956,23 +2320,48 @@ $launchButton.Add_Click({
     }
 })
 
+Initialize-HiaOptionalArtwork
+Set-HiaLauncherPage -Page 'overview'
+Update-HiaOverviewSummary
 Initialize-RecoveryPrompt
 
 $window.Add_SizeChanged({ Update-ResponsiveLayout })
 $window.Add_Closed({
     $script:inlineStatusTimer.Stop()
     $script:bootstrapTimer.Stop()
+    $script:embeddingTimer.Stop()
+    $script:knowledgeIndexWindowClosing = $true
+    $script:knowledgeIndexTimer.Stop()
+    if ($null -ne $script:knowledgeIndexProcess) {
+        try {
+            Stop-HiaKnowledgeIndexProcessTree `
+                -Process $script:knowledgeIndexProcess
+        } catch { }
+        $script:knowledgeIndexProcess.Dispose()
+        $script:knowledgeIndexProcess = $null
+    }
     if ($null -ne $script:bootstrapProcess) {
         # Disposing this wrapper does not terminate the user-started verified bootstrap.
         $script:bootstrapProcess.Dispose()
         $script:bootstrapProcess = $null
+    }
+    if ($null -ne $script:embeddingProcess) {
+        # The verified project-local install may continue after the launcher window closes.
+        $script:embeddingProcess.Dispose()
+        $script:embeddingProcess = $null
     }
 })
 $window.Add_ContentRendered({
     Update-ResponsiveLayout
     if ($script:initialScanStarted) { return }
     $script:initialScanStarted = $true
-    Invoke-GuiScan -PreferredHoudini $inputs.houdini -PreferredBridge $inputs.bridge -PreferredBackend $inputs.backend
+    Invoke-GuiScan `
+        -PreferredHoudini $inputs.houdini `
+        -PreferredBridge $inputs.bridge `
+        -PreferredBackend $inputs.backend `
+        -PreferredEmbedding $inputs.embedding `
+        -PreferredEmbeddingDevice $inputs.embedding_device
 })
 
+Set-HiaKnowledgeIndexDisplay -Reset
 [void]$window.ShowDialog()

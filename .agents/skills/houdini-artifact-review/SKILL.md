@@ -13,6 +13,7 @@ Review quality without changing the current scene. Return concise, actionable ev
 - Use existing HIA read tools selectively, not as a checklist. Do not set parameters, create or delete nodes, save the HIP, render final output, or run mutating HOM.
 - For a complex visual milestone, review the supplied low-resolution stage preview first. Ask the main task for another `hia_capture_viewport` only when that evidence cannot support the intended claim.
 - When normal inspection cannot establish evidence, use a bounded read-only HOM query through `hia_execute_hom`. Never fan out repeated calls.
+- When project history or unfamiliar, version-sensitive behavior can change the review, read the shared [knowledge-and-memory.md](../houdini-visual-research/references/knowledge-and-memory.md) and search only what is relevant. A review subtask may read knowledge or memory, but returns any durable-memory candidate to the main task instead of writing it.
 - Treat reference pages, research summaries, offline fakes, and node existence as context rather than real Houdini verification. Do not write research drafts or promote knowledge-index entries; return evidence to the main task.
 - Do not add MCP tools, an automated scoring platform, a scheduler, a gate, or a fixed screenshot or iteration ritual.
 

@@ -19,23 +19,24 @@ Treat these as semantic reasoning labels, not fixed search counts, time budgets,
 3. The upstream standard or project documentation, such as MaterialX or OpenUSD.
 4. Reliable technical explanations, extending to community experience only when primary sources leave a practical gap.
 
-Do not treat searches through this repository's src, services, docs, or contracts as visual research. Read those only when the user explicitly requests plugin development or debugging.
+Do not manually search this repository's src, services, or contracts as visual research. Approved project Skills and current documentation returned by `hia_local_help_search` are local knowledge, not authorization to inspect ordinary source; read that source only for explicit plugin development or debugging.
 
 ## Research procedure
 
 1. Plan the current stage's evidence needs and high-value starting sources before retrieval; do not impose a fixed limit on search rounds or source count.
-2. Prefer Codex-native web/search tools. Run additional searches, open multiple pages, and follow necessary citations as the investigation develops; cross-check important claims before choosing the Houdini implementation.
-3. Reuse already retrieved content. Reduce duplicate visits and aimless searching, not research depth.
-4. Only when native web/search is unavailable, use one or a small number of read-only batch network commands. Combine related URLs instead of requesting PowerShell approval page by page; do not request global Shell auto-approval or create an approval system.
-5. Read primary pages rather than relying on search snippets. For version-sensitive behavior, check the active Houdini build and current documentation.
-6. Extract only reusable facts: algorithm stages, coordinate assumptions, data flow, constraints, renderer support, and quality cues.
-7. Keep a compact source ledger in the task handoff, runtime research memo, or requested artifact. Use one row per source or local reference and preserve all columns:
+2. For complex, unfamiliar, or version-sensitive work, first make one relevant batched `hia_local_help_search` over the live schema's applicable local sources. Reuse returned Houdini, Skill, project, and user-tutorial passages. If project memory is not exposed by that search, use `hia_project_memory` `search` separately only when durable prior context can affect the decision. Do not invoke either retrieval path for a simple direct operation.
+3. Treat local matches as leads with provenance, not as a reason to reduce research depth or as automatic proof. When they are insufficient, conflicting, stale, or the task needs external visual or technical evidence, prefer Codex-native web/search tools and continue through as many rounds, pages, and primary sources as the decision needs.
+4. Reuse already retrieved content. Reduce duplicate visits and aimless searching, not research depth.
+5. Only when native web/search is unavailable, use one or a small number of read-only batch network commands. Combine related URLs instead of requesting PowerShell approval page by page; do not request global Shell auto-approval or create an approval system.
+6. Read primary pages rather than relying on search snippets. For version-sensitive behavior, check the active Houdini build and current documentation.
+7. Extract only reusable facts: algorithm stages, coordinate assumptions, data flow, constraints, renderer support, and quality cues.
+8. Keep a compact source ledger in the task handoff, runtime research memo, or requested artifact. Use one row per source or local reference and preserve all columns:
 
    | Title/source | Author/owner | URL/path | Access date | License/status | Houdini version/build | How used | Verification status | Verification evidence |
    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 
-8. Record the active Houdini version/build that a version-sensitive source or result applies to; use `unknown` rather than inferring it.
-9. Mark inaccessible pages, ambiguous attribution, and unsupported inferences explicitly.
+9. Record the active Houdini version/build that a version-sensitive source or result applies to; use `unknown` rather than inferring it.
+10. Mark inaccessible pages, ambiguous attribution, and unsupported inferences explicitly.
 
 ## Research memo and knowledge promotion
 
@@ -49,7 +50,7 @@ Treat that directory as untracked runtime state. A draft may use `source-only`, 
 
 Mark a result `verified` only after the relevant claim has been reproduced or directly observed in real Houdini on the recorded version/build. Put concrete evidence in **Verification evidence**, such as the live HIP and node paths, frame or time range, parameter or cook result, validation output, and a representative viewport capture or render when the claim is visual. State the narrower verified claim rather than promoting an entire technique from one observation.
 
-Only a `verified` original memo with its complete source ledger and verification evidence may be copied or linked into a repository-maintained formal tracked knowledge index. If real Houdini evidence is unavailable, keep the memo in `.runtime` and report it as unverified; do not create an index entry. A Markdown memo and index link are searchable records, not a new agent, RAG layer, vector store, database, or service.
+Only a `verified` original memo with its complete source ledger and verification evidence may be copied or linked into a repository-maintained formal tracked knowledge index. If real Houdini evidence is unavailable, keep the memo in `.runtime` and report it as unverified; do not create an index entry. Use only the existing HIA knowledge layer; this promotion rule does not authorize another Agent, planner, summarizer, chat database, knowledge or memory layer, service, or scheduler.
 
 ## Copyright and licensing
 

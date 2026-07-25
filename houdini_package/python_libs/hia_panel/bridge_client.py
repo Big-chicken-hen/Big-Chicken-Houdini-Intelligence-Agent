@@ -173,6 +173,19 @@ class BridgeClient(QtCore.QObject):
             context=context,
         )
 
+    def delete_thread(
+        self,
+        thread_id: str,
+        *,
+        context: str = "thread_delete",
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/threads/delete",
+            {"thread_id": thread_id},
+            context=context,
+        )
+
     def start_thread(
         self,
         *,
