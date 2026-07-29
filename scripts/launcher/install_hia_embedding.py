@@ -12,6 +12,7 @@ import argparse
 import importlib.metadata
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -25,6 +26,9 @@ from typing import Any, Mapping, Sequence
 SUPPORTED_CONTRACT_VERSION = 1
 MODEL_MANIFEST_NAME = ".hia-embedding-model.json"
 STAGING_DIRECTORY_PREFIX = ".hia-embedding-staging-"
+VENV_STAGING_DIRECTORY_PREFIX = ".venv-staging-"
+VENV_MARKER_NAME = ".hia-managed-venv.json"
+VENV_MARKER_SCHEMA = "hia-managed-python-venv/1"
 
 
 class InstallerError(RuntimeError):
@@ -349,9 +353,111 @@ def build_plan(
         "manifest_path": str(model_dir / MODEL_MANIFEST_NAME),
         "layout": layout,
         "worker_distribution": worker_distribution,
+        "dimension": int(getattr(profile, "default_dimension")),
         "child_environment": child_environment,
         "required_directories": directories,
         "remove_environment": remove_environment,
+    }
+
+
+def smoke_selected_model(
+    plan: Mapping[str, Any],
+    *,
+    staging_install_id: str,
+    device: str,
+) -> dict[str, Any]:
+    _assert_download_environment(
+        plan,
+        staging_install_id=staging_install_id,
+    )
+    if device not in {"cpu", "cuda"}:
+        raise InstallerError("embedding smoke device is invalid")
+    model_dir = Path(str(plan["model_dir"]))
+    expected_manifest = _manifest_payload(plan)
+    if (
+        not _is_ordinary_directory(model_dir)
+        or not _read_matching_manifest(
+            model_dir / MODEL_MANIFEST_NAME,
+            expected_manifest,
+        )
+        or not _model_payload_is_complete(model_dir)
+    ):
+        raise InstallerError("embedding smoke model payload is incomplete")
+    dimension = plan.get("dimension")
+    if (
+        isinstance(dimension, bool)
+        or not isinstance(dimension, int)
+        or not 1 <= dimension <= 4096
+    ):
+        raise InstallerError("embedding smoke dimension is invalid")
+    try:
+        from hia_embedding_worker.worker import EmbeddingWorker
+    except Exception as exc:
+        raise InstallerError("embedding worker smoke entry is unavailable") from exc
+
+    worker = EmbeddingWorker()
+    initialized, _stop = worker.handle(
+        {
+            "id": "installer-smoke-init",
+            "method": "init",
+            "params": {
+                "model_id": plan["model_id"],
+                "model_dir": str(model_dir),
+                "dim": dimension,
+                "profile": plan["profile_id"],
+                "model_revision": plan["revision"],
+                "device": device,
+            },
+        }
+    )
+    if initialized.get("ok") is not True:
+        raise InstallerError("embedding worker smoke initialization failed")
+    encoded, _stop = worker.handle(
+        {
+            "id": "installer-smoke-embed",
+            "method": "embed",
+            "params": {
+                "texts": ["HIA local embedding smoke"],
+                "input_type": "document",
+            },
+        }
+    )
+    if encoded.get("ok") is not True:
+        raise InstallerError("embedding worker smoke encode failed")
+    result = encoded.get("result")
+    if not isinstance(result, Mapping):
+        raise InstallerError("embedding worker smoke result is invalid")
+    vectors = result.get("vectors")
+    if (
+        result.get("profile") != plan["profile_id"]
+        or result.get("model_id") != plan["model_id"]
+        or result.get("model_revision") != plan["revision"]
+        or result.get("device") != device
+        or result.get("dim") != dimension
+        or result.get("normalized") is not True
+        or result.get("count") != 1
+        or not isinstance(vectors, list)
+        or len(vectors) != 1
+        or not isinstance(vectors[0], list)
+        or len(vectors[0]) != dimension
+    ):
+        raise InstallerError("embedding worker smoke contract mismatch")
+    try:
+        numeric = [float(value) for value in vectors[0]]
+    except (TypeError, ValueError) as exc:
+        raise InstallerError("embedding worker smoke vector is invalid") from exc
+    if not all(math.isfinite(value) for value in numeric):
+        raise InstallerError("embedding worker smoke vector is non-finite")
+    norm = math.sqrt(sum(value * value for value in numeric))
+    if not math.isfinite(norm) or abs(norm - 1.0) > 1e-4:
+        raise InstallerError("embedding worker smoke vector is not normalized")
+    return {
+        "status": "ready",
+        **expected_manifest,
+        "model_dir": str(model_dir),
+        "dimension": dimension,
+        "device": device,
+        "norm": norm,
     }
 
 
@@ -361,17 +467,95 @@ def _same_path(left: Path, right: Path) -> bool:
     )
 
 
-def _assert_download_environment(plan: Mapping[str, Any]) -> None:
+def _validated_staging_worker(
+    plan: Mapping[str, Any],
+    install_id: str,
+) -> Path:
+    if re.fullmatch(r"[0-9a-f]{32}", install_id) is None:
+        raise InstallerError("staged embedding venv install id is invalid")
+    layout = plan.get("layout")
+    if not isinstance(layout, Mapping):
+        raise InstallerError("embedding runtime layout is invalid")
+    toolchain_root = _required_layout_path(layout, "toolchain_root")
+    try:
+        resolved_toolchain = toolchain_root.resolve(strict=True)
+    except OSError as exc:
+        raise InstallerError("embedding toolchain root is unavailable") from exc
+    if not _is_ordinary_directory(resolved_toolchain):
+        raise InstallerError("embedding toolchain root is unsafe")
+
+    staging_root = toolchain_root / (
+        f"{VENV_STAGING_DIRECTORY_PREFIX}{install_id}"
+    )
+    try:
+        resolved_staging = staging_root.resolve(strict=True)
+    except OSError as exc:
+        raise InstallerError("staged embedding venv is unavailable") from exc
+    lexical_staging = Path(os.path.abspath(os.fspath(staging_root)))
+    if (
+        os.path.normcase(str(lexical_staging))
+        != os.path.normcase(str(resolved_staging))
+        or resolved_staging.parent != resolved_toolchain
+        or not _is_ordinary_directory(resolved_staging)
+    ):
+        raise InstallerError("staged embedding venv is unsafe")
+
+    marker_path = resolved_staging / VENV_MARKER_NAME
+    if not _is_ordinary_file(marker_path):
+        raise InstallerError("staged embedding venv marker is unavailable")
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise InstallerError("staged embedding venv marker is invalid") from exc
+    if (
+        not isinstance(marker, dict)
+        or marker.get("schema") != VENV_MARKER_SCHEMA
+        or marker.get("role") != "hia-embedding"
+        or marker.get("install_id") != install_id
+        or marker.get("python_version") != "3.10.11"
+        or not isinstance(marker.get("managed_python"), str)
+        or not marker["managed_python"]
+        or Path(marker["managed_python"]).is_absolute()
+        or ".." in Path(marker["managed_python"]).parts
+    ):
+        raise InstallerError("staged embedding venv marker does not match")
+
+    worker_python = resolved_staging / "Scripts" / "python.exe"
+    if not _is_ordinary_file(worker_python):
+        raise InstallerError("staged embedding worker Python is unavailable")
+    return worker_python
+
+
+def _assert_download_environment(
+    plan: Mapping[str, Any],
+    *,
+    staging_install_id: str | None = None,
+) -> None:
     raw_environment = plan.get("child_environment")
     if not isinstance(raw_environment, Mapping):
         raise InstallerError("installer environment plan is invalid")
+    canonical_worker = _required_layout_path(plan["layout"], "worker_python")
+    worker_python = (
+        _validated_staging_worker(plan, staging_install_id)
+        if staging_install_id is not None
+        else canonical_worker
+    )
+    saw_worker_environment = False
     for name, expected_value in raw_environment.items():
-        if os.environ.get(str(name)) != str(expected_value):
+        selected_value = str(expected_value)
+        if (
+            Path(selected_value).is_absolute()
+            and _same_path(Path(selected_value), canonical_worker)
+        ):
+            selected_value = str(worker_python)
+            saw_worker_environment = True
+        if os.environ.get(str(name)) != selected_value:
             raise InstallerError(
                 f"installer child environment is not isolated: {name}"
             )
+    if not saw_worker_environment:
+        raise InstallerError("installer environment plan has no worker Python")
 
-    worker_python = _required_layout_path(plan["layout"], "worker_python")
     if not _same_path(Path(sys.executable), worker_python):
         raise InstallerError("download must run in the dedicated embedding venv")
     try:
@@ -655,8 +839,15 @@ def _write_staged_manifest(
         raise InstallerError("embedding model manifest could not be written") from exc
 
 
-def download_selected_model(plan: Mapping[str, Any]) -> dict[str, Any]:
-    _assert_download_environment(plan)
+def download_selected_model(
+    plan: Mapping[str, Any],
+    *,
+    staging_install_id: str | None = None,
+) -> dict[str, Any]:
+    _assert_download_environment(
+        plan,
+        staging_install_id=staging_install_id,
+    )
     model_dir = Path(str(plan["model_dir"]))
     manifest_path = Path(str(plan["manifest_path"]))
     expected_manifest = _manifest_payload(plan)
@@ -730,12 +921,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("plan", "download"),
+        choices=("plan", "download", "smoke"),
         required=True,
     )
     parser.add_argument("--project-root", required=True)
     parser.add_argument("--profile")
     parser.add_argument("--revision")
+    parser.add_argument("--staging-install-id")
+    parser.add_argument("--device", choices=("cpu", "cuda"))
     return parser
 
 
@@ -747,11 +940,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             requested_profile=arguments.profile,
             requested_revision=arguments.revision,
         )
-        result = (
-            plan
-            if arguments.action == "plan"
-            else download_selected_model(plan)
-        )
+        if arguments.action == "plan":
+            result = plan
+        elif arguments.action == "download":
+            result = download_selected_model(
+                plan,
+                staging_install_id=arguments.staging_install_id,
+            )
+        else:
+            if not arguments.staging_install_id or not arguments.device:
+                raise InstallerError(
+                    "embedding smoke requires staging install id and device"
+                )
+            result = smoke_selected_model(
+                plan,
+                staging_install_id=arguments.staging_install_id,
+                device=arguments.device,
+            )
     except InstallerError as exc:
         print(
             json.dumps(

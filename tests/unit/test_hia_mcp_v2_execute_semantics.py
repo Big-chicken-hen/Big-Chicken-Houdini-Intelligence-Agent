@@ -20,9 +20,9 @@ GOAL_BINDING = "a" * 64
 
 class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
     def setUp(self) -> None:
-        temporary_root = REPOSITORY_ROOT / ".runtime" / "tmp"
-        temporary_root.mkdir(parents=True, exist_ok=True)
-        self._temporary = tempfile.TemporaryDirectory(dir=temporary_root)
+        self._temporary = tempfile.TemporaryDirectory(
+            dir=REPOSITORY_ROOT / "tests"
+        )
         self.project_root = Path(self._temporary.name) / "execute-project"
         self.project_root.mkdir()
         self.hou = FakeHou()
@@ -252,6 +252,7 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
                 "label": "modeling-stage-1",
                 "created": True,
                 "path": str(backup_path.resolve()),
+                "storage_scope": "runtime_fallback",
                 "error": None,
             },
             response["checkpoint"],
@@ -264,10 +265,169 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         self.assertEqual("thread-test", marker["thread_id"])
         self.assertEqual(GOAL_BINDING, marker["goal_binding"])
         self.assertEqual(backup_path.name, marker["checkpoint_file"])
-        self.assertEqual(
-            {"version", "thread_id", "goal_binding", "checkpoint_file"},
-            set(marker),
+        self.assertEqual(2, marker["version"])
+        self.assertEqual("a" * 32, marker["launcher_session_id"])
+        self.assertEqual("runtime_fallback", marker["storage_scope"])
+        self.assertIsNone(marker["source_hip_path"])
+
+    def test_saved_hip_checkpoint_tracks_save_as_and_writes_bound_pointer(self) -> None:
+        session_checkpoint_directory = self.checkpoint_directory()
+        first_parent = Path(self._temporary.name) / "first-scene"
+        second_parent = Path(self._temporary.name) / "second-scene"
+        first_parent.mkdir()
+        second_parent.mkdir()
+        first_hip = first_parent / "asset.hip"
+        second_hip = second_parent / "asset-v2.hip"
+        first_hip.write_bytes(b"hip")
+        second_hip.write_bytes(b"hip")
+        self.hou.hipFile.current_path = str(first_hip)
+        self.hou.hipFile.new_file = False
+        backup_calls = 0
+
+        def save_backup() -> str:
+            nonlocal backup_calls
+            backup_calls += 1
+            backup_path = (
+                Path(os.environ["HOUDINI_BACKUP_DIR"])
+                / f"asset_bak{backup_calls}.hip"
+            )
+            backup_path.write_bytes(b"checkpoint")
+            return str(backup_path)
+
+        self.hou.hipFile.saveAsBackup = mock.Mock(side_effect=save_backup)  # type: ignore[attr-defined]
+        self.executor._node_digest = mock.Mock(  # type: ignore[method-assign]
+            side_effect=["before-1", "after-1", "before-2", "after-2"]
         )
+        environment = {
+            "HOUDINI_BACKUP_DIR": str(session_checkpoint_directory),
+            **self.enabled_focus_environment(),
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            first = self.executor.dispatch(
+                "hia_execute_hom",
+                {
+                    "script": "pass",
+                    "diff_paths": ["/obj/asset"],
+                    "checkpoint_label": "stage-1",
+                },
+            )
+            self.assertEqual(
+                str(session_checkpoint_directory),
+                os.environ["HOUDINI_BACKUP_DIR"],
+            )
+            self.hou.hipFile.current_path = str(second_hip)
+            second = self.executor.dispatch(
+                "hia_execute_hom",
+                {
+                    "script": "pass",
+                    "diff_paths": ["/obj/asset"],
+                    "checkpoint_label": "stage-2",
+                },
+            )
+            self.assertEqual(
+                str(session_checkpoint_directory),
+                os.environ["HOUDINI_BACKUP_DIR"],
+            )
+
+        for response, parent in (
+            (first, first_parent),
+            (second, second_parent),
+        ):
+            checkpoint = response["checkpoint"]
+            self.assertTrue(checkpoint["created"])
+            self.assertEqual("hip", checkpoint["storage_scope"])
+            self.assertEqual(
+                parent / ".hia" / "checkpoints",
+                Path(checkpoint["path"]).parent,
+            )
+        pointer = json.loads(
+            (
+                session_checkpoint_directory / ".hia-stage-checkpoint.json"
+            ).read_text(encoding="utf-8")
+        )
+        local_marker = json.loads(
+            (
+                second_parent
+                / ".hia"
+                / "checkpoints"
+                / ".hia-stage-checkpoint.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(pointer, local_marker)
+        self.assertEqual(2, pointer["version"])
+        self.assertEqual("a" * 32, pointer["launcher_session_id"])
+        self.assertEqual("thread-test", pointer["thread_id"])
+        self.assertEqual(GOAL_BINDING, pointer["goal_binding"])
+        self.assertEqual("hip", pointer["storage_scope"])
+        self.assertEqual(str(second_hip.resolve()), pointer["source_hip_path"])
+        self.assertEqual(Path(second["checkpoint"]["path"]).name, pointer["checkpoint_file"])
+
+    def test_unsafe_saved_hip_checkpoint_uses_session_fallback(self) -> None:
+        session_checkpoint_directory = self.checkpoint_directory()
+        scene_parent = Path(self._temporary.name) / "unsafe-checkpoint-scene"
+        scene_parent.mkdir()
+        hip_path = scene_parent / "scene.hip"
+        hip_path.write_bytes(b"hip")
+        self.hou.hipFile.current_path = str(hip_path)
+        self.hou.hipFile.new_file = False
+
+        def save_backup() -> str:
+            backup = Path(os.environ["HOUDINI_BACKUP_DIR"]) / "scene_bak1.hip"
+            backup.write_bytes(b"checkpoint")
+            return str(backup)
+
+        self.hou.hipFile.saveAsBackup = mock.Mock(side_effect=save_backup)  # type: ignore[attr-defined]
+        self.executor._node_digest = mock.Mock(  # type: ignore[method-assign]
+            side_effect=["before", "after"]
+        )
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "HOUDINI_BACKUP_DIR": str(session_checkpoint_directory),
+                    **self.enabled_focus_environment(),
+                },
+                clear=False,
+            ),
+            mock.patch(
+                "hia_mcp_runtime.executor._is_reparse_point",
+                side_effect=lambda path: Path(path) == scene_parent,
+            ),
+        ):
+            response = self.executor.dispatch(
+                "hia_execute_hom",
+                {
+                    "script": "pass",
+                    "diff_paths": ["/obj/asset"],
+                    "checkpoint_label": "unsafe-parent",
+                },
+            )
+
+        checkpoint = response["checkpoint"]
+        self.assertTrue(checkpoint["created"])
+        self.assertEqual("runtime_fallback", checkpoint["storage_scope"])
+        self.assertTrue(
+            Path(checkpoint["path"]).is_relative_to(session_checkpoint_directory)
+        )
+        self.assertFalse((scene_parent / ".hia").exists())
+
+    def test_backup_environment_is_restored_when_hou_putenv_fails(self) -> None:
+        original = str(self.checkpoint_directory())
+        replacement = self.project_root / "replacement-checkpoints"
+        replacement.mkdir()
+        self.hou.putenv = mock.Mock(  # type: ignore[attr-defined]
+            side_effect=RuntimeError("simulated putenv failure")
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {"HOUDINI_BACKUP_DIR": original},
+            clear=False,
+        ):
+            with self.assertRaises(RuntimeError):
+                with self.executor._houdini_backup_directory(replacement):  # type: ignore[attr-defined]
+                    pass
+            self.assertEqual(original, os.environ["HOUDINI_BACKUP_DIR"])
 
     def test_focus_mode_off_never_creates_a_recovery_checkpoint(self) -> None:
         checkpoint_directory = self.checkpoint_directory()
@@ -532,19 +692,17 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         )
 
         timings = response["phase_timings"]
-        for name in (
-            "runtime_ui_queue_seconds",
-            "runtime_ui_main_thread_seconds",
-            "runtime_ui_return_seconds",
-            "runtime_pre_diff_seconds",
-            "runtime_hom_seconds",
-            "runtime_post_diff_seconds",
-            "runtime_checkpoint_seconds",
-            "runtime_result_normalization_seconds",
-            "runtime_execute_total_seconds",
-        ):
-            self.assertIn(name, timings)
-            self.assertGreaterEqual(timings[name], 0.0)
+        self.assertEqual(
+            {
+                "queue_seconds",
+                "hom_seconds",
+                "validation_seconds",
+                "total_seconds",
+            },
+            set(timings),
+        )
+        for value in timings.values():
+            self.assertGreaterEqual(value, 0.0)
         self.assertFalse(response["execution_limit"]["interruptible_after_main_thread_entry"])
         self.assertTrue(response["execution_limit"]["hom_may_continue_after_client_timeout"])
         self.assertFalse(response["execution_limit"]["automatic_retry_after_timeout"])

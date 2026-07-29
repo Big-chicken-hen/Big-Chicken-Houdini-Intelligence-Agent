@@ -1,0 +1,1290 @@
+{
+  "schema_version": 2,
+  "pack_id": "sidefx-official-workflows-v2",
+  "pack_version": "2.0.0",
+  "research_notes": [
+    "Current general SideFX documentation pages often display Houdini 22; Houdini 21 differences were cross-checked against /news/21 pages and pages explicitly marked for Houdini 21.",
+    "Opening the Layout LOP page directly once produced a tool-layer Internal Error.",
+    "Some official video pages expose no searchable transcript, so no unverified video details were invented."
+  ],
+  "sources": [
+    {
+      "id": "src-f24f8c73ba0ad363",
+      "title": "Copy to Points SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/copytopoints",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a01943d6fbd65c9a",
+      "title": "Copying and instancing point attributes",
+      "url": "https://www.sidefx.com/docs/houdini/copy/instanceattrs",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-70d61b7a33ddf53a",
+      "title": "Copying and instancing",
+      "url": "https://www.sidefx.com/docs/houdini/copy/index.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-dfec8e0b6a03e6cc",
+      "title": "Ocean Spectrum SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/oceanspectrum.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-783f8a9cd7d0bc29",
+      "title": "Intro to Look Development and Lighting",
+      "url": "https://www.sidefx.com/tutorials/intro-to-look-development-and-lighting/",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-2b36ae774c342ef9",
+      "title": "Using MaterialX in Solaris",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/materialx.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-81f3e5fe7117587e",
+      "title": "Oceans workflow",
+      "url": "https://www.sidefx.com/docs/houdini/fluid/oceans.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a4df953393510b0e",
+      "title": "Houdini 21 PDG changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/pdg.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-935b52f92be9f4a2",
+      "title": "Introduction to PDG and TOPs",
+      "url": "https://www.sidefx.com/docs/houdini/tops/intro.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-26da3d85db1ca293",
+      "title": "PDG FX workflow tutorial",
+      "url": "https://www.sidefx.com/docs/houdini/tops/tutorial_pdgfxworkflow.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c7c1f24eacf17db9",
+      "title": "TOP file paths",
+      "url": "https://www.sidefx.com/docs/houdini/tops/paths.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-0f629f840f652e76",
+      "title": "Copy to Points LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/copytopoints.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-9a1d594e39f1f7e4",
+      "title": "PDG cache modes",
+      "url": "https://www.sidefx.com/docs/houdini/tops/pdg/cacheMode.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-2abd7a33e65420ce",
+      "title": "PDG Services",
+      "url": "https://www.sidefx.com/docs/houdini/tops/services.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-ba3e5264685e4a4b",
+      "title": "Creating materials for Karma",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/kug/materials.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-34d247207016ad9f",
+      "title": "Karma A Beautiful Game",
+      "url": "https://www.sidefx.com/tutorials/karma-a-beautiful-game/",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-f2f397e7fba6168c",
+      "title": "Transferring animation",
+      "url": "https://www.sidefx.com/docs/houdini/character/kinefx/retargeting.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-9749a162ca39d076",
+      "title": "Karma",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/karma.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-bfcc65470fd1116e",
+      "title": "AOV workflows",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/support/aovs.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-e895e25da7255f7c",
+      "title": "Houdini 21 Karma changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/karma.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-53bc674d00abb6fe",
+      "title": "Karma XPU",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/karma_xpu.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-9ea200f734e480b7",
+      "title": "Render Var LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/rendervar.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-73d15084eec4779d",
+      "title": "Karma AOV 2.0",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/vop/kma_aov-2.0.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-946c887c0ad90fde",
+      "title": "Cryptomatte",
+      "url": "https://www.sidefx.com/docs/houdini/render/cryptomatte.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-86f62b4a006f3246",
+      "title": "Character folder structure",
+      "url": "https://www.sidefx.com/docs/houdini/character/kinefx/packedcharacterformat.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-d537e568b883e572",
+      "title": "MotionClips",
+      "url": "https://www.sidefx.com/docs/houdini/character/kinefx/motionclips.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-bc5710d53571d74c",
+      "title": "Houdini 21 APEX and KineFX changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/kinefx.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a3571e7c8c333027",
+      "title": "KineFX character toolset",
+      "url": "https://www.sidefx.com/docs/houdini/character/kinefx/overview.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-b68c19290c3f5ba2",
+      "title": "Introduction to Pyro: post-processing and rendering",
+      "url": "https://www.sidefx.com/docs/houdini/pyro/intro.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-43702b102c72e1a5",
+      "title": "Vellum Solver DOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/dop/vellumsolver.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-d98a37fef8ebb8e3",
+      "title": "Working with low- and high-resolution cloth",
+      "url": "https://www.sidefx.com/docs/houdini/vellum/lowreshighres.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-5d2e56401db87d4d",
+      "title": "Vellum soft bodies",
+      "url": "https://www.sidefx.com/docs/houdini/vellum/softbody.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-6b68ac314eae8004",
+      "title": "Vellum overview",
+      "url": "https://www.sidefx.com/docs/houdini/vellum/overview.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a8214c567cf1f035",
+      "title": "UV Layout SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/uvlayout.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-4ff295f96a81dd2d",
+      "title": "UV Unwrap SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/uvunwrap.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-cd5b14c717ffe21a",
+      "title": "UV Flatten from Points SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/uvflattenfrompoints.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-70009f0fc3269b60",
+      "title": "Attribute Wrangle SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/attribwrangle.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-b7d1b90b1ee231e8",
+      "title": "VEX language reference",
+      "url": "https://www.sidefx.com/docs/houdini/vex/lang.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-382eef4dcb682559",
+      "title": "Procedural Thinking",
+      "url": "https://www.sidefx.com/tutorials/procedural-thinking/",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-23792f31e11003b6",
+      "title": "Volume Wrangle SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/volumewrangle.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-7a365029b6af72a7",
+      "title": "Vellum dynamic constraints",
+      "url": "https://www.sidefx.com/docs/houdini/vellum/dynamicconstraints.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a6356e91955897fc",
+      "title": "Using VEX expressions",
+      "url": "https://www.sidefx.com/docs/houdini/vex/snippets",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c7555aaa9a7cfb10",
+      "title": "VEX geometry functions",
+      "url": "https://www.sidefx.com/docs/houdini/vex/functions/index.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-3f37ebfa66962bb4",
+      "title": "Destruction overview",
+      "url": "https://www.sidefx.com/docs/houdini/destruction/overview.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-90d6e0ae943f0cfa",
+      "title": "RBD Pack SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/rbdpack.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-da36d5f4085889a4",
+      "title": "Solaris performance",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/performance.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-6f860a68141adcda",
+      "title": "Houdini 21 Rigid Body Dynamics changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/rbd.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-764640f96f6ced88",
+      "title": "Pyro Solver SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/pyrosolver.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-901bda654cc502de",
+      "title": "RBD constraints",
+      "url": "https://www.sidefx.com/docs/houdini/destruction/constraints.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-630b0a2595aec918",
+      "title": "RBD Bullet Solver SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/rbdbulletsolver.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-078fdf25bd35da19",
+      "title": "Attribute Create SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/attribcreate.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-b573eab55f2b2b86",
+      "title": "Solaris Essentials",
+      "url": "https://www.sidefx.com/tutorials/solaris-essentials/",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-5fa0130b0705fb56",
+      "title": "UV Flatten SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/uvflatten.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c27d3b1fc5e546bf",
+      "title": "Geometry",
+      "url": "https://www.sidefx.com/docs/houdini/model/index.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a89de2ea068ee62d",
+      "title": "Scene Import LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/sceneimport.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-0dba2e2b265623dd",
+      "title": "How LOPs work",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/about_lops.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-63415f84fa3db2c1",
+      "title": "Geometry attributes",
+      "url": "https://www.sidefx.com/docs/houdini/model/attributes.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-21d333dd0ff192ab",
+      "title": "Cache COP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/cop/cache.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-b8ff9c2f5ce3feba",
+      "title": "Setting up a crowd simulation",
+      "url": "https://www.sidefx.com/docs/houdini/crowds/setup.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-d4a6600f10db92a1",
+      "title": "Crowd caches",
+      "url": "https://www.sidefx.com/docs/houdini/crowds/caches.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-f73d0328dbdb8aad",
+      "title": "Copernicus cables",
+      "url": "https://www.sidefx.com/docs/houdini/copernicus/cables.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c100f17e38202b4b",
+      "title": "Copernicus glossary",
+      "url": "https://www.sidefx.com/docs/houdini/copernicus/glossary.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-4244a497e296979e",
+      "title": "Houdini 21 Copernicus changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/copernicus.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-4bcbfbd2e9f2b7f0",
+      "title": "Working with Copernicus nodes",
+      "url": "https://www.sidefx.com/docs/houdini/copernicus/working_with_cops.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-0f8810277791e2c8",
+      "title": "SOP Whitewater",
+      "url": "https://www.sidefx.com/docs/houdini/fluid/sopwhitewater.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a736e17312cfaf23",
+      "title": "Houdini 21 Pyro and FLIP changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/pyro.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-49c84a9ca51bc748",
+      "title": "FLIP Solver SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/flipsolver.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-2b214185409a4a74",
+      "title": "Caching and previews for SOP FLIP",
+      "url": "https://www.sidefx.com/docs/houdini/fluid/sopcaching.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c23e275c05ce903e",
+      "title": "Houdini 21 Crowd changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/crowds.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-7d7598224dc45643",
+      "title": "Official Crowd learning collection",
+      "url": "https://www.sidefx.com/learn/collections/crowds/",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-f5e5f7526083a69f",
+      "title": "Houdini 21 VEX and OpenCL changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/vex.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-97534928cf22c038",
+      "title": "Cooking",
+      "url": "https://www.sidefx.com/docs/houdini/basics/cooking",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c19f821c3ba49c25",
+      "title": "Houdini 21 user interface and scripting changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/viewport.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-291b474b53d6d103",
+      "title": "Channel nodes and CHOP networks",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/chop/index.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-951bc6a108e599ac",
+      "title": "Performance Monitor pane",
+      "url": "https://www.sidefx.com/docs/houdini/ref/panes/perfmon.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-42e01f6f3c8d358e",
+      "title": "File Cache SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/filecache.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-1bd24e5fc72508ef",
+      "title": "Primitives",
+      "url": "https://www.sidefx.com/docs/houdini/model/primitives.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-9681de9ec02382ca",
+      "title": "Pack SOP and packed primitives",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/pack",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-8169e3237d853c99",
+      "title": "Writing out USD",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/output.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-edb8bb7150e15875",
+      "title": "Houdini 21 Solaris changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/solaris.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-81d565a9a098c5e0",
+      "title": "Introduction to Copernicus",
+      "url": "https://www.sidefx.com/docs/houdini/copernicus/intro.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-29c0a36cda491f18",
+      "title": "USD in Solaris",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/usd.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-41626e03a05013fe",
+      "title": "Channel and audio formats: CHOP internals",
+      "url": "https://www.sidefx.com/docs/houdini/io/formats/channel_formats.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-06381a8c307a5cbf",
+      "title": "Export channels window",
+      "url": "https://www.sidefx.com/docs/houdini/ref/windows/channelexport.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-8fb9c7ce695a0cc5",
+      "title": "Component Builder",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/component_builder.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-f863a3fbe0b7cddd",
+      "title": "Fluid-object collisions",
+      "url": "https://www.sidefx.com/docs/houdini/fluid/sopcollisions.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-961d03304a4c4f3e",
+      "title": "Heightfield scattering attributes",
+      "url": "https://www.sidefx.com/docs/houdini/heightfields/scatterattribs.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-4c946dd3cfc889ec",
+      "title": "Various heightfield features and output",
+      "url": "https://www.sidefx.com/docs/houdini/heightfields/workflows.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-d237a80a236746b2",
+      "title": "Terrain heightfields for Unity",
+      "url": "https://www.sidefx.com/docs/houdini/unity/terrain/basics.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-ee2ce0e803dbf9c1",
+      "title": "What's new: Modeling, geometry, and terrains in Houdini 21",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/model.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-690388aa35e3cc42",
+      "title": "Terrain creation",
+      "url": "https://www.sidefx.com/docs/houdini/heightfields/creation.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-dc3944677c1fc71a",
+      "title": "HeightField SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/heightfield.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-abddf4d342c108a4",
+      "title": "HeightField Erode 3.0 SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/heightfield_erode.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-4e6d730b1b40144f",
+      "title": "Tool scripts",
+      "url": "https://www.sidefx.com/docs/houdini/hom/tool_script.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-82375011a98b4f24",
+      "title": "Karma sampling",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/kug/sampling.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-bf5e8172f380c2a2",
+      "title": "Reducing noise",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/kug/noise.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-8cc10ce690bfeeda",
+      "title": "Python scripting",
+      "url": "https://www.sidefx.com/docs/houdini/hom/",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c3df40d55d8a4913",
+      "title": "HOM introduction",
+      "url": "https://www.sidefx.com/docs/houdini/hom/intro.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-39b8cfb681e3c3ed",
+      "title": "hou.NodeError",
+      "url": "https://www.sidefx.com/docs/houdini/hom/hou/NodeError.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-ae8d79b66ab24e06",
+      "title": "Command-Line Scripting",
+      "url": "https://www.sidefx.com/docs/houdini/hom/commandline",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-e90dbd73d4b94400",
+      "title": "H21 Foundations welcome",
+      "url": "https://www.sidefx.com/tutorials/h21-foundations-welcome/",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-fa66da847826b79c",
+      "title": "Houdini 21 documentation",
+      "url": "https://www.sidefx.com/docs/houdini/",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-65dcb2d0e10c8742",
+      "title": "Solaris and Karma",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/index.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-d585bedc1c85a946",
+      "title": "Compiled SOPs H16 Masterclass",
+      "url": "https://www.sidefx.com/tutorials/houdini-16-masterclass-compiled-sops/?collection=30",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-118c96fa0ff03954",
+      "title": "Narrow-band simulations",
+      "url": "https://www.sidefx.com/docs/houdini/fluid/sopnarrowband.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c2ff0c589af019d7",
+      "title": "Looping in geometry networks",
+      "url": "https://www.sidefx.com/docs/houdini/model/looping.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-f8e5535e67a2fe4e",
+      "title": "Compiled blocks",
+      "url": "https://www.sidefx.com/docs/houdini/model/compile.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-518e839945cefc5f",
+      "title": "hou.HDADefinition",
+      "url": "https://www.sidefx.com/docs/houdini/hom/hou/HDADefinition.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-207cce61631665ee",
+      "title": "What's new: Houdini Engine, APIs, and plug-ins in H21",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/engine.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-febf2a6d9cd1082d",
+      "title": "Heightfields and terrains",
+      "url": "https://www.sidefx.com/docs/houdini/heightfields/index.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-cc1ea19df759bf02",
+      "title": "Install and manage digital assets",
+      "url": "https://www.sidefx.com/docs/houdini/assets/install.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-cfbff8cfb44d0a3a",
+      "title": "Creating and versioning digital assets",
+      "url": "https://www.sidefx.com/docs/houdini/assets/create.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-d8376c4f31741f10",
+      "title": "Digital asset versions and namespaces",
+      "url": "https://www.sidefx.com/docs/houdini/assets/namespaces.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-52046e8d229d7693",
+      "title": "Edit an asset's user interface",
+      "url": "https://www.sidefx.com/docs/houdini/assets/asset_ui.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-e9209b63e2cd65a1",
+      "title": "Project management",
+      "url": "https://www.sidefx.com/docs/houdini/basics/project.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c436db02b5900452",
+      "title": "hou.fileReferences",
+      "url": "https://www.sidefx.com/docs/houdini/hom/hou/fileReferences.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-84c5281141dea184",
+      "title": "Houdini 21 Smashing Wine Glass",
+      "url": "https://media.sidefx.com/files/tutorials/h21-foundations-smashing-wineglass/h21_foundations_smashing_wineglass.pdf",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-4372c1f94672f0bc",
+      "title": "KineFX skin capture",
+      "url": "https://www.sidefx.com/docs/houdini/character/kinefx/capture.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-9df65cd157d24acd",
+      "title": "Crowd agent states",
+      "url": "https://www.sidefx.com/docs/houdini/crowds/states.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-626f4096e98f7239",
+      "title": "Crowd triggers and transitions",
+      "url": "https://www.sidefx.com/docs/houdini/crowds/triggers.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-0535a15c4840ca99",
+      "title": "pdgoutput expression",
+      "url": "https://www.sidefx.com/docs/houdini/expressions/pdgoutput.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-b264a6a53cd69e7d",
+      "title": "hou.OpNode reference",
+      "url": "https://www.sidefx.com/docs/houdini/hom/hou/OpNode.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-91cdf8dfd04aef00",
+      "title": "hou.Parm reference",
+      "url": "https://www.sidefx.com/docs/houdini/hom/hou/Parm.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-2a7122995b71e110",
+      "title": "Bake Geometry Textures COP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/cop/bakegeometrytextures.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-0072d10dce67caa3",
+      "title": "ROP Image Output COP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/cop/rop_image.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-ac994e7c114ebe70",
+      "title": "Crowd Solver DOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/dop/crowdsolver.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-61f8c0a8dd304bcd",
+      "title": "Crowd State DOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/dop/crowdstate.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-f4b89447823a0b6a",
+      "title": "Crowd Transition DOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/dop/crowdtransition.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-68c8e3e7843d45f0",
+      "title": "Crowd Trigger DOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/dop/crowdtrigger.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-54b806bafd695186",
+      "title": "Assign Material LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/assignmaterial.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-8efa9a1eea869c97",
+      "title": "Camera LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/camera.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-42edce04dc784d18",
+      "title": "Configure Layer LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/configurelayer.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-71ff7e4aaa349d7d",
+      "title": "Configure Primitives LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/configureprimitive.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-1c5f0a851efa5eae",
+      "title": "Karma Ocean LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/karmaocean.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-ddab2b3e61f2b8d0",
+      "title": "Karma Render Products LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/karmarenderproducts.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-9eda7a39e87d031c",
+      "title": "Karma Render Settings LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/karmarendersettings.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-1aaa267d153596c5",
+      "title": "Layer Break LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/layerbreak.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-92f624f531e79a55",
+      "title": "Light LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/light.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-3346d2ba4cae4412",
+      "title": "Material Library LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/materiallibrary.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-67c0dc4f9d8de96e",
+      "title": "Volume LOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/volume.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-1846b1ac14b926ca",
+      "title": "Biped Retarget SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--biped_retarget.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-4810c562bc5b35d6",
+      "title": "Biped Setup SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--biped_setup.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-35410f0344886259",
+      "title": "Full Body IK SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--fullbodyik.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-dc448c79cd5d062f",
+      "title": "Joint Capture Biharmonic SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--jointcapturebiharmonic.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-46568eec33ee51e2",
+      "title": "Joint Capture Paint SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--jointcapturepaint.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-5ee355672a7648a5",
+      "title": "Joint Capture Proximity SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--jointcaptureproximity.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-0370267f9e4402da",
+      "title": "Joint Deform SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--jointdeform.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-2a6dd06ce69bb147",
+      "title": "Map Points SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--mappoints.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-5f700b7d15321bb7",
+      "title": "Rig Match Pose SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/kinefx--rigmatchpose.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-48dee028e8cc7bb6",
+      "title": "RBD Constraint Properties SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/rbdconstraintproperties.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a67cbfc83ad80745",
+      "title": "RBD Unpack SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/rbdunpack.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c771b08cd8814fec",
+      "title": "Vellum Constraints SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/vellumconstraints",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c49334a365d79881",
+      "title": "Whitewater Post-Process SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/whitewaterpostprocess.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-c27962f5fc6d406f",
+      "title": "Whitewater Solver SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/whitewatersolver.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-80120fe89ed9a821",
+      "title": "Karma Volume VOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/vop/kma_volume.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-f54e9320a4410599",
+      "title": "Vellum Hair workflow",
+      "url": "https://www.sidefx.com/docs/houdini/shelf/vellumhair.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a47886787542ec74",
+      "title": "PDG attributes",
+      "url": "https://www.sidefx.com/docs/houdini/tops/attributes.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-5cdfaf7cf7312965",
+      "title": "PDG common how-tos",
+      "url": "https://www.sidefx.com/docs/houdini/tops/commonhowto.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-5d1ad0995241e089",
+      "title": "Vellum attributes",
+      "url": "https://www.sidefx.com/docs/houdini/vellum/vellumattributes.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-dfa3edec0fd986a2",
+      "title": "Minimal SOP FLIP setups",
+      "url": "https://www.sidefx.com/docs/houdini/fluid/sopminimalsetup.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-42d515f822d13b02",
+      "title": "FLIP Container SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/flipcontainer.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-422aeb8d7621fc48",
+      "title": "FLIP Boundary SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/flipboundary.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-a0dcdf60d69cfc08",
+      "title": "Simulation cache checkpoints",
+      "url": "https://www.sidefx.com/docs/houdini/dyno/cache",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-e6fa998e58c74311",
+      "title": "Animation",
+      "url": "https://www.sidefx.com/docs/houdini/anim/index.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-0b754dc9b2e48673",
+      "title": "Keyframes",
+      "url": "https://www.sidefx.com/docs/houdini/anim/keyframes.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-f919c38e69f70481",
+      "title": "hou.Keyframe",
+      "url": "https://www.sidefx.com/docs/houdini/hom/hou/Keyframe.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-984b26fa0fe81a6f",
+      "title": "hou.parmExtrapolate",
+      "url": "https://www.sidefx.com/docs/houdini/hom/hou/parmExtrapolate.html",
+      "accessed": "2026-07-26"
+    },
+    {
+      "id": "src-6a32e44726e088b6",
+      "title": "Curve SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/curve.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-c8fd3af4211ee445",
+      "title": "Resample SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/resample.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-938e55e1f77f42ff",
+      "title": "Sweep SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/sweep.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-4a56296848d075de",
+      "title": "Trim NURBS surfaces",
+      "url": "https://www.sidefx.com/docs/houdini/model/trim_nurbs.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-372a64688b638458",
+      "title": "Subdivide SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/subdivide.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-d21e5fa0652c79a9",
+      "title": "Crease SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/crease.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-478cfed1dc374cac",
+      "title": "OpenCL SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/opencl.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-962fd422166d605a",
+      "title": "OpenCL for VEX users",
+      "url": "https://www.sidefx.com/docs/houdini/vex/ocl.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-93bd05bce16d853b",
+      "title": "OpenCL SOP for VEX users",
+      "url": "https://www.sidefx.com/tutorials/opencl-sop-for-vex-users/",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-598bd3bd10e6929a",
+      "title": "SOP Solver DOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/dop/sopsolver.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-25f117fac81d18ae",
+      "title": "Block Begin Compile SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/compile_begin.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-b4a20021b370b172",
+      "title": "Block End Compile SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/compile_end.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-78ce1abdd60e1d9d",
+      "title": "Creating and styling guide hair with Guide Groom",
+      "url": "https://www.sidefx.com/docs/houdini/fur/groom.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-17f384f134e0664c",
+      "title": "Guide Transfer SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/guidetransfer.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-0095e5ab1a110091",
+      "title": "Hair Generate SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/hairgen.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-43449d114dc44b41",
+      "title": "Houdini 21 muscles and character effects changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/muscles.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-da265749a623aac9",
+      "title": "Houdini 22 hair, fur, and feathers changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/22/feathers.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-cbe854a337c72960",
+      "title": "About finite elements",
+      "url": "https://www.sidefx.com/docs/houdini/finiteelements/about.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-ed104669bd6fb34c",
+      "title": "Creating simulation meshes for use with FEM",
+      "url": "https://www.sidefx.com/docs/houdini/finiteelements/geometry.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-199fb469b620e554",
+      "title": "FEM constraints",
+      "url": "https://www.sidefx.com/docs/houdini/finiteelements/constraints.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-1782d2e651a02e54",
+      "title": "Finite element collisions",
+      "url": "https://www.sidefx.com/docs/houdini/finiteelements/collisions.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-050bee0f04d9ffc6",
+      "title": "Rendering finite elements",
+      "url": "https://www.sidefx.com/docs/houdini/finiteelements/rendering.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-84239f2274b3ed8c",
+      "title": "FEM Solver 2.0 DOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/dop/femsolver.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-d405fb36c91ff904",
+      "title": "Houdini 20.5 MPM changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/20_5/mpm.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-fce378fac68820fc",
+      "title": "Houdini 21 MPM changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/mpm.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-39fdb8cfd25871ab",
+      "title": "MPM Container SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/mpmcontainer.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-4783cccfaf652c3f",
+      "title": "MPM Source SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/mpmsource.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-e6daa355f466c7af",
+      "title": "MPM Collider SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/mpmcollider.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-a5c773fbc87b0c28",
+      "title": "MPM Solver SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/mpmsolver.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-de4b8555662430a7",
+      "title": "MPM Surface SOP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/mpmsurface.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-f40af1438b6d5c3c",
+      "title": "Copernicus for Houdini users",
+      "url": "https://www.sidefx.com/docs/houdini/copernicus/transition.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-1a5be461e0e3a973",
+      "title": "Pyro Block Begin COP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/cop/pyro_block_begin.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-af12dfdd365a334d",
+      "title": "Pyro Configure COP",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/cop/pyro_configure.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-cb0eccde101ff82d",
+      "title": "Houdini 22 Pyro and simulation changes",
+      "url": "https://www.sidefx.com/docs/houdini/news/22/pyro.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-d119e391b932ca8f",
+      "title": "Writing custom viewer states in Python",
+      "url": "https://www.sidefx.com/docs/houdini/hom/python_states.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-6eb6a3a3feb4d53f",
+      "title": "Python state creating and editing nodes",
+      "url": "https://www.sidefx.com/docs/houdini/hom/state_node.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-9f0c889bc2d21076",
+      "title": "Python states supporting undo",
+      "url": "https://www.sidefx.com/docs/houdini/hom/state_undo.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-56d23e651e92bbe4",
+      "title": "Python state guide geometry",
+      "url": "https://www.sidefx.com/docs/houdini/hom/state_guides.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-2ffb8f4351ff0e14",
+      "title": "Python state Copernicus",
+      "url": "https://www.sidefx.com/docs/houdini/hom/state_cops.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-e8368bd65bd82d95",
+      "title": "Viewer State Browser",
+      "url": "https://www.sidefx.com/docs/houdini/ref/windows/viewer_state_browser.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-d686d4a112f05d88",
+      "title": "HDK getting started",
+      "url": "https://www.sidefx.com/docs/hdk/_h_d_k__intro__getting_started.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-8e324b07e8f3853a",
+      "title": "Compiling HDK code",
+      "url": "https://www.sidefx.com/docs/hdk/_h_d_k__intro__compiling.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-786491caaa0ebfbb",
+      "title": "HDK build tools",
+      "url": "https://www.sidefx.com/docs/hdk/_h_d_k__intro__tools.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-dd2a31529b5f84e8",
+      "title": "HDK compatibility",
+      "url": "https://www.sidefx.com/docs/hdk/_h_d_k__intro__compatibility.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-e87959a68c9b98a1",
+      "title": "Debugging custom HDK plug-ins",
+      "url": "https://www.sidefx.com/docs/hdk/_h_d_k__intro__debugging.html",
+      "accessed": "2026-07-27"
+    },
+    {
+      "id": "src-a799701a9215fbe8",
+      "title": "Houdini packages",
+      "url": "https://www.sidefx.com/docs/houdini/ref/plugins.html",
+      "accessed": "2026-07-27"
+    }
+  ]
+}

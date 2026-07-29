@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import unittest
@@ -11,7 +12,12 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 BOOTSTRAP_PATH = REPOSITORY_ROOT / "scripts" / "bootstrap-runtime.ps1"
 BUILD_RELEASE_PATH = REPOSITORY_ROOT / "scripts" / "build-release.ps1"
 PUBLIC_CHECKER_PATH = REPOSITORY_ROOT / "scripts" / "check-public-release.py"
+KNOWLEDGE_PACK_PATH = REPOSITORY_ROOT / "knowledge" / "sidefx-official"
 README_PATH = REPOSITORY_ROOT / "README.md"
+INSTALLATION_PATH = REPOSITORY_ROOT / "docs" / "INSTALLATION.md"
+TEST_REPORT_PATH = REPOSITORY_ROOT / "docs" / "TEST-REPORT.md"
+GITIGNORE_PATH = REPOSITORY_ROOT / ".gitignore"
+HIA_MCP_V2_PATH = REPOSITORY_ROOT / "docs" / "HIA-MCP-V2.md"
 XAML_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.xaml"
 WPF_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Wpf.ps1"
 CORE_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Core.psm1"
@@ -24,6 +30,27 @@ CS_PROJECT_PATH = (
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    def test_knowledge_cli_documentation_uses_project_managed_venv(self) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        hia_mcp_v2 = HIA_MCP_V2_PATH.read_text(encoding="utf-8")
+        managed_command = (
+            r".\.venv\Scripts\python.exe -B "
+            r".\houdini_package\python_libs\hia_mcp_runtime\knowledge_index_cli.py"
+        )
+        install_command = (
+            r"powershell -File .\scripts\hia-knowledge.ps1 environment-install"
+        )
+
+        self.assertEqual(1, readme.count(managed_command))
+        self.assertEqual(13, hia_mcp_v2.count(managed_command))
+        for source in (readme, hia_mcp_v2):
+            self.assertIn(install_command, source)
+            self.assertNotIn(
+                "\npython -B "
+                r".\houdini_package\python_libs\hia_mcp_runtime\knowledge_index_cli.py",
+                source,
+            )
+
     def test_release_powershell_scripts_parse(self) -> None:
         for path in (BOOTSTRAP_PATH, BUILD_RELEASE_PATH):
             command = (
@@ -55,13 +82,15 @@ class ReleasePackagingTests(unittest.TestCase):
             r"downloads\codex\$version",
             r"toolchains\codex\$version",
             r"tmp\codex-bootstrap",
-            "Python 3.10+",
+            r"scripts\hia-knowledge.ps1 environment-install",
+            "a global or PATH Python is not used by the normal setup",
             "No global PATH, registry, Houdini installation, or user configuration was changed.",
         ):
             self.assertIn(required, source)
         self.assertNotIn("git config --global", source.lower())
         self.assertNotIn("setx", source.lower())
         self.assertNotIn("Remove-Item", source)
+        self.assertNotIn("Get-Command -Name 'python.exe'", source)
         self.assertIsNone(re.search(r"(?i)(?:^|[\"'\s])[a-z]:[\\/]", source))
 
     def test_release_builder_uses_a_strict_allowlist_and_fresh_launcher_files(self) -> None:
@@ -70,20 +99,32 @@ class ReleasePackagingTests(unittest.TestCase):
             "$releaseFileAllowlist",
             "$releaseDirectoryAllowlist",
             "$releaseDenyPatterns",
+            ".agents/skills/houdini-visual-research/references/build-brief-and-review.md",
             "scripts/bootstrap-runtime.ps1",
+            "scripts/hia-cache.ps1",
+            "scripts/hia-knowledge.ps1",
             "scripts/launcher/Install-HiaEmbedding.ps1",
+            "scripts/launcher/hia_knowledge_cli.py",
             "scripts/launcher/install_hia_embedding.py",
+            "services/bridge/hia_bridge/knowledge_cli.py",
             "contracts/codex-app-server/0.144.3/",
             "knowledge/sidefx-official/",
             "schemas/codex-app-server/0.144.3/",
             "services/hia_mcp_v2/",
-            "src/hia_core/",
+            "src/hia_core/__init__.py",
+            "src/hia_core/codex_protocol.py",
+            "src/hia_core/embedding_contract.py",
+            "src/hia_core/houdini_contract.py",
+            "src/hia_core/path_policy.py",
             "houdini_package/python_panels/houdini_intelligence.pypanel",
+            "houdini_package/python_libs/hia_mcp_runtime/deterministic_sources.py",
             "houdini_package/python_libs/hia_mcp_runtime/embedding_client.py",
+            "houdini_package/python_libs/hia_mcp_runtime/viewport_quality.py",
             "houdini_package/python_libs/hia_mcp_runtime/hybrid_knowledge.py",
             "houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py",
             "houdini_package/python_libs/hia_mcp_runtime/knowledge_index_cli.py",
             "houdini_package/python_libs/hia_panel/panel.py",
+            "houdini_package/python_libs/hia_panel/task_insights.py",
             'Big-Chicken-Houdini-Intelligence-Agent-v$Version-win-x64',
             "BigChickenLauncher.exe",
             "D3DCompiler_47_cor3.dll",
@@ -100,6 +141,8 @@ class ReleasePackagingTests(unittest.TestCase):
         ):
             self.assertIn(required, source)
         self.assertNotIn("'houdini_package/',", source)
+        self.assertNotIn("'src/hia_core/',", source)
+        self.assertNotIn("src/hia_core/vending_machine.py", source)
         for excluded in (
             "hia_b4b_stairs_acceptance.pypanel",
             "b4b_acceptance.py",
@@ -113,16 +156,30 @@ class ReleasePackagingTests(unittest.TestCase):
             "'(^|/)tests?(/|$)'",
             "'(^|/)assets(/|$)'",
             "'(^|/)\\.runtime(/|$)'",
+            "'(^|/)\\.venv(/|$)'",
             "TEST-REPORT",
             "steam-winter-sale",
-            r"\.(hip|hiplc|hipnc|exr|png",
+            "auth|credentials|secrets?|token",
+            r"\.(hip|hiplc|hipnc|abc|fbx|usd|usda|usdc|exr|png",
         ):
             self.assertIn(forbidden, source)
         self.assertIn("& $launcherBuildScript", source)
         self.assertIn("$launcherDist = $packageRoot", source)
         self.assertIn("$buildArguments = @{ OutputDirectory = $launcherDist }", source)
         self.assertNotIn("Join-Path $runtimeRoot 'dist\\launcher'", source)
+        self.assertIn(
+            "& $python.Source -B $publicReleaseChecker --source-tree $projectRoot",
+            source,
+        )
         self.assertIn("& $python.Source -B $publicReleaseChecker $archivePath", source)
+        self.assertLess(
+            source.index("--source-tree $projectRoot"),
+            source.index("& $launcherBuildScript"),
+        )
+        self.assertLess(
+            source.index("--source-tree $projectRoot"),
+            source.index("[System.IO.FileMode]::CreateNew"),
+        )
         self.assertNotIn("Copy-Item", source)
         self.assertNotIn("Remove-Item", source)
         self.assertIsNone(re.search(r"(?i)(?:^|[\"'\s])[a-z]:[\\/]", source))
@@ -130,12 +187,101 @@ class ReleasePackagingTests(unittest.TestCase):
             source.index("$releaseFileAllowlist")
             : source.index("$releaseDenyPatterns")
         ]
+        self.assertIn(
+            "'houdini_package/python_libs/hia_mcp_runtime/viewport_quality.py'",
+            allowlist_source,
+        )
+        executor_source = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "executor.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "from .viewport_quality import analyze_png_quality",
+            executor_source,
+        )
         self.assertNotIn("'.runtime", allowlist_source)
         self.assertNotIn('".runtime', allowlist_source)
+        self.assertNotIn("'.venv", allowlist_source)
+        self.assertNotIn('".venv', allowlist_source)
+        self.assertLess(
+            source.index(
+                "if ($normalized -match $managedVenvDenyPattern) { return $false }"
+            ),
+            source.index("if ($releaseFileAllowlist -contains $normalized)"),
+        )
         self.assertLess(
             source.index("if ($releaseFileAllowlist -contains $normalized)"),
             source.index("foreach ($pattern in $releaseDenyPatterns)"),
         )
+
+    def test_release_allowlist_covers_exact_current_knowledge_cards(self) -> None:
+        manifest = json.loads(
+            (KNOWLEDGE_PACK_PATH / "manifest.json").read_text(encoding="utf-8")
+        )
+        manifest_cards = {
+            str(item["path"])
+            for item in manifest["sources"]
+        }
+        disk_cards = {
+            path.relative_to(KNOWLEDGE_PACK_PATH).as_posix()
+            for path in (KNOWLEDGE_PACK_PATH / "cards").rglob("*.md")
+            if path.is_file() and not path.is_symlink()
+        }
+
+        self.assertEqual(disk_cards, manifest_cards)
+        source = BUILD_RELEASE_PATH.read_text(encoding="utf-8-sig")
+        directory_allowlist = source[
+            source.index("$releaseDirectoryAllowlist")
+            : source.index("$releaseDenyPatterns")
+        ]
+        self.assertIn("'knowledge/sidefx-official/'", directory_allowlist)
+
+    def test_release_docs_distinguish_historical_artifacts_and_counts(self) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        installation = INSTALLATION_PATH.read_text(encoding="utf-8")
+        report = TEST_REPORT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("Published historical Preview ZIP", readme)
+        self.assertIn("$ReleaseVersion = '<approved-preview-version>'", readme)
+        self.assertNotIn("-Version 0.1.1-preview", readme)
+        self.assertIn("historical 2026-07-24 snapshot", installation)
+        self.assertIn("各节中的“当前”", report)
+        self.assertIn("不能作为最新发行候选", report)
+        self.assertIn("当前权威环境是项目根 `<project-root>/.venv`", report)
+        self.assertIn("`hia-knowledge.ps1 list`", report)
+        self.assertNotIn("`hia-knowledge.ps1 sources list`", report)
+        self.assertIn("尚缺 33 张卡", report)
+
+    def test_gitignore_covers_private_and_large_generated_outputs(self) -> None:
+        ignored = set(GITIGNORE_PATH.read_text(encoding="utf-8").splitlines())
+        for required in (
+            "auth.json",
+            "credentials.json",
+            "secrets.json",
+            "token.json",
+            "models/",
+            "*.abc",
+            "*.fbx",
+            "*.usd",
+            "*.usda",
+            "*.usdc",
+        ):
+            self.assertIn(required, ignored)
+        self.assertNotIn("*.png", ignored)
+
+    def test_release_excludes_asset_only_core_examples(self) -> None:
+        source = BUILD_RELEASE_PATH.read_text(encoding="utf-8-sig")
+        allowlist_source = source[
+            source.index("$releaseFileAllowlist")
+            : source.index("$releaseDenyPatterns")
+        ]
+        self.assertNotIn("'src/hia_core/'", allowlist_source)
+        self.assertNotIn("vending_machine.py", allowlist_source)
+        self.assertIn("'src/hia_core/houdini_contract.py'", allowlist_source)
+        self.assertIn("'src/hia_core/embedding_contract.py'", allowlist_source)
 
     def test_release_launcher_build_uses_a_project_runtime_output_override(self) -> None:
         source = (

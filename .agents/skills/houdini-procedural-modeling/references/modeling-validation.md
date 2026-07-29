@@ -20,6 +20,12 @@ Verify only the relevant items:
 
 Use `hia_validate`, `hia_scene_diff`, inspection, or a bounded read-only HOM query only when it contributes evidence. Do not call every available tool.
 
+## Prove retrieved semantics
+
+For a Focused or Full change, translate only implementation-relevant knowledge into explicit expectations before authoring: the target path, group or attribute, ownership/type, mapping, relationship, range or tolerance, affected dependency, and representative control change. After the write, ask the current `hia_validate` semantic-expectation capability to test those claims through its live contract. Do not copy its payload schema into this reference. A clean cook or nonempty mesh is insufficient when the researched claim concerns a host relationship, stable material region, expected placement range, or dependency update.
+
+Treat an unproven semantic result as a real risk. State the missing observation once and choose a bounded additional check only when it can settle the claim; do not repeat the warning or launch a tool cascade. For a simulation/cache handoff, apply the evidence rule in the shared Build Brief reference rather than inferring freshness from a clean cook.
+
 ## Check visual identity
 
 Use a representative viewport or render view only when visual evidence is needed. Judge:

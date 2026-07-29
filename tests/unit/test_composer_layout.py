@@ -93,11 +93,14 @@ class _TextEdit:
 
 
 class _Shortcut:
-    def __init__(self, _sequence: object, _parent: object) -> None:
+    def __init__(self, sequence: object, parent: object) -> None:
+        self.sequence = sequence
+        self.parent = parent
+        self.context: object | None = None
         self.activated = _Signal()
 
-    def setContext(self, _context: object) -> None:  # noqa: N802
-        pass
+    def setContext(self, context: object) -> None:  # noqa: N802
+        self.context = context
 
 
 def _load_composer_module() -> types.ModuleType:
@@ -146,6 +149,31 @@ def _load_composer_module() -> types.ModuleType:
 
 
 class ComposerLayoutTests(unittest.TestCase):
+    def test_editor_preserves_native_ime_and_uses_widget_local_send_shortcuts(
+        self,
+    ) -> None:
+        source = COMPOSER_PATH.read_text(encoding="utf-8")
+        self.assertIn("class ExpandableTextEdit(QtWidgets.QTextEdit):", source)
+        self.assertNotIn("def inputMethodEvent(", source)
+        self.assertNotIn("def keyPressEvent(", source)
+
+        module = _load_composer_module()
+        editor = module.ExpandableTextEdit()
+        self.assertEqual(
+            ["Ctrl+Return", "Ctrl+Enter"],
+            [shortcut.sequence for shortcut in editor._send_shortcuts],
+        )
+        self.assertTrue(
+            all(shortcut.parent is editor for shortcut in editor._send_shortcuts)
+        )
+        self.assertTrue(
+            all(
+                shortcut.context
+                is module.QtCore.Qt.ShortcutContext.WidgetShortcut
+                for shortcut in editor._send_shortcuts
+            )
+        )
+
     def test_initial_editor_reserves_four_lines_without_taking_chat_stretch(self) -> None:
         module = _load_composer_module()
         editor = module.ExpandableTextEdit()

@@ -26,7 +26,6 @@ ENV_PREFIX = "HIA_MCP_V2_"
 MAX_REQUEST_BYTES = 1_048_576
 MAX_RESPONSE_BYTES = 4_194_304
 DEFAULT_TIMEOUT_SECONDS = 60.0
-SERIALIZATION_TIMING_HEADER = "X-HIA-MCP-V2-Serialize-Seconds"
 
 
 class CancellationToken:
@@ -217,20 +216,10 @@ class LoopbackTransport:
                 },
                 method="POST",
             )
-            request_attempted_at = time.monotonic()
             try:
                 with urllib.request.urlopen(request, timeout=remaining_timeout) as response:
-                    headers_received_at = time.monotonic()
                     cancellation.mark_accepted()
-                    runtime_serialization_seconds = _header_seconds(
-                        response.headers.get(SERIALIZATION_TIMING_HEADER)
-                    )
-                    response_read_started = time.monotonic()
                     raw = response.read(MAX_RESPONSE_BYTES + 1)
-                    response_read_seconds = max(
-                        0.0,
-                        time.monotonic() - response_read_started,
-                    )
             except urllib.error.HTTPError as exc:
                 cancellation.mark_accepted()
                 raw_error = exc.read(MAX_RESPONSE_BYTES + 1)
@@ -264,12 +253,10 @@ class LoopbackTransport:
                     "The Houdini runtime response exceeds the byte limit",
                     {"limit_bytes": MAX_RESPONSE_BYTES},
                 )
-            decode_started = time.monotonic()
             try:
                 payload = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise TransportError("INVALID_RESPONSE", "The Houdini runtime returned invalid JSON") from exc
-            response_decode_seconds = max(0.0, time.monotonic() - decode_started)
             if not isinstance(payload, dict) or payload.get("protocol") != WIRE_PROTOCOL:
                 raise TransportError("INVALID_RESPONSE", "The Houdini runtime response has the wrong protocol")
             if payload.get("ok") is not True:
@@ -287,28 +274,34 @@ class LoopbackTransport:
             if tool_name == "hia_execute_hom":
                 result = dict(result)
                 phase_timings = result.get("phase_timings")
-                merged_timings = dict(phase_timings) if isinstance(phase_timings, Mapping) else {}
-                merged_timings.update(
-                    {
-                        "stdio_queue_seconds": _rounded_seconds(queue_seconds),
-                        "request_serialization_seconds": _rounded_seconds(
-                            request_serialization_seconds
-                        ),
-                        "runtime_wait_seconds": _rounded_seconds(
-                            headers_received_at - request_attempted_at
-                        ),
-                        "response_read_seconds": _rounded_seconds(response_read_seconds),
-                        "response_decode_seconds": _rounded_seconds(response_decode_seconds),
-                        "total_seconds": _rounded_seconds(
-                            queue_seconds + (time.monotonic() - call_started)
-                        ),
-                    }
+                runtime_timings = (
+                    phase_timings
+                    if isinstance(phase_timings, Mapping)
+                    else {}
                 )
-                if runtime_serialization_seconds is not None:
-                    merged_timings["runtime_serialization_seconds"] = _rounded_seconds(
-                        runtime_serialization_seconds
-                    )
-                result["phase_timings"] = merged_timings
+                runtime_queue = float(
+                    runtime_timings.get("queue_seconds") or 0.0
+                )
+                runtime_total = float(
+                    runtime_timings.get("total_seconds") or 0.0
+                )
+                result["phase_timings"] = {
+                    "queue_seconds": _rounded_seconds(
+                        queue_seconds + runtime_queue
+                    ),
+                    "hom_seconds": _rounded_seconds(
+                        float(runtime_timings.get("hom_seconds") or 0.0)
+                    ),
+                    "validation_seconds": _rounded_seconds(
+                        float(runtime_timings.get("validation_seconds") or 0.0)
+                    ),
+                    "total_seconds": _rounded_seconds(
+                        max(
+                            queue_seconds + (time.monotonic() - call_started),
+                            queue_seconds + runtime_total,
+                        )
+                    ),
+                }
             return result
         finally:
             with self._active_lock:
@@ -349,16 +342,6 @@ def _valid_token(value: str) -> bool:
 
 def _rounded_seconds(value: float) -> float:
     return round(max(0.0, float(value)), 6)
-
-
-def _header_seconds(value: str | None) -> float | None:
-    if not value:
-        return None
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return None
-    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _before_submission_details(

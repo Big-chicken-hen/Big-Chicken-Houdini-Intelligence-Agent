@@ -26,6 +26,7 @@ $publicReleaseChecker = Join-Path $projectRoot 'scripts\check-public-release.py'
 # credentials, and user assets do not belong in a public release archive.
 $releaseFileAllowlist = @(
     '.codex/config.toml',
+    '.agents/skills/houdini-visual-research/references/build-brief-and-review.md',
     'AGENTS.md',
     'CHANGELOG.md',
     'LICENSE',
@@ -45,8 +46,10 @@ $releaseFileAllowlist = @(
     'houdini_package/python3.11libs/uiready.py',
     'houdini_package/python_panels/houdini_intelligence.pypanel',
     'houdini_package/python_libs/hia_mcp_runtime/__init__.py',
+    'houdini_package/python_libs/hia_mcp_runtime/deterministic_sources.py',
     'houdini_package/python_libs/hia_mcp_runtime/embedding_client.py',
     'houdini_package/python_libs/hia_mcp_runtime/executor.py',
+    'houdini_package/python_libs/hia_mcp_runtime/viewport_quality.py',
     'houdini_package/python_libs/hia_mcp_runtime/hybrid_knowledge.py',
     'houdini_package/python_libs/hia_mcp_runtime/http_server.py',
     'houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py',
@@ -62,28 +65,40 @@ $releaseFileAllowlist = @(
     'houdini_package/python_libs/hia_panel/network_response.py',
     'houdini_package/python_libs/hia_panel/panel.py',
     'houdini_package/python_libs/hia_panel/runtime_diagnostics.py',
+    'houdini_package/python_libs/hia_panel/task_insights.py',
     'houdini_package/python_libs/hia_panel/turn_state.py',
     'scripts/bootstrap-runtime.ps1',
+    'scripts/hia-cache.ps1',
+    'scripts/hia-knowledge.ps1',
     'scripts/hia-launcher.ps1',
     'scripts/launch-houdini.ps1',
     'scripts/launcher/HiaLauncher.Core.psm1',
     'scripts/launcher/HiaLauncher.Wpf.ps1',
     'scripts/launcher/HiaLauncher.xaml',
     'scripts/launcher/Install-HiaEmbedding.ps1',
-    'scripts/launcher/install_hia_embedding.py'
+    'scripts/launcher/hia_knowledge_cli.py',
+    'scripts/launcher/install_hia_embedding.py',
+    'services/bridge/hia_bridge/knowledge_cli.py',
+    'src/hia_core/__init__.py',
+    'src/hia_core/codex_protocol.py',
+    'src/hia_core/embedding_contract.py',
+    'src/hia_core/houdini_contract.py',
+    'src/hia_core/path_policy.py'
 )
 $releaseDirectoryAllowlist = @(
     '.agents/skills/',
     'contracts/codex-app-server/0.144.3/',
+    'knowledge/community-tutorials/',
     'knowledge/sidefx-official/',
     'schemas/codex-app-server/0.144.3/',
     'schemas/houdini-mcp/0.2.0/',
     'services/bridge/',
-    'services/hia_mcp_v2/',
-    'src/hia_core/'
+    'services/hia_mcp_v2/'
 )
+$managedVenvDenyPattern = '(^|/)\.venv(/|$)'
 $releaseDenyPatterns = @(
     '(^|/)\.runtime(/|$)',
+    $managedVenvDenyPattern,
     '(^|/)\.git(/|$)',
     '(^|/)tests?(/|$)',
     '(^|/)assets(/|$)',
@@ -91,9 +106,9 @@ $releaseDenyPatterns = @(
     '(^|/)TEST-REPORT\.md$',
     '(^|/)P[0-9]-',
     '(^|/).*GATE.*\.md$',
-    '(^|/)(auth|credentials|secrets?)\.json$',
+    '(^|/)(auth|credentials|secrets?|token)\.json$',
     '(^|/)\.env($|\.)',
-    '\.(hip|hiplc|hipnc|exr|png|jpe?g|webp|gif|bmp|mp4|mov|log|zip)$',
+    '\.(hip|hiplc|hipnc|abc|fbx|usd|usda|usdc|exr|png|jpe?g|webp|gif|bmp|mp4|mov|log|zip)$',
     'steam-winter-sale'
 )
 $launcherFiles = @(
@@ -129,6 +144,9 @@ function Test-ReleasePathAllowed {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
 
     $normalized = $RelativePath.Replace('\', '/').TrimStart('/')
+    # The user-visible managed environment is never a release input, even if a
+    # future edit accidentally adds one of its files to the explicit allowlist.
+    if ($normalized -match $managedVenvDenyPattern) { return $false }
     if ($releaseFileAllowlist -contains $normalized) { return $true }
     foreach ($pattern in $releaseDenyPatterns) {
         if ($normalized -match $pattern) { return $false }
@@ -188,6 +206,18 @@ if (Test-Path -LiteralPath $checksumsPath) {
 }
 if (-not (Test-Path -LiteralPath $publicReleaseChecker -PathType Leaf)) {
     throw "Public release checker is missing: $publicReleaseChecker"
+}
+$python = Get-Command -Name 'python.exe' -ErrorAction SilentlyContinue
+if ($null -eq $python) {
+    throw 'Python 3.10+ is required to run the public release checker.'
+}
+
+# Refuse an incomplete built-in knowledge release before building the launcher
+# or creating a ZIP. The checker compares disk and manifest cards, then requires
+# every card plus manifest/coverage/sources to appear in real git ls-files.
+& $python.Source -B $publicReleaseChecker --source-tree $projectRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "Release source preflight rejected the built-in knowledge pack with code $LASTEXITCODE."
 }
 
 # Remove only the six known generated launcher outputs so this invocation cannot
@@ -281,10 +311,6 @@ try {
         $archiveStream.Dispose()
     }
 
-    $python = Get-Command -Name 'python.exe' -ErrorAction SilentlyContinue
-    if ($null -eq $python) {
-        throw 'Python 3.10+ is required to run the public release checker.'
-    }
     & $python.Source -B $publicReleaseChecker $archivePath
     if ($LASTEXITCODE -ne 0) {
         if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
@@ -306,4 +332,4 @@ try {
 Write-Output "[release] archive: $archivePath"
 Write-Output "[release] sha256: $archiveHash"
 Write-Output "[release] checksums: $checksumsPath"
-Write-Output '[release] Bundled launcher artwork was included; Steam seasonal artwork, runtime state, tests, HIP files, renders, credentials, and historical Gate reports were not packaged.'
+Write-Output '[release] Only the project-owned launcher artwork was included; runtime state, user data, tests, HIP files, renders, credentials, and historical Gate reports were not packaged.'

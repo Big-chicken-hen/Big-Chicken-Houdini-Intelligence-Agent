@@ -1,6 +1,6 @@
 # Research and Sources
 
-Use external research when it materially affects technique or visual fidelity. For complex, unfamiliar, reference-driven, material, rendering, simulation, animation, version-sensitive, or ShaderToy work, research iteratively and cross-check as many high-quality sources as the decision genuinely needs. Codex may continue automatically through multiple research rounds and sources while the investigation remains in scope; do not impose a fixed limit on search rounds or source count. Do not browse for a simple successful Box, known direct operation, or single-parameter read.
+Every Houdini request that will write the scene starts with the single request-level local-knowledge lookup defined in `knowledge-and-memory.md`. Use external research when it materially affects technique or visual fidelity. For complex, unfamiliar, reference-driven, material, rendering, simulation, animation, version-sensitive, or ShaderToy work, complete external research before the first write, iterate through as many high-quality sources as the decision genuinely needs, and do not impose a fixed limit on search rounds or source count. A simple deterministic edit may stop after local retrieval; a read-only inspection requires neither local nor web research.
 
 Research is required when the user names or links a ShaderToy, GLSL example, paper, tutorial, website, artist, project, named effect, or reference image, and when current Houdini/version limitations could change the decision.
 
@@ -8,7 +8,7 @@ Research is required when the user names or links a ShaderToy, GLSL example, pap
 
 - `none`: Use for a simple, deterministic operation, known direct edit, or known parameter read when external evidence would not change the result.
 - `light`: Use focused current sources for a familiar visual task when a small technique, renderer, or version check can improve the implementation.
-- `deep`: Search iteratively and cross-check multiple high-quality sources for ShaderToy/GLSL, papers, unfamiliar techniques, complex materials, rendering, simulation, animation, ambiguous references, or uncertain Houdini/version behavior.
+- `deep`: Use multiple research rounds and sources; search iteratively and cross-check high-quality sources for ShaderToy/GLSL, papers, unfamiliar techniques, complex materials, rendering, simulation, animation, ambiguous references, or uncertain Houdini/version behavior.
 
 Treat these as semantic reasoning labels, not fixed search counts, time budgets, or approval gates. Change depth as evidence develops.
 
@@ -24,7 +24,7 @@ Do not manually search this repository's src, services, or contracts as visual r
 ## Research procedure
 
 1. Plan the current stage's evidence needs and high-value starting sources before retrieval; do not impose a fixed limit on search rounds or source count.
-2. For complex, unfamiliar, or version-sensitive work, first make one relevant batched `hia_local_help_search` over the live schema's applicable local sources. Reuse returned Houdini, Skill, project, and user-tutorial passages. If project memory is not exposed by that search, use `hia_project_memory` `search` separately only when durable prior context can affect the decision. Do not invoke either retrieval path for a simple direct operation.
+2. Consume the single shared pre-write lookup from `knowledge-and-memory.md`; do not issue another local-help search merely because external research begins or this Skill also triggered. Reuse its Houdini, Skill, project, and user-tutorial passages. If project memory was not exposed by that search, use `hia_project_memory` `search` separately only when durable prior context can affect the decision. Do not use retrieval for a purely read-only inspection.
 3. Treat local matches as leads with provenance, not as a reason to reduce research depth or as automatic proof. When they are insufficient, conflicting, stale, or the task needs external visual or technical evidence, prefer Codex-native web/search tools and continue through as many rounds, pages, and primary sources as the decision needs.
 4. Reuse already retrieved content. Reduce duplicate visits and aimless searching, not research depth.
 5. Only when native web/search is unavailable, use one or a small number of read-only batch network commands. Combine related URLs instead of requesting PowerShell approval page by page; do not request global Shell auto-approval or create an approval system.
@@ -42,13 +42,15 @@ Do not manually search this repository's src, services, or contracts as visual r
 
 Write findings as an original short memo that captures the decision, reusable facts, Houdini translation, constraints, sources, and remaining uncertainty. Summarize and re-derive; do not copy a tutorial, paper, repository, or ShaderToy implementation into the memo.
 
+Return a compact synthesis to the Director: decision, evidence, risks, necessary source links, and unverified items. Keep the full ledger or detailed memo at its referenced path; do not paste full source documents, every search result, or a long research-subtask transcript into the main task context.
+
 Keep every draft, partial synthesis, rejected approach, and hypothesis only under:
 
     <project-root>/.runtime/cache/research/<thread-or-turn-id>/
 
 Treat that directory as untracked runtime state. A draft may use `source-only`, `hypothesis`, `rejected`, or `unverified` in the ledger's **Verification status** column. Source authority, a successful web lookup, plausible reasoning, an offline fake, and node creation alone are not real Houdini verification.
 
-Mark a result `verified` only after the relevant claim has been reproduced or directly observed in real Houdini on the recorded version/build. Put concrete evidence in **Verification evidence**, such as the live HIP and node paths, frame or time range, parameter or cook result, validation output, and a representative viewport capture or render when the claim is visual. State the narrower verified claim rather than promoting an entire technique from one observation.
+Mark a result `verified` only after the relevant claim has been reproduced or directly observed in real Houdini on the recorded version/build. Put concrete evidence in **Verification evidence**, such as the live HIP and node paths, frame or time range, parameter or cook result, validation output, and a representative viewport capture or render when the claim is visual. State the narrower verified claim rather than promoting an entire technique from one observation. A reusable procedure also requires the user's acceptance of the observed result.
 
 Only a `verified` original memo with its complete source ledger and verification evidence may be copied or linked into a repository-maintained formal tracked knowledge index. If real Houdini evidence is unavailable, keep the memo in `.runtime` and report it as unverified; do not create an index entry. Use only the existing HIA knowledge layer; this promotion rule does not authorize another Agent, planner, summarizer, chat database, knowledge or memory layer, service, or scheduler.
 

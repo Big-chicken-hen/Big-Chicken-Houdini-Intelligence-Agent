@@ -1,0 +1,24 @@
+{
+  "pack_id": "community-tutorials-curated-v1",
+  "pack_version": "1.0.0",
+  "source_kind": "community_tutorial",
+  "verification": "community_unverified",
+  "card_count": 16,
+  "source_count": 32,
+  "domains": {
+    "SOP/attributes/VEX": ["sop-attribute-vex-contracts", "vex-topology-spatial-queries"],
+    "curve modeling": ["curve-procedural-modeling"],
+    "Pyro": ["pyro-fields-cache-contract"],
+    "FLIP": ["flip-fluid-debug-cache"],
+    "Vellum": ["vellum-constraint-workflow"],
+    "RBD": ["rbd-constraint-networks"],
+    "KineFX": ["kinefx-transform-rig"],
+    "Solaris/USD": ["solaris-usd-scene-assembly"],
+    "MaterialX/Karma": ["materialx-karma-lookdev"],
+    "Copernicus": ["copernicus-layer-workflow"],
+    "PDG/TOPs": ["pdg-tops-work-items"],
+    "HDA/Viewer State": ["hda-interface-contract", "viewer-state-interaction"],
+    "performance/debugging": ["performance-profiling", "cache-debug-evidence"]
+  },
+  "validation_boundary": "Cards contain human-readable checks for attributes, mappings, ranges, caches, cooks, or visual evidence. They do not extend or invent the runtime semantic_checks schema."
+}

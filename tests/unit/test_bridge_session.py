@@ -978,6 +978,77 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
         self.assertEqual("message-0", projected[0]["text"])
         self.assertEqual("message-171", projected[-1]["text"])
 
+    def test_read_preserves_only_safe_public_ids_and_final_chat(self) -> None:
+        client = _ThreadContentClient(
+            {
+                "thread": {
+                    "id": "thread-current",
+                    "turns": [
+                        {
+                            "id": "turn-public-1",
+                            "items": [
+                                {
+                                    "id": "item-user-1",
+                                    "type": "userMessage",
+                                    "content": [
+                                        {"type": "text", "text": "公开问题"},
+                                        {
+                                            "type": "localImage",
+                                            "path": r"E:\private\reference.png",
+                                        },
+                                    ],
+                                },
+                                {
+                                    "id": "item-commentary-1",
+                                    "type": "agentMessage",
+                                    "channel": "commentary",
+                                    "text": "内部进度",
+                                },
+                                {
+                                    "id": "item-final-1",
+                                    "type": "agentMessage",
+                                    "text": "公开最终回答",
+                                },
+                                {
+                                    "id": "tool-raw-1",
+                                    "type": "commandExecution",
+                                    "aggregatedOutput": "secret tool output",
+                                },
+                            ],
+                        },
+                        {
+                            "id": "../unsafe-turn",
+                            "items": [
+                                {
+                                    "id": "unsafe item id",
+                                    "type": "agentMessage",
+                                    "text": "第二条最终回答",
+                                }
+                            ],
+                        },
+                    ],
+                }
+            }
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.read_thread("thread-current")
+
+        turns = result["result"]["thread"]["turns"]
+        self.assertEqual("turn-public-1", turns[0]["id"])
+        self.assertNotIn("id", turns[1])
+        self.assertEqual(
+            ["userMessage", "agentMessage"],
+            [item["type"] for item in turns[0]["items"]],
+        )
+        self.assertEqual("item-user-1", turns[0]["items"][0]["id"])
+        self.assertEqual("item-final-1", turns[0]["items"][1]["id"])
+        self.assertNotIn("id", turns[1]["items"][0])
+        self.assertNotIn(
+            "secret tool output",
+            json.dumps(result, ensure_ascii=False),
+        )
+
     def test_list_threads_filters_response_after_dual_cwd_query(self) -> None:
         client = _ThreadHistoryClient(
             {
@@ -2538,11 +2609,12 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "不要调用 request_user_input",
             "信息不足时采用合理默认值",
             "无法执行才报告原因",
-            "自动截图写 HIA_CACHE_DIR/screenshots",
+            "安全已保存 HIP 的自动截图优先写同级 .hia/screenshots",
+            "否则回退 HIA_CACHE_DIR/screenshots",
             "预览写 previews",
             "中间图写 tmp",
+            "附件/知识/模型/索引仍留项目 .runtime",
             "文件名加时间戳和短随机后缀",
-            "插件源码、内部缓存、自动截图/预览/附件/临时/诊断必须留项目内",
             "用户明确指定的最终渲染、EXR、视频、USD、模拟缓存或导出是用户交付物",
             "可写所选普通本地项目外目录",
             "未指定才用 HIA_RENDER_OUTPUT_DIR",
@@ -2553,6 +2625,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                 self.assertIn(required_text, instructions)
         self.assertNotIn("不使用 fxhoudinimcp", instructions)
         self.assertNotIn(".runtime/jobs", instructions)
+        self.assertNotIn("自动截图写 HIA_CACHE_DIR/screenshots", instructions)
         for asset_specific_text in ("售货机", "桌子", "楼梯", "vending_machine"):
             self.assertNotIn(asset_specific_text, instructions)
         self.assertNotIn("baseInstructions", params)
@@ -2591,6 +2664,9 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "主任务只保留原生 Goal、决定和子任务短摘要",
             "子任务详情按需查看",
             "不塞入主上下文",
+            "安全已存 HIP 截图写同级 .hia/screenshots",
+            "否则用 HIA_CACHE_DIR/screenshots",
+            "附件/知识/模型/索引留 .runtime",
         ):
             self.assertIn(required_text, instructions)
         for forbidden_text in (
@@ -2599,11 +2675,12 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "capture_screenshot",
             "create_node",
             "set_parameters",
+            "截图写 HIA_CACHE_DIR/screenshots，预览写",
         ):
             self.assertNotIn(forbidden_text, instructions)
         self.assertEqual("hia_v2", session.snapshot()["mcp_backend"])
 
-    def test_research_instructions_batch_public_pages_without_weakening_hia_serial_io(
+    def test_scene_writes_require_research_before_hia_serial_io(
         self,
     ) -> None:
         for backend in ("fxhoudini", "hia_v2"):
@@ -2612,15 +2689,18 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                 session.start_thread()
                 instructions = client.requests[0][1]["developerInstructions"]
                 for required_text in (
-                    "先定本阶段必需 URL",
-                    "优先原生 web/search",
-                    "同阶段公开页合为一次 PowerShell 只读批量读取",
-                    "不逐页审批",
-                    "复用已取内容",
-                    "不重复抓取相近页面",
+                    "首次场景写入前必须先",
+                    "一次相关",
+                    "批量检索并复用结果",
+                    "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务",
+                    "必须先用原生 web/search",
+                    "当前 SideFX 官方与原始来源",
+                    "简单确定性修改不扩展为多轮网页研究",
                 ):
                     self.assertIn(required_text, instructions)
                 if backend == "hia_v2":
+                    self.assertIn("hia_local_help_search", instructions)
+                    self.assertIn("检索不可用时明确说明，禁止静默跳过", instructions)
                     self.assertIn(
                         "多个关键词先合并为一次批量查询并复用结果",
                         instructions,
