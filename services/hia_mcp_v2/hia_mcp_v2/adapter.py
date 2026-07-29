@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import threading
 from collections import OrderedDict
 from typing import Any, Mapping
@@ -17,6 +18,18 @@ MCP_PROTOCOL_VERSION = "2025-06-18"
 SERVER_VERSION = "0.1.0"
 _REQUEST_METHODS = {"initialize", "ping", "tools/list", "tools/call"}
 _NOTIFICATIONS = {"notifications/initialized", "notifications/cancelled"}
+
+
+def _capability_alias_in_query(alias: str, query: str) -> bool:
+    if any(not character.isascii() for character in alias):
+        return alias in query
+    return bool(
+        re.search(
+            rf"(?<!\w){re.escape(alias)}(?!\w)",
+            query,
+            flags=re.UNICODE,
+        )
+    )
 
 
 class HiaMcpAdapter:
@@ -204,25 +217,97 @@ class HiaMcpAdapter:
                 self._active.pop(request_id, None)
 
     def _search_capabilities(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        query = str(arguments.get("query", "")).casefold()
+        raw_query = str(arguments.get("query", "")).casefold().strip()
+        query_terms = tuple(
+            dict.fromkeys(
+                term
+                for term in re.split(r"[\s/|,;，；]+", raw_query)
+                if term
+            )
+        )
         domain = str(arguments.get("domain", "")).casefold()
         offset = int(arguments.get("offset", 0))
         limit = int(arguments.get("limit", 50))
-        matches = []
-        for item in CAPABILITY_MATRIX:
-            haystack = json.dumps(item, ensure_ascii=False).casefold()
+        ranked_matches = []
+        for catalog_index, item in enumerate(CAPABILITY_MATRIX):
             if domain and domain not in str(item["domain"]).casefold():
                 continue
-            if query and query not in haystack:
+            searchable = " ".join(
+                [
+                    str(item["domain"]),
+                    *[str(value) for value in item["tools"]],
+                    str(item["description"]),
+                    *[str(value) for value in item["parameters"]],
+                    *[str(value) for value in item["aliases"]],
+                ]
+            ).casefold()
+            aliases = {
+                str(value).casefold()
+                for value in item["aliases"]
+                if str(value)
+            }
+            matched_values = {
+                term for term in query_terms if term in searchable
+            }
+            matched_values.update(
+                alias
+                for alias in aliases
+                if _capability_alias_in_query(alias, raw_query)
+            )
+            matched_terms = len(matched_values)
+            if query_terms and not matched_terms:
                 continue
-            matches.append(copy.deepcopy(item))
+            tool_name = str(item["tools"][0]) if item["tools"] else ""
+            ranked_matches.append(
+                (matched_terms, catalog_index, tool_name.casefold(), copy.deepcopy(item))
+            )
+        ranked_matches.sort(key=lambda match: (-match[0], match[1], match[2]))
+        matches = [match[3] for match in ranked_matches]
         page = matches[offset : offset + limit]
+        registered_names = [
+            str(item.get("name"))
+            for item in self._descriptors
+            if isinstance(item.get("name"), str)
+        ]
+        catalogued_names = [
+            str(name)
+            for item in CAPABILITY_MATRIX
+            for name in item["tools"]
+        ]
+        registered_set = set(registered_names)
+        catalogued_set = set(catalogued_names)
+        health = {
+            "registered": len(registered_names),
+            "catalogued": len(catalogued_names),
+            "missing": sorted(registered_set - catalogued_set),
+            "orphaned": sorted(catalogued_set - registered_set),
+        }
+        incomplete = bool(
+            health["missing"]
+            or health["orphaned"]
+            or len(registered_names) != len(registered_set)
+            or len(catalogued_names) != len(catalogued_set)
+        )
+        empty_reason = None
+        if not matches:
+            empty_reason = "CATALOG_INCOMPLETE" if incomplete else "NO_MATCH"
+        warnings = (
+            ["Capability catalog is incomplete; inspect catalog_health before choosing a tool."]
+            if incomplete
+            else []
+        )
         return {
             "ok": True,
-            "result": {"capabilities": page, "total": len(matches), "offset": offset, "limit": limit},
-            "warnings": [],
+            "result": {
+                "capabilities": page,
+                "total": len(matches),
+                "offset": offset,
+                "limit": limit,
+                "empty_reason": empty_reason,
+                "catalog_health": health,
+            },
+            "warnings": warnings,
         }
-
     def _tool_result(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(payload)
         image = value.pop("image", None)

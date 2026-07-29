@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 REPOSITORY_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 sys.path.insert(0, str(REPOSITORY_ROOT / "services" / "bridge"))
+sys.path.insert(0, str(REPOSITORY_ROOT / "services" / "hia_mcp_v2"))
 sys.path.insert(0, str(REPOSITORY_ROOT / "houdini_package" / "python_libs"))
 
 from hia_bridge.codex_stdio import CodexStdioClient  # noqa: E402
@@ -26,9 +27,41 @@ from hia_bridge.http_server import (  # noqa: E402
     BridgeApplication,
     LoopbackHTTPServer,
 )
+from hia_bridge.knowledge_cli import KnowledgeCliError  # noqa: E402
 from hia_bridge.protocol import ProtocolPolicy  # noqa: E402
 from hia_bridge.session import BridgeSession  # noqa: E402
 from hia_panel.turn_state import PanelTurnState, TurnPhase  # noqa: E402
+
+
+class _KnowledgeCliShim:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.thread_reads: list[dict[str, Any]] = []
+        self.close_calls = 0
+        self.error: KnowledgeCliError | None = None
+
+    def handle(
+        self,
+        arguments: dict[str, Any],
+        *,
+        thread_reader: Callable[[str], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        self.requests.append(dict(arguments))
+        if self.error is not None:
+            raise self.error
+        if arguments.get("operation") == "import_thread":
+            if thread_reader is None:
+                raise AssertionError("import_thread requires the session reader")
+            self.thread_reads.append(
+                thread_reader(str(arguments.get("thread_id") or ""))
+            )
+        return {
+            "action": arguments["action"],
+            "environment": {"state": "ready", "embedding_mode": "fts5"},
+        }
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 class BridgeHTTPTests(unittest.TestCase):
@@ -192,6 +225,379 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertFalse(unavailable["available"])
         self.assertEqual("hia_v2", unavailable["backend"])
         self.assertIsNone(unavailable["scene_revision"])
+
+    def test_project_memory_route_forwards_only_the_fixed_hia_tool(self) -> None:
+        mcp_token = "hia-runtime-" + "m" * 40
+        self.server.application = BridgeApplication(
+            self.session,
+            self.events,
+            self.TOKEN,
+            houdini_mcp_port=45124,
+            houdini_mcp_token=mcp_token,
+            houdini_mcp_backend="hia_v2",
+        )
+        active_id = "mem_" + "a" * 32
+        old_id = "mem_" + "b" * 32
+        replacement_id = "mem_" + "c" * 32
+        captured: list[dict[str, Any]] = []
+
+        def memory(
+            memory_id: str,
+            *,
+            title: str,
+            body: str,
+            status: str = "active",
+            superseded_by: str = "",
+            source_thread_id: str | None = "thread-memory-source",
+            source_turn_id: str | None = "turn-memory-source",
+        ) -> dict[str, Any]:
+            value = {
+                "id": memory_id,
+                "memory_type": "decision",
+                "title": title,
+                "body": body,
+                "tags": ["cabin", "scale"],
+                "scope": "project",
+                "status": status,
+                "superseded_by": superseded_by,
+                "created_at": "2026-07-26T10:00:00Z",
+                "updated_at": "2026-07-26T10:01:00Z",
+            }
+            if source_thread_id is not None:
+                value["source_thread_id"] = source_thread_id
+            if source_turn_id is not None:
+                value["source_turn_id"] = source_turn_id
+            return value
+
+        def runtime_response(request: Any, **_kwargs: Any) -> io.BytesIO:
+            envelope = json.loads(request.data.decode("utf-8"))
+            captured.append(
+                {
+                    "url": request.full_url,
+                    "authorization": request.get_header("Authorization"),
+                    "envelope": envelope,
+                }
+            )
+            arguments = envelope["arguments"]
+            action = arguments["action"]
+            if action == "list":
+                result = {
+                    "items": [
+                        memory(
+                            active_id,
+                            title="Cabin scale",
+                            body="Keep the cabin at real-world scale.",
+                        ),
+                        memory(
+                            old_id,
+                            title="Old scale",
+                            body="Old body",
+                            status="superseded",
+                            superseded_by=replacement_id,
+                            source_thread_id=None,
+                            source_turn_id=None,
+                        ),
+                    ],
+                    "total": 2,
+                    "offset": 0,
+                    "limit": 50,
+                    "scope": "project",
+                }
+            elif action == "search":
+                result = {
+                    "matches": [
+                        {
+                            "source": "project_memory",
+                            "title": "Cabin scale",
+                            "snippet": "real-world scale",
+                            "metadata": {
+                                "memory_id": active_id,
+                                "memory_type": "decision",
+                                "tags": ["cabin", "scale"],
+                                "scope": "project",
+                                "status": "active",
+                                "superseded_by": "",
+                                "created_at": "2026-07-26T10:00:00Z",
+                                "updated_at": "2026-07-26T10:01:00Z",
+                                "source_thread_id": "thread-search-source",
+                                "source_turn_id": "turn-search-source",
+                            },
+                        }
+                    ],
+                    "total": 1,
+                    "offset": 0,
+                    "limit": 50,
+                    "retrieval": {},
+                }
+            elif action == "record":
+                result = {
+                    "memory": memory(
+                        active_id,
+                        title=arguments["title"],
+                        body=arguments["body"],
+                        source_thread_id=arguments.get("source_thread_id"),
+                        source_turn_id=arguments.get("source_turn_id"),
+                    ),
+                    "retrieval": {},
+                }
+            elif action == "supersede":
+                result = {
+                    "superseded": memory(
+                        old_id,
+                        title="Old scale",
+                        body="Old body",
+                        status="superseded",
+                        superseded_by=replacement_id,
+                    ),
+                    "replacement": memory(
+                        replacement_id,
+                        title=arguments["title"],
+                        body=arguments["body"],
+                        source_thread_id=arguments.get("source_thread_id"),
+                        source_turn_id=arguments.get("source_turn_id"),
+                    ),
+                    "retrieval": {},
+                }
+            else:
+                result = {
+                    "memory_id": arguments["memory_id"],
+                    "deleted": True,
+                }
+            raw = json.dumps(
+                {
+                    "protocol": "hia-mcp-v2/1",
+                    "ok": True,
+                    "id": envelope["id"],
+                    "result": {
+                        "ok": True,
+                        "result": result,
+                        "stdout": "",
+                        "warnings": [],
+                        "errors": [],
+                        "revision": 7,
+                        "dirty": False,
+                    },
+                }
+            ).encode("utf-8")
+            return io.BytesIO(raw)
+
+        record_arguments = {
+            "action": "record",
+            "memory_type": "decision",
+            "title": "Cabin scale",
+            "body": "Keep the cabin at real-world scale.",
+            "tags": ["cabin", "scale"],
+            "scope": "project",
+            "source_thread_id": "thread-record-source",
+            "source_turn_id": "turn-record-source",
+        }
+        supersede_arguments = {
+            **record_arguments,
+            "action": "supersede",
+            "memory_id": old_id,
+            "title": "Updated scale",
+            "body": "Use surveyed dimensions.",
+        }
+        with mock.patch(
+            "hia_bridge.http_server.urllib_request.urlopen",
+            side_effect=runtime_response,
+        ):
+            listed = self.request(
+                "POST",
+                "/v1/project-memory",
+                {
+                    "action": "list",
+                    "include_superseded": True,
+                    "offset": 0,
+                    "limit": 50,
+                },
+            )
+            searched = self.request(
+                "POST",
+                "/v1/project-memory",
+                {
+                    "action": "search",
+                    "query": "cabin scale",
+                    "include_superseded": True,
+                    "offset": 0,
+                    "limit": 50,
+                },
+            )
+            recorded = self.request(
+                "POST",
+                "/v1/project-memory",
+                record_arguments,
+            )
+            superseded = self.request(
+                "POST",
+                "/v1/project-memory",
+                supersede_arguments,
+            )
+            deleted = self.request(
+                "POST",
+                "/v1/project-memory",
+                {"action": "delete", "memory_id": active_id},
+            )
+            with self.assertRaises(HTTPError) as missing_id:
+                self.request(
+                    "POST",
+                    "/v1/project-memory",
+                    {"action": "delete"},
+                )
+
+        self.assertEqual(2, listed["total"])
+        self.assertEqual(
+            {
+                "id",
+                "memory_type",
+                "title",
+                "summary",
+                "tags",
+                "scope",
+                "status",
+                "superseded_by",
+                "created_at",
+                "updated_at",
+                "source_thread_id",
+                "source_turn_id",
+            },
+            set(listed["memories"][0]),
+        )
+        self.assertEqual(
+            "thread-memory-source",
+            listed["memories"][0]["source_thread_id"],
+        )
+        self.assertEqual(
+            "turn-memory-source",
+            listed["memories"][0]["source_turn_id"],
+        )
+        self.assertNotIn("source_thread_id", listed["memories"][1])
+        self.assertNotIn("source_turn_id", listed["memories"][1])
+        self.assertEqual("Old body", listed["memories"][1]["summary"])
+        self.assertEqual("real-world scale", searched["memories"][0]["summary"])
+        self.assertEqual(
+            "thread-search-source",
+            searched["memories"][0]["source_thread_id"],
+        )
+        self.assertEqual(
+            "turn-search-source",
+            searched["memories"][0]["source_turn_id"],
+        )
+        self.assertEqual(active_id, recorded["memory"]["id"])
+        self.assertEqual(
+            "thread-record-source",
+            recorded["memory"]["source_thread_id"],
+        )
+        self.assertEqual(
+            "turn-record-source",
+            recorded["memory"]["source_turn_id"],
+        )
+        self.assertEqual(old_id, superseded["superseded"]["id"])
+        self.assertEqual(replacement_id, superseded["replacement"]["id"])
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(active_id, deleted["memory_id"])
+        self.assertEqual(400, missing_id.exception.code)
+        self.assertEqual(
+            ["list", "search", "record", "supersede", "delete"],
+            [
+                entry["envelope"]["arguments"]["action"]
+                for entry in captured
+            ],
+        )
+        for entry in captured:
+            self.assertEqual(
+                "http://127.0.0.1:45124/hia-mcp-v2/v1/execute",
+                entry["url"],
+            )
+            self.assertEqual(
+                f"Bearer {mcp_token}",
+                entry["authorization"],
+            )
+            self.assertEqual(
+                "hia_project_memory",
+                entry["envelope"]["tool"],
+            )
+
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/project-memory",
+                {"action": "clear"},
+            )
+        self.assertEqual(400, raised.exception.code)
+
+    def test_project_memory_route_requires_live_hia_v2(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/project-memory",
+                {"action": "list"},
+            )
+        self.assertEqual(503, raised.exception.code)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(
+            "PROJECT_MEMORY_UNAVAILABLE",
+            payload["structured_error"]["code"],
+        )
+
+    def test_project_knowledge_route_is_one_fixed_authenticated_adapter(
+        self,
+    ) -> None:
+        knowledge = _KnowledgeCliShim()
+        self.application._knowledge_cli = knowledge
+        request = {
+            "action": "start",
+            "operation": "import_files",
+            "paths": [r"D:\references\guide.pdf"],
+        }
+
+        response = self.request("POST", "/v1/knowledge", request)
+
+        self.assertEqual("start", response["action"])
+        self.assertEqual([request], knowledge.requests)
+
+        imported = {
+            "action": "start",
+            "operation": "import_thread",
+            "thread_id": "thread-fake",
+        }
+        self.request("POST", "/v1/knowledge", imported)
+        self.assertEqual("thread-fake", knowledge.thread_reads[0]["thread_id"])
+        self.assertEqual(
+            "thread-fake",
+            knowledge.thread_reads[0]["result"]["thread"]["id"],
+        )
+
+        removed = {
+            "action": "start",
+            "operation": "remove_thread",
+            "thread_id": "thread-fake",
+        }
+        self.request("POST", "/v1/knowledge", removed)
+        self.assertEqual(1, len(knowledge.thread_reads))
+
+        knowledge.error = KnowledgeCliError(
+            "KNOWLEDGE_JOB_ACTIVE",
+            "Another knowledge operation is already running",
+            http_status=409,
+            details={"job_id": "a" * 32},
+        )
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/knowledge",
+                {"action": "start", "operation": "rebuild"},
+            )
+        self.assertEqual(409, raised.exception.code)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(
+            "KNOWLEDGE_JOB_ACTIVE",
+            payload["structured_error"]["code"],
+        )
+        self.assertEqual(
+            "a" * 32,
+            payload["structured_error"]["details"]["job_id"],
+        )
 
     def test_bad_token_is_rejected(self) -> None:
         with self.assertRaises(HTTPError) as raised:

@@ -1,10 +1,12 @@
 {
-  "schema_version": 1,
-  "pack_id": "sidefx-official-workflows-v1",
-  "description": "Original workflow cards linked to SideFX primary sources.",
+  "schema_version": 2,
+  "pack_id": "sidefx-official-workflows-v2",
+  "pack_version": "2.0.0",
+  "description": "Original Houdini 21 workflow cards linked to SideFX primary sources.",
   "publisher": "Big-Chicken contributors",
   "card_license": "Apache-2.0",
   "upstream_publisher": "SideFX",
+  "upstream_terms": "https://www.sidefx.com/legal/terms-and-conditions/",
   "upstream_terms_url": "https://www.sidefx.com/legal/terms-and-conditions/",
   "upstream_content_redistributed": false,
   "installed_help_archives": [
@@ -26,84 +28,798 @@
   ],
   "sources": [
     {
-      "id": "h21-foundations",
-      "title": "H21 Foundations: end-to-end procedural shot workflow",
-      "path": "cards/h21-foundations.md",
-      "url": "https://www.sidefx.com/tutorials/h21-foundations-welcome/",
+      "id": "cache-packaging-performance",
+      "title": "File cache, versioning, and package boundaries",
+      "path": "cards/cache-packaging-performance.md",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/filecache.html",
       "houdini_version": "21",
-      "topic": "workflow"
+      "topic": "cache",
+      "source_ids": [
+        "src-42e01f6f3c8d358e",
+        "src-1bd24e5fc72508ef",
+        "src-9681de9ec02382ca",
+        "src-951bc6a108e599ac",
+        "src-97534928cf22c038",
+        "src-c19f821c3ba49c25",
+        "src-e9209b63e2cd65a1",
+        "src-c436db02b5900452"
+      ]
     },
     {
-      "id": "vex-snippets",
-      "title": "VEX and Wrangle workflow",
-      "path": "cards/vex-snippets.md",
-      "url": "https://www.sidefx.com/docs/houdini/vex/snippets",
-      "houdini_version": "any",
-      "topic": "vex"
-    },
+      "id": "chops-channels-export",
+      "title": "CHOP channels, processing, and export workflow",
+      "path": "cards/chops-channels-export.md",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/chop/index.html",
+      "houdini_version": "21",
+      "topic": "chops",
+        "source_ids": [
+          "src-291b474b53d6d103",
+          "src-41626e03a05013fe",
+          "src-06381a8c307a5cbf",
+          "src-bc5710d53571d74c"
+        ]
+      },
     {
-      "id": "usd-basics",
-      "title": "Solaris and USD composition basics",
-      "path": "cards/usd-basics.md",
-      "url": "https://www.sidefx.com/docs/houdini/solaris/usd.html",
-      "houdini_version": "any",
-      "topic": "solaris"
-    },
-    {
-      "id": "solaris-performance",
-      "title": "Solaris performance and stage organization",
-      "path": "cards/solaris-performance.md",
-      "url": "https://www.sidefx.com/docs/houdini/solaris/performance.html",
-      "houdini_version": "any",
-      "topic": "solaris-performance"
-    },
-    {
-      "id": "materialx-solaris",
-      "title": "MaterialX in Solaris",
-      "path": "cards/materialx-solaris.md",
-      "url": "https://www.sidefx.com/docs/houdini/solaris/materialx",
-      "houdini_version": "any",
-      "topic": "materialx"
-    },
-    {
-      "id": "karma-xpu",
-      "title": "Karma XPU workflow and compatibility checks",
-      "path": "cards/karma-xpu.md",
-      "url": "https://www.sidefx.com/docs/houdini/solaris/karma_xpu.html",
-      "houdini_version": "any",
-      "topic": "karma"
-    },
-    {
-      "id": "pyro-intro",
-      "title": "Pyro sourcing, solving, caching, and rendering",
-      "path": "cards/pyro-intro.md",
-      "url": "https://www.sidefx.com/docs/houdini/pyro/intro.html",
-      "houdini_version": "any",
-      "topic": "pyro"
-    },
-    {
-      "id": "vellum-overview",
-      "title": "Vellum constraint and stability workflow",
-      "path": "cards/vellum-overview.md",
-      "url": "https://www.sidefx.com/docs/houdini/vellum/overview.html",
-      "houdini_version": "any",
-      "topic": "vellum"
-    },
-    {
-      "id": "pdg-tops",
-      "title": "PDG and TOPs dependency workflow",
-      "path": "cards/pdg-tops.md",
-      "url": "https://www.sidefx.com/docs/houdini/tops/intro.html",
-      "houdini_version": "any",
-      "topic": "pdg"
+      "id": "component-builder-variants-payloads",
+      "title": "Solaris Component Builder, variants, and payload delivery",
+      "path": "cards/component-builder-variants-payloads.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/component_builder.html",
+      "houdini_version": "21",
+      "topic": "usd",
+      "source_ids": [
+        "src-8fb9c7ce695a0cc5",
+        "src-29c0a36cda491f18",
+        "src-8169e3237d853c99",
+        "src-edb8bb7150e15875"
+      ]
     },
     {
       "id": "copernicus",
-      "title": "Copernicus image and texture workflow",
+      "title": "Copernicus layer and data-flow workflow",
       "path": "cards/copernicus.md",
-      "url": "https://www.sidefx.com/docs/houdini/news/21/copernicus.html",
+      "url": "https://www.sidefx.com/docs/houdini/copernicus/intro.html",
       "houdini_version": "21",
-      "topic": "copernicus"
+      "topic": "copernicus",
+      "source_ids": [
+        "src-81d565a9a098c5e0",
+        "src-c100f17e38202b4b",
+        "src-0072d10dce67caa3",
+        "src-4244a497e296979e"
+      ]
+    },
+    {
+      "id": "copernicus-feedback-texture-output",
+      "title": "Copernicus feedback, texture, and output workflow",
+      "path": "cards/copernicus-feedback-texture-output.md",
+      "url": "https://www.sidefx.com/docs/houdini/copernicus/working_with_cops.html",
+      "houdini_version": "21",
+      "topic": "copernicus",
+      "source_ids": [
+        "src-4bcbfbd2e9f2b7f0",
+        "src-f73d0328dbdb8aad",
+        "src-21d333dd0ff192ab",
+        "src-2a7122995b71e110",
+        "src-0072d10dce67caa3",
+        "src-4244a497e296979e"
+      ]
+    },
+    {
+      "id": "crowds-agent-state",
+      "title": "Crowd agent definition, layout, and state workflow",
+      "path": "cards/crowds-agent-state.md",
+      "url": "https://www.sidefx.com/docs/houdini/crowds/setup.html",
+      "houdini_version": "21",
+      "topic": "crowds",
+      "source_ids": [
+        "src-b8ff9c2f5ce3feba",
+        "src-9df65cd157d24acd",
+        "src-61f8c0a8dd304bcd",
+        "src-ac994e7c114ebe70",
+        "src-d4a6600f10db92a1",
+        "src-c23e275c05ce903e"
+      ]
+    },
+    {
+      "id": "crowds-transition-render",
+      "title": "Crowd transition, motion, cache, and render workflow",
+      "path": "cards/crowds-transition-render.md",
+      "url": "https://www.sidefx.com/docs/houdini/crowds/setup.html",
+      "houdini_version": "21",
+      "topic": "crowds",
+      "source_ids": [
+        "src-b8ff9c2f5ce3feba",
+        "src-626f4096e98f7239",
+        "src-9df65cd157d24acd",
+        "src-68c8e3e7843d45f0",
+        "src-f4b89447823a0b6a",
+        "src-c23e275c05ce903e",
+        "src-7d7598224dc45643"
+      ]
+    },
+    {
+      "id": "diagnostics-performance",
+      "title": "General diagnostics and performance",
+      "path": "cards/diagnostics-performance.md",
+      "url": "https://www.sidefx.com/docs/houdini/ref/panes/perfmon.html",
+      "houdini_version": "21",
+      "topic": "diagnostics",
+      "source_ids": [
+        "src-951bc6a108e599ac",
+        "src-97534928cf22c038",
+        "src-1bd24e5fc72508ef",
+        "src-c19f821c3ba49c25",
+        "src-f5e5f7526083a69f"
+      ]
+    },
+    {
+      "id": "flip-mesh-whitewater-cache",
+      "title": "FLIP meshing, whitewater, and cache workflow",
+      "path": "cards/flip-mesh-whitewater-cache.md",
+      "url": "https://www.sidefx.com/docs/houdini/fluid/sopcaching.html",
+      "houdini_version": "21",
+      "topic": "fluids",
+      "source_ids": [
+        "src-2b214185409a4a74",
+        "src-0f8810277791e2c8",
+        "src-c27962f5fc6d406f",
+        "src-c49334a365d79881",
+        "src-a0dcdf60d69cfc08",
+        "src-a736e17312cfaf23"
+      ]
+    },
+    {
+      "id": "flip-source-collision-narrowband",
+      "title": "FLIP sourcing, collision, and narrow-band workflow",
+      "path": "cards/flip-source-collision-narrowband.md",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/flipsolver.html",
+      "houdini_version": "21",
+      "topic": "fluids",
+      "source_ids": [
+        "src-49c84a9ca51bc748",
+        "src-dfa3edec0fd986a2",
+        "src-42d515f822d13b02",
+        "src-422aeb8d7621fc48",
+        "src-f863a3fbe0b7cddd",
+        "src-118c96fa0ff03954",
+        "src-a0dcdf60d69cfc08"
+      ]
+    },
+    {
+      "id": "foreach-compile-copy",
+      "title": "For-Each loops and compiled blocks",
+      "path": "cards/foreach-compile-copy.md",
+      "url": "https://www.sidefx.com/docs/houdini/model/looping.html",
+      "houdini_version": "21",
+      "topic": "sop",
+      "source_ids": [
+        "src-c2ff0c589af019d7",
+        "src-f8e5535e67a2fe4e",
+        "src-d585bedc1c85a946"
+      ]
+    },
+    {
+      "id": "h21-foundations",
+      "title": "Houdini 21 end-to-end procedural production workflow",
+      "path": "cards/h21-foundations.md",
+      "url": "https://www.sidefx.com/tutorials/h21-foundations-welcome/",
+      "houdini_version": "21",
+      "topic": "foundations",
+      "source_ids": [
+        "src-e90dbd73d4b94400",
+        "src-fa66da847826b79c",
+        "src-65dcb2d0e10c8742"
+      ]
+    },
+    {
+      "id": "hda-authoring-versioning",
+      "title": "HDA authoring, interfaces, and versioning",
+      "path": "cards/hda-authoring-versioning.md",
+      "url": "https://www.sidefx.com/docs/houdini/assets/create.html",
+      "houdini_version": "21",
+      "topic": "hda",
+      "source_ids": [
+        "src-cfbff8cfb44d0a3a",
+        "src-d8376c4f31741f10",
+        "src-52046e8d229d7693",
+        "src-cc1ea19df759bf02",
+        "src-c19f821c3ba49c25"
+      ]
+    },
+    {
+      "id": "hda-library-debug",
+      "title": "HDA library installation and debugging",
+      "path": "cards/hda-library-debug.md",
+      "url": "https://www.sidefx.com/docs/houdini/assets/install.html",
+      "houdini_version": "21",
+      "topic": "hda",
+      "source_ids": [
+        "src-cc1ea19df759bf02",
+        "src-d8376c4f31741f10",
+        "src-518e839945cefc5f",
+        "src-cfbff8cfb44d0a3a",
+        "src-207cce61631665ee"
+      ]
+    },
+    {
+      "id": "heightfields",
+      "title": "Heightfield terrain workflows",
+      "path": "cards/heightfields.md",
+      "url": "https://www.sidefx.com/docs/houdini/heightfields/index.html",
+      "houdini_version": "21",
+      "topic": "heightfields",
+      "source_ids": [
+        "src-febf2a6d9cd1082d",
+        "src-690388aa35e3cc42",
+        "src-dc3944677c1fc71a",
+        "src-abddf4d342c108a4",
+        "src-ee2ce0e803dbf9c1"
+      ]
+    },
+    {
+      "id": "heightfield-scatter-export",
+      "title": "Heightfield scattering and export",
+      "path": "cards/heightfield-scatter-export.md",
+      "url": "https://www.sidefx.com/docs/houdini/heightfields/scatterattribs.html",
+      "houdini_version": "21",
+      "topic": "heightfields",
+      "source_ids": [
+        "src-961d03304a4c4f3e",
+        "src-febf2a6d9cd1082d",
+        "src-4c946dd3cfc889ec",
+        "src-dc3944677c1fc71a",
+        "src-d237a80a236746b2"
+      ]
+    },
+    {
+      "id": "hom-cook-exception-performance",
+      "title": "HOM cooking, exceptions, and performance",
+      "path": "cards/hom-cook-exception-performance.md",
+      "url": "https://www.sidefx.com/docs/houdini/basics/cooking",
+      "houdini_version": "21",
+      "topic": "hom",
+      "source_ids": [
+        "src-97534928cf22c038",
+        "src-c3df40d55d8a4913",
+        "src-39b8cfb681e3c3ed",
+        "src-ae8d79b66ab24e06",
+        "src-951bc6a108e599ac"
+      ]
+    },
+    {
+      "id": "hom-debugging",
+      "title": "HOM nodes, parameters, and geometry",
+      "path": "cards/hom-debugging.md",
+      "url": "https://www.sidefx.com/docs/houdini/hom/intro.html",
+      "houdini_version": "21",
+      "topic": "hom",
+      "source_ids": [
+        "src-c3df40d55d8a4913",
+        "src-8cc10ce690bfeeda",
+        "src-4e6d730b1b40144f",
+        "src-ae8d79b66ab24e06",
+        "src-b264a6a53cd69e7d",
+        "src-91cdf8dfd04aef00",
+        "src-39b8cfb681e3c3ed",
+        "src-c19f821c3ba49c25"
+      ]
+    },
+    {
+      "id": "karma-sampling-aov-denoise",
+      "title": "Karma sampling, AOV, denoising, and render-statistics workflow",
+      "path": "cards/karma-sampling-aov-denoise.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/kug/sampling.html",
+      "houdini_version": "21",
+      "topic": "karma",
+      "source_ids": [
+        "src-82375011a98b4f24",
+        "src-bf5e8172f380c2a2",
+        "src-bfcc65470fd1116e",
+        "src-9eda7a39e87d031c",
+        "src-e895e25da7255f7c"
+      ]
+    },
+    {
+      "id": "karma-xpu",
+      "title": "Karma XPU setup, compatibility, and render diagnosis",
+      "path": "cards/karma-xpu.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/karma_xpu.html",
+      "houdini_version": "21",
+      "topic": "karma",
+      "source_ids": [
+        "src-53bc674d00abb6fe",
+        "src-9749a162ca39d076",
+        "src-ba3e5264685e4a4b",
+        "src-34d247207016ad9f"
+      ]
+    },
+    {
+      "id": "animation-keyframes-curves",
+      "title": "Traditional keyframes and Animation Editor curve workflow",
+      "path": "cards/animation-keyframes-curves.md",
+      "url": "https://www.sidefx.com/docs/houdini/anim/index.html",
+      "houdini_version": "21",
+      "topic": "animation",
+      "source_ids": [
+        "src-e6fa998e58c74311",
+        "src-0b754dc9b2e48673",
+        "src-f919c38e69f70481",
+        "src-984b26fa0fe81a6f",
+        "src-91cdf8dfd04aef00",
+        "src-bc5710d53571d74c"
+      ]
+    },
+    {
+      "id": "kinefx-retarget-motionclip",
+      "title": "KineFX retargeting and MotionClip workflow",
+      "path": "cards/kinefx-retarget-motionclip.md",
+      "url": "https://www.sidefx.com/docs/houdini/character/kinefx/retargeting.html",
+      "houdini_version": "21",
+      "topic": "kinefx",
+      "source_ids": [
+        "src-f2f397e7fba6168c",
+        "src-5f700b7d15321bb7",
+        "src-2a6dd06ce69bb147",
+        "src-35410f0344886259",
+        "src-0370267f9e4402da",
+        "src-d537e568b883e572",
+        "src-4810c562bc5b35d6",
+        "src-1846b1ac14b926ca",
+        "src-bc5710d53571d74c"
+      ]
+    },
+    {
+      "id": "kinefx-rig-capture",
+      "title": "KineFX rig, character assembly, and capture workflow",
+      "path": "cards/kinefx-rig-capture.md",
+      "url": "https://www.sidefx.com/docs/houdini/character/kinefx/overview.html",
+      "houdini_version": "21",
+      "topic": "kinefx",
+      "source_ids": [
+        "src-a3571e7c8c333027",
+        "src-4372c1f94672f0bc",
+        "src-dc448c79cd5d062f",
+        "src-5ee355672a7648a5",
+        "src-46568eec33ee51e2",
+        "src-0370267f9e4402da",
+        "src-86f62b4a006f3246",
+        "src-bc5710d53571d74c"
+      ]
+    },
+    {
+      "id": "lighting-camera-aov",
+      "title": "Solaris lighting, camera, render product, and AOV workflow",
+      "path": "cards/lighting-camera-aov.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/index.html",
+      "houdini_version": "21",
+      "topic": "rendering",
+      "source_ids": [
+        "src-65dcb2d0e10c8742",
+        "src-8efa9a1eea869c97",
+        "src-92f624f531e79a55",
+        "src-9eda7a39e87d031c",
+        "src-ddab2b3e61f2b8d0",
+        "src-9ea200f734e480b7",
+        "src-73d15084eec4779d",
+        "src-946c887c0ad90fde",
+        "src-783f8a9cd7d0bc29"
+      ]
+    },
+    {
+      "id": "materialx-layers-displacement-volume",
+      "title": "MaterialX layers, displacement, and volume materials for Karma",
+      "path": "cards/materialx-layers-displacement-volume.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/materialx.html",
+      "houdini_version": "21",
+      "topic": "materialx",
+      "source_ids": [
+        "src-2b36ae774c342ef9",
+        "src-ba3e5264685e4a4b",
+        "src-53bc674d00abb6fe",
+        "src-e895e25da7255f7c"
+      ]
+    },
+    {
+      "id": "materialx-solaris",
+      "title": "MaterialX authoring and binding in Solaris",
+      "path": "cards/materialx-solaris.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/kug/materials.html",
+      "houdini_version": "21",
+      "topic": "materialx",
+      "source_ids": [
+        "src-ba3e5264685e4a4b",
+        "src-2b36ae774c342ef9",
+        "src-65dcb2d0e10c8742",
+        "src-783f8a9cd7d0bc29"
+      ]
+    },
+    {
+      "id": "ocean-spectrum-evaluate-render",
+      "title": "Ocean spectrum, evaluation, and render workflow",
+      "path": "cards/ocean-spectrum-evaluate-render.md",
+      "url": "https://www.sidefx.com/docs/houdini/fluid/oceans.html",
+      "houdini_version": "21",
+      "topic": "fluids",
+      "source_ids": [
+        "src-81f3e5fe7117587e",
+        "src-dfec8e0b6a03e6cc",
+        "src-1c5f0a851efa5eae",
+        "src-e895e25da7255f7c"
+      ]
+    },
+    {
+      "id": "pack-copy-instances",
+      "title": "Pack, Copy to Points, and instances",
+      "path": "cards/pack-copy-instances.md",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/copytopoints",
+      "houdini_version": "21",
+      "topic": "sop",
+      "source_ids": [
+        "src-f24f8c73ba0ad363",
+        "src-a01943d6fbd65c9a",
+        "src-9681de9ec02382ca",
+        "src-70d61b7a33ddf53a",
+        "src-0f629f840f652e76"
+      ]
+    },
+    {
+      "id": "pdg-partition-scheduler-cache-debug",
+      "title": "PDG partition, scheduler, cache, and debug workflow",
+      "path": "cards/pdg-partition-scheduler-cache-debug.md",
+      "url": "https://www.sidefx.com/docs/houdini/tops/pdg/cacheMode.html",
+      "houdini_version": "21",
+      "topic": "pdg",
+      "source_ids": [
+        "src-9a1d594e39f1f7e4",
+        "src-2abd7a33e65420ce",
+        "src-c7c1f24eacf17db9",
+        "src-a4df953393510b0e"
+      ]
+    },
+    {
+      "id": "pdg-tops",
+      "title": "PDG work-item and dependency workflow",
+      "path": "cards/pdg-tops.md",
+      "url": "https://www.sidefx.com/docs/houdini/tops/intro.html",
+      "houdini_version": "21",
+      "topic": "pdg",
+      "source_ids": [
+        "src-935b52f92be9f4a2",
+        "src-a47886787542ec74",
+        "src-5cdfaf7cf7312965",
+        "src-0535a15c4840ca99",
+        "src-26da3d85db1ca293",
+        "src-a4df953393510b0e"
+      ]
+    },
+    {
+      "id": "pyro-cache-shade-render",
+      "title": "Pyro cache, shading, and render workflow",
+      "path": "cards/pyro-cache-shade-render.md",
+      "url": "https://www.sidefx.com/docs/houdini/pyro/intro.html",
+      "houdini_version": "21",
+      "topic": "pyro",
+      "source_ids": [
+        "src-b68c19290c3f5ba2",
+        "src-764640f96f6ced88",
+        "src-a0dcdf60d69cfc08",
+        "src-67c0dc4f9d8de96e",
+        "src-3346d2ba4cae4412",
+        "src-54b806bafd695186",
+        "src-80120fe89ed9a821",
+        "src-53bc674d00abb6fe",
+        "src-bfcc65470fd1116e",
+        "src-e895e25da7255f7c"
+      ]
+    },
+    {
+      "id": "pyro-intro",
+      "title": "Pyro source and sparse solve workflow",
+      "path": "cards/pyro-intro.md",
+      "url": "https://www.sidefx.com/docs/houdini/pyro/intro.html",
+      "houdini_version": "21",
+      "topic": "pyro",
+      "source_ids": [
+        "src-b68c19290c3f5ba2",
+        "src-764640f96f6ced88",
+        "src-a736e17312cfaf23"
+      ]
+    },
+    {
+      "id": "rbd-constraints-bullet-cache",
+      "title": "RBD constraints, Bullet solving, and cache workflow",
+      "path": "cards/rbd-constraints-bullet-cache.md",
+      "url": "https://www.sidefx.com/docs/houdini/destruction/constraints.html",
+      "houdini_version": "21",
+      "topic": "rbd",
+      "source_ids": [
+        "src-901bda654cc502de",
+        "src-630b0a2595aec918",
+        "src-48dee028e8cc7bb6",
+        "src-a0dcdf60d69cfc08",
+        "src-6f860a68141adcda"
+      ]
+    },
+    {
+      "id": "rbd-fracture-name-pack",
+      "title": "RBD fracture, naming, and packing workflow",
+      "path": "cards/rbd-fracture-name-pack.md",
+      "url": "https://www.sidefx.com/docs/houdini/destruction/overview.html",
+      "houdini_version": "21",
+      "topic": "rbd",
+      "source_ids": [
+        "src-3f37ebfa66962bb4",
+        "src-90d6e0ae943f0cfa",
+        "src-a67cbfc83ad80745",
+        "src-630b0a2595aec918",
+        "src-84c5281141dea184"
+      ]
+    },
+    {
+      "id": "solaris-performance",
+      "title": "Solaris stage organization and performance diagnosis",
+      "path": "cards/solaris-performance.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/performance.html",
+      "houdini_version": "21",
+      "topic": "solaris",
+      "source_ids": [
+        "src-da36d5f4085889a4",
+        "src-65dcb2d0e10c8742",
+        "src-29c0a36cda491f18",
+        "src-edb8bb7150e15875"
+      ]
+    },
+    {
+      "id": "solaris-scene-import-layout",
+      "title": "Scene Import, USD layout, and shot-layer handoff",
+      "path": "cards/solaris-scene-import-layout.md",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/lop/sceneimport.html",
+      "houdini_version": "21",
+      "topic": "solaris",
+      "source_ids": [
+        "src-a89de2ea068ee62d",
+        "src-1aaa267d153596c5",
+        "src-42edce04dc784d18",
+        "src-0dba2e2b265623dd",
+        "src-8169e3237d853c99",
+        "src-edb8bb7150e15875"
+      ]
+    },
+    {
+      "id": "sop-procedural-attributes",
+      "title": "SOP procedural modeling and attributes",
+      "path": "cards/sop-procedural-attributes.md",
+      "url": "https://www.sidefx.com/docs/houdini/model/attributes.html",
+      "houdini_version": "21",
+      "topic": "sop",
+      "source_ids": [
+        "src-63415f84fa3db2c1",
+        "src-c27d3b1fc5e546bf",
+        "src-078fdf25bd35da19",
+        "src-ee2ce0e803dbf9c1",
+        "src-e90dbd73d4b94400"
+      ]
+    },
+    {
+      "id": "usd-basics",
+      "title": "Solaris and USD composition workflow",
+      "path": "cards/usd-basics.md",
+      "url": "https://www.sidefx.com/docs/houdini/solaris/usd.html",
+      "houdini_version": "21",
+      "topic": "usd",
+      "source_ids": [
+        "src-29c0a36cda491f18",
+        "src-71ff7e4aaa349d7d",
+        "src-65dcb2d0e10c8742",
+        "src-b573eab55f2b2b86",
+        "src-edb8bb7150e15875"
+      ]
+    },
+    {
+      "id": "uv-workflows",
+      "title": "UV workflows",
+      "path": "cards/uv-workflows.md",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/uvflatten.html",
+      "houdini_version": "21",
+      "topic": "uv",
+      "source_ids": [
+        "src-5fa0130b0705fb56",
+        "src-a8214c567cf1f035",
+        "src-4ff295f96a81dd2d",
+        "src-cd5b14c717ffe21a",
+        "src-ee2ce0e803dbf9c1"
+      ]
+    },
+    {
+      "id": "vellum-overview",
+      "title": "Vellum cloth and hair workflow",
+      "path": "cards/vellum-overview.md",
+      "url": "https://www.sidefx.com/docs/houdini/vellum/overview.html",
+      "houdini_version": "21",
+      "topic": "vellum",
+      "source_ids": [
+        "src-6b68ac314eae8004",
+        "src-c771b08cd8814fec",
+        "src-5d1ad0995241e089",
+        "src-f54e9320a4410599",
+        "src-43702b102c72e1a5",
+        "src-d98a37fef8ebb8e3"
+      ]
+    },
+    {
+      "id": "vellum-softbody-grains",
+      "title": "Vellum soft body and grains workflow",
+      "path": "cards/vellum-softbody-grains.md",
+      "url": "https://www.sidefx.com/docs/houdini/vellum/softbody.html",
+      "houdini_version": "21",
+      "topic": "vellum",
+      "source_ids": [
+        "src-5d2e56401db87d4d",
+        "src-7a365029b6af72a7",
+        "src-43702b102c72e1a5"
+      ]
+    },
+    {
+      "id": "vex-neighbor-volume-debug",
+      "title": "VEX neighbors, volumes, and debugging",
+      "path": "cards/vex-neighbor-volume-debug.md",
+      "url": "https://www.sidefx.com/docs/houdini/vex/snippets",
+      "houdini_version": "21",
+      "topic": "vex",
+      "source_ids": [
+        "src-a6356e91955897fc",
+        "src-c7555aaa9a7cfb10",
+        "src-23792f31e11003b6",
+        "src-70009f0fc3269b60",
+        "src-f5e5f7526083a69f"
+      ]
+    },
+    {
+      "id": "vex-snippets",
+      "title": "VEX snippets and Attribute Wrangle",
+      "path": "cards/vex-snippets.md",
+      "url": "https://www.sidefx.com/docs/houdini/vex/snippets",
+      "houdini_version": "21",
+      "topic": "vex",
+      "source_ids": [
+        "src-a6356e91955897fc",
+        "src-70009f0fc3269b60",
+        "src-b7d1b90b1ee231e8",
+        "src-f5e5f7526083a69f",
+        "src-382eef4dcb682559"
+      ]
+    },
+    {
+      "id": "curve-nurbs-subdivision",
+      "title": "Curve, NURBS, and subdivision modeling",
+      "path": "cards/curve-nurbs-subdivision.md",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/curve.html",
+      "houdini_version": "21",
+      "topic": "modeling",
+      "source_ids": [
+        "src-6a32e44726e088b6",
+        "src-c8fd3af4211ee445",
+        "src-938e55e1f77f42ff",
+        "src-4a56296848d075de",
+        "src-372a64688b638458",
+        "src-d21e5fa0652c79a9",
+        "src-ee2ce0e803dbf9c1"
+      ]
+    },
+    {
+      "id": "opencl-sop-compiled-dop",
+      "title": "OpenCL SOP and compiled SOP-in-DOP workflow",
+      "path": "cards/opencl-sop-compiled-dop.md",
+      "url": "https://www.sidefx.com/docs/houdini/nodes/sop/opencl.html",
+      "houdini_version": "21",
+      "topic": "opencl",
+      "source_ids": [
+        "src-478cfed1dc374cac",
+        "src-962fd422166d605a",
+        "src-93bd05bce16d853b",
+        "src-f5e5f7526083a69f",
+        "src-598bd3bd10e6929a",
+        "src-f8e5535e67a2fe4e",
+        "src-25f117fac81d18ae",
+        "src-b4a20021b370b172"
+      ]
+    },
+    {
+      "id": "groom-guides-uv-transfer",
+      "title": "Rest groom, guide transfer, and hair generation workflow",
+      "path": "cards/groom-guides-uv-transfer.md",
+      "url": "https://www.sidefx.com/docs/houdini/fur/groom.html",
+      "houdini_version": "21",
+      "topic": "groom",
+      "source_ids": [
+        "src-78ce1abdd60e1d9d",
+        "src-17f384f134e0664c",
+        "src-0095e5ab1a110091",
+        "src-43449d114dc44b41",
+        "src-da265749a623aac9"
+      ]
+    },
+    {
+      "id": "fem-solids-constraints",
+      "title": "FEM solid, constraint, collision, and render-deformation workflow",
+      "path": "cards/fem-solids-constraints.md",
+      "url": "https://www.sidefx.com/docs/houdini/finiteelements/about.html",
+      "houdini_version": "21",
+      "topic": "fem",
+      "source_ids": [
+        "src-cbe854a337c72960",
+        "src-ed104669bd6fb34c",
+        "src-199fb469b620e554",
+        "src-1782d2e651a02e54",
+        "src-050bee0f04d9ffc6",
+        "src-84239f2274b3ed8c"
+      ]
+    },
+    {
+      "id": "mpm-material-simulation",
+      "title": "MPM material, collision, cache, and surfacing workflow",
+      "path": "cards/mpm-material-simulation.md",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/mpm.html",
+      "houdini_version": "21",
+      "topic": "mpm",
+      "source_ids": [
+        "src-d405fb36c91ff904",
+        "src-fce378fac68820fc",
+        "src-39fdb8cfd25871ab",
+        "src-4783cccfaf652c3f",
+        "src-e6daa355f466c7af",
+        "src-a5c773fbc87b0c28",
+        "src-de4b8555662430a7"
+      ]
+    },
+    {
+      "id": "copernicus-pyro-cop2-migration",
+      "title": "Houdini 21 Copernicus Pyro and Legacy COP2 migration",
+      "path": "cards/copernicus-pyro-cop2-migration.md",
+      "url": "https://www.sidefx.com/docs/houdini/news/21/pyro.html",
+      "houdini_version": "21",
+      "topic": "copernicus",
+      "source_ids": [
+        "src-a736e17312cfaf23",
+        "src-4244a497e296979e",
+        "src-f40af1438b6d5c3c",
+        "src-81d565a9a098c5e0",
+        "src-1a5be461e0e3a973",
+        "src-af12dfdd365a334d",
+        "src-cb0eccde101ff82d"
+      ]
+    },
+    {
+      "id": "python-viewer-state",
+      "title": "Python Viewer State authoring and validation",
+      "path": "cards/python-viewer-state.md",
+      "url": "https://www.sidefx.com/docs/houdini/hom/python_states.html",
+      "houdini_version": "21",
+      "topic": "hom",
+      "source_ids": [
+        "src-d119e391b932ca8f",
+        "src-6eb6a3a3feb4d53f",
+        "src-9f0c889bc2d21076",
+        "src-56d23e651e92bbe4",
+        "src-2ffb8f4351ff0e14",
+        "src-e8368bd65bd82d95",
+        "src-c19f821c3ba49c25"
+      ]
+    },
+    {
+      "id": "hdk-package-distribution",
+      "title": "HDK plug-in build and package distribution",
+      "path": "cards/hdk-package-distribution.md",
+      "url": "https://www.sidefx.com/docs/hdk/_h_d_k__intro__getting_started.html",
+      "houdini_version": "21",
+      "topic": "hdk",
+      "source_ids": [
+        "src-d686d4a112f05d88",
+        "src-8e324b07e8f3853a",
+        "src-786491caaa0ebfbb",
+        "src-dd2a31529b5f84e8",
+        "src-e87959a68c9b98a1",
+        "src-a799701a9215fbe8"
+      ]
     }
   ]
 }

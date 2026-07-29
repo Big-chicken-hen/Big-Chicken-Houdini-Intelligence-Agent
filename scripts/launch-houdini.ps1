@@ -1052,25 +1052,15 @@ function Resolve-BridgePythonExecutable {
         [Parameter(Mandatory = $true)][string]$ProjectRoot
     )
 
-    if ($RequestedPath) { return $RequestedPath }
-    $candidates = @()
-    if ($env:HIA_BRIDGE_PYTHON) { $candidates += [string]$env:HIA_BRIDGE_PYTHON }
-    $projectPython = Join-Path $ProjectRoot '.runtime\python\python.exe'
-    if (Test-Path -LiteralPath $projectPython -PathType Leaf) {
-        $candidates += $projectPython
+    $managedPython = Get-HiaManagedBridgePythonPath -ProjectRoot $ProjectRoot
+    if ($RequestedPath) {
+        $requested = [System.IO.Path]::GetFullPath($RequestedPath)
+        if ([System.StringComparer]::OrdinalIgnoreCase.Equals($requested, $managedPython)) {
+            return Resolve-HiaManagedBridgePython -ProjectRoot $ProjectRoot
+        }
+        return $requested
     }
-    foreach ($command in @(Get-Command -Name 'python.exe' -All -ErrorAction SilentlyContinue)) {
-        if ($command.Source) { $candidates += [string]$command.Source }
-    }
-    $candidates = @($candidates | Where-Object {
-        $_ -and (Test-Path -LiteralPath $_ -PathType Leaf)
-    } | ForEach-Object {
-        [System.IO.Path]::GetFullPath([string]$_)
-    } | Sort-Object -Unique)
-    if ($candidates.Count -ne 1) {
-        throw 'Pass -BridgePython with one exact python.exe path; the launcher will not guess between candidates.'
-    }
-    return [string]$candidates[0]
+    return Resolve-HiaManagedBridgePython -ProjectRoot $ProjectRoot
 }
 
 $ResolvedRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path.TrimEnd('\')
@@ -1199,16 +1189,18 @@ if ($RecoveryDecision -eq 'recover') {
     $sourceSessionCheckpoints = Assert-OrdinaryProjectPath `
         -Path (Join-Path $ResolvedRoot ".runtime\launcher-sessions\$RecoverySessionId\checkpoints") `
         -Root $ResolvedRoot
-    $recoverySourceCheckpoint = Assert-OrdinaryProjectPath `
-        -Path $RecoveryCheckpoint `
-        -Root $ResolvedRoot
-    $sourceParent = [System.IO.Path]::GetDirectoryName($recoverySourceCheckpoint).TrimEnd('\')
-    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-        $sourceParent,
-        $sourceSessionCheckpoints.TrimEnd('\')
-    )) {
-        throw 'Recovery checkpoint is not a top-level file in the selected launcher session.'
+    $validatedRecoveryCheckpoint = Get-HiaLatestLauncherCheckpoint `
+        -CheckpointDirectory $sourceSessionCheckpoints
+    if (
+        $null -eq $validatedRecoveryCheckpoint -or
+        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            [System.IO.Path]::GetFullPath($RecoveryCheckpoint),
+            [string]$validatedRecoveryCheckpoint.path
+        )
+    ) {
+        throw 'Recovery checkpoint is not bound to the selected launcher session.'
     }
+    $recoverySourceCheckpoint = [string]$validatedRecoveryCheckpoint.path
     $sourceFile = Get-Item -LiteralPath $recoverySourceCheckpoint -Force -ErrorAction Stop
     $recoveryMatch = [regex]::Match(
         $sourceFile.Name,
@@ -1705,7 +1697,9 @@ Only after the next meaningful stage succeeds may one hia_execute_hom batch set 
                 $progressCopy = Copy-HiaLauncherRecoveryHip `
                     -SessionRoot $sessionRoot `
                     -SourcePath ([string]$latestCheckpoint.path) `
-                    -Attempt ($automaticRestartCount + 1)
+                    -Attempt ($automaticRestartCount + 1) `
+                    -ThreadId $recoveryThreadId `
+                    -GoalBinding $recoveryGoalBinding
                 if (Test-RecoveryHipWithHython `
                     -HythonExe $HythonExe `
                     -HipPath $progressCopy.path `
@@ -1775,7 +1769,9 @@ Only after the next meaningful stage succeeds may one hia_execute_hom batch set 
                 $copied = Copy-HiaLauncherRecoveryHip `
                     -SessionRoot $sessionRoot `
                     -SourcePath ([string]$candidate.value.path) `
-                    -Attempt ($automaticRestartCount + 1)
+                    -Attempt ($automaticRestartCount + 1) `
+                    -ThreadId $recoveryThreadId `
+                    -GoalBinding $recoveryGoalBinding
                 if (Test-RecoveryHipWithHython `
                     -HythonExe $HythonExe `
                     -HipPath $copied.path `

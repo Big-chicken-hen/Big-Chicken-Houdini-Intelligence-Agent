@@ -139,8 +139,13 @@ class _Widget:
         self._checked = False
         self._tooltip = ""
         self._style_sheet = ""
+        self._minimum_width = 0
         self._item_roles: dict[tuple[int, Any], Any] = {}
+        self._range = (0, 1)
+        self._value = 0
+        self._format = ""
         self.clear_focus_calls = 0
+        self.visible_set_calls = 0
 
     def setEnabled(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
@@ -149,6 +154,7 @@ class _Widget:
         return self._enabled
 
     def setVisible(self, visible: bool) -> None:
+        self.visible_set_calls += 1
         self._visible = bool(visible)
 
     def isVisible(self) -> bool:
@@ -171,6 +177,27 @@ class _Widget:
 
     def styleSheet(self) -> str:
         return self._style_sheet
+
+    def setMinimumWidth(self, width: int) -> None:
+        self._minimum_width = int(width)
+
+    def minimumWidth(self) -> int:
+        return self._minimum_width
+
+    def setRange(self, minimum: int, maximum: int) -> None:
+        self._range = (int(minimum), int(maximum))
+
+    def setValue(self, value: int) -> None:
+        self._value = int(value)
+
+    def value(self) -> int:
+        return self._value
+
+    def setFormat(self, value: str) -> None:
+        self._format = value
+
+    def format(self) -> str:
+        return self._format
 
     def setChecked(self, checked: bool) -> None:
         self._checked = bool(checked)
@@ -491,6 +518,8 @@ class _BridgeClientShim:
         self.thread_read_requests: list[tuple[str, str]] = []
         self.thread_rename_requests: list[tuple[str, str, str]] = []
         self.thread_delete_requests: list[tuple[str, str]] = []
+        self.project_memory_requests: list[tuple[dict[str, Any], str]] = []
+        self.knowledge_requests: list[tuple[dict[str, Any], str]] = []
         self.goal_get_requests: list[str] = []
         self.goal_set_requests: list[tuple[str, str, str, int | None]] = []
         self.goal_clear_requests: list[str] = []
@@ -566,6 +595,24 @@ class _BridgeClientShim:
 
     def delete_thread(self, thread_id: str, *, context: str) -> None:
         self.thread_delete_requests.append((thread_id, context))
+
+    def project_memory(
+        self,
+        arguments: dict[str, Any],
+        *,
+        context: str,
+    ) -> str:
+        self.project_memory_requests.append((dict(arguments), context))
+        return "project-memory-request"
+
+    def project_knowledge(
+        self,
+        arguments: dict[str, Any],
+        *,
+        context: str,
+    ) -> str:
+        self.knowledge_requests.append((dict(arguments), context))
+        return "knowledge-request"
 
     def get_goal(self, thread_id: str) -> None:
         self.goal_get_requests.append(thread_id)
@@ -778,6 +825,18 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._thread_delete_confirm_id = None
     panel._thread_delete_confirm_not_before = None
     panel._thread_delete_pending = None
+    panel._project_memory_loaded = False
+    panel._project_memory_pending = None
+    panel._project_memory_delete_confirm_id = None
+    panel._project_memory_delete_confirm_not_before = None
+    panel._knowledge_loaded = False
+    panel._knowledge_pending = None
+    panel._knowledge_job = None
+    panel._knowledge_environment = {}
+    panel._knowledge_source_dialog = None
+    panel._knowledge_source_dialog_mode = None
+    panel._knowledge_delete_confirm_id = None
+    panel._knowledge_delete_confirm_not_before = None
     panel._goal_action_context = None
     panel._current_goal = None
     panel._goal_turn_id = None
@@ -788,7 +847,15 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._goal_auto_turn_token = None
     panel._goal_auto_turn_has_progress = False
     panel._goal_continue_after_open_thread_id = None
+    panel._build_brief = None
+    panel._build_brief_thread_id = None
+    panel._context_pack_summary = None
+    panel._stage_items = []
+    panel._review_records = []
     panel._team_records = {}
+    panel._responsive_layout_mode = None
+    panel._responsive_left_auto_hidden = False
+    panel._responsive_right_auto_hidden = False
     panel._turn_performance_token = None
     panel._turn_performance_marks = {}
     panel._reconnect_attempt = 0
@@ -823,6 +890,13 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._thread_delete_confirm_timer = _ManualTimer(
         panel._reset_thread_delete_confirmation
     )
+    panel._project_memory_confirm_timer = _ManualTimer(
+        panel._reset_project_memory_delete_confirmation
+    )
+    panel._knowledge_poll_timer = _ManualTimer(panel._poll_knowledge_job)
+    panel._knowledge_confirm_timer = _ManualTimer(
+        panel._reset_knowledge_delete_confirmation
+    )
     panel._diagnostic_writer = _DiagnosticWriterShim()
     panel._scene_executor_token = "executor-secret"
     panel._poll_timer = _TimerShim()
@@ -853,10 +927,65 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.rename_thread_button = _Widget()
     panel.copy_thread_id_button = _Widget()
     panel.delete_thread_button = _Widget("删除")
+    panel.project_memory_search_edit = _Widget()
+    panel.project_memory_combo = _Widget()
+    panel.project_memory_combo.addItem("尚未加载项目记忆", None)
+    panel.project_memory_search_button = _Widget("搜索")
+    panel.project_memory_refresh_button = _Widget("刷新")
+    panel.project_memory_details_text = _Widget()
+    panel.project_memory_type_combo = _Widget()
+    for label, value in (
+        ("决策", "decision"),
+        ("偏好", "preference"),
+        ("资产", "asset"),
+        ("经验", "lesson"),
+        ("工作流", "workflow"),
+    ):
+        panel.project_memory_type_combo.addItem(label, value)
+    panel.project_memory_title_edit = _Widget()
+    panel.project_memory_body_edit = _Widget()
+    panel.project_memory_tags_edit = _Widget()
+    panel.project_memory_scope_edit = _Widget("project")
+    panel.project_memory_record_button = _Widget("新增")
+    panel.project_memory_supersede_button = _Widget("取代所选")
+    panel.project_memory_delete_button = _Widget("删除所选")
+    panel.project_memory_editor_button = _Widget("编辑记忆 ▸")
+    panel.project_memory_editor_panel = _Widget()
+    panel.project_memory_editor_panel.setVisible(False)
+    panel.project_memory_status_label = _Widget()
+    panel.knowledge_state_label = _Widget("知识环境：尚未检查")
+    panel.knowledge_metrics_label = _Widget()
+    panel.knowledge_progress_bar = _Widget()
+    panel.knowledge_maintenance_button = _Widget("资料库维护 ▸")
+    panel.knowledge_maintenance_panel = _Widget()
+    panel.knowledge_maintenance_panel.setVisible(False)
+    panel.knowledge_source_combo = _Widget()
+    panel.knowledge_source_combo.addItem("尚未加载用户资料", None)
+    panel.knowledge_source_details_text = _Widget()
+    panel.knowledge_refresh_button = _Widget("刷新状态")
+    panel.knowledge_repair_button = _Widget("修复知识环境")
+    panel.knowledge_import_files_button = _Widget("导入文件")
+    panel.knowledge_import_folder_button = _Widget("导入文件夹")
+    panel.knowledge_import_thread_button = _Widget("索引当前任务原文")
+    panel.knowledge_remove_thread_button = _Widget("移除当前任务索引")
+    panel.knowledge_rebuild_button = _Widget("重建索引")
+    panel.knowledge_cancel_button = _Widget("取消当前任务")
+    panel.knowledge_delete_button = _Widget("删除托管副本")
+    panel.knowledge_status_label = _Widget()
+    panel.knowledge_log_label = _Widget("日志：—")
+    panel.left_column = _Widget()
+    panel.right_column = _Widget()
+    panel.history_sidebar_button = _Widget("历史")
+    panel.history_sidebar_button.setChecked(True)
+    panel.task_sidebar_button = _Widget("任务")
+    panel.task_sidebar_button.setChecked(True)
     panel.new_thread_button = _Widget()
     panel.resume_thread_button = _Widget()
     panel.send_button = _Widget()
     panel.stop_button = _Widget()
+    panel.runtime_settings_group = _Widget("运行设置（下一轮）")
+    panel.model_label = _Widget("模型")
+    panel.effort_label = _Widget("推理")
     panel.conversation = _ConversationShim()
     panel.welcome_group = _Widget()
     panel.approval_group = _Widget()
@@ -882,11 +1011,14 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.include_selection_checkbox = _Widget()
     panel.model_combo = _Widget()
     panel.model_combo.addItem("Codex 默认", None)
+    panel.model_combo.setMinimumWidth(120)
     panel.effort_combo = _Widget()
     panel.effort_combo.addItem("Codex 默认", None)
+    panel.effort_combo.setMinimumWidth(96)
     panel.service_tier_label = _Widget("速度")
     panel.service_tier_combo = _Widget()
     panel.service_tier_combo.addItem("标准", None)
+    panel.service_tier_combo.setMinimumWidth(96)
     panel.service_tier_label.setVisible(False)
     panel.service_tier_combo.setVisible(False)
     panel.goal_objective_edit = _Widget()
@@ -901,6 +1033,9 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.goal_refresh_button = _Widget()
     panel.goal_save_button = _Widget("保存（继续跟进）")
     panel.goal_clear_button = _Widget()
+    panel.build_brief_text = _Widget()
+    panel.stage_details_text = _Widget()
+    panel.review_empty_label = _Widget()
     panel.team_combo = _Widget()
     panel.team_combo.addItem("暂无子任务", None)
     panel.team_details_text = _Widget()
@@ -1244,15 +1379,54 @@ class PanelWiringTests(unittest.TestCase):
         self.assertNotIn("self.history_combo.setMinimumWidth(210)", panel_source)
         self.assertNotIn("right_column.setMinimumWidth(260)", panel_source)
         for column in ("left_column", "center_column", "right_column"):
-            self.assertIn(f"{column}.setMinimumWidth(0)", panel_source)
+            self.assertIn(f"self.{column}.setMinimumWidth(0)", panel_source)
         self.assertIn("self.main_splitter.setChildrenCollapsible(True)", panel_source)
-        self.assertIn("for index in range(3):", panel_source)
-        self.assertIn("self.main_splitter.setCollapsible(index, True)", panel_source)
+        self.assertIn(
+            "_RESPONSIVE_HIDE_RIGHT_WIDTH = _CENTER_TARGET_MIN_WIDTH + 560",
+            panel_source,
+        )
+        self.assertIn(
+            "self.center_column.setSizePolicy(\n"
+            "            QtWidgets.QSizePolicy.Policy.Ignored,",
+            panel_source,
+        )
+        self.assertIn("self.main_splitter.setCollapsible(0, True)", panel_source)
+        self.assertIn("self.main_splitter.setCollapsible(1, False)", panel_source)
+        self.assertIn("self.main_splitter.setCollapsible(2, True)", panel_source)
+        self.assertIn("self.main_splitter.setStretchFactor(1, 5)", panel_source)
+        self.assertEqual(5, panel_source.count("self.task_tabs.addTab("))
+        for label in ("任务蓝图", "阶段进度", "审阅", "团队", "知识与记忆"):
+            self.assertIn(f'"{label}"', panel_source)
         self.assertEqual(
-            2,
+            4,
             panel_source.count("AdjustToMinimumContentsLengthWithIcon"),
         )
-        self.assertEqual(2, panel_source.count("setMinimumContentsLength(0)"))
+        self.assertEqual(4, panel_source.count("setMinimumContentsLength(0)"))
+        self.assertIn("project_memory_content.setMinimumWidth(0)", panel_source)
+        self.assertIn("self.knowledge_group.setMinimumWidth(0)", panel_source)
+        self.assertIn(
+            "self.knowledge_source_combo.setMinimumWidth(0)",
+            panel_source,
+        )
+        self.assertIn(
+            "QtCore.Qt.WindowModality.NonModal",
+            panel_source,
+        )
+        self.assertIn(
+            "Deleting a managed copy never deletes the original file.",
+            (
+                REPOSITORY_ROOT
+                / "services"
+                / "bridge"
+                / "hia_bridge"
+                / "knowledge_cli.py"
+            ).read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "self.project_memory_page.setHorizontalScrollBarPolicy(",
+            panel_source,
+        )
+        self.assertNotIn("QMessageBox", panel_source)
         self.assertIn(
             "for label in (self.thread_status_label, self.turn_status_label):",
             panel_source,
@@ -1285,6 +1459,7 @@ class PanelWiringTests(unittest.TestCase):
             "self.goal_objective_edit = QtWidgets.QPlainTextEdit()",
             panel_source,
         )
+
         self.assertIn("仅用于长期多步骤任务；普通聊天无需设置", panel_source)
         self.assertIn("长期任务目标（普通聊天可留空）", panel_source)
         self.assertIn(
@@ -1296,6 +1471,206 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn('QtWidgets.QCheckBox("目标专注模式")', panel_source)
         self.assertIn("普通聊天，不自动恢复或续做", panel_source)
         self.assertNotIn("inputMethodEvent", panel_source)
+
+    def test_knowledge_and_memory_page_is_split_compact_and_collapsed(self) -> None:
+        panel_source = (
+            PANEL_LIB_ROOT / "hia_panel" / "panel.py"
+        ).read_text(encoding="utf-8")
+        start = panel_source.index(
+            "self.project_memory_page = QtWidgets.QScrollArea()"
+        )
+        end = panel_source.index(
+            'self.task_tabs.addTab(self.project_memory_page, "知识与记忆")',
+            start,
+        )
+        page_source = panel_source[start:end]
+
+        self.assertIn(
+            "self.knowledge_memory_tabs = QtWidgets.QTabWidget()",
+            page_source,
+        )
+        self.assertIn(
+            'self.knowledge_memory_tabs.addTab(knowledge_page, "本地资料库")',
+            page_source,
+        )
+        self.assertIn(
+            'self.knowledge_memory_tabs.addTab(memory_page, "项目记忆")',
+            page_source,
+        )
+        self.assertEqual(1, page_source.count("QtWidgets.QScrollArea()"))
+        self.assertIn(
+            "self.knowledge_maintenance_panel.setVisible(False)",
+            page_source,
+        )
+        self.assertIn(
+            "self.project_memory_editor_panel.setVisible(False)",
+            page_source,
+        )
+        self.assertIn('"资料库维护 ▸"', page_source)
+        self.assertIn('"编辑记忆 ▸"', page_source)
+        self.assertIn(
+            "聊天不会自动转成项目记忆",
+            page_source,
+        )
+        self.assertIn('"索引当前任务原文"', page_source)
+        self.assertIn('"移除当前任务索引"', page_source)
+        self.assertIn("视频本体不会复制", page_source)
+        self.assertIn("不会自动变成项目记忆", page_source)
+        for suffix in (
+            "*.aac",
+            "*.avi",
+            "*.flac",
+            "*.m4a",
+            "*.m4v",
+            "*.mkv",
+            "*.mov",
+            "*.mp3",
+            "*.mp4",
+            "*.ogg",
+            "*.wav",
+            "*.webm",
+        ):
+            self.assertIn(suffix, panel_source)
+        self.assertNotIn("聊天会自动", page_source)
+        self.assertIn(
+            "self.knowledge_source_details_text.setMaximumHeight(120)",
+            page_source,
+        )
+        self.assertIn(
+            "self.project_memory_details_text.setMaximumHeight(150)",
+            page_source,
+        )
+        for name in (
+            "knowledge_memory_tabs",
+            "knowledge_maintenance_panel",
+            "project_memory_editor_panel",
+            "knowledge_source_combo",
+            "project_memory_combo",
+        ):
+            self.assertIn(f"self.{name}.setMinimumWidth(0)", page_source)
+
+        panel = _make_panel()
+        self.assertFalse(panel.knowledge_maintenance_panel.isVisible())
+        self.assertFalse(panel.project_memory_editor_panel.isVisible())
+        panel._toggle_knowledge_maintenance(True)
+        panel._toggle_project_memory_editor(True)
+        self.assertTrue(panel.knowledge_maintenance_panel.isVisible())
+        self.assertTrue(panel.project_memory_editor_panel.isVisible())
+        self.assertEqual("资料库维护 ▾", panel.knowledge_maintenance_button.text())
+        self.assertEqual("编辑记忆 ▾", panel.project_memory_editor_button.text())
+
+    def test_responsive_layout_collapses_sidebars_without_rewriting_state(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel.input_edit.setPlainText("保留中的中文草稿")
+        panel.attachment_strip.add_path("E:/assets/reference.png")
+        panel._current_goal = {
+            "threadId": "thread-1",
+            "objective": "保持当前目标",
+            "status": "active",
+        }
+        panel._team_records["child-1"] = {
+            "root_thread_id": "thread-1",
+            "task": "审阅",
+        }
+
+        panel._apply_responsive_layout(1_200)
+        self.assertTrue(panel.left_column.isVisible())
+        self.assertTrue(panel.right_column.isVisible())
+
+        panel._apply_responsive_layout(900)
+        self.assertTrue(panel.left_column.isVisible())
+        self.assertFalse(panel.right_column.isVisible())
+        visibility_calls = panel.right_column.visible_set_calls
+        panel._apply_responsive_layout(900)
+        self.assertEqual(visibility_calls, panel.right_column.visible_set_calls)
+
+        panel._apply_responsive_layout(700)
+        self.assertFalse(panel.left_column.isVisible())
+        self.assertFalse(panel.right_column.isVisible())
+        panel._apply_responsive_layout(1_200)
+        self.assertTrue(panel.left_column.isVisible())
+        self.assertTrue(panel.right_column.isVisible())
+
+        panel._toggle_task_sidebar(False)
+        panel._apply_responsive_layout(700)
+        panel._apply_responsive_layout(1_200)
+        self.assertFalse(panel.right_column.isVisible())
+        self.assertEqual("保留中的中文草稿", panel.input_edit.toPlainText())
+        self.assertEqual(
+            ["E:/assets/reference.png"],
+            panel.attachment_strip.paths(),
+        )
+        self.assertEqual("保持当前目标", panel._current_goal["objective"])
+        self.assertIn("child-1", panel._team_records)
+
+    def test_runtime_settings_wrap_and_stay_operable_at_common_and_narrow_widths(
+        self,
+    ) -> None:
+        panel_source = (
+            PANEL_LIB_ROOT / "hia_panel" / "panel.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'QtWidgets.QGroupBox("运行设置（下一轮）")',
+            panel_source,
+        )
+        self.assertIn("QtWidgets.QFormLayout(", panel_source)
+        self.assertIn(
+            "QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows",
+            panel_source,
+        )
+        self.assertIn(
+            "QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow",
+            panel_source,
+        )
+        self.assertNotIn(
+            "session_row.addWidget(self.model_combo)",
+            panel_source,
+        )
+        self.assertNotIn(
+            "session_row.addWidget(self.effort_combo)",
+            panel_source,
+        )
+        self.assertNotIn(
+            "session_row.addWidget(self.service_tier_combo)",
+            panel_source,
+        )
+
+        panel = _make_panel()
+        panel._on_action_completed(
+            "models",
+            {
+                "models": [
+                    {
+                        "model": "model-layout",
+                        "displayName": "Layout Model",
+                        "isDefault": True,
+                        "inputModalities": ["text"],
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "medium"}
+                        ],
+                        "defaultReasoningEffort": "medium",
+                        "serviceTiers": [
+                            {"id": "priority", "name": "快速"}
+                        ],
+                    }
+                ]
+            },
+        )
+        for width in (1_200, 700):
+            with self.subTest(width=width):
+                panel._apply_responsive_layout(width)
+                panel._refresh_controls()
+                self.assertTrue(panel.runtime_settings_group.isVisible())
+                for combo in (
+                    panel.model_combo,
+                    panel.effort_combo,
+                    panel.service_tier_combo,
+                ):
+                    self.assertTrue(combo.isVisible())
+                    self.assertTrue(combo.isEnabled())
+                    self.assertGreaterEqual(combo.minimumWidth(), 96)
 
     def test_turn_start_and_steer_do_not_force_houdini_focus_change(self) -> None:
         panel = _make_panel()
@@ -1566,8 +1941,8 @@ class PanelWiringTests(unittest.TestCase):
         self.assertTrue(panel.add_image_button.isEnabled())
         self.assertFalse(panel.new_thread_button.isEnabled())
         self.assertFalse(panel.resume_thread_button.isEnabled())
-        self.assertFalse(panel.model_combo.isEnabled())
-        self.assertFalse(panel.effort_combo.isEnabled())
+        self.assertTrue(panel.model_combo.isEnabled())
+        self.assertTrue(panel.effort_combo.isEnabled())
 
         panel.input_edit.setPlainText("把顶部再缩短一些")
         panel.attachment_strip.add_path(attachment)
@@ -2800,10 +3175,16 @@ class PanelWiringTests(unittest.TestCase):
         conversation = panel.conversation
         dialog = _DialogShim()
         panel._attachment_dialog = dialog
+        knowledge_dialog = _DialogShim()
+        panel._knowledge_source_dialog = knowledge_dialog
+        panel._knowledge_source_dialog_mode = "files"
         timers = (
             panel._poll_timer,
             panel._houdini_heartbeat_timer,
             panel._scene_work_timer,
+            panel._project_memory_confirm_timer,
+            panel._knowledge_poll_timer,
+            panel._knowledge_confirm_timer,
         )
         for timer in timers:
             timer.start(25)
@@ -2811,6 +3192,21 @@ class PanelWiringTests(unittest.TestCase):
         panel._stopping_turn_token = stop_token
         panel._interrupt_tokens["interrupt:old"] = stop_token
         panel._reconciliation_tokens["session_reconcile:old"] = stop_token
+        panel._project_memory_pending = {
+            "context": "project_memory:list:old",
+            "action": "list",
+            "memory_id": None,
+        }
+        panel._knowledge_pending = {
+            "context": "knowledge:status:old",
+            "action": "status",
+        }
+        panel._knowledge_job = {
+            "job_id": "a" * 32,
+            "operation": "rebuild",
+            "state": "running",
+            "cancellable": True,
+        }
         event = _CloseEvent()
         panel._polling_enabled = True
         panel._local_houdini_polling_enabled = True
@@ -2826,13 +3222,22 @@ class PanelWiringTests(unittest.TestCase):
         self.assertFalse(hasattr(client, "shutdown"))
         self.assertEqual(1, dialog.close_calls)
         self.assertIsNone(panel._attachment_dialog)
+        self.assertEqual(1, knowledge_dialog.close_calls)
+        self.assertIsNone(panel._knowledge_source_dialog)
         self.assertEqual(2, conversation.stop_timer_calls)
         for timer in timers:
-            self.assertFalse(timer.active)
+            self.assertFalse(
+                timer.isActive()
+                if hasattr(timer, "isActive")
+                else timer.active
+            )
             self.assertEqual(2, timer.stop_calls)
         self.assertIsNone(panel._stopping_turn_token)
         self.assertEqual({}, panel._interrupt_tokens)
         self.assertEqual({}, panel._reconciliation_tokens)
+        self.assertIsNone(panel._project_memory_pending)
+        self.assertIsNone(panel._knowledge_pending)
+        self.assertIsNone(panel._knowledge_job)
 
     def test_attachment_dialog_finished_releases_only_the_finished_dialog(self) -> None:
         panel = _make_panel()
@@ -4367,6 +4772,760 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIsNone(panel._thread_delete_confirm_id)
         self.assertEqual(context, panel._thread_delete_pending["context"])
 
+    def test_project_memory_list_search_and_details_use_stable_contract(self) -> None:
+        panel = _make_panel()
+        panel._refresh_project_memories()
+        list_arguments, context = panel._client.project_memory_requests[-1]
+        self.assertEqual("list", list_arguments["action"])
+        self.assertEqual("project", list_arguments["scope"])
+        self.assertEqual(
+            "正在刷新项目记忆…",
+            panel.project_memory_status_label.text(),
+        )
+        active_id = "mem_" + "a" * 32
+        old_id = "mem_" + "b" * 32
+        replacement_id = "mem_" + "c" * 32
+        memories = [
+            {
+                "id": active_id,
+                "memory_type": "decision",
+                "title": "木屋比例",
+                "summary": "保持真实世界比例。",
+                "tags": ["cabin", "scale"],
+                "scope": "project",
+                "status": "active",
+                "superseded_by": "",
+                "created_at": "2026-07-26T10:00:00Z",
+                "updated_at": "2026-07-26T10:01:00Z",
+                "source_thread_id": "thread-memory-source",
+                "source_turn_id": "turn-memory-source",
+            },
+            {
+                "id": old_id,
+                "memory_type": "lesson",
+                "title": "旧流程",
+                "summary": "已经被新流程取代。",
+                "tags": ["workflow"],
+                "scope": "project",
+                "status": "superseded",
+                "superseded_by": replacement_id,
+                "created_at": "2026-07-25T10:00:00Z",
+                "updated_at": "2026-07-26T09:00:00Z",
+            },
+        ]
+        panel._on_action_completed(
+            context,
+            {
+                "action": "list",
+                "memories": memories,
+                "total": 2,
+            },
+        )
+
+        self.assertEqual(2, panel.project_memory_combo.count())
+        summary = panel.project_memory_combo.itemText(0)
+        self.assertIn("木屋比例", summary)
+        self.assertIn("显式记录 · Thread", summary)
+        self.assertIn("2026-07-26", summary)
+        self.assertNotIn(active_id, summary)
+        self.assertNotIn("保持真实世界比例", summary)
+        details = panel.project_memory_details_text.toPlainText()
+        self.assertIn("决策 (decision)", details)
+        self.assertIn("保持真实世界比例", details)
+        self.assertIn("cabin, scale", details)
+        self.assertIn(active_id, details)
+        self.assertIn("有效", details)
+        self.assertIn(
+            "来源 / 创建方式：用户或 Codex 显式记录",
+            details,
+        )
+        self.assertIn("Thread：thread-memory-source", details)
+        self.assertIn("Turn：turn-memory-source", details)
+        panel.project_memory_combo.setCurrentIndex(1)
+        panel._on_project_memory_selected(1)
+        legacy_details = panel.project_memory_details_text.toPlainText()
+        self.assertIn("已取代", legacy_details)
+        self.assertIn("旧记录：来源未记录", legacy_details)
+        self.assertIn(
+            replacement_id,
+            legacy_details,
+        )
+
+        panel.project_memory_search_edit.setText("木屋 比例")
+        panel._search_project_memories()
+        arguments, search_context = panel._client.project_memory_requests[-1]
+        self.assertEqual("search", arguments["action"])
+        self.assertEqual("木屋 比例", arguments["query"])
+        self.assertEqual("project", arguments["scope"])
+        self.assertTrue(arguments["include_superseded"])
+        self.assertTrue(search_context.startswith("project_memory:search:"))
+        panel._on_action_completed(
+            search_context,
+            {
+                "action": "search",
+                "memories": [],
+                "total": 0,
+            },
+        )
+        self.assertIn(
+            "不代表其他 scope 的记忆丢失",
+            panel.project_memory_status_label.text(),
+        )
+        empty_details = panel.project_memory_details_text.toPlainText()
+        self.assertIn("暂无可显示的项目记忆", empty_details)
+        self.assertIn("只有用户或 Codex 显式记录", empty_details)
+        self.assertIn("聊天不会自动转成项目记忆", empty_details)
+
+    def test_project_memory_record_and_supersede_send_only_explicit_form_values(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._stream_thread_id = "thread-1"
+        panel._stream_turn_id = "turn-record-source"
+        panel.project_memory_type_combo.setCurrentIndex(4)
+        panel.project_memory_title_edit.setText("可复用建模流程")
+        panel.project_memory_body_edit.setPlainText("先搭纵向主干，再展开横向分支。")
+        panel.project_memory_tags_edit.setText("modeling, 布局, modeling")
+        panel.project_memory_scope_edit.setText("project")
+
+        panel._record_project_memory()
+
+        arguments, context = panel._client.project_memory_requests[-1]
+        self.assertEqual(
+            {
+                "action": "record",
+                "memory_type": "workflow",
+                "title": "可复用建模流程",
+                "body": "先搭纵向主干，再展开横向分支。",
+                "tags": ["modeling", "布局"],
+                "scope": "project",
+                "source_thread_id": "thread-1",
+                "source_turn_id": "turn-record-source",
+            },
+            arguments,
+        )
+        self.assertTrue(context.startswith("project_memory:record:"))
+        panel._on_action_completed(
+            context,
+            {
+                "action": "record",
+                "memory": {
+                    "id": "mem_" + "d" * 32,
+                    "memory_type": "workflow",
+                    "title": arguments["title"],
+                    "summary": arguments["body"],
+                    "tags": arguments["tags"],
+                    "scope": "project",
+                    "status": "active",
+                    "superseded_by": "",
+                    "created_at": "2026-07-26T10:00:00Z",
+                    "updated_at": "2026-07-26T10:00:00Z",
+                },
+            },
+        )
+        self.assertEqual("", panel.project_memory_title_edit.text())
+        self.assertEqual("", panel.project_memory_body_edit.toPlainText())
+        self.assertEqual(
+            "list",
+            panel._client.project_memory_requests[-1][0]["action"],
+        )
+
+        selected_id = "mem_" + "e" * 32
+        panel._project_memory_pending = None
+        panel._apply_project_memories(
+            [
+                {
+                    "id": selected_id,
+                    "memory_type": "decision",
+                    "title": "旧决定",
+                    "summary": "旧正文",
+                    "tags": [],
+                    "scope": "project",
+                    "status": "active",
+                    "superseded_by": "",
+                    "created_at": "2026-07-25T10:00:00Z",
+                    "updated_at": "2026-07-25T10:00:00Z",
+                }
+            ]
+        )
+        panel.project_memory_type_combo.setCurrentIndex(0)
+        panel.project_memory_title_edit.setText("新决定")
+        panel.project_memory_body_edit.setPlainText("新正文")
+        panel.project_memory_tags_edit.setText("approved")
+        panel._supersede_project_memory()
+        supersede = panel._client.project_memory_requests[-1][0]
+        self.assertEqual("supersede", supersede["action"])
+        self.assertEqual(selected_id, supersede["memory_id"])
+        self.assertEqual("decision", supersede["memory_type"])
+        self.assertEqual("新正文", supersede["body"])
+        self.assertEqual("thread-1", supersede["source_thread_id"])
+        self.assertEqual("turn-record-source", supersede["source_turn_id"])
+
+    def test_project_memory_delete_is_nonmodal_exact_and_does_not_touch_chat(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        memory_id = "mem_" + "f" * 32
+        panel._apply_project_memories(
+            [
+                {
+                    "id": memory_id,
+                    "memory_type": "preference",
+                    "title": "材质偏好",
+                    "summary": "避免过低粗糙度。",
+                    "tags": ["material"],
+                    "scope": "project",
+                    "status": "active",
+                    "superseded_by": "",
+                    "created_at": "2026-07-26T10:00:00Z",
+                    "updated_at": "2026-07-26T10:00:00Z",
+                }
+            ]
+        )
+        conversation_before = list(panel.conversation.entries)
+        history_before = list(panel._thread_history)
+        panel_time = HoudiniIntelligencePanel._delete_project_memory.__globals__[
+            "time"
+        ]
+        with mock.patch.object(
+            panel_time,
+            "monotonic",
+            side_effect=(20.0, 20.1, 20.8),
+        ):
+            panel._delete_project_memory()
+            self.assertEqual([], panel._client.project_memory_requests)
+            self.assertEqual(
+                "再次点击删除",
+                panel.project_memory_delete_button.text(),
+            )
+            panel._delete_project_memory()
+            self.assertEqual([], panel._client.project_memory_requests)
+            panel._delete_project_memory()
+
+        self.assertEqual(1, len(panel._client.project_memory_requests))
+        arguments, context = panel._client.project_memory_requests[0]
+        self.assertEqual(
+            {"action": "delete", "memory_id": memory_id},
+            arguments,
+        )
+        self.assertEqual(conversation_before, panel.conversation.entries)
+        self.assertEqual(history_before, panel._thread_history)
+        self.assertEqual([], panel._client.thread_delete_requests)
+        panel._on_action_completed(
+            context,
+            {
+                "action": "delete",
+                "memory_id": memory_id,
+                "deleted": True,
+            },
+        )
+        self.assertEqual(
+            "list",
+            panel._client.project_memory_requests[-1][0]["action"],
+        )
+
+    def test_project_memory_failure_preserves_editor_and_unlocks_controls(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel.project_memory_title_edit.setText("保留的标题")
+        panel.project_memory_body_edit.setPlainText("保留的正文")
+        panel._record_project_memory()
+        _arguments, context = panel._client.project_memory_requests[-1]
+
+        panel._on_request_failed(
+            context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_MEMORY_FAILED",
+                    "message": "temporary failure",
+                }
+            },
+        )
+
+        self.assertIsNone(panel._project_memory_pending)
+        self.assertEqual("保留的标题", panel.project_memory_title_edit.text())
+        self.assertEqual(
+            "保留的正文",
+            panel.project_memory_body_edit.toPlainText(),
+        )
+        self.assertIn(
+            "PROJECT_MEMORY_FAILED",
+            panel.project_memory_status_label.text(),
+        )
+        self.assertTrue(panel.project_memory_record_button.isEnabled())
+
+    def test_knowledge_status_keeps_environment_pack_and_index_progress_distinct(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        source = {
+            "source_id": "guide-a1.pdf",
+            "name": "guide.pdf",
+            "original_path": r"D:\references\guide.pdf",
+            "managed_path": ".runtime/knowledge/sources/guide-a1.pdf",
+            "format": "pdf",
+            "size_bytes": 120,
+            "imported_at": "2026-07-26T09:30:00Z",
+            "index_status": "indexed",
+            "chunk_count": 9,
+            "vector_count": 4,
+        }
+        context = "knowledge:status:test"
+        panel._knowledge_pending = {
+            "context": context,
+            "action": "status",
+            "preserve_status": False,
+        }
+
+        panel._on_action_completed(
+            context,
+            {
+                "action": "status",
+                "environment": {
+                    "state": "ready",
+                    "embedding_mode": "cpu_embedding",
+                },
+                "built_in": {
+                    "installed": True,
+                    "pack_id": "sidefx-official-workflows-v1",
+                    "version": "1",
+                    "card_count": 10,
+                    "complete": True,
+                },
+                "index": {
+                    "available": True,
+                    "complete": False,
+                    "document_count": 14,
+                    "chunk_count": 40,
+                    "vector_count": 20,
+                    "vector_pending": 20,
+                },
+                "sources": {"items": [source], "total": 1},
+            },
+        )
+
+        self.assertEqual("知识环境：可用", panel.knowledge_state_label.text())
+        metrics = panel.knowledge_metrics_label.text()
+        self.assertIn("文档：14", metrics)
+        self.assertIn("内置卡片：10", metrics)
+        self.assertIn("向量：20 已建 / 20 待建", metrics)
+        self.assertIn("最近更新：2026-07-26 09:30:00", metrics)
+        metrics_tooltip = panel.knowledge_metrics_label.toolTip()
+        self.assertIn("版本 1", metrics_tooltip)
+        self.assertIn("托管资料：1", metrics_tooltip)
+        self.assertIn("索引：未完成", metrics_tooltip)
+        self.assertEqual((0, 40), panel.knowledge_progress_bar._range)
+        self.assertEqual(20, panel.knowledge_progress_bar.value())
+        self.assertFalse(panel.knowledge_progress_bar.isVisible())
+        self.assertEqual(1, panel.knowledge_source_combo.count())
+        details = panel.knowledge_source_details_text.toPlainText()
+        self.assertIn(r"D:\references\guide.pdf", details)
+        self.assertIn("guide-a1.pdf", details)
+        self.assertTrue(panel._knowledge_loaded)
+        self.assertIsNone(panel._knowledge_pending)
+
+        payload = {
+            "environment": {"state": "ready", "embedding_mode": "fts5"},
+            "built_in": {},
+            "index": {},
+            "sources": {"items": [], "total": 0},
+        }
+        panel._apply_knowledge_status(payload)
+        self.assertEqual(
+            "知识环境：FTS5 降级",
+            panel.knowledge_state_label.text(),
+        )
+        payload["environment"] = {
+            "state": "repair_required",
+            "embedding_mode": "fts5",
+        }
+        panel._apply_knowledge_status(payload)
+        self.assertEqual("知识环境：需修复", panel.knowledge_state_label.text())
+
+    def test_knowledge_repair_is_background_and_cancel_boundary_is_honest(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._knowledge_environment = {
+            "state": "repair_required",
+            "embedding_mode": "fts5",
+        }
+        panel._refresh_controls()
+
+        panel._start_knowledge_job("repair")
+        arguments, context = panel._client.knowledge_requests[-1]
+        self.assertEqual(
+            {"action": "start", "operation": "repair"},
+            arguments,
+        )
+        self.assertFalse(panel._turn_state.busy)
+        self.assertIsNone(panel._goal_action_context)
+        panel._on_action_completed(
+            context,
+            {
+                "action": "start",
+                "job": {
+                    "job_id": "a" * 32,
+                    "operation": "repair",
+                    "state": "running",
+                    "cancellable": False,
+                    "elapsed_seconds": 1.5,
+                    "log_path": str(
+                        REPOSITORY_ROOT
+                        / ".runtime"
+                        / "cache"
+                        / "knowledge-cli"
+                        / "panel-a.log"
+                    ),
+                    "result": None,
+                    "error": None,
+                },
+            },
+        )
+
+        self.assertEqual(
+            "知识环境：正在修复",
+            panel.knowledge_state_label.text(),
+        )
+        self.assertIn("没有安全取消契约", panel.knowledge_status_label.text())
+        self.assertFalse(panel.knowledge_cancel_button.isEnabled())
+        self.assertTrue(panel.knowledge_progress_bar.isVisible())
+        self.assertTrue(panel._knowledge_poll_timer.isActive())
+        panel._knowledge_poll_timer.fire()
+        poll, _poll_context = panel._client.knowledge_requests[-1]
+        self.assertEqual("job_status", poll["action"])
+        self.assertEqual("a" * 32, poll["job_id"])
+
+    def test_knowledge_status_rehydrates_running_job_after_panel_reopen(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        context = "knowledge:status:reopen"
+        panel._knowledge_pending = {
+            "context": context,
+            "action": "status",
+            "preserve_status": False,
+        }
+
+        panel._on_action_completed(
+            context,
+            {
+                "action": "status",
+                "environment": {
+                    "state": "repair_required",
+                    "embedding_mode": "fts5",
+                },
+                "built_in": {},
+                "index": {
+                    "available": True,
+                    "complete": False,
+                    "chunk_count": 40,
+                    "vector_count": 20,
+                    "vector_pending": 20,
+                },
+                "sources": {"items": [], "total": None},
+                "job": {
+                    "job_id": "d" * 32,
+                    "operation": "repair",
+                    "state": "running",
+                    "cancellable": False,
+                    "elapsed_seconds": 3.0,
+                    "log_path": (
+                        "E:/project/.runtime/cache/knowledge-cli/reopen.log"
+                    ),
+                    "result": None,
+                    "error": None,
+                },
+            },
+        )
+
+        self.assertEqual("d" * 32, panel._knowledge_job["job_id"])
+        self.assertEqual(
+            "知识环境：正在修复",
+            panel.knowledge_state_label.text(),
+        )
+        self.assertIn("没有安全取消契约", panel.knowledge_status_label.text())
+        self.assertTrue(panel._knowledge_poll_timer.isActive())
+
+    def test_knowledge_import_rebuild_and_exact_delete_use_one_job_contract(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._knowledge_environment = {
+            "state": "ready",
+            "embedding_mode": "fts5",
+        }
+        panel._knowledge_source_dialog_mode = "files"
+        panel._accept_knowledge_sources(
+            [r"D:\references\guide.pdf", r"D:\references\notes.md"]
+        )
+        imported, _context = panel._client.knowledge_requests[-1]
+        self.assertEqual("start", imported["action"])
+        self.assertEqual("import_files", imported["operation"])
+        self.assertEqual(
+            [r"D:\references\guide.pdf", r"D:\references\notes.md"],
+            imported["paths"],
+        )
+
+        panel._knowledge_pending = None
+        panel._start_knowledge_job("rebuild")
+        rebuilt, rebuild_context = panel._client.knowledge_requests[-1]
+        self.assertEqual(
+            {"action": "start", "operation": "rebuild"},
+            rebuilt,
+        )
+        panel._on_action_completed(
+            rebuild_context,
+            {
+                "action": "start",
+                "job": {
+                    "job_id": "b" * 32,
+                    "operation": "rebuild",
+                    "state": "running",
+                    "cancellable": True,
+                    "elapsed_seconds": 0.2,
+                    "log_path": "E:/project/.runtime/cache/knowledge-cli/b.log",
+                    "result": None,
+                    "error": None,
+                },
+            },
+        )
+        self.assertTrue(panel.knowledge_cancel_button.isEnabled())
+        panel._cancel_knowledge_job()
+        cancelled, _cancel_context = panel._client.knowledge_requests[-1]
+        self.assertEqual(
+            {"action": "cancel", "job_id": "b" * 32},
+            cancelled,
+        )
+
+        panel._knowledge_pending = None
+        panel._knowledge_job = None
+        panel._apply_knowledge_sources(
+            [
+                {
+                    "source_id": "guide-a1.pdf",
+                    "name": "guide.pdf",
+                    "original_path": r"D:\references\guide.pdf",
+                    "managed_path": ".runtime/knowledge/sources/guide-a1.pdf",
+                    "format": "pdf",
+                    "index_status": "indexed",
+                }
+            ]
+        )
+        panel_time = HoudiniIntelligencePanel._delete_knowledge_source.__globals__[
+            "time"
+        ]
+        with mock.patch.object(
+            panel_time,
+            "monotonic",
+            side_effect=(10.0, 10.2, 10.8),
+        ):
+            panel._delete_knowledge_source()
+            panel._delete_knowledge_source()
+            self.assertNotEqual(
+                "delete",
+                panel._client.knowledge_requests[-1][0].get("operation"),
+            )
+            panel._delete_knowledge_source()
+        deleted, _delete_context = panel._client.knowledge_requests[-1]
+        self.assertEqual("delete", deleted["operation"])
+        self.assertEqual("guide-a1.pdf", deleted["source_id"])
+        self.assertNotIn("original_path", deleted)
+
+    def test_current_thread_index_controls_are_explicit_idle_and_nonintrusive(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._knowledge_environment = {
+            "state": "ready",
+            "embedding_mode": "fts5",
+        }
+        conversation_before = list(panel.conversation.entries)
+        goal_before = panel._current_goal
+        panel._refresh_controls()
+        self.assertTrue(panel.knowledge_import_thread_button.isEnabled())
+        self.assertTrue(panel.knowledge_remove_thread_button.isEnabled())
+
+        panel._index_current_thread()
+        imported, import_context = panel._client.knowledge_requests[-1]
+        self.assertEqual(
+            {
+                "action": "start",
+                "operation": "import_thread",
+                "thread_id": "thread-1",
+            },
+            imported,
+        )
+        self.assertTrue(import_context.startswith("knowledge:start:"))
+        self.assertEqual(conversation_before, panel.conversation.entries)
+        self.assertIs(goal_before, panel._current_goal)
+
+        panel._knowledge_pending = None
+        panel._remove_current_thread_index()
+        removed, remove_context = panel._client.knowledge_requests[-1]
+        self.assertEqual(
+            {
+                "action": "start",
+                "operation": "remove_thread",
+                "thread_id": "thread-1",
+            },
+            removed,
+        )
+        self.assertTrue(remove_context.startswith("knowledge:start:"))
+        self.assertEqual(conversation_before, panel.conversation.entries)
+        self.assertIs(goal_before, panel._current_goal)
+
+        no_thread = _make_panel(selected_thread_id=None)
+        no_thread._knowledge_environment = {
+            "state": "ready",
+            "embedding_mode": "fts5",
+        }
+        no_thread._refresh_controls()
+        self.assertFalse(no_thread.knowledge_import_thread_button.isEnabled())
+        self.assertFalse(no_thread.knowledge_remove_thread_button.isEnabled())
+
+        active_turn = _make_panel()
+        active_turn._knowledge_environment = {
+            "state": "ready",
+            "embedding_mode": "fts5",
+        }
+        self.assertTrue(active_turn._turn_state.begin_start("thread-1"))
+        active_turn._refresh_controls()
+        self.assertFalse(active_turn.knowledge_import_thread_button.isEnabled())
+        self.assertFalse(active_turn.knowledge_remove_thread_button.isEnabled())
+        active_turn._index_current_thread()
+        self.assertEqual([], active_turn._client.knowledge_requests)
+
+        pending = _make_panel()
+        pending._knowledge_environment = {
+            "state": "ready",
+            "embedding_mode": "fts5",
+        }
+        pending._knowledge_pending = {
+            "context": "knowledge:status:pending",
+            "action": "status",
+        }
+        pending._refresh_controls()
+        self.assertFalse(pending.knowledge_import_thread_button.isEnabled())
+        self.assertFalse(pending.knowledge_remove_thread_button.isEnabled())
+
+        running = _make_panel()
+        running._knowledge_environment = {
+            "state": "ready",
+            "embedding_mode": "fts5",
+        }
+        running._knowledge_job = {
+            "job_id": "f" * 32,
+            "operation": "import_thread",
+            "state": "running",
+            "cancellable": True,
+        }
+        running._refresh_controls()
+        self.assertFalse(running.knowledge_import_thread_button.isEnabled())
+        self.assertFalse(running.knowledge_remove_thread_button.isEnabled())
+
+    def test_media_without_sidecar_has_a_readable_nonblocking_message(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._knowledge_job = {
+            "job_id": "e" * 32,
+            "operation": "import_files",
+            "state": "running",
+            "cancellable": True,
+        }
+
+        panel._apply_knowledge_job(
+            {
+                "job_id": "e" * 32,
+                "operation": "import_files",
+                "state": "failed",
+                "cancellable": True,
+                "elapsed_seconds": 0.4,
+                "log_path": "",
+                "result": None,
+                "error": {
+                    "code": "TRANSCRIPT_REQUIRED",
+                    "message": "No transcript sidecar",
+                },
+            }
+        )
+
+        message = panel.knowledge_status_label.text()
+        self.assertIn("SRT、VTT 或 TXT", message)
+        self.assertIn("视频本体没有复制", message)
+        self.assertIsNone(panel._knowledge_job)
+
+    def test_knowledge_terminal_refresh_and_failure_do_not_touch_chat_or_goal(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        conversation_before = list(panel.conversation.entries)
+        goal_before = panel._current_goal
+        panel._knowledge_job = {
+            "job_id": "c" * 32,
+            "operation": "import_files",
+            "state": "running",
+            "cancellable": True,
+        }
+        context = "knowledge:job_status:test"
+        panel._knowledge_pending = {
+            "context": context,
+            "action": "job_status",
+            "preserve_status": True,
+        }
+        panel._on_action_completed(
+            context,
+            {
+                "action": "job_status",
+                "job": {
+                    "job_id": "c" * 32,
+                    "operation": "import_files",
+                    "state": "completed",
+                    "cancellable": True,
+                    "elapsed_seconds": 2.0,
+                    "log_path": "E:/project/.runtime/cache/knowledge-cli/c.log",
+                    "result": {
+                        "imported": 2,
+                        "already_imported": 0,
+                        "log_path": "",
+                    },
+                    "error": None,
+                },
+            },
+        )
+        refresh, refresh_context = panel._client.knowledge_requests[-1]
+        self.assertEqual({"action": "status"}, refresh)
+        self.assertTrue(refresh_context.startswith("knowledge:status:"))
+        self.assertEqual(conversation_before, panel.conversation.entries)
+        self.assertIs(goal_before, panel._current_goal)
+
+        panel._on_request_failed(
+            refresh_context,
+            {
+                "structured_error": {
+                    "code": "KNOWLEDGE_CLI_TIMEOUT",
+                    "message": "status timed out",
+                    "details": {
+                        "log_path": (
+                            "E:/project/.runtime/cache/knowledge-cli/"
+                            "status-failure.log"
+                        )
+                    },
+                }
+            },
+        )
+        self.assertIsNone(panel._knowledge_pending)
+        self.assertIn(
+            "KNOWLEDGE_CLI_TIMEOUT",
+            panel.knowledge_status_label.text(),
+        )
+        self.assertIn(
+            "status-failure.log",
+            panel.knowledge_log_label.text(),
+        )
+
     def test_active_turn_rejects_thread_delete_and_prompts_stop(self) -> None:
         panel = _make_panel()
         self.assertTrue(panel._turn_state.begin_start("thread-1"))
@@ -4389,6 +5548,10 @@ class PanelWiringTests(unittest.TestCase):
             "root_thread_id": "thread-1",
             "status": "completed",
         }
+        panel._build_brief = {"summary": "old brief"}
+        panel._build_brief_thread_id = "thread-1"
+        panel._stage_items = [{"title": "old stage", "status": "pending"}]
+        panel._review_records = [{"domain": "old"}]
         panel._current_goal = {"objective": "current goal", "status": "active"}
         panel._focus_mode = True
         panel._session_action_pending = True
@@ -4418,6 +5581,10 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("", panel.input_edit.toPlainText())
         self.assertEqual([], panel.attachment_strip.paths())
         self.assertEqual({}, panel._team_records)
+        self.assertIsNone(panel._build_brief)
+        self.assertIsNone(panel._build_brief_thread_id)
+        self.assertEqual([], panel._stage_items)
+        self.assertEqual([], panel._review_records)
         self.assertIsNone(panel._current_goal)
         self.assertFalse(panel._focus_mode)
         self.assertIsNone(panel._crash_recovery_observation)
@@ -5273,6 +6440,75 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual([], images)
         self.assertFalse(panel.model_combo.isEnabled())
         self.assertFalse(panel.effort_combo.isEnabled())
+
+    def test_active_turn_allows_next_turn_model_effort_and_speed_changes(self) -> None:
+        panel = _make_panel()
+        panel._on_action_completed(
+            "models",
+            {
+                "models": [
+                    {
+                        "model": "model-a",
+                        "displayName": "Model A",
+                        "isDefault": True,
+                        "inputModalities": ["text"],
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "low", "description": "Fast"},
+                            {"reasoningEffort": "high", "description": "Deep"},
+                        ],
+                        "defaultReasoningEffort": "low",
+                        "serviceTiers": [
+                            {"id": "priority", "name": "Fast"}
+                        ],
+                    },
+                    {
+                        "model": "model-b",
+                        "displayName": "Model B",
+                        "inputModalities": ["text"],
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "medium", "description": "Balanced"},
+                            {"reasoningEffort": "high", "description": "Deep"},
+                        ],
+                        "defaultReasoningEffort": "medium",
+                        "serviceTiers": [
+                            {"id": "priority", "name": "Fast"}
+                        ],
+                    },
+                ]
+            },
+        )
+        panel.input_edit.setPlainText("first")
+        panel._send()
+        first_request = panel._client.turn_requests[-1]
+        context = first_request[-1]
+        panel._on_action_completed(
+            context,
+            {
+                "ok": True,
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "turn_active": True,
+                "turn_status": "inProgress",
+            },
+        )
+
+        self.assertTrue(panel.model_combo.isEnabled())
+        self.assertTrue(panel.effort_combo.isEnabled())
+        self.assertTrue(panel.service_tier_combo.isEnabled())
+        panel.model_combo.setCurrentIndex(2)
+        panel._on_model_changed()
+        panel.effort_combo.setCurrentIndex(2)
+        panel.service_tier_combo.setCurrentIndex(1)
+        self.assertEqual("model-a", first_request[1])
+        self.assertEqual("low", first_request[2])
+
+        panel._render_event(_completed_notification("turn-1"))
+        panel.input_edit.setPlainText("second")
+        panel._send()
+        second_request = panel._client.turn_requests[-1]
+        self.assertEqual("model-b", second_request[1])
+        self.assertEqual("high", second_request[2])
+        self.assertEqual("priority", panel._client.turn_service_tiers[-1])
 
     def test_new_thread_uses_catalog_model_and_effort_updates_per_model(self) -> None:
         panel = _make_panel()
@@ -6313,6 +7549,56 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertFalse(restored.goal_focus_checkbox.isChecked())
 
+    def test_saved_goal_can_enable_focus_during_its_active_turn_without_stop(self) -> None:
+        panel = _make_panel()
+        goal = {
+            "threadId": "thread-1",
+            "objective": "Finish the long task",
+            "status": "active",
+        }
+        panel.goal_objective_edit.setPlainText(goal["objective"])
+        panel._save_goal()
+        self.assertEqual("goal_set", panel._goal_action_context)
+        self.assertFalse(panel.goal_focus_checkbox.isEnabled())
+
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "thread/goal/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "goal-turn-1",
+                    "goal": goal,
+                },
+            }
+        )
+        panel._render_event(
+            {
+                "type": "session_state",
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_id": "goal-turn-1",
+                    "turn_status": "inProgress",
+                    "turn_active": True,
+                    "focus_mode": False,
+                },
+            }
+        )
+        self.assertTrue(panel._turn_state.busy)
+
+        panel._on_action_completed(
+            "goal_set",
+            {"thread_id": "thread-1", "goal": goal, "focus_mode": False},
+        )
+        self.assertTrue(panel._turn_state.busy)
+        self.assertTrue(panel.goal_focus_checkbox.isEnabled())
+
+        panel.goal_focus_checkbox.setChecked(True)
+        panel._set_focus_mode(True)
+        self.assertEqual([("thread-1", True)], panel._client.focus_mode_requests)
+
     def test_goal_inflight_blocks_thread_switch_and_rebinds_after_resume(self) -> None:
         panel = _make_panel()
         panel._turn_performance_marks = {"sent": 1.0, "ack": 2.0}
@@ -6407,8 +7693,10 @@ class PanelWiringTests(unittest.TestCase):
                         "receiverThreadIds": ["thread-review"],
                         "agentsStates": {
                             "thread-review": {
+                                "role": "材质审阅",
                                 "status": "completed",
                                 "message": "材质审阅发现：粗糙度过低。",
+                                "reasoning": "不得显示的内部长推理",
                             }
                         },
                         "prompt": "审阅材质与灯光",
@@ -6429,7 +7717,52 @@ class PanelWiringTests(unittest.TestCase):
                         "type": "mcpToolCall",
                         "tool": "web/search",
                         "status": "failed",
-                        "error": {"message": "reference unavailable"},
+                        "error": {
+                            "message": (
+                                "reference unavailable; "
+                                "Authorization: Bearer tool-secret; "
+                                "Cookie=session-secret"
+                            )
+                        },
+                    },
+                },
+            }
+        )
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-review",
+                    "turnId": "turn-review",
+                    "item": {
+                        "id": "review-1",
+                        "type": "taskInsight",
+                        "reviews": [
+                            {
+                                "domain": "material",
+                                "severity": "warning",
+                                "objectPath": "/mat/wood",
+                                "evidence": "粗糙度过低；api_key=review-secret",
+                                "suggestedNextAction": "提高粗糙度并复查。",
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-review",
+                    "turnId": "turn-review",
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "command": "curl -H 'Bearer command-secret' https://example.test",
+                        "status": "completed",
                     },
                 },
             }
@@ -6451,12 +7784,188 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual(conversation_before, panel.conversation.entries)
         self.assertEqual([], panel._client.thread_read_requests)
         details = panel.team_details_text.toPlainText()
+        self.assertIn("角色：材质审阅", details)
         self.assertIn("审阅材质与灯光", details)
         self.assertIn("web/search：failed", details)
-        self.assertIn("reference unavailable", details)
-        self.assertIn("材质审阅发现：粗糙度过低", details)
+        self.assertIn("错误：reference unavailable", details)
+        self.assertIn("最新公开摘要：材质审阅发现：粗糙度过低", details)
+        self.assertNotIn("内部长推理", details)
+        self.assertNotIn("tool-secret", details)
+        self.assertNotIn("session-secret", details)
+        self.assertNotIn("command-secret", details)
+        self.assertIn("material", panel._review_records[0]["domain"])
+        self.assertNotIn(
+            "review-secret",
+            panel._review_records[0]["evidence"],
+        )
         self.assertIn("协议未单独报告", details)
         self.assertEqual([], panel._client.session_contexts)
+
+    def test_task_insights_are_bounded_thread_scoped_and_do_not_spam_chat(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._clear_task_insights()
+        self.assertIn("尚无执行蓝图", panel.build_brief_text.toPlainText())
+        self.assertEqual("", panel.stage_details_text.toPlainText())
+        self.assertTrue(panel.review_empty_label.isVisible())
+
+        _context, turn_id = _start_active_turn(panel, 1)
+        self.assertIn("request 1", panel.build_brief_text.toPlainText())
+        system_count = sum(
+            entry["role"] == "system" for entry in panel.conversation.entries
+        )
+
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "turn/plan/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": turn_id,
+                    "plan": [
+                        {"step": "建立可编辑主体", "status": "completed"},
+                        {
+                            "step": "检查材质与比例",
+                            "status": "inProgress",
+                            "summary": "公开阶段摘要",
+                        },
+                    ],
+                },
+            }
+        )
+        self.assertIn("建立可编辑主体", panel.stage_details_text.toPlainText())
+        self.assertIn("检查材质与比例", panel.stage_details_text.toPlainText())
+        self.assertIn("已完成", panel.stage_details_text.toPlainText())
+        self.assertIn("进行中", panel.stage_details_text.toPlainText())
+        self.assertIn("公开阶段摘要", panel.stage_details_text.toPlainText())
+        self.assertEqual(
+            system_count,
+            sum(
+                entry["role"] == "system"
+                for entry in panel.conversation.entries
+            ),
+        )
+
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": turn_id,
+                    "item": {
+                        "id": "task-insight-1",
+                        "type": "taskInsight",
+                        "buildBrief": {
+                            "title": "木屋短蓝图",
+                            "summary": "先结构、后材质、最后审阅。",
+                            "constraints": ["保持可编辑"],
+                            "deliverables": ["当前 HIP 中的节点网络"],
+                        },
+                        "contextPack": {
+                            "title": "本地资料",
+                            "source": "项目知识",
+                            "itemCount": 3,
+                            "body": "不得展示的长正文",
+                        },
+                        "reviews": [
+                            {
+                                "domain": "structure",
+                                "severity": "warning",
+                                "objectPath": "/obj/HIA_Result",
+                                "evidence": (
+                                    "屋檐支撑间距不一致。 "
+                                    "Bearer review-secret"
+                                ),
+                                "suggestedNextAction": "统一支撑间距后复查。",
+                                "reasoning": "不得显示的内部推理",
+                                "rawJson": '{"secret":"不得显示"}',
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+        brief = panel.build_brief_text.toPlainText()
+        self.assertIn("木屋短蓝图", brief)
+        self.assertIn("保持可编辑", brief)
+        self.assertIn("Context Pack：本地资料 · 项目知识 · 3 项", brief)
+        self.assertNotIn("不得展示的长正文", brief)
+        review = panel._format_review_record(panel._review_records[0])
+        self.assertIn("Domain：structure", review)
+        self.assertIn("Severity：warning", review)
+        self.assertIn("/obj/HIA_Result", review)
+        self.assertIn("屋檐支撑间距不一致", review)
+        self.assertIn("统一支撑间距后复查", review)
+        self.assertNotIn("review-secret", review)
+        self.assertIn("[REDACTED]", review)
+        self.assertNotIn("内部推理", review)
+        self.assertNotIn("secret", review)
+
+        snapshot = (
+            dict(panel._build_brief or {}),
+            list(panel._stage_items),
+            list(panel._review_records),
+        )
+        conversation_before = list(panel.conversation.entries)
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "future/unknown",
+                "params": {
+                    "threadId": "thread-1",
+                    "buildBrief": {"summary": "不得应用"},
+                },
+            }
+        )
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "item/completed",
+                "params": {
+                    "threadId": "other-thread",
+                    "item": {
+                        "type": "taskInsight",
+                        "reviews": [{"domain": "foreign"}],
+                    },
+                },
+            }
+        )
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "stale-old-turn",
+                    "item": {
+                        "type": "taskInsight",
+                        "buildBrief": {"summary": "迟到旧蓝图"},
+                        "reviews": [{"domain": "stale"}],
+                    },
+                },
+            }
+        )
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": turn_id,
+                    "item": {
+                        "type": "reasoning",
+                        "buildBrief": {"summary": "伪装的推理蓝图"},
+                        "reviews": [{"domain": "reasoning"}],
+                    },
+                },
+            }
+        )
+        self.assertEqual(snapshot[0], panel._build_brief)
+        self.assertEqual(snapshot[1], panel._stage_items)
+        self.assertEqual(snapshot[2], panel._review_records)
+        self.assertEqual(conversation_before, panel.conversation.entries)
 
     def test_team_events_are_scoped_to_the_current_root_thread(self) -> None:
         panel = _make_panel()

@@ -776,6 +776,138 @@ class BridgeClientQueueTests(unittest.TestCase):
             ],
         )
 
+    def test_project_memory_requests_use_one_thin_bridge_contract(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        memory_id = "mem_" + "a" * 32
+        requests = (
+            {
+                "action": "list",
+                "include_superseded": True,
+                "offset": 0,
+                "limit": 50,
+            },
+            {
+                "action": "search",
+                "query": "wood cabin",
+                "include_superseded": True,
+                "offset": 0,
+                "limit": 50,
+            },
+            {
+                "action": "record",
+                "memory_type": "decision",
+                "title": "Cabin scale",
+                "body": "Keep the cabin at real-world scale.",
+                "tags": ["cabin", "scale"],
+                "scope": "project",
+            },
+            {
+                "action": "supersede",
+                "memory_id": memory_id,
+                "memory_type": "decision",
+                "title": "Updated cabin scale",
+                "body": "Use the surveyed dimensions.",
+                "tags": ["cabin", "scale"],
+                "scope": "project",
+            },
+            {"action": "delete", "memory_id": memory_id},
+        )
+
+        for index, arguments in enumerate(requests):
+            client.project_memory(
+                arguments,
+                context=f"project_memory:{arguments['action']}:{index}",
+            )
+
+        self.assertEqual(
+            [
+                (
+                    "POST",
+                    "/v1/project-memory",
+                    arguments,
+                    f"project_memory:{arguments['action']}:{index}",
+                    65_000,
+                )
+                for index, arguments in enumerate(requests)
+            ],
+            [
+                (
+                    submission["method"],
+                    submission["path"],
+                    submission["payload"],
+                    submission["context"],
+                    submission["timeout_ms"],
+                )
+                for submission in transport.submissions
+            ],
+        )
+
+    def test_project_knowledge_requests_use_fixed_background_cli_contract(
+        self,
+    ) -> None:
+        client, transport = _load_transport_bridge_client()
+        requests = (
+            {"action": "status"},
+            {
+                "action": "start",
+                "operation": "import_files",
+                "paths": [r"D:\references\guide.pdf"],
+            },
+            {
+                "action": "start",
+                "operation": "import_folder",
+                "paths": [r"D:\references"],
+            },
+            {
+                "action": "start",
+                "operation": "delete",
+                "source_id": "guide-abc123.pdf",
+            },
+            {"action": "start", "operation": "repair"},
+            {"action": "start", "operation": "rebuild"},
+            {
+                "action": "start",
+                "operation": "import_thread",
+                "thread_id": "thread-selected",
+            },
+            {
+                "action": "start",
+                "operation": "remove_thread",
+                "thread_id": "thread-selected",
+            },
+            {"action": "job_status", "job_id": "a" * 32},
+            {"action": "cancel", "job_id": "a" * 32},
+        )
+
+        for index, arguments in enumerate(requests):
+            client.project_knowledge(
+                arguments,
+                context=f"knowledge:{arguments['action']}:{index}",
+            )
+
+        self.assertEqual(
+            [
+                (
+                    "POST",
+                    "/v1/knowledge",
+                    arguments,
+                    f"knowledge:{arguments['action']}:{index}",
+                    65_000,
+                )
+                for index, arguments in enumerate(requests)
+            ],
+            [
+                (
+                    submission["method"],
+                    submission["path"],
+                    submission["payload"],
+                    submission["context"],
+                    submission["timeout_ms"],
+                )
+                for submission in transport.submissions
+            ],
+        )
+
     def test_dispose_then_reopen_same_session_health_succeeds(self) -> None:
         first_panel, first_transport = _load_transport_bridge_client()
         first_panel.dispose()

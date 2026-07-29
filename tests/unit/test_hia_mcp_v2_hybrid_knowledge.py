@@ -41,6 +41,7 @@ class FakeEmbedder:
         *,
         available: bool = True,
         model_id: str = "Qwen/Qwen3-Embedding-0.6B",
+        model_revision: str = "fake-revision-1",
         active_profile: str = "qwen3-embedding-0.6b",
         requested_profile: str | None = None,
         dim: int = 32,
@@ -49,6 +50,7 @@ class FakeEmbedder:
     ) -> None:
         self.available = available
         self.model_id = model_id
+        self.model_revision = model_revision
         self.active_profile = active_profile
         self.requested_profile = requested_profile or active_profile
         self.dim = dim
@@ -64,12 +66,15 @@ class FakeEmbedder:
         active_profile: str,
         requested_profile: str,
         dim: int,
+        model_revision: str | None = None,
         fallback_reason: str = "",
     ) -> None:
         self.model_id = model_id
         self.active_profile = active_profile
         self.requested_profile = requested_profile
         self.dim = dim
+        if model_revision is not None:
+            self.model_revision = model_revision
         self.fallback_reason = fallback_reason
 
     def encode(
@@ -95,6 +100,7 @@ class FakeEmbedder:
                 _fake_vector(value, self.dim) for value in query_values
             ],
             "model_id": self.model_id,
+            "model_revision": self.model_revision,
             "profile_id": self.active_profile,
             "active_profile": self.active_profile,
             "requested_profile": self.requested_profile,
@@ -110,7 +116,7 @@ class FakeEmbedder:
             "available": self.available,
             "status": "degraded" if self.fallback_reason else "ready",
             "model_id": self.model_id if self.available else "",
-            "model_revision": "",
+            "model_revision": self.model_revision if self.available else "",
             "profile_id": self.active_profile if self.available else "",
             "active_profile": self.active_profile if self.available else "",
             "requested_profile": self.requested_profile,
@@ -118,6 +124,7 @@ class FakeEmbedder:
             "normalized": self.available,
             "fallback_reason": self.fallback_reason,
             "repair": {},
+            "device": "fake-cpu",
         }
 
     def close(self) -> None:
@@ -192,13 +199,17 @@ def _seed_document(
     source_key: str,
     title: str,
     bodies: Sequence[str],
+    collection: str = "user",
+    source_group: str = "user",
+    source: str = "user_document",
+    attributes: Mapping[str, Any] | None = None,
 ) -> int:
     now = _utc_now()
     text = "\n\n".join(bodies)
     candidate = _Candidate(
-        collection="user",
-        source_group="user",
-        source="user_document",
+        collection=collection,
+        source_group=source_group,
+        source=source,
         source_key=source_key,
         title=title,
         source_path=f".runtime/knowledge/sources/{source_key}.md",
@@ -208,7 +219,7 @@ def _seed_document(
         license_name="test-only",
         verification="verified",
         evidence="Deterministic unit-test fixture",
-        attributes={"fixture": source_key},
+        attributes={"fixture": source_key, **dict(attributes or {})},
         inline_text=text,
     )
     metadata = {
@@ -349,7 +360,13 @@ class HybridKnowledgeTests(unittest.TestCase):
             limit=10,
         )[0]
 
-        self.assertEqual(lexical["matches"], result["matches"])
+        self.assertEqual(
+            [
+                {**match, "source_kind": "user_document"}
+                for match in lexical["matches"]
+            ],
+            result["matches"],
+        )
         self.assertEqual(lexical["total"], result["total"])
         self.assertEqual(lexical["tokenizer"], result["tokenizer"])
         self.assertEqual("hybrid", result["retrieval"]["requested_mode"])
@@ -539,6 +556,7 @@ class HybridKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=10,
+            allow_index_updates=True,
         )[0]
         first_progress = first["retrieval"]["vector"]["index"]
         self.assertEqual(
@@ -571,6 +589,7 @@ class HybridKnowledgeTests(unittest.TestCase):
             {
                 "complete": False,
                 "partial": True,
+                "signature_compatible": True,
                 "vector_chunks": 32,
                 "total_chunks": total_chunks,
                 "pending_chunks": total_chunks - 32,
@@ -591,6 +610,7 @@ class HybridKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=10,
+            allow_index_updates=True,
         )[0]
         second_progress = second["retrieval"]["vector"]["index"]
         self.assertEqual(8, len(embedder.document_inputs))
@@ -606,6 +626,7 @@ class HybridKnowledgeTests(unittest.TestCase):
             {
                 "complete": False,
                 "partial": True,
+                "signature_compatible": True,
                 "vector_chunks": 40,
                 "total_chunks": total_chunks,
                 "pending_chunks": total_chunks - 40,
@@ -795,6 +816,7 @@ class HybridKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=10,
+            allow_index_updates=True,
         )
 
         self.assertEqual([alpha_body, beta_body], embedder.document_inputs)
@@ -852,6 +874,9 @@ class HybridKnowledgeTests(unittest.TestCase):
             "decoded_active": 0,
             "decoded_max_active": 0,
             "decoded_calls": 0,
+            "vector_scan_sql": "",
+            "hydrate_selects": 0,
+            "hydrate_parameters": [],
         }
         original_connect = index._connect  # noqa: SLF001
         original_decode = hybrid_module._decode_vector  # noqa: SLF001
@@ -893,7 +918,15 @@ class HybridKnowledgeTests(unittest.TestCase):
                 normalized = " ".join(sql.split())
                 if "FROM chunk_vectors cv JOIN chunks c" in normalized:
                     tracking["vector_selects"] += 1
+                    tracking["vector_scan_sql"] = normalized
                     return TrackingCursor(cursor)
+                if (
+                    "FROM chunks c JOIN documents d ON d.id = c.document_id"
+                    in normalized
+                    and "WHERE c.id IN" in normalized
+                ):
+                    tracking["hydrate_selects"] += 1
+                    tracking["hydrate_parameters"].append(len(parameters))
                 return cursor
 
             def close(self) -> None:
@@ -914,8 +947,8 @@ class HybridKnowledgeTests(unittest.TestCase):
             def __del__(self) -> None:
                 tracking["decoded_active"] -= 1
 
-        def tracked_connect() -> TrackingConnection:
-            return TrackingConnection(original_connect())
+        def tracked_connect(**kwargs: Any) -> TrackingConnection:
+            return TrackingConnection(original_connect(**kwargs))
 
         def tracked_decode(raw: Any, dim: int) -> TrackedVector:
             tracking["decoded_calls"] += 1
@@ -945,8 +978,269 @@ class HybridKnowledgeTests(unittest.TestCase):
         self.assertEqual(vector_count, tracking["decoded_calls"])
         self.assertLessEqual(tracking["decoded_max_active"], 2)
         self.assertEqual(0, tracking["decoded_active"])
+        self.assertNotIn("d.*", tracking["vector_scan_sql"])
+        self.assertNotIn("c.body", tracking["vector_scan_sql"])
+        self.assertEqual(1, tracking["hydrate_selects"])
+        self.assertLessEqual(
+            max(tracking["hydrate_parameters"]),
+            hybrid_module.VECTOR_HYDRATE_BATCH_SIZE,
+        )
+        self.assertLessEqual(sum(tracking["hydrate_parameters"]), 3 * 17)
         self.assertEqual(3, len(rankings))
         self.assertTrue(all(len(ranking) <= 17 for ranking in rankings))
+
+    def test_lexical_results_expose_source_kind_and_fold_canonical_cards(
+        self,
+    ) -> None:
+        index = LocalKnowledgeIndex(self.project_root)
+        for version in ("1", "2"):
+            _seed_document(
+                index,
+                source_key=f"builtin-v{version}",
+                title=f"Official cloth workflow v{version}",
+                bodies=("CanonicalClothWorkflow deterministic steps",),
+                collection="project",
+                source_group="project",
+                source="builtin_official_workflow",
+                attributes={
+                    "canonical_id": "cloth-workflow",
+                    "pack_version": version,
+                },
+            )
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=FakeEmbedder(available=False),
+        )
+
+        result = store.search_many(
+            ("CanonicalClothWorkflow",),
+            {"project"},
+            current_houdini_version="21.0",
+            offset=0,
+            limit=10,
+            mode="lexical",
+        )[0]
+
+        self.assertEqual(1, len(result["matches"]))
+        self.assertEqual(1, result["total"])
+        match = result["matches"][0]
+        self.assertEqual(
+            "builtin_official_workflow",
+            match["source_kind"],
+        )
+        self.assertEqual(
+            "cloth-workflow",
+            match["metadata"]["canonical_id"],
+        )
+
+    def test_lexical_fallback_keeps_corpus_available_without_encoder(self) -> None:
+        index = LocalKnowledgeIndex(self.project_root)
+        _seed_document(
+            index,
+            source_key="lexical-status",
+            title="Lexical status",
+            bodies=("LexicalStatusNeedle remains searchable through FTS5",),
+        )
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=FakeEmbedder(available=False),
+        )
+
+        lexical = store.search_many(
+            ("LexicalStatusNeedle",),
+            {"user"},
+            current_houdini_version="21.0.440",
+            offset=0,
+            limit=10,
+            mode="lexical",
+        )[0]["retrieval"]
+        self.assertTrue(lexical["lexical"]["available"])
+        self.assertTrue(lexical["corpus"]["available"])
+        self.assertEqual("ready", lexical["corpus"]["state"])
+        self.assertFalse(lexical["encoder"]["loaded"])
+        self.assertFalse(lexical["vector"]["available"])
+
+        degraded = store.search_many(
+            ("LexicalStatusNeedle",),
+            {"user"},
+            current_houdini_version="21.0.440",
+            offset=0,
+            limit=10,
+            mode="hybrid",
+        )[0]["retrieval"]
+        self.assertEqual("lexical", degraded["mode_used"])
+        self.assertTrue(degraded["corpus"]["available"])
+        self.assertEqual("ready", degraded["corpus"]["state"])
+        self.assertFalse(degraded["vector"]["available"])
+
+    def test_complete_vector_search_honors_builtin_identity_filters(self) -> None:
+        index = LocalKnowledgeIndex(self.project_root)
+        _seed_document(
+            index,
+            source_key="builtin-filtered",
+            title="Filtered official workflow",
+            bodies=("VectorFilterNeedle official workflow body",),
+            collection="project",
+            source_group="project",
+            source="builtin_official_workflow",
+            attributes={
+                "card_id": "filtered-card",
+                "canonical_id": "filtered-canonical",
+                "pack_version": "2",
+            },
+        )
+        with closing(index._connect()) as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE documents SET houdini_version = ? "
+                "WHERE source_key = ?",
+                ("21", "builtin-filtered"),
+            )
+            connection.commit()
+        _seed_document(
+            index,
+            source_key="project-noise",
+            title="Project noise",
+            bodies=("VectorFilterNeedle unrelated project reference",),
+            collection="project",
+            source_group="project",
+            source="project_skill",
+        )
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=FakeEmbedder(),
+        )
+        self.assertTrue(_build_all_vectors(store)["complete"])
+
+        result = store.search_many(
+            ("VectorFilterNeedle",),
+            {"project"},
+            current_houdini_version="21.0.440",
+            offset=0,
+            limit=10,
+            mode="hybrid",
+            source_kinds={"builtin_official_workflow"},
+            card_id="filtered-card",
+            canonical_id="filtered-canonical",
+        )[0]
+
+        self.assertEqual(1, result["total"])
+        self.assertEqual(
+            ["builtin_official_workflow"],
+            [match["source"] for match in result["matches"]],
+        )
+        self.assertTrue(
+            result["matches"][0]["metadata"]["current_version_match"]
+        )
+        self.assertEqual(
+            "global",
+            result["retrieval"]["corpus"]["ranking_scope"],
+        )
+
+    def test_intent_ranking_is_bounded_deterministic_and_preserves_node_lookup(
+        self,
+    ) -> None:
+        def match(
+            source: str,
+            source_key: str,
+            title: str,
+            **metadata: Any,
+        ) -> dict[str, Any]:
+            return {
+                "source": source,
+                "title": title,
+                "snippet": title,
+                "metadata": {
+                    "source_key": source_key,
+                    "content_hash": source_key,
+                    **metadata,
+                },
+            }
+
+        workflow = HybridKnowledgeStore._combine_matches(  # noqa: SLF001
+            (
+                match("houdini_help_archive", "help", "Installed help"),
+                match(
+                    "builtin_official_workflow",
+                    "builtin-v2",
+                    "Official workflow v2",
+                    canonical_id="cloth",
+                    pack_version="2",
+                ),
+                match(
+                    "bundled_knowledge_card",
+                    "builtin-v1",
+                    "Official workflow v1",
+                    canonical_id="cloth",
+                    pack_version="1",
+                ),
+            ),
+            (),
+            "hybrid",
+            query="How should I build this cloth workflow?",
+        )
+        self.assertEqual(
+            ["builtin_official_workflow", "live_node_help"],
+            [item["source_kind"] for item in workflow],
+        )
+        self.assertEqual(2, len(workflow))
+        self.assertEqual("2", workflow[0]["provenance"]["pack_version"])
+        self.assertEqual("cloth", workflow[0]["provenance"]["canonical_id"])
+        legacy = HybridKnowledgeStore._combine_matches(  # noqa: SLF001
+            (
+                match(
+                    "bundled_knowledge_card",
+                    "legacy",
+                    "Legacy bundled workflow",
+                ),
+            ),
+            (),
+            "hybrid",
+            query="workflow",
+        )
+        self.assertEqual(
+            "builtin_official_workflow",
+            legacy[0]["source_kind"],
+        )
+
+        exact_node = HybridKnowledgeStore._combine_matches(  # noqa: SLF001
+            (
+                match("houdini_help", "box-help", "nodes/sop/box"),
+                match("houdini_node_catalog", "box-type", "Sop::box"),
+            ),
+            (),
+            "hybrid",
+            query="Sop::box",
+        )
+        self.assertEqual("live_node_catalog", exact_node[0]["source_kind"])
+
+        explicit_memory = HybridKnowledgeStore._combine_matches(  # noqa: SLF001
+            (
+                match("project_docs", "docs", "Project reference"),
+                match("project_memory", "memory", "Recorded decision"),
+            ),
+            (),
+            "hybrid",
+            query="project memory decision",
+        )
+        self.assertEqual("project_memory", explicit_memory[0]["source_kind"])
+        self.assertEqual(
+            "project_reference",
+            explicit_memory[1]["source_kind"],
+        )
+
+        explicit_user_source = HybridKnowledgeStore._combine_matches(  # noqa: SLF001
+            (
+                match("project_skill", "skill", "Project reference"),
+                match("user_document", "user", "Imported notes"),
+            ),
+            (),
+            "hybrid",
+            query="my imported document",
+        )
+        self.assertEqual("user_document", explicit_user_source[0]["source_kind"])
 
     def test_batch_queries_encode_once_and_rrf_deduplicates_with_provenance(
         self,
@@ -977,6 +1271,7 @@ class HybridKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=10,
+            allow_index_updates=True,
         )
 
         self.assertEqual(
@@ -1075,6 +1370,161 @@ class HybridKnowledgeTests(unittest.TestCase):
             )
         )
 
+    def test_default_search_is_read_only_across_revision_and_backlog(
+        self,
+    ) -> None:
+        index = LocalKnowledgeIndex(self.project_root)
+        target_body = "revision target workflow"
+        _seed_document(
+            index,
+            source_key="revision-target",
+            title="Revision target",
+            bodies=(target_body,),
+        )
+        embedder = FakeEmbedder(model_revision="revision-one")
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=embedder,
+        )
+        completed = _build_all_vectors(store)
+        self.assertTrue(completed["complete"])
+        original_signature = _rows(
+            index,
+            "SELECT value FROM metadata "
+            "WHERE key = 'active_vector_signature'",
+        )[0][0]
+        original_vectors = _rows(
+            index,
+            "SELECT chunk_id, model_id, dim, vector_blob "
+            "FROM chunk_vectors ORDER BY chunk_id",
+        )
+        self.assertIn("revision-one", original_signature)
+        self.assertTrue(original_signature.endswith("|normalized=1"))
+
+        embedder.reconfigure(
+            model_id=embedder.model_id,
+            active_profile=embedder.active_profile,
+            requested_profile=embedder.requested_profile,
+            dim=embedder.dim,
+            model_revision="revision-two",
+        )
+        embedder.calls.clear()
+        read_only = store.search_many(
+            ("revision target",),
+            {"user"},
+            current_houdini_version="21.0",
+            offset=0,
+            limit=10,
+        )[0]
+
+        self.assertEqual([], embedder.document_inputs)
+        self.assertEqual(
+            original_vectors,
+            _rows(
+                index,
+                "SELECT chunk_id, model_id, dim, vector_blob "
+                "FROM chunk_vectors ORDER BY chunk_id",
+            ),
+        )
+        self.assertEqual(
+            original_signature,
+            _rows(
+                index,
+                "SELECT value FROM metadata "
+                "WHERE key = 'active_vector_signature'",
+            )[0][0],
+        )
+        retrieval = read_only["retrieval"]
+        self.assertEqual("lexical", retrieval["mode_used"])
+        self.assertEqual(
+            "VECTOR_INDEX_SIGNATURE_MISMATCH",
+            retrieval["fallback_reason"],
+        )
+        self.assertTrue(retrieval["encoder"]["available"])
+        self.assertEqual("revision-two", retrieval["encoder"]["model_revision"])
+        self.assertEqual("fake-cpu", retrieval["encoder"]["device"])
+        self.assertFalse(retrieval["corpus"]["signature_compatible"])
+        self.assertFalse(retrieval["corpus"]["global_recall"])
+        self.assertEqual(0, retrieval["corpus"]["vector_chunks"])
+        self.assertEqual(
+            {
+                "fts_seconds",
+                "query_encode_seconds",
+                "vector_scan_seconds",
+            },
+            set(retrieval["timings"]),
+        )
+
+        embedder.calls.clear()
+        updated = store.search_many(
+            ("revision target",),
+            {"user"},
+            current_houdini_version="21.0",
+            offset=0,
+            limit=10,
+            allow_index_updates=True,
+        )[0]
+        active_signature = _rows(
+            index,
+            "SELECT value FROM metadata "
+            "WHERE key = 'active_vector_signature'",
+        )[0][0]
+        self.assertIn("revision-two", active_signature)
+        self.assertNotEqual(original_signature, active_signature)
+        self.assertEqual([target_body], embedder.document_inputs)
+        self.assertTrue(updated["retrieval"]["corpus"]["signature_compatible"])
+
+        pending_body = "new pending readonly candidate"
+        _seed_document(
+            index,
+            source_key="pending-readonly",
+            title="Pending readonly",
+            bodies=(pending_body,),
+        )
+        vectors_before_query = _rows(
+            index,
+            "SELECT chunk_id, vector_blob FROM chunk_vectors ORDER BY chunk_id",
+        )
+        embedder.calls.clear()
+        with (
+            mock.patch.object(
+                store,
+                "_activate_vector_layer",
+                side_effect=AssertionError("read-only search activated vectors"),
+            ),
+            mock.patch.object(
+                store,
+                "_sync_query_candidate_vectors",
+                side_effect=AssertionError("read-only search indexed candidates"),
+            ),
+        ):
+            pending = store.search_many(
+                ("pending readonly",),
+                {"user"},
+                current_houdini_version="21.0",
+                offset=0,
+                limit=10,
+            )[0]
+        self.assertEqual([], embedder.document_inputs)
+        self.assertEqual(
+            vectors_before_query,
+            _rows(
+                index,
+                "SELECT chunk_id, vector_blob "
+                "FROM chunk_vectors ORDER BY chunk_id",
+            ),
+        )
+        self.assertTrue(pending["retrieval"]["corpus"]["partial"])
+        self.assertEqual(
+            "lexical_candidates",
+            pending["retrieval"]["corpus"]["ranking_scope"],
+        )
+        self.assertEqual(
+            0,
+            pending["retrieval"]["corpus"]["chunks_indexed_this_call"],
+        )
+
     def test_corrupt_blob_and_dimension_fall_back_to_lexical(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)
         _seed_document(
@@ -1095,6 +1545,7 @@ class HybridKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=10,
+            allow_index_updates=True,
         )
         original = _rows(
             index,
@@ -1165,6 +1616,7 @@ class HybridKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=10,
+            allow_index_updates=True,
         )[0]
         vector = result["retrieval"]["vector"]
 

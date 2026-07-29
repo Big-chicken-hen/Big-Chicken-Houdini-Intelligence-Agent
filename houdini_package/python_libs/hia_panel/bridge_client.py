@@ -22,6 +22,8 @@ _EVENT_POLL_TIMEOUT_MS = 20_000
 _DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 _SESSION_ACTION_TIMEOUT_MS = 50_000
 _INTERRUPT_TIMEOUT_MS = 7_000
+_PROJECT_MEMORY_TIMEOUT_MS = 65_000
+_KNOWLEDGE_TIMEOUT_MS = 65_000
 _RESULT_DRAIN_INTERVAL_MS = 25
 _MAX_RESULTS_PER_TICK = 128
 _RESULT_QUEUE_LIMIT = 256
@@ -183,6 +185,32 @@ class BridgeClient(QtCore.QObject):
             "POST",
             "/v1/threads/delete",
             {"thread_id": thread_id},
+            context=context,
+        )
+
+    def project_memory(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        context: str,
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/project-memory",
+            dict(arguments),
+            context=context,
+        )
+
+    def project_knowledge(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        context: str,
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/knowledge",
+            dict(arguments),
             context=context,
         )
 
@@ -410,6 +438,10 @@ class BridgeClient(QtCore.QObject):
             timeout_ms = _INTERRUPT_TIMEOUT_MS
         elif context in _GOAL_ACTION_CONTEXTS:
             timeout_ms = _SESSION_ACTION_TIMEOUT_MS
+        elif context.startswith("project_memory:"):
+            timeout_ms = _PROJECT_MEMORY_TIMEOUT_MS
+        elif context.startswith("knowledge:"):
+            timeout_ms = _KNOWLEDGE_TIMEOUT_MS
         elif (
             method == "POST"
             and path == "/v1/session"

@@ -676,8 +676,10 @@ class BridgeSession:
                 "FX fallback 同样非代码级隔离。"
             )
         common_instructions = (
-            "外部研究先定本阶段必需 URL，优先原生 web/search；没有网页工具时才把同阶段公开页合为"
-            "一次 PowerShell 只读批量读取，不逐页审批；复用已取内容，不重复抓取相近页面。"
+            "任何创建、修改或修复在首次场景写入前必须先做一次相关本地知识批量检索并复用结果；"
+            "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务还必须先用原生 web/search "
+            "查当前 SideFX 官方与原始来源；没有网页工具时才批量只读抓取公开页。"
+            "本地检索不可用时明确说明，禁止静默跳过；简单确定性修改不扩展为多轮网页研究。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
             "只有用户明确要求离线、独立 HIP、批处理或后台渲染时才用 PATH 中的 hython.exe。"
             "普通场景请求不先搜索项目源码/文档；仅诊断或修改 Panel、Bridge、MCP/项目代码时读取。"
@@ -686,24 +688,25 @@ class BridgeSession:
             "上下文仅用 app-server 自动整理，不手动 compact，不创建本地摘要或记忆。"
             "实时代码禁止 hou.hipFile.clear/load/save，不替换当前场景；新资产放入唯一新根。"
             "不要调用 request_user_input；信息不足时采用合理默认值，无法执行才报告原因。"
-            "自动截图写 HIA_CACHE_DIR/screenshots，预览写 previews，中间图写 tmp，文件名加时间戳和短随机后缀；"
-            "插件源码、内部缓存、自动截图/预览/附件/临时/诊断必须留项目内。"
+            "安全已保存 HIP 的自动截图优先写同级 .hia/screenshots，否则回退 HIA_CACHE_DIR/screenshots；"
+            "预览写 previews，中间图写 tmp，附件/知识/模型/索引仍留项目 .runtime；文件名加时间戳和短随机后缀。"
             "用户明确指定的最终渲染、EXR、视频、USD、模拟缓存或导出是用户交付物，"
             "可写所选普通本地项目外目录；未指定才用 HIA_RENDER_OUTPUT_DIR，并始终报告最终路径。"
             "禁止屏幕接管。"
         )
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             common_instructions = (
-                "外部研究先定本阶段必需 URL，优先原生 web/search；无网页工具时把同阶段公开页合为"
-                "一次 PowerShell 只读批量读取，不逐页审批；复用已取内容，不重复抓取相近页面。"
-                "MCP 不可用就说明，不转离线 HIP；hython 仅按用户明确的离线/独立 HIP/批处理/后台渲染要求使用。"
-                "普通场景不查项目代码/文档，仅诊断 Panel/Bridge/MCP/项目代码时读取。"
+                "任何创建、修改或修复在首次场景写入前必须先用 hia_local_help_search 做一次相关批量检索并复用结果；"
+                "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务必须先用原生 web/search "
+                "查当前 SideFX 官方与原始来源；"
+                "检索不可用时明确说明，禁止静默跳过；简单确定性修改不扩展为多轮网页研究。"
+                "MCP 不可用就说明，不转离线 HIP；hython 仅用于用户明确的离线/独立 HIP/批处理/后台渲染。"
+                "普通场景不查项目源码。"
                 "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，不塞入主上下文；主任务公开采纳。"
-                "上下文由 app-server 自动整理，不手动 compact 或建本地摘要/记忆。"
                 "禁止 hou.hipFile.clear/load/save 和替换当前场景；新资产置于唯一新根。"
-                "不调用 request_user_input；信息不足用合理默认，无法执行才报告。"
-                "截图写 HIA_CACHE_DIR/screenshots，预览写 previews，中间图写 tmp，文件名用时间戳和短随机后缀；"
-                "插件源码、内部缓存、自动截图/预览/附件/临时/诊断留项目内。"
+                "不调用 request_user_input；信息不足用默认，无法执行才报告。"
+                "安全已存 HIP 截图写同级 .hia/screenshots，否则用 HIA_CACHE_DIR/screenshots；"
+                "预览写 previews，中间图写 tmp，附件/知识/模型/索引留 .runtime；名用时间戳+短随机后缀。"
                 "用户指定的最终渲染/EXR/视频/USD/模拟缓存/导出可写所选普通项目外目录；"
                 "否则用 HIA_RENDER_OUTPUT_DIR；始终报告最终路径。禁止屏幕接管。"
             )
@@ -2346,10 +2349,33 @@ class BridgeSession:
                     "Thread response contains an invalid turn",
                     502,
                 )
+            projected_turn: dict[str, Any] = {"items": []}
+            turn_id = turn.get("id")
+            if (
+                BridgeSession._identifier_is_valid(turn_id)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", turn_id)
+                is not None
+                and len(turn_id) <= 256
+            ):
+                projected_turn["id"] = turn_id
             projected_items: list[dict[str, Any]] = []
             for item in turn["items"]:
                 if not isinstance(item, dict):
                     continue
+                item_id = item.get("id")
+                safe_item_id = (
+                    item_id
+                    if (
+                        BridgeSession._identifier_is_valid(item_id)
+                        and re.fullmatch(
+                            r"[A-Za-z0-9][A-Za-z0-9._:-]*",
+                            item_id,
+                        )
+                        is not None
+                        and len(item_id) <= 256
+                    )
+                    else None
+                )
                 if item.get("type") == "userMessage":
                     content = item.get("content")
                     if not isinstance(content, list):
@@ -2370,16 +2396,36 @@ class BridgeSession:
                             projected_content.append(
                                 {"type": "localImage", "path": entry["path"]}
                             )
-                    projected_items.append(
-                        {"type": "userMessage", "content": projected_content}
-                    )
+                    projected_item: dict[str, Any] = {
+                        "type": "userMessage",
+                        "content": projected_content,
+                    }
+                    if safe_item_id is not None:
+                        projected_item["id"] = safe_item_id
+                    projected_items.append(projected_item)
                 elif item.get("type") == "agentMessage" and isinstance(
                     item.get("text"), str
                 ):
-                    projected_items.append(
-                        {"type": "agentMessage", "text": item["text"]}
-                    )
-            projected_turns.append({"items": projected_items})
+                    marker_values = {
+                        str(item.get(name) or "").strip().casefold()
+                        for name in ("channel", "phase")
+                    }
+                    if marker_values & {
+                        "analysis",
+                        "commentary",
+                        "internal",
+                        "reasoning",
+                    }:
+                        continue
+                    projected_item = {
+                        "type": "agentMessage",
+                        "text": item["text"],
+                    }
+                    if safe_item_id is not None:
+                        projected_item["id"] = safe_item_id
+                    projected_items.append(projected_item)
+            projected_turn["items"] = projected_items
+            projected_turns.append(projected_turn)
 
         return {
             "thread": {

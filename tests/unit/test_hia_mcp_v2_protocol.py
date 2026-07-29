@@ -12,7 +12,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "services" / "hia_mcp_v2"))
 
 from hia_mcp_v2.adapter import HiaMcpAdapter, MCP_PROTOCOL_VERSION  # noqa: E402
 from hia_mcp_v2.stdio import run_bytes  # noqa: E402
-from hia_mcp_v2.tools import CAPABILITY_MATRIX, TOOL_NAMES  # noqa: E402
+from hia_mcp_v2.tools import CAPABILITY_MATRIX, TOOL_NAMES, TOOL_SPECS  # noqa: E402
 
 
 class FakeTransport:
@@ -81,6 +81,15 @@ def initialize(adapter: HiaMcpAdapter) -> None:
 
 
 class HiaMcpV2ProtocolTests(unittest.TestCase):
+    def test_capture_tool_describes_quality_and_display_boundary(self) -> None:
+        capture = next(
+            spec for spec in TOOL_SPECS if spec.name == "hia_capture_viewport"
+        )
+        description = capture.description.casefold()
+        self.assertIn("documented flipbook path", description)
+        self.assertIn("capture quality", description)
+        self.assertIn("unverified os hdr", description)
+
     def test_initialize_identifies_the_independent_server(self) -> None:
         adapter = HiaMcpAdapter(FakeTransport())
         response = adapter.handle_message(
@@ -102,18 +111,37 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         initialize(adapter)
         response = adapter.handle_message(rpc(2, "tools/list", {}))
         names = [item["name"] for item in response["result"]["tools"]]
-        matrix_names = {
-            name
-            for capability in CAPABILITY_MATRIX
-            for name in capability["tools"]
-        }
+        matrix_names = [capability["tools"][0] for capability in CAPABILITY_MATRIX]
         self.assertEqual(list(TOOL_NAMES), names)
-        self.assertEqual(set(TOOL_NAMES), matrix_names)
+        self.assertEqual(list(TOOL_NAMES), matrix_names)
+        self.assertEqual(len(TOOL_SPECS), len(CAPABILITY_MATRIX))
+        for spec, capability in zip(TOOL_SPECS, CAPABILITY_MATRIX, strict=True):
+            self.assertEqual([spec.name], capability["tools"])
+            self.assertEqual(spec.domain, capability["domain"])
+            self.assertEqual(spec.description, capability["description"])
+            self.assertEqual(
+                list(spec.input_schema.get("properties", {})),
+                capability["parameters"],
+            )
+            self.assertEqual(list(spec.aliases), capability["aliases"])
         self.assertEqual(17, len(names))
         self.assertNotIn("hia_create_node", names)
         self.assertNotIn("hia_set_parameter", names)
         self.assertNotIn("hia_connect_nodes", names)
         self.assertTrue(all(name.startswith("hia_") for name in names))
+        self.assertEqual(1, names.count("hia_local_help_search"))
+
+        context_tool = next(
+            item for item in response["result"]["tools"] if item["name"] == "hia_context"
+        )
+        context_properties = context_tool["inputSchema"]["properties"]
+        self.assertIn("include_context_pack", context_properties)
+        self.assertEqual(4, context_properties["knowledge_queries"]["maxItems"])
+        self.assertEqual(
+            32768,
+            context_properties["context_pack_max_bytes"]["maximum"],
+        )
+        self.assertIn("strict byte budget", context_tool["description"].casefold())
 
         search_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_search_node_types"
@@ -153,6 +181,20 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(4, local_help_properties["sources"]["maxItems"])
         self.assertEqual(
+            [
+                "builtin_official_workflow",
+                "community_tutorial",
+                "user_document",
+                "user_transcript",
+                "thread_export",
+                "project_memory",
+            ],
+            local_help_properties["source_kinds"]["items"]["enum"],
+        )
+        self.assertEqual(6, local_help_properties["source_kinds"]["maxItems"])
+        self.assertIn("card_id", local_help_properties)
+        self.assertIn("canonical_id", local_help_properties)
+        self.assertEqual(
             ["lexical", "vector", "hybrid"],
             local_help_properties["mode"]["enum"],
         )
@@ -164,7 +206,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             local_help_tool["description"].casefold(),
         )
         self.assertIn(
-            "scanned once",
+            "refresh=false is strictly read-only",
             local_help_tool["description"].casefold(),
         )
         self.assertIn(
@@ -176,7 +218,20 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("degrades completely to lexical", local_help_description)
         self.assertIn("each query's own lexical candidates", local_help_description)
         self.assertIn("index reports complete", local_help_description)
-        self.assertIn("requested/active embedding profiles", local_help_description)
+        self.assertIn("independent cli operation", local_help_description)
+        self.assertIn("single local-knowledge search entry", local_help_description)
+        self.assertIn("does not gate hia_execute_hom", local_help_description)
+        self.assertIn("backing source group", local_help_description)
+        self.assertEqual(
+            ["compact", "full", "diagnostic"],
+            local_help_properties["response_format"]["enum"],
+        )
+        self.assertEqual(
+            "compact",
+            local_help_properties["response_format"]["default"],
+        )
+        self.assertEqual(4096, local_help_properties["max_bytes"]["minimum"])
+        self.assertEqual(262144, local_help_properties["max_bytes"]["maximum"])
 
         memory_tool = next(
             item
@@ -224,6 +279,44 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("checkpoint", execute_description)
         self.assertIn("diff_paths", execute_properties)
         self.assertIn("checkpoint_label", execute_properties)
+        self.assertIn("task", execute_properties)
+        self.assertIn("mutable_root", execute_properties)
+        self.assertIn("protected_paths", execute_properties)
+        self.assertIn("expected_outputs", execute_properties)
+        self.assertIn("checks", execute_properties)
+        self.assertIn("semantic_checks", execute_properties)
+        self.assertIn("not an ir", execute_description)
+
+        validate_tool = next(
+            item for item in response["result"]["tools"] if item["name"] == "hia_validate"
+        )
+        validate_properties = validate_tool["inputSchema"]["properties"]
+        self.assertEqual(
+            [
+                "node_errors",
+                "empty_output",
+                "critical_paths",
+                "geometry_summary",
+                "changed_scope",
+                "semantic_expectations",
+            ],
+            validate_properties["checks"]["items"]["enum"],
+        )
+        self.assertIn("protected_paths", validate_properties)
+        self.assertIn("semantic_checks", validate_properties)
+        self.assertIn("spatial intersection", validate_tool["description"].casefold())
+        self.assertIn(
+            "unsupported node categories",
+            validate_tool["description"].casefold(),
+        )
+
+        context_tool = next(
+            item for item in response["result"]["tools"] if item["name"] == "hia_context"
+        )
+        self.assertIn(
+            "include_runtime_capabilities",
+            context_tool["inputSchema"]["properties"],
+        )
 
         capture_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_capture_viewport"
@@ -339,6 +432,43 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                 "hia_local_help_search",
             ],
             [call[0] for call in transport.calls],
+        )
+
+    def test_local_help_exact_ids_may_dispatch_without_query(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        for request_id, arguments in (
+            (2, {"card_id": "karma-xpu"}),
+            (3, {"canonical_id": "materialx-solaris"}),
+            (4, {"card_id": "karma-xpu", "query": "render workflow"}),
+        ):
+            response = adapter.handle_message(
+                rpc(
+                    request_id,
+                    "tools/call",
+                    {
+                        "name": "hia_local_help_search",
+                        "arguments": arguments,
+                    },
+                )
+            )
+            self.assertFalse(response["result"]["isError"])
+        self.assertEqual(
+            [
+                ("hia_local_help_search", {"card_id": "karma-xpu"}, 2),
+                (
+                    "hia_local_help_search",
+                    {"canonical_id": "materialx-solaris"},
+                    3,
+                ),
+                (
+                    "hia_local_help_search",
+                    {"card_id": "karma-xpu", "query": "render workflow"},
+                    4,
+                ),
+            ],
+            transport.calls,
         )
 
     def test_project_memory_actions_validate_and_dispatch_once_each(self) -> None:
@@ -466,16 +596,147 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         transport = FakeTransport()
         adapter = HiaMcpAdapter(transport)
         initialize(adapter)
+
+        def search(
+            query: str = "",
+            *,
+            domain: str = "",
+            offset: int = 0,
+        ) -> dict[str, Any]:
+            arguments: dict[str, Any] = {"query": query, "offset": offset}
+            if domain:
+                arguments["domain"] = domain
+            response = adapter.handle_message(
+                rpc(
+                    2,
+                    "tools/call",
+                    {
+                        "name": "hia_search_capabilities",
+                        "arguments": arguments,
+                    },
+                )
+            )
+            return response["result"]["structuredContent"]
+
+        solaris = search("composed USD stage")["result"]
+        self.assertEqual("solaris_usd_understanding", solaris["capabilities"][0]["domain"])
+        self.assertEqual(
+            {"registered": 17, "catalogued": 17, "missing": [], "orphaned": []},
+            solaris["catalog_health"],
+        )
+        self.assertIsNone(solaris["empty_reason"])
+        self.assertEqual(
+            ["hia_scene_diff"],
+            search("hia_scene_diff")["result"]["capabilities"][0]["tools"],
+        )
+        scene_tools = {
+            name
+            for item in search(domain="scene_perception")["result"]["capabilities"]
+            for name in item["tools"]
+        }
+        self.assertEqual(
+            {"hia_context", "hia_inspect", "hia_scene_graph"},
+            scene_tools,
+        )
+
+        for query in ("checkpoint", "检查点", "备份", "checkpoint_label"):
+            with self.subTest(query=query):
+                names = {
+                    name
+                    for item in search(query)["result"]["capabilities"]
+                    for name in item["tools"]
+                }
+                self.assertIn("hia_execute_hom", names)
+        for query in (
+            "runtime",
+            "recovery",
+            "recover",
+            "运行时",
+            "恢复",
+            "崩溃恢复",
+        ):
+            with self.subTest(query=query):
+                names = {
+                    name
+                    for item in search(query)["result"]["capabilities"]
+                    for name in item["tools"]
+                }
+                self.assertIn("hia_context", names)
+
+        for query in (
+            "runtime recovery checkpoint",
+            "runtime/recovery/checkpoint",
+            "运行时 恢复 检查点",
+            "运行时/恢复/检查点",
+            "运行时恢复检查点",
+        ):
+            with self.subTest(query=query):
+                combined = search(query)["result"]
+                names = [
+                    name
+                    for item in combined["capabilities"]
+                    for name in item["tools"]
+                ]
+                self.assertIn("hia_context", names)
+                self.assertIn("hia_execute_hom", names)
+                self.assertLess(
+                    names.index("hia_context"),
+                    names.index("hia_execute_hom"),
+                )
+                self.assertIsNone(combined["empty_reason"])
+
+        page_past_end = search("Solaris", offset=999)["result"]
+        self.assertEqual(1, page_past_end["total"])
+        self.assertEqual([], page_past_end["capabilities"])
+        self.assertIsNone(page_past_end["empty_reason"])
+        self.assertEqual([], transport.calls)
+
+    def test_capability_search_distinguishes_no_match_from_incomplete_catalog(self) -> None:
+        adapter = HiaMcpAdapter(FakeTransport())
+        initialize(adapter)
+
         response = adapter.handle_message(
             rpc(
                 2,
                 "tools/call",
-                {"name": "hia_search_capabilities", "arguments": {"query": "Solaris"}},
+                {
+                    "name": "hia_search_capabilities",
+                    "arguments": {"query": "not-a-real-hia-capability"},
+                },
             )
         )
-        capabilities = response["result"]["structuredContent"]["result"]["capabilities"]
-        self.assertEqual("solaris_usd_understanding", capabilities[0]["domain"])
-        self.assertEqual([], transport.calls)
+        payload = response["result"]["structuredContent"]
+        self.assertEqual("NO_MATCH", payload["result"]["empty_reason"])
+        self.assertEqual([], payload["warnings"])
+
+        adapter._descriptors = [  # type: ignore[attr-defined]
+            item
+            for item in adapter._descriptors  # type: ignore[attr-defined]
+            if item["name"] != "hia_context"
+        ]
+        adapter._descriptors.append({"name": "hia_uncatalogued"})  # type: ignore[attr-defined]
+        response = adapter.handle_message(
+            rpc(
+                3,
+                "tools/call",
+                {
+                    "name": "hia_search_capabilities",
+                    "arguments": {"query": "not-a-real-hia-capability"},
+                },
+            )
+        )
+        payload = response["result"]["structuredContent"]
+        self.assertEqual("CATALOG_INCOMPLETE", payload["result"]["empty_reason"])
+        self.assertEqual(
+            {
+                "registered": 17,
+                "catalogued": 17,
+                "missing": ["hia_uncatalogued"],
+                "orphaned": ["hia_context"],
+            },
+            payload["result"]["catalog_health"],
+        )
+        self.assertEqual(1, len(payload["warnings"]))
 
     def test_cancel_before_dispatch_returns_an_honest_limit(self) -> None:
         transport = FakeTransport()
@@ -510,6 +771,49 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(-32602, response["error"]["code"])
         self.assertEqual("INVALID_ARGUMENTS", response["error"]["data"]["code"])
+        self.assertEqual([], transport.calls)
+
+    def test_semantic_check_shape_is_rejected_before_transport(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        cases = (
+            {
+                "semantic_checks": [
+                    {"type": "sample", "data_kind": "attribute", "name": "v"}
+                ]
+            },
+            {
+                "semantic_checks": [
+                    {
+                        "type": "sample",
+                        "path": "/obj/out",
+                        "data_kind": "attribute",
+                        "name": "v",
+                        "min_magnitude": 2.0,
+                        "max_magnitude": 1.0,
+                    }
+                ]
+            },
+            {"semantic_checks": [{"type": "mapping", "source": {
+                "path": "/obj/source",
+                "data_kind": "volume",
+                "name": "density",
+            }}]},
+        )
+        for request_id, arguments in enumerate(cases, start=20):
+            response = adapter.handle_message(
+                rpc(
+                    request_id,
+                    "tools/call",
+                    {"name": "hia_validate", "arguments": arguments},
+                )
+            )
+            self.assertEqual(-32602, response["error"]["code"])
+            self.assertEqual(
+                "INVALID_ARGUMENTS",
+                response["error"]["data"]["code"],
+            )
         self.assertEqual([], transport.calls)
 
     def test_ambiguous_or_missing_batch_query_forms_are_rejected_before_transport(

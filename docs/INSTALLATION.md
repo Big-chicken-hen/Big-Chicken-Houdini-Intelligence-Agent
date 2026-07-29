@@ -1,17 +1,19 @@
 # Installation and first run
 
-Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The tested configuration is Houdini 21.0.440 with its Python 3.11 runtime, a separate CPython 3.10+ Bridge executable, and Codex 0.144.3. For most users, the published Preview ZIP is the recommended installation; clone the source only when you plan to develop or inspect the project.
+Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The tested configuration is Houdini 21.0.440 with its Python 3.11 runtime, a project-managed CPython 3.10.11 Bridge/local-knowledge environment, and Codex 0.144.3. The published v0.1.1 Preview ZIP is the historical 2026-07-24 snapshot and does not represent later source changes. Use that ZIP only to reproduce its published version; use a source checkout to inspect current development until a newer Preview is published.
 
-## 1. Download and fully extract the Preview ZIP
+## 1. Download and fully extract the historical Preview ZIP
 
 Download the
 [`Big-Chicken-Houdini-Intelligence-Agent-v0.1.1-preview-win-x64.zip`](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/download/v0.1.1-preview/Big-Chicken-Houdini-Intelligence-Agent-v0.1.1-preview-win-x64.zip)
 and its adjacent
 [`SHA256SUMS.txt`](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/download/v0.1.1-preview/SHA256SUMS.txt).
+Do not reuse this archive or checksum as the candidate output for a later
+release.
 Use **Extract All** to unpack the complete archive into an ordinary writable local directory, for example:
 
 ```text
-D:\Tools\Big-Chicken-Houdini-Intelligence-Agent
+<writable-local-directory>\Big-Chicken-Houdini-Intelligence-Agent
 ```
 
 The project does not require a fixed drive letter. Do not run it from inside the ZIP, and do not place it inside the Houdini installation directory or another protected system directory.
@@ -25,31 +27,54 @@ above and its SHA-256 matches `SHA256SUMS.txt`.
 The build commands in the README are for source checkouts only; the public ZIP
 intentionally omits those maintainer scripts.
 
-## 2. Install Houdini and Bridge Python
+## 2. Install Houdini
 
 Install separately:
 
 - SideFX Houdini. Houdini 21.0.440 is the currently verified build.
-- CPython 3.10 or newer for the Bridge.
 - A valid Codex/ChatGPT sign-in and network access to the OpenAI service.
 
-A normal 64-bit Python from [python.org](https://www.python.org/downloads/windows/)
-installed **for the current user** is supported; administrator access, a
-system-wide Python installation, and a global PATH change are not required.
-The launcher can discover a per-user installation, or you can select its exact
-`python.exe` manually. Bridge Python is separate from Houdini's embedded Python.
+Normal installation does not require global Python, a PATH Python, administrator
+site-packages, or a package installed into Houdini. HIA prepares one managed
+CPython base beneath the extracted project's `.runtime` directory and one
+user-visible virtual environment at:
+
+```text
+<project-root>\.venv
+```
+
+The same `.venv` runs the Bridge, local document parsing, and optional embedding
+worker. Activate it manually, when desired, with:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+The project-local uv executable, CPython base, download caches, models, and
+knowledge data remain internal under `.runtime`.
+
+The base installation includes the PDF parser but not PyTorch or a Qwen model.
+Those larger optional dependencies are installed only after the user explicitly
+chooses embedding. Houdini's embedded Python/HOM runtime continues to follow the
+selected Houdini installation and is never modified or redirected through
+`.venv`. The separately installed FXHoudiniMCP fallback also keeps its own
+environment; it is not merged into HIA's `.venv`.
 
 Big-Chicken Houdini Intelligence Agent does not redistribute Houdini. Houdini
 must already be installed and licensed. Other Houdini versions may be discovered,
 but only Houdini 21.0.440 with Python 3.11 has completed the current real-GUI
 acceptance path.
 
-## 3. Install or repair the pinned Codex runtime
+## 3. Install or repair the project-local runtimes
 
-Start `BigChickenLauncher.exe`, select the Houdini executable, the Bridge
-`python.exe`, and **HIA MCP V2**, then run or refresh the checks. If the action
-button says **安装/修复 Codex**, click it. The launcher downloads and verifies
-the pinned Codex runtime, then refreshes the checks automatically.
+Start `BigChickenLauncher.exe`, select the Houdini executable and **HIA MCP V2**,
+and keep the recommended project-managed Python mode. Run or refresh the checks.
+If the main action says **安装/修复 Codex**, click it. In **本地知识**, a missing,
+legacy, unsafe, or incomplete environment shows the detected reason and an
+**安装本地知识环境** or **修复本地知识环境** button. Click it once; the launcher
+runs the same project-relative CLI asynchronously, shows the current stage and
+project-local log, and offers a retry if verification fails. A WPF user does
+not need to open PowerShell for this repair.
 
 This normal first-run action:
 
@@ -59,15 +84,36 @@ This normal first-run action:
 - installs them only beneath `.runtime\toolchains\codex\0.144.3`;
 - leaves global PATH, the registry, the Houdini installation, and user configuration unchanged.
 
-It does not install Bridge Python.
+The local-knowledge action always installs or repairs project-managed Python
+3.10.11, project-local uv, the single `<project-root>\.venv`, and `pypdf`. When no verified model is
+installed, it stops at that parser baseline and does not install PyTorch or
+download a Qwen model. Failure never blocks basic Houdini launch: retrieval
+remains available through SQLite FTS5.
 
-### Command-line fallback
+The former `.runtime\toolchains\hia-embedding\venv` path is accepted only as a
+legacy migration source. Explicit repair uses project-local managed CPython to
+build a fresh staging venv under `.runtime`; it never moves or rewrites the old
+venv in place. An existing top-level `.venv` without a valid HIA managed marker
+is refused rather than taken over.
 
-If the launcher cannot complete the download, open PowerShell in the extracted
-package root and run:
+Before publishing, repair verifies Python 3.10.11 x64, disabled user
+site-packages, project-local `sys.executable`/`sys.prefix`/base prefix,
+Bridge/MCP/parser/worker imports, the reusable model payload, and the selected
+PyTorch/CUDA runtime. It validates the published `.venv` again before the exact
+legacy source can be reported as a cleanup candidate. Cleanup requires a
+separate explicit confirmation; repair never removes it automatically. Any failure preserves the old
+environment and does not leave a half-published `.venv`. The knowledge database,
+model directories, and project-local uv/Hugging Face caches are not deleted.
+The vector index is not started automatically.
+
+### Command-line access without WPF
+
+The launcher is the normal repair path. Users who deliberately run without WPF
+have the same capabilities through project-relative commands:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-runtime.ps1
+powershell -File .\scripts\hia-knowledge.ps1 environment-install
 ```
 
 ### Manual Codex placement for troubleshooting
@@ -139,9 +185,15 @@ For a source checkout, start the PowerShell launcher:
 powershell -NoProfile -Sta -ExecutionPolicy Bypass -File .\scripts\hia-launcher.ps1
 ```
 
-The launcher discovers Houdini installations, lists available Bridge Python executables, checks the Codex version and login, verifies project imports and HIA MCP V2, and checks local runtime writes and loopback ports.
+The launcher discovers Houdini installations, checks the project-managed
+Bridge/local-knowledge environment, checks the Codex version and login, verifies
+project imports and HIA MCP V2, and checks local runtime writes and loopback ports.
 
-If more than one Houdini or Python candidate exists, choose the exact executable instead of asking the launcher to guess. **HIA MCP V2** is the recommended backend.
+If more than one Houdini candidate exists, choose the exact executable instead of
+asking the launcher to guess. **HIA MCP V2** is the recommended backend. An
+external Python is available only as an explicit advanced Bridge override. The
+normal install and repair path always prepares and uses the project-managed
+Python and shared `.venv`.
 
 Green checks are ready, yellow checks need attention but do not necessarily block launch, and red checks must be fixed before Houdini can start.
 
@@ -156,7 +208,106 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
 .\.runtime\dist\launcher\BigChickenLauncher.exe
 ```
 
-`-InstallLocalSdk` downloads and verifies a Microsoft .NET 8 SDK under `.runtime`; it does not install a global SDK. The published EXE and its native sidecars must remain together. The launcher uses its built-in dark gradient and has no required external artwork.
+`-InstallLocalSdk` downloads and verifies a Microsoft .NET 8 SDK under `.runtime`; it does not install a global SDK. The published EXE and its native sidecars must remain together. Release archives include the project-owned launcher illustration at `assets\launcher\launcher-hero.png`. If that file is missing or cannot be decoded, the launcher falls back to its built-in dark gradient without blocking preflight or Houdini launch.
+
+## Use local knowledge without WPF
+
+The WPF **本地知识** page is a client of the same project-relative commands
+available to users who run `scripts\launch-houdini.ps1` directly. It does not
+contain an exclusive importer, source database, parser, or indexer. Open
+PowerShell in the project root and run the required action:
+
+```powershell
+powershell -File .\scripts\hia-knowledge.ps1 status
+powershell -File .\scripts\hia-knowledge.ps1 environment-status
+powershell -File .\scripts\hia-knowledge.ps1 environment-install
+powershell -File .\scripts\hia-knowledge.ps1 environment-repair
+powershell -File .\scripts\hia-knowledge.ps1 import-file -Path "<path-to-document>"
+powershell -File .\scripts\hia-knowledge.ps1 import-folder -Path "<path-to-folder>"
+powershell -File .\scripts\hia-knowledge.ps1 list
+powershell -File .\scripts\hia-knowledge.ps1 delete -SourceId "<source-id>"
+powershell -File .\scripts\hia-knowledge.ps1 rescan
+powershell -File .\scripts\hia-knowledge.ps1 index-status
+powershell -File .\scripts\hia-knowledge.ps1 index-build -BatchSize 32
+```
+
+`index-build` commits bounded batches, so the same command continues missing or
+changed chunks after interruption. The supported formats are `.md`, `.txt`,
+`.html`, `.htm`, `.srt`, `.vtt`, and text-based `.pdf`. The first release does
+not claim video ingestion, scanned-PDF OCR, or image OCR. Import creates a
+managed copy under `.runtime\knowledge\sources`; deleting that copy never
+deletes or changes the original file.
+
+The WPF page maps these actions to **导入文件**, **导入文件夹**, managed-source
+rows showing origin/format/size/index state, **删除所选**, **重新扫描**, and
+**构建/继续索引**. The deletion prompt explicitly identifies the managed copy
+and repeats that the original file is outside the deletion target.
+
+`environment-status` is the canonical environment troubleshooting report. It
+includes the full resolved venv/Python paths, Python version and bitness,
+project-local uv, `pypdf`, PyTorch version, CUDA build/availability and GPU name,
+model/profile status, free space, and redacted proxy-presence flags. `status`
+adds managed-source and index state, while `index-status` returns the dedicated
+index view. The WPF page uses these same probes, groups them as environment,
+parser, model, and index status with repair/log actions, and may shorten a
+visible path while retaining the complete path in its tooltip/report.
+
+### Optional embedding without WPF
+
+Install the base environment first. To opt into the default embedding model
+without WPF, invoke the same installer used by the launcher:
+
+```powershell
+$projectRoot = (Resolve-Path -LiteralPath .).Path
+powershell -File .\scripts\launcher\Install-HiaEmbedding.ps1 `
+  -ProjectRoot $projectRoot `
+  -Profile qwen3-embedding-0.6b `
+  -Device auto
+```
+
+`auto` accepts CUDA only after the project-local PyTorch runtime actually reports
+`torch.cuda.is_available()` and a GPU name. A visible NVIDIA adapter alone is not
+success. Driver/runtime mismatch falls back to CPU embedding when usable, or to
+FTS5; AMD, integrated-graphics, no-discrete-GPU, and deliberately CPU-only
+systems can use `-Device cpu`. CPU embedding is slower for large indexing jobs,
+while FTS5 is lexical-only and requires no model download. Neither mode blocks
+Houdini.
+
+Project-local uv is bootstrapped under `.runtime\toolchains` when missing and
+never modifies system PATH. Proxy values are inherited only by bounded installer
+children and are redacted from status/log output. Advanced custom model
+directories must resolve beneath the current project's `.runtime\models`
+boundary. Defaults never store a development-machine drive or username, and a
+moved project resolves its toolchains and models again from the new root.
+
+## Inspect or clear managed cache without WPF
+
+List first, note the returned snapshot hash, then clear only an explicit
+allowlisted category:
+
+```powershell
+powershell -File .\scripts\hia-cache.ps1 -Action list
+powershell -File .\scripts\hia-cache.ps1 -Action list -Category screenshots
+powershell -File .\scripts\hia-cache.ps1 -Action clear -Category screenshots -SnapshotHash "<hash-from-list>"
+```
+
+Available categories are `screenshots`, `previews`, `tmp`,
+`embedding-runtime`, `embedding-downloads`, and `dotnet`. The list result shows
+each exact resolved target and estimated size; clear reports each category's
+outcome. The command derives the project root from its own location, rejects
+reparse points, path escape, changed snapshots, and every project-external
+target, and preserves category roots.
+
+An ordinary `.hip`, `.hiplc`, or `.hipnc` file anywhere in a selected category
+blocks that category and makes the entire selected clear batch perform zero
+writes. The default final-output root `.runtime\cache` remains valid, but a
+final-output path cannot equal or sit below any clearable category root.
+
+There is no arbitrary-path or wildcard cleanup mode. The command never targets
+`.runtime\knowledge`, `.runtime\models`, `.runtime\toolchains`,
+`.runtime\attachments`, `.runtime\launcher-sessions`, Codex Home/Threads,
+checkpoints, HIP files, `.runtime\cache\renders`,
+`.runtime\cache\research`, or a user-selected final-output directory.
 
 ## 6. Open the Houdini Panel
 
@@ -202,9 +353,57 @@ The launcher requires exactly one Codex executable whose directory version match
 
 Repeat the project-local login command above. Do not use or copy another user's Codex Home.
 
-### Bridge Python is red
+### Project-local Python or local knowledge is red
 
-Choose an exact CPython 3.10+ `python.exe`. Big-Chicken Houdini Intelligence Agent's Bridge and HIA MCP V2 use the Python standard library and project source paths; they do not require Houdini's embedded Python as the Bridge process.
+In WPF, open **本地知识**, read the reason beside the environment status, and
+click **安装本地知识环境**, **修复本地知识环境**, or the retry action shown there.
+The expandable log identifies the failed managed-Python, uv, venv, parser,
+network/proxy, disk-space, or verification stage. If a verified model is
+already installed, the same repair also restores its PyTorch/worker runtime for
+the current CPU/CUDA selection; no second repair click is required.
+
+Without WPF, run the same underlying commands:
+
+```powershell
+powershell -File .\scripts\hia-knowledge.ps1 environment-status
+powershell -File .\scripts\hia-knowledge.ps1 environment-repair
+```
+
+The repair action stays beneath the current project root and repairs the same
+`.venv` used by the Bridge and local knowledge. Do not fix this with global `pip`,
+user site-packages, a PATH change, or packages copied into the Houdini
+installation. A failed or interrupted repair can be retried; the project-local
+install lock prevents a second concurrent run, and FTS5 remains available while
+the optional embedding runtime is incomplete.
+
+### CUDA or a GPU is unavailable
+
+Use the reported PyTorch/CUDA build, `cuda_available`, and GPU name rather than
+the adapter name alone. A missing or incompatible NVIDIA driver is not accepted
+as CUDA-ready. Choose CPU embedding or remain on FTS5; basic Houdini startup
+continues normally on AMD and GPU-less systems.
+
+### Environment download fails or disk space is low
+
+`environment-status` reports available project-volume space and whether HTTP,
+HTTPS, or no-proxy variables are present without exposing their values. Free
+space first, verify the proxy outside HIA if required, then rerun the same
+project-local repair. Read the project-local log path returned by the command;
+do not switch to global `pip`.
+
+### The project was moved
+
+Close the launcher and Houdini, move the complete extracted directory, then run
+`environment-status` again from the new root. Managed toolchain and model paths
+and the top-level `.venv` are re-derived from the script location. A legacy venv
+whose base Python still points outside the project is reported as
+repair-required instead of silently borrowing that machine's installation.
+
+### Cache snapshot changed
+
+Run `hia-cache.ps1 -Action list` again and use the new hash. The clear command
+intentionally refuses a stale preview rather than deleting files that appeared
+or changed after confirmation.
 
 ### Several Houdini versions were found
 

@@ -23,6 +23,13 @@ from .bridge_client import BridgeClient
 from .houdini_read_adapter import HoudiniReadAdapter, HoudiniReadAdapterError
 from .network_response import format_bridge_error
 from .runtime_diagnostics import RuntimeDiagnosticWriter
+from .task_insights import (
+    bounded_public_text,
+    normalize_build_brief,
+    normalize_context_pack_summary,
+    normalize_reviews,
+    normalize_stage_plan,
+)
 from .turn_state import PanelTurnState, TurnPhase, TurnStateToken
 
 
@@ -46,6 +53,26 @@ _CRASH_RECOVERY_RECHECK_CONTEXT = "thread_read:crash_recovery_recheck"
 _THREAD_RENAME_CONTEXT_PREFIX = "thread_rename:"
 _THREAD_DELETE_CONTEXT_PREFIX = "thread_delete:"
 _THREAD_DELETE_CONFIRM_MIN_SECONDS = 0.75
+_PROJECT_MEMORY_CONTEXT_PREFIX = "project_memory:"
+_PROJECT_MEMORY_CONFIRM_MIN_SECONDS = 0.75
+_KNOWLEDGE_CONTEXT_PREFIX = "knowledge:"
+_KNOWLEDGE_SOURCE_CONFIRM_MIN_SECONDS = 0.75
+_KNOWLEDGE_SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}\Z")
+_KNOWLEDGE_MEDIA_GLOBS = (
+    "*.aac *.avi *.flac *.m4a *.m4v *.mkv *.mov "
+    "*.mp3 *.mp4 *.ogg *.wav *.webm"
+)
+_PROJECT_MEMORY_TYPES = (
+    ("决策", "decision"),
+    ("偏好", "preference"),
+    ("资产", "asset"),
+    ("经验", "lesson"),
+    ("工作流", "workflow"),
+)
+_PROJECT_MEMORY_TYPE_LABELS = {
+    value: label for label, value in _PROJECT_MEMORY_TYPES
+}
+_PROJECT_MEMORY_STABLE_ID = re.compile(r"mem_[0-9a-f]{32}\Z")
 _GOAL_GET_CONTEXT = "goal_get"
 _GOAL_SET_CONTEXT = "goal_set"
 _GOAL_CLEAR_CONTEXT = "goal_clear"
@@ -86,6 +113,20 @@ _GOAL_RUNNING_WITH_TEXT = "当前跟进：Codex 正在推进 Goal"
 _TEAM_RECORD_LIMIT = 32
 _TEAM_EVENT_LIMIT = 24
 _TEAM_TEXT_LIMIT = 65_536
+_CENTER_TARGET_MIN_WIDTH = 520
+_RESPONSIVE_HIDE_RIGHT_WIDTH = _CENTER_TARGET_MIN_WIDTH + 560
+_RESPONSIVE_HIDE_BOTH_WIDTH = _CENTER_TARGET_MIN_WIDTH + 260
+_RUNTIME_MODEL_MIN_WIDTH = 120
+_RUNTIME_SELECTOR_MIN_WIDTH = 96
+_STAGE_STATUS_LABELS = {
+    "completed": ("✓", "已完成"),
+    "inProgress": ("▶", "进行中"),
+    "in_progress": ("▶", "进行中"),
+    "active": ("▶", "进行中"),
+    "pending": ("○", "待处理"),
+    "blocked": ("!", "受阻"),
+    "failed": ("×", "失败"),
+}
 _CRASH_RECOVERY_THREAD_ENV = "HIA_CRASH_RECOVERY_THREAD_ID"
 _CRASH_RECOVERY_GOAL_BINDING_ENV = "HIA_CRASH_RECOVERY_GOAL_BINDING"
 _CRASH_RECOVERY_PROMPT_ENV = "HIA_CRASH_RECOVERY_PROMPT_ID"
@@ -172,6 +213,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._thread_delete_confirm_id: str | None = None
         self._thread_delete_confirm_not_before: float | None = None
         self._thread_delete_pending: dict[str, Any] | None = None
+        self._project_memory_loaded = False
+        self._project_memory_pending: dict[str, Any] | None = None
+        self._project_memory_delete_confirm_id: str | None = None
+        self._project_memory_delete_confirm_not_before: float | None = None
+        self._knowledge_loaded = False
+        self._knowledge_pending: dict[str, Any] | None = None
+        self._knowledge_job: dict[str, Any] | None = None
+        self._knowledge_environment: dict[str, Any] = {}
+        self._knowledge_source_dialog: Any | None = None
+        self._knowledge_source_dialog_mode: str | None = None
+        self._knowledge_delete_confirm_id: str | None = None
+        self._knowledge_delete_confirm_not_before: float | None = None
         self._goal_action_context: str | None = None
         self._current_goal: dict[str, Any] | None = None
         self._goal_turn_id: str | None = None
@@ -182,7 +235,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._goal_auto_turn_token: TurnStateToken | None = None
         self._goal_auto_turn_has_progress = False
         self._goal_continue_after_open_thread_id: str | None = None
+        self._build_brief: dict[str, Any] | None = None
+        self._build_brief_thread_id: str | None = None
+        self._context_pack_summary: dict[str, Any] | None = None
+        self._stage_items: list[dict[str, str]] = []
+        self._review_records: list[dict[str, str]] = []
         self._team_records: dict[str, dict[str, Any]] = {}
+        self._responsive_layout_mode: str | None = None
+        self._responsive_left_auto_hidden = False
+        self._responsive_right_auto_hidden = False
         self._turn_performance_token: TurnStateToken | None = None
         self._turn_performance_marks: dict[str, float] = {}
         self._reconnect_attempt = 0
@@ -240,6 +301,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._thread_delete_confirm_timer.setInterval(5_000)
         self._thread_delete_confirm_timer.timeout.connect(
             self._reset_thread_delete_confirmation
+        )
+        self._project_memory_confirm_timer = QtCore.QTimer(self)
+        self._project_memory_confirm_timer.setSingleShot(True)
+        self._project_memory_confirm_timer.setInterval(5_000)
+        self._project_memory_confirm_timer.timeout.connect(
+            self._reset_project_memory_delete_confirmation
+        )
+        self._knowledge_poll_timer = QtCore.QTimer(self)
+        self._knowledge_poll_timer.setSingleShot(True)
+        self._knowledge_poll_timer.setInterval(750)
+        self._knowledge_poll_timer.timeout.connect(self._poll_knowledge_job)
+        self._knowledge_confirm_timer = QtCore.QTimer(self)
+        self._knowledge_confirm_timer.setSingleShot(True)
+        self._knowledge_confirm_timer.setInterval(5_000)
+        self._knowledge_confirm_timer.timeout.connect(
+            self._reset_knowledge_delete_confirmation
         )
         self._build_ui()
         self._initialize_houdini_read_adapter(hou_module)
@@ -327,40 +404,92 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         session_row.addWidget(self.auth_label)
         session_row.addWidget(self.thread_status_label)
         session_row.addWidget(self.turn_status_label)
+        self.history_sidebar_button = QtWidgets.QToolButton()
+        self.history_sidebar_button.setText("历史")
+        self.history_sidebar_button.setCheckable(True)
+        self.history_sidebar_button.setChecked(True)
+        self.history_sidebar_button.setToolTip("显示或收起历史任务栏")
+        session_row.addWidget(self.history_sidebar_button)
+        self.task_sidebar_button = QtWidgets.QToolButton()
+        self.task_sidebar_button.setText("任务")
+        self.task_sidebar_button.setCheckable(True)
+        self.task_sidebar_button.setChecked(True)
+        self.task_sidebar_button.setToolTip("显示或收起任务蓝图、阶段、审阅和团队")
+        session_row.addWidget(self.task_sidebar_button)
         session_row.addStretch(1)
-        session_row.addWidget(QtWidgets.QLabel("模型"))
+        root.addLayout(session_row)
+
+        self.runtime_settings_group = QtWidgets.QGroupBox("运行设置（下一轮）")
+        self.runtime_settings_group.setMinimumWidth(0)
+        self.runtime_settings_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.runtime_settings_group.setToolTip(
+            "活动 Turn 中的选择会在下一轮生效，不会改写当前已发请求。"
+        )
+        runtime_settings_layout = QtWidgets.QFormLayout(
+            self.runtime_settings_group
+        )
+        runtime_settings_layout.setContentsMargins(6, 4, 6, 4)
+        runtime_settings_layout.setHorizontalSpacing(8)
+        runtime_settings_layout.setVerticalSpacing(4)
+        runtime_settings_layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        runtime_settings_layout.setRowWrapPolicy(
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+
+        self.model_label = QtWidgets.QLabel("模型")
         self.model_combo = QtWidgets.QComboBox()
         self.model_combo.addItem(_CODEX_DEFAULT_LABEL, None)
+        self.model_combo.setMinimumWidth(_RUNTIME_MODEL_MIN_WIDTH)
         self.model_combo.setMaximumWidth(220)
         self.model_combo.setToolTip("当前 Codex 模型")
-        session_row.addWidget(self.model_combo)
-        session_row.addWidget(QtWidgets.QLabel("推理"))
+        runtime_settings_layout.addRow(self.model_label, self.model_combo)
+
+        self.effort_label = QtWidgets.QLabel("推理")
         self.effort_combo = QtWidgets.QComboBox()
         self.effort_combo.addItem(_CODEX_DEFAULT_LABEL, None)
+        self.effort_combo.setMinimumWidth(_RUNTIME_SELECTOR_MIN_WIDTH)
         self.effort_combo.setMaximumWidth(140)
         self.effort_combo.setToolTip("当前推理强度")
-        session_row.addWidget(self.effort_combo)
+        runtime_settings_layout.addRow(self.effort_label, self.effort_combo)
+
         self.service_tier_label = QtWidgets.QLabel("速度")
         self.service_tier_combo = QtWidgets.QComboBox()
         self.service_tier_combo.addItem(_CODEX_STANDARD_TIER_LABEL, None)
+        self.service_tier_combo.setMinimumWidth(_RUNTIME_SELECTOR_MIN_WIDTH)
         self.service_tier_combo.setMaximumWidth(150)
         self.service_tier_combo.setToolTip(
             "速度档位来自当前模型的实时 model/list。"
         )
+        for combo in (
+            self.model_combo,
+            self.effort_combo,
+            self.service_tier_combo,
+        ):
+            combo.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+        runtime_settings_layout.addRow(
+            self.service_tier_label,
+            self.service_tier_combo,
+        )
         self.service_tier_label.setVisible(False)
         self.service_tier_combo.setVisible(False)
-        session_row.addWidget(self.service_tier_label)
-        session_row.addWidget(self.service_tier_combo)
-        root.addLayout(session_row)
+        root.addWidget(self.runtime_settings_group)
 
         self.main_splitter = QtWidgets.QSplitter(
             QtCore.Qt.Orientation.Horizontal, self
         )
         self.main_splitter.setObjectName("mainThreeColumnSplitter")
         self.main_splitter.setChildrenCollapsible(True)
-        left_column = QtWidgets.QWidget(self.main_splitter)
-        left_column.setMinimumWidth(0)
-        left_layout = QtWidgets.QVBoxLayout(left_column)
+        self.left_column = QtWidgets.QWidget(self.main_splitter)
+        self.left_column.setMinimumWidth(0)
+        left_layout = QtWidgets.QVBoxLayout(self.left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(QtWidgets.QLabel("历史任务"))
         self.history_combo = QtWidgets.QComboBox()
@@ -400,14 +529,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         left_layout.addWidget(self.thread_id_edit)
         left_layout.addStretch(1)
 
-        center_column = QtWidgets.QWidget(self.main_splitter)
-        center_column.setMinimumWidth(0)
-        center_layout = QtWidgets.QVBoxLayout(center_column)
+        self.center_column = QtWidgets.QWidget(self.main_splitter)
+        self.center_column.setMinimumWidth(0)
+        self.center_column.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        center_layout = QtWidgets.QVBoxLayout(self.center_column)
         center_layout.setContentsMargins(0, 0, 0, 0)
 
-        right_column = QtWidgets.QWidget(self.main_splitter)
-        right_column.setMinimumWidth(0)
-        right_layout = QtWidgets.QVBoxLayout(right_column)
+        self.right_column = QtWidgets.QWidget(self.main_splitter)
+        self.right_column.setMinimumWidth(0)
+        self.right_column.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        right_layout = QtWidgets.QVBoxLayout(self.right_column)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
         self.welcome_group = QtWidgets.QFrame()
@@ -525,7 +662,29 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         action_row.addWidget(self.stop_button)
         center_layout.addLayout(action_row)
 
-        self.goal_group = QtWidgets.QGroupBox("Goal")
+        self.task_tabs = QtWidgets.QTabWidget()
+        self.task_tabs.setObjectName("hiaTaskInspectorTabs")
+        self.task_tabs.setDocumentMode(True)
+        self.task_tabs.setMinimumWidth(0)
+        self.task_tabs.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        self.task_tabs.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+
+        blueprint_scroll = QtWidgets.QScrollArea()
+        blueprint_scroll.setWidgetResizable(True)
+        blueprint_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        blueprint_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        blueprint_page = QtWidgets.QWidget()
+        blueprint_page.setMinimumWidth(0)
+        blueprint_layout = QtWidgets.QVBoxLayout(blueprint_page)
+        blueprint_layout.setContentsMargins(4, 4, 4, 4)
+        blueprint_layout.setSpacing(6)
+
+        self.goal_group = QtWidgets.QGroupBox("用户目标 · Goal")
         goal_layout = QtWidgets.QVBoxLayout(self.goal_group)
         goal_help = QtWidgets.QLabel(
             "仅用于长期多步骤任务；普通聊天无需设置。填写目标后点保存，状态由 Codex 更新。"
@@ -572,9 +731,84 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         goal_button_row.addWidget(self.goal_save_button)
         goal_button_row.addWidget(self.goal_clear_button)
         goal_layout.addLayout(goal_button_row)
-        right_layout.addWidget(self.goal_group)
+        blueprint_layout.addWidget(self.goal_group)
 
-        self.team_group = QtWidgets.QGroupBox("团队")
+        self.build_brief_group = QtWidgets.QGroupBox("Build Brief · 短执行蓝图")
+        build_brief_layout = QtWidgets.QVBoxLayout(self.build_brief_group)
+        build_brief_help = QtWidgets.QLabel(
+            "Goal 说明长期目标；这里仅显示当前任务的简短公开执行蓝图。"
+        )
+        build_brief_help.setWordWrap(True)
+        build_brief_layout.addWidget(build_brief_help)
+        self.build_brief_text = QtWidgets.QPlainTextEdit()
+        self.build_brief_text.setReadOnly(True)
+        self.build_brief_text.setLineWrapMode(
+            QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
+        )
+        self.build_brief_text.setMaximumHeight(170)
+        self.build_brief_text.setPlainText(
+            "尚无执行蓝图。复杂任务开始后，这里会显示首次任务摘要或后端公开的 Build Brief。"
+        )
+        build_brief_layout.addWidget(self.build_brief_text)
+        blueprint_layout.addWidget(self.build_brief_group)
+        blueprint_layout.addStretch(1)
+        blueprint_scroll.setWidget(blueprint_page)
+        self.task_tabs.addTab(blueprint_scroll, "任务蓝图")
+
+        stage_page = QtWidgets.QWidget()
+        stage_page.setMinimumWidth(0)
+        stage_layout = QtWidgets.QVBoxLayout(stage_page)
+        stage_layout.setContentsMargins(4, 4, 4, 4)
+        stage_help = QtWidgets.QLabel(
+            "仅显示当前 Thread 收到的公开计划步骤，不推断隐藏进度。"
+        )
+        stage_help.setWordWrap(True)
+        stage_layout.addWidget(stage_help)
+        self.stage_details_text = QtWidgets.QPlainTextEdit()
+        self.stage_details_text.setReadOnly(True)
+        self.stage_details_text.setLineWrapMode(
+            QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
+        )
+        self.stage_details_text.setPlaceholderText(
+            "尚无阶段计划。收到 Codex 的公开计划后显示。"
+        )
+        stage_layout.addWidget(self.stage_details_text, 1)
+        self.task_tabs.addTab(stage_page, "阶段进度")
+
+        review_page = QtWidgets.QWidget()
+        review_page.setMinimumWidth(0)
+        review_layout = QtWidgets.QVBoxLayout(review_page)
+        review_layout.setContentsMargins(4, 4, 4, 4)
+        self.review_empty_label = QtWidgets.QLabel(
+            "尚无专业审阅。收到结构化公开审阅后显示。"
+        )
+        self.review_empty_label.setWordWrap(True)
+        review_layout.addWidget(self.review_empty_label)
+        self.review_scroll_area = QtWidgets.QScrollArea()
+        self.review_scroll_area.setWidgetResizable(True)
+        self.review_scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.review_scroll_area.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.review_cards_container = QtWidgets.QWidget()
+        self.review_cards_container.setMinimumWidth(0)
+        self.review_cards_layout = QtWidgets.QVBoxLayout(
+            self.review_cards_container
+        )
+        self.review_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.review_cards_layout.setSpacing(6)
+        self.review_cards_layout.addStretch(1)
+        self.review_scroll_area.setWidget(self.review_cards_container)
+        review_layout.addWidget(self.review_scroll_area, 1)
+        self.task_tabs.addTab(review_page, "审阅")
+
+        team_page = QtWidgets.QWidget()
+        team_page.setMinimumWidth(0)
+        team_page_layout = QtWidgets.QVBoxLayout(team_page)
+        team_page_layout.setContentsMargins(4, 4, 4, 4)
+        team_page_layout.setSpacing(6)
+
+        self.team_group = QtWidgets.QGroupBox("团队活动")
         team_layout = QtWidgets.QVBoxLayout(self.team_group)
         self.team_combo = QtWidgets.QComboBox()
         self.team_combo.addItem("暂无子任务", None)
@@ -594,7 +828,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "选择子任务后查看任务、状态、工具、错误与公开回复。"
         )
         team_layout.addWidget(self.team_details_text, 1)
-        right_layout.addWidget(self.team_group, 1)
+        team_page_layout.addWidget(self.team_group, 1)
 
         self.performance_group = QtWidgets.QGroupBox("本次 Turn 用时")
         performance_layout = QtWidgets.QVBoxLayout(self.performance_group)
@@ -603,17 +837,319 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         self.performance_label.setWordWrap(True)
         performance_layout.addWidget(self.performance_label)
-        right_layout.addWidget(self.performance_group)
+        team_page_layout.addWidget(self.performance_group)
+        self.task_tabs.addTab(team_page, "团队")
 
-        self.main_splitter.addWidget(left_column)
-        self.main_splitter.addWidget(center_column)
-        self.main_splitter.addWidget(right_column)
-        for index in range(3):
-            self.main_splitter.setCollapsible(index, True)
+        self.project_memory_page = QtWidgets.QScrollArea()
+        self.project_memory_page.setWidgetResizable(True)
+        self.project_memory_page.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.project_memory_page.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        project_memory_content = QtWidgets.QWidget()
+        project_memory_content.setMinimumWidth(0)
+        project_memory_layout = QtWidgets.QVBoxLayout(project_memory_content)
+        project_memory_layout.setContentsMargins(4, 4, 4, 4)
+        project_memory_layout.setSpacing(6)
+
+        self.knowledge_memory_tabs = QtWidgets.QTabWidget()
+        self.knowledge_memory_tabs.setDocumentMode(True)
+        self.knowledge_memory_tabs.setMinimumWidth(0)
+
+        knowledge_page = QtWidgets.QWidget()
+        knowledge_page.setMinimumWidth(0)
+        knowledge_page_layout = QtWidgets.QVBoxLayout(knowledge_page)
+        knowledge_page_layout.setContentsMargins(4, 4, 4, 4)
+        knowledge_page_layout.setSpacing(6)
+
+        self.knowledge_group = QtWidgets.QGroupBox("本地资料库")
+        self.knowledge_group.setMinimumWidth(0)
+        knowledge_layout = QtWidgets.QVBoxLayout(self.knowledge_group)
+        knowledge_layout.setContentsMargins(6, 6, 6, 6)
+        knowledge_layout.setSpacing(5)
+        knowledge_help = QtWidgets.QLabel(
+            "资料副本保存在项目内；删除托管副本不会删除原文件。"
+        )
+        knowledge_help.setWordWrap(True)
+        knowledge_layout.addWidget(knowledge_help)
+
+        self.knowledge_state_label = QtWidgets.QLabel("知识环境：尚未检查")
+        self.knowledge_state_label.setWordWrap(True)
+        knowledge_layout.addWidget(self.knowledge_state_label)
+        self.knowledge_metrics_label = QtWidgets.QLabel(
+            "文档：— · 内置卡片：— · 向量：尚未检查 · 最近更新：—"
+        )
+        self.knowledge_metrics_label.setWordWrap(True)
+        knowledge_layout.addWidget(self.knowledge_metrics_label)
+
+        knowledge_summary_actions = QtWidgets.QHBoxLayout()
+        self.knowledge_refresh_button = QtWidgets.QPushButton("刷新状态")
+        self.knowledge_maintenance_button = QtWidgets.QPushButton(
+            "资料库维护 ▸"
+        )
+        self.knowledge_maintenance_button.setCheckable(True)
+        self.knowledge_maintenance_button.setChecked(False)
+        knowledge_summary_actions.addWidget(self.knowledge_refresh_button)
+        knowledge_summary_actions.addStretch(1)
+        knowledge_summary_actions.addWidget(self.knowledge_maintenance_button)
+        knowledge_layout.addLayout(knowledge_summary_actions)
+
+        self.knowledge_status_label = QtWidgets.QLabel(
+            "打开本页后可手动刷新；不会自动修复、导入或重建。"
+        )
+        self.knowledge_status_label.setWordWrap(True)
+        knowledge_layout.addWidget(self.knowledge_status_label)
+        self.knowledge_progress_bar = QtWidgets.QProgressBar()
+        self.knowledge_progress_bar.setRange(0, 1)
+        self.knowledge_progress_bar.setValue(0)
+        self.knowledge_progress_bar.setTextVisible(True)
+        self.knowledge_progress_bar.setFormat("索引进度未报告")
+        self.knowledge_progress_bar.setMinimumWidth(0)
+        self.knowledge_progress_bar.setVisible(False)
+        knowledge_layout.addWidget(self.knowledge_progress_bar)
+
+        self.knowledge_maintenance_panel = QtWidgets.QWidget()
+        self.knowledge_maintenance_panel.setMinimumWidth(0)
+        knowledge_maintenance_layout = QtWidgets.QVBoxLayout(
+            self.knowledge_maintenance_panel
+        )
+        knowledge_maintenance_layout.setContentsMargins(0, 4, 0, 0)
+        knowledge_maintenance_layout.setSpacing(5)
+        self.knowledge_source_combo = QtWidgets.QComboBox()
+        self.knowledge_source_combo.addItem("尚未加载用户资料", None)
+        self.knowledge_source_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.knowledge_source_combo.setMinimumContentsLength(0)
+        self.knowledge_source_combo.setMinimumWidth(0)
+        self.knowledge_source_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        knowledge_maintenance_layout.addWidget(self.knowledge_source_combo)
+        self.knowledge_source_details_text = QtWidgets.QPlainTextEdit()
+        self.knowledge_source_details_text.setReadOnly(True)
+        self.knowledge_source_details_text.setLineWrapMode(
+            QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
+        )
+        self.knowledge_source_details_text.setMaximumHeight(120)
+        self.knowledge_source_details_text.setPlaceholderText(
+            "选择资料后显示原始路径、托管副本、索引状态和 stable ID。"
+        )
+        knowledge_maintenance_layout.addWidget(
+            self.knowledge_source_details_text
+        )
+
+        knowledge_actions = QtWidgets.QGridLayout()
+        self.knowledge_repair_button = QtWidgets.QPushButton("修复知识环境")
+        self.knowledge_import_files_button = QtWidgets.QPushButton("导入文件")
+        self.knowledge_import_folder_button = QtWidgets.QPushButton("导入文件夹")
+        self.knowledge_import_thread_button = QtWidgets.QPushButton(
+            "索引当前任务原文"
+        )
+        self.knowledge_remove_thread_button = QtWidgets.QPushButton(
+            "移除当前任务索引"
+        )
+        self.knowledge_rebuild_button = QtWidgets.QPushButton("重建索引")
+        self.knowledge_cancel_button = QtWidgets.QPushButton("取消当前任务")
+        self.knowledge_delete_button = QtWidgets.QPushButton("删除托管副本")
+        knowledge_actions.addWidget(self.knowledge_repair_button, 0, 0, 1, 2)
+        knowledge_actions.addWidget(self.knowledge_import_files_button, 1, 0)
+        knowledge_actions.addWidget(self.knowledge_import_folder_button, 1, 1)
+        knowledge_actions.addWidget(self.knowledge_import_thread_button, 2, 0)
+        knowledge_actions.addWidget(self.knowledge_remove_thread_button, 2, 1)
+        knowledge_actions.addWidget(self.knowledge_rebuild_button, 3, 0)
+        knowledge_actions.addWidget(self.knowledge_cancel_button, 3, 1)
+        knowledge_actions.addWidget(self.knowledge_delete_button, 4, 0, 1, 2)
+        knowledge_actions.setColumnStretch(0, 1)
+        knowledge_actions.setColumnStretch(1, 1)
+        knowledge_maintenance_layout.addLayout(knowledge_actions)
+        self.knowledge_media_help_label = QtWidgets.QLabel(
+            "音视频仅托管并索引已有的 SRT/VTT/TXT 字幕；"
+            "视频本体不会复制。当前任务原文只在你点击时索引，"
+            "不会自动变成项目记忆。"
+        )
+        self.knowledge_media_help_label.setWordWrap(True)
+        knowledge_maintenance_layout.addWidget(self.knowledge_media_help_label)
+        self.knowledge_log_label = QtWidgets.QLabel("日志：—")
+        self.knowledge_log_label.setWordWrap(True)
+        self.knowledge_log_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        knowledge_maintenance_layout.addWidget(self.knowledge_log_label)
+        self.knowledge_maintenance_panel.setVisible(False)
+        knowledge_layout.addWidget(self.knowledge_maintenance_panel)
+        knowledge_page_layout.addWidget(self.knowledge_group)
+        knowledge_page_layout.addStretch(1)
+        self.knowledge_memory_tabs.addTab(knowledge_page, "本地资料库")
+
+        memory_page = QtWidgets.QWidget()
+        memory_page.setMinimumWidth(0)
+        memory_layout = QtWidgets.QVBoxLayout(memory_page)
+        memory_layout.setContentsMargins(4, 4, 4, 4)
+        memory_layout.setSpacing(6)
+
+        project_memory_help = QtWidgets.QLabel(
+            "只有用户或 Codex 显式记录，内容才会成为项目记忆；"
+            "聊天不会自动转成项目记忆。"
+        )
+        project_memory_help.setWordWrap(True)
+        memory_layout.addWidget(project_memory_help)
+
+        project_memory_search_row = QtWidgets.QHBoxLayout()
+        self.project_memory_search_edit = QtWidgets.QLineEdit()
+        self.project_memory_search_edit.setPlaceholderText(
+            "搜索标题、正文或 tags；留空列出 scope=project"
+        )
+        self.project_memory_search_edit.setMinimumWidth(0)
+        self.project_memory_search_edit.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.project_memory_search_button = QtWidgets.QPushButton("搜索")
+        self.project_memory_refresh_button = QtWidgets.QPushButton("刷新")
+        project_memory_search_row.addWidget(
+            self.project_memory_search_edit,
+            1,
+        )
+        project_memory_search_row.addWidget(self.project_memory_search_button)
+        project_memory_search_row.addWidget(self.project_memory_refresh_button)
+        memory_layout.addLayout(project_memory_search_row)
+
+        self.project_memory_combo = QtWidgets.QComboBox()
+        self.project_memory_combo.addItem("尚未加载项目记忆", None)
+        self.project_memory_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.project_memory_combo.setMinimumContentsLength(0)
+        self.project_memory_combo.setMinimumWidth(0)
+        self.project_memory_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        memory_layout.addWidget(self.project_memory_combo)
+
+        self.project_memory_details_text = QtWidgets.QPlainTextEdit()
+        self.project_memory_details_text.setReadOnly(True)
+        self.project_memory_details_text.setLineWrapMode(
+            QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
+        )
+        self.project_memory_details_text.setMaximumHeight(150)
+        self.project_memory_details_text.setPlaceholderText(
+            "选择一条记忆后显示来源、时间、关联 Thread/Turn、状态和 stable ID。"
+        )
+        memory_layout.addWidget(self.project_memory_details_text)
+
+        self.project_memory_editor_button = QtWidgets.QPushButton(
+            "编辑记忆 ▸"
+        )
+        self.project_memory_editor_button.setCheckable(True)
+        self.project_memory_editor_button.setChecked(False)
+        memory_layout.addWidget(self.project_memory_editor_button)
+
+        self.project_memory_editor_panel = QtWidgets.QWidget()
+        self.project_memory_editor_panel.setMinimumWidth(0)
+        project_memory_editor_layout = QtWidgets.QVBoxLayout(
+            self.project_memory_editor_panel
+        )
+        project_memory_editor_layout.setContentsMargins(0, 0, 0, 0)
+        project_memory_editor_layout.setSpacing(5)
+        project_memory_form_widget = QtWidgets.QWidget()
+        project_memory_form = QtWidgets.QFormLayout(project_memory_form_widget)
+        project_memory_form.setContentsMargins(6, 6, 6, 6)
+        project_memory_form.setRowWrapPolicy(
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        project_memory_form.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        self.project_memory_type_combo = QtWidgets.QComboBox()
+        for label, value in _PROJECT_MEMORY_TYPES:
+            self.project_memory_type_combo.addItem(label, value)
+        self.project_memory_title_edit = QtWidgets.QLineEdit()
+        self.project_memory_title_edit.setPlaceholderText("简短标题")
+        self.project_memory_body_edit = QtWidgets.QTextEdit()
+        self.project_memory_body_edit.setAcceptRichText(False)
+        self.project_memory_body_edit.setPlaceholderText("可长期复用的记忆正文")
+        self.project_memory_body_edit.setMinimumHeight(72)
+        self.project_memory_body_edit.setMaximumHeight(120)
+        self.project_memory_tags_edit = QtWidgets.QLineEdit()
+        self.project_memory_tags_edit.setPlaceholderText("逗号分隔，例如 material, cabin")
+        self.project_memory_scope_edit = QtWidgets.QLineEdit("project")
+        self.project_memory_scope_edit.setPlaceholderText(
+            "project（列表默认范围）"
+        )
+        for editor in (
+            self.project_memory_title_edit,
+            self.project_memory_body_edit,
+            self.project_memory_tags_edit,
+            self.project_memory_scope_edit,
+        ):
+            editor.setMinimumWidth(0)
+            editor.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Ignored,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
+        project_memory_form.addRow("类型", self.project_memory_type_combo)
+        project_memory_form.addRow("标题", self.project_memory_title_edit)
+        project_memory_form.addRow("正文", self.project_memory_body_edit)
+        project_memory_form.addRow("Tags", self.project_memory_tags_edit)
+        project_memory_form.addRow(
+            "Scope（新增/取代；列表默认 project）",
+            self.project_memory_scope_edit,
+        )
+        project_memory_editor_layout.addWidget(project_memory_form_widget)
+
+        project_memory_action_row = QtWidgets.QGridLayout()
+        self.project_memory_record_button = QtWidgets.QPushButton("新增")
+        self.project_memory_supersede_button = QtWidgets.QPushButton("取代所选")
+        self.project_memory_delete_button = QtWidgets.QPushButton("删除所选")
+        project_memory_action_row.addWidget(
+            self.project_memory_record_button,
+            0,
+            0,
+        )
+        project_memory_action_row.addWidget(
+            self.project_memory_supersede_button,
+            0,
+            1,
+        )
+        project_memory_action_row.addWidget(
+            self.project_memory_delete_button,
+            1,
+            0,
+            1,
+            2,
+        )
+        project_memory_action_row.setColumnStretch(0, 1)
+        project_memory_action_row.setColumnStretch(1, 1)
+        project_memory_editor_layout.addLayout(project_memory_action_row)
+        self.project_memory_editor_panel.setVisible(False)
+        memory_layout.addWidget(self.project_memory_editor_panel)
+
+        self.project_memory_status_label = QtWidgets.QLabel(
+            "列表默认只显示 scope=project；这里只有显式记忆，不会自动保存聊天。"
+        )
+        self.project_memory_status_label.setWordWrap(True)
+        memory_layout.addWidget(self.project_memory_status_label)
+        memory_layout.addStretch(1)
+        self.knowledge_memory_tabs.addTab(memory_page, "项目记忆")
+
+        project_memory_layout.addWidget(self.knowledge_memory_tabs)
+        self.project_memory_page.setWidget(project_memory_content)
+        self.task_tabs.addTab(self.project_memory_page, "知识与记忆")
+        right_layout.addWidget(self.task_tabs, 1)
+
+        self.main_splitter.addWidget(self.left_column)
+        self.main_splitter.addWidget(self.center_column)
+        self.main_splitter.addWidget(self.right_column)
+        self.main_splitter.setCollapsible(0, True)
+        self.main_splitter.setCollapsible(1, False)
+        self.main_splitter.setCollapsible(2, True)
         self.main_splitter.setStretchFactor(0, 0)
-        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setStretchFactor(1, 5)
         self.main_splitter.setStretchFactor(2, 0)
-        self.main_splitter.setSizes([230, 720, 300])
+        self.main_splitter.setSizes([220, 760, 320])
         root.addWidget(self.main_splitter, 1)
 
         self.new_thread_button.clicked.connect(self._new_thread)
@@ -647,7 +1183,1073 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.rename_thread_button.clicked.connect(self._rename_thread)
         self.copy_thread_id_button.clicked.connect(self._copy_thread_id)
         self.delete_thread_button.clicked.connect(self._delete_thread)
+        self.project_memory_search_edit.returnPressed.connect(
+            self._search_project_memories
+        )
+        self.project_memory_search_button.clicked.connect(
+            self._search_project_memories
+        )
+        self.project_memory_refresh_button.clicked.connect(
+            self._refresh_project_memories
+        )
+        self.project_memory_combo.currentIndexChanged.connect(
+            self._on_project_memory_selected
+        )
+        self.project_memory_record_button.clicked.connect(
+            self._record_project_memory
+        )
+        self.project_memory_supersede_button.clicked.connect(
+            self._supersede_project_memory
+        )
+        self.project_memory_delete_button.clicked.connect(
+            self._delete_project_memory
+        )
+        self.project_memory_editor_button.toggled.connect(
+            self._toggle_project_memory_editor
+        )
+        self.knowledge_refresh_button.clicked.connect(self._refresh_knowledge)
+        self.knowledge_maintenance_button.toggled.connect(
+            self._toggle_knowledge_maintenance
+        )
+        self.knowledge_repair_button.clicked.connect(
+            lambda: self._start_knowledge_job("repair")
+        )
+        self.knowledge_import_files_button.clicked.connect(
+            lambda: self._choose_knowledge_sources("files")
+        )
+        self.knowledge_import_folder_button.clicked.connect(
+            lambda: self._choose_knowledge_sources("folder")
+        )
+        self.knowledge_import_thread_button.clicked.connect(
+            self._index_current_thread
+        )
+        self.knowledge_remove_thread_button.clicked.connect(
+            self._remove_current_thread_index
+        )
+        self.knowledge_rebuild_button.clicked.connect(
+            lambda: self._start_knowledge_job("rebuild")
+        )
+        self.knowledge_cancel_button.clicked.connect(self._cancel_knowledge_job)
+        self.knowledge_delete_button.clicked.connect(
+            self._delete_knowledge_source
+        )
+        self.knowledge_source_combo.currentIndexChanged.connect(
+            self._on_knowledge_source_selected
+        )
+        self.task_tabs.currentChanged.connect(self._on_task_tab_changed)
+        self.history_sidebar_button.toggled.connect(
+            self._toggle_history_sidebar
+        )
+        self.task_sidebar_button.toggled.connect(self._toggle_task_sidebar)
         self._refresh_controls()
+
+    def _set_sidebar_visible(
+        self,
+        side: str,
+        visible: bool,
+        *,
+        automatic: bool,
+    ) -> None:
+        if side == "left":
+            column = getattr(self, "left_column", None)
+            button = getattr(self, "history_sidebar_button", None)
+            if not automatic:
+                self._responsive_left_auto_hidden = False
+        else:
+            column = getattr(self, "right_column", None)
+            button = getattr(self, "task_sidebar_button", None)
+            if not automatic:
+                self._responsive_right_auto_hidden = False
+        if column is not None:
+            column.setVisible(bool(visible))
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(bool(visible))
+            button.blockSignals(False)
+
+    def _toggle_history_sidebar(self, visible: bool) -> None:
+        self._set_sidebar_visible("left", visible, automatic=False)
+
+    def _toggle_task_sidebar(self, visible: bool) -> None:
+        self._set_sidebar_visible("right", visible, automatic=False)
+
+    def _on_task_tab_changed(self, index: int) -> None:
+        tabs = getattr(self, "task_tabs", None)
+        page = getattr(self, "project_memory_page", None)
+        if (
+            tabs is None
+            or page is None
+            or tabs.widget(index) is not page
+        ):
+            return
+        if not self._knowledge_loaded and self._knowledge_pending is None:
+            self._refresh_knowledge()
+        if (
+            not self._project_memory_loaded
+            and self._project_memory_pending is None
+        ):
+            self._request_project_memories(query="")
+
+    def _toggle_knowledge_maintenance(self, expanded: bool) -> None:
+        panel = getattr(self, "knowledge_maintenance_panel", None)
+        button = getattr(self, "knowledge_maintenance_button", None)
+        if panel is not None:
+            panel.setVisible(bool(expanded))
+        if button is not None:
+            button.setText(
+                "资料库维护 ▾" if expanded else "资料库维护 ▸"
+            )
+
+    def _toggle_project_memory_editor(self, expanded: bool) -> None:
+        panel = getattr(self, "project_memory_editor_panel", None)
+        button = getattr(self, "project_memory_editor_button", None)
+        if panel is not None:
+            panel.setVisible(bool(expanded))
+        if button is not None:
+            button.setText("编辑记忆 ▾" if expanded else "编辑记忆 ▸")
+
+    def _refresh_knowledge(self, *, preserve_status: bool = False) -> None:
+        if self._knowledge_job_running():
+            self._poll_knowledge_job()
+            return
+        self._submit_knowledge(
+            {"action": "status"},
+            preserve_status=preserve_status,
+        )
+
+    def _submit_knowledge(
+        self,
+        arguments: dict[str, Any],
+        *,
+        preserve_status: bool = False,
+    ) -> None:
+        if self._knowledge_pending is not None:
+            return
+        client = getattr(self, "_client", None)
+        if client is None:
+            self.knowledge_status_label.setText(
+                "本地知识需要当前项目 Bridge；请从项目脚本启动 Houdini。"
+            )
+            return
+        action = str(arguments.get("action") or "")
+        context = f"{_KNOWLEDGE_CONTEXT_PREFIX}{action}:{uuid.uuid4().hex}"
+        self._knowledge_pending = {
+            "context": context,
+            "action": action,
+            "operation": arguments.get("operation"),
+            "preserve_status": preserve_status,
+        }
+        if not preserve_status:
+            self.knowledge_status_label.setText(
+                {
+                    "status": "正在读取知识环境和索引状态…",
+                    "list": "正在读取用户资料…",
+                    "start": "正在启动本地知识任务…",
+                    "job_status": "正在同步本地知识任务…",
+                    "cancel": "正在请求取消本地知识任务…",
+                }.get(action, "正在处理本地知识请求…")
+            )
+        self._refresh_controls()
+        request_id = client.project_knowledge(arguments, context=context)
+        if request_id is None:
+            self._knowledge_pending = None
+            self.knowledge_status_label.setText(
+                "知识请求未能发送；Bridge 可能正在关闭。"
+            )
+            self._refresh_controls()
+
+    def _start_knowledge_job(
+        self,
+        operation: str,
+        *,
+        paths: list[str] | None = None,
+        source_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> None:
+        if self._knowledge_job_running():
+            return
+        arguments: dict[str, Any] = {
+            "action": "start",
+            "operation": operation,
+        }
+        if paths is not None:
+            arguments["paths"] = list(paths)
+        if source_id is not None:
+            arguments["source_id"] = source_id
+        if thread_id is not None:
+            arguments["thread_id"] = thread_id
+        self._submit_knowledge(arguments)
+
+    def _index_current_thread(self) -> None:
+        thread_id = self._selected_thread_id
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id
+            or self._turn_state.busy
+            or self._knowledge_pending is not None
+            or self._knowledge_job_running()
+        ):
+            return
+        self._start_knowledge_job("import_thread", thread_id=thread_id)
+
+    def _remove_current_thread_index(self) -> None:
+        thread_id = self._selected_thread_id
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id
+            or self._turn_state.busy
+            or self._knowledge_pending is not None
+            or self._knowledge_job_running()
+        ):
+            return
+        self._start_knowledge_job("remove_thread", thread_id=thread_id)
+
+    def _knowledge_job_running(self) -> bool:
+        return (
+            isinstance(self._knowledge_job, dict)
+            and self._knowledge_job.get("state") == "running"
+        )
+
+    def _poll_knowledge_job(self) -> None:
+        job = self._knowledge_job
+        if (
+            not isinstance(job, dict)
+            or job.get("state") != "running"
+            or self._knowledge_pending is not None
+        ):
+            return
+        job_id = job.get("job_id")
+        if isinstance(job_id, str) and job_id:
+            self._submit_knowledge(
+                {"action": "job_status", "job_id": job_id},
+                preserve_status=True,
+            )
+
+    def _cancel_knowledge_job(self) -> None:
+        job = self._knowledge_job
+        if (
+            not isinstance(job, dict)
+            or job.get("state") != "running"
+            or job.get("cancellable") is not True
+            or self._knowledge_pending is not None
+        ):
+            return
+        self._submit_knowledge(
+            {"action": "cancel", "job_id": job.get("job_id")},
+        )
+
+    def _knowledge_environment_label(self) -> str:
+        if (
+            self._knowledge_job_running()
+            and self._knowledge_job.get("operation") == "repair"
+        ):
+            return "正在修复"
+        state = str(self._knowledge_environment.get("state") or "")
+        mode = str(self._knowledge_environment.get("embedding_mode") or "")
+        if state in {"missing", "repair_required"}:
+            return "需修复"
+        if state == "ready" and mode == "fts5":
+            return "FTS5 降级"
+        if state == "ready":
+            return "可用"
+        return "需修复"
+
+    def _apply_knowledge_status(self, payload: dict[str, Any]) -> None:
+        environment = payload.get("environment")
+        self._knowledge_environment = (
+            dict(environment) if isinstance(environment, dict) else {}
+        )
+        self.knowledge_state_label.setText(
+            f"知识环境：{self._knowledge_environment_label()}"
+        )
+        built_in = payload.get("built_in")
+        built_in = built_in if isinstance(built_in, dict) else {}
+        pack_id = str(built_in.get("pack_id") or "")
+        version = str(built_in.get("version") or "")
+        card_count = built_in.get("card_count")
+        if pack_id or version or isinstance(card_count, int):
+            official = (
+                f"{pack_id or 'SideFX 官方知识包'}"
+                f" · 版本 {version or '未报告'}"
+                f" · {card_count if isinstance(card_count, int) else '未报告'} 张卡片"
+            )
+        else:
+            official = "协议未报告（修复环境后可重新检查）"
+
+        sources = payload.get("sources")
+        sources = sources if isinstance(sources, dict) else {}
+        source_total = sources.get("total")
+        source_text = (
+            str(source_total) if isinstance(source_total, int) else "未报告"
+        )
+        source_items = sources.get("items")
+        imported_at_values = [
+            str(value.get("imported_at") or "")
+            for value in source_items
+            if isinstance(value, dict) and value.get("imported_at")
+        ] if isinstance(source_items, list) else []
+        latest_update = max(imported_at_values) if imported_at_values else ""
+        latest_update_text = (
+            latest_update.replace("T", " ")[:19]
+            if latest_update
+            else "未报告"
+        )
+        index = payload.get("index")
+        index = index if isinstance(index, dict) else {}
+        complete = index.get("complete")
+        complete_text = (
+            "已完成"
+            if complete is True
+            else ("未完成" if complete is False else "完成状态未报告")
+        )
+        documents = index.get("document_count")
+        chunks = index.get("chunk_count")
+        vectors = index.get("vector_count")
+        pending = index.get("vector_pending")
+        embedding_mode = str(
+            self._knowledge_environment.get("embedding_mode") or ""
+        )
+        if embedding_mode == "fts5":
+            vector_text = "FTS5 可用（向量未启用）"
+        elif complete is True and isinstance(vectors, int):
+            vector_text = f"已完成（{vectors}）"
+        elif isinstance(vectors, int) and isinstance(pending, int):
+            vector_text = f"{vectors} 已建 / {pending} 待建"
+        elif complete is False:
+            vector_text = "未完成"
+        else:
+            vector_text = "状态未报告"
+        count_text = (
+            f"{documents if isinstance(documents, int) else '—'} 文档"
+            f" / {chunks if isinstance(chunks, int) else '—'} chunks"
+            f" / {vectors if isinstance(vectors, int) else '—'} vectors"
+            f" / 待处理 {pending if isinstance(pending, int) else '—'}"
+        )
+        self.knowledge_metrics_label.setText(
+            "文档："
+            f"{documents if isinstance(documents, int) else '—'}"
+            " · 内置卡片："
+            f"{card_count if isinstance(card_count, int) else '—'}"
+            f" · 向量：{vector_text}"
+            f" · 最近更新：{latest_update_text}"
+        )
+        self.knowledge_metrics_label.setToolTip(
+            f"官方知识包：{official}\n"
+            f"托管资料：{source_text}\n"
+            f"索引：{complete_text} · {count_text}"
+        )
+
+        if self._knowledge_job_running():
+            self.knowledge_progress_bar.setRange(0, 0)
+            self.knowledge_progress_bar.setFormat("任务进行中")
+        elif isinstance(vectors, int) and isinstance(pending, int):
+            total = vectors + pending
+            self.knowledge_progress_bar.setRange(0, max(1, total))
+            self.knowledge_progress_bar.setValue(vectors if total else int(complete is True))
+            self.knowledge_progress_bar.setFormat(
+                "已完成 %v / %m" if total else complete_text
+            )
+        else:
+            self.knowledge_progress_bar.setRange(0, 1)
+            self.knowledge_progress_bar.setValue(int(complete is True))
+            self.knowledge_progress_bar.setFormat(complete_text)
+        self.knowledge_progress_bar.setVisible(
+            self._knowledge_job_running()
+        )
+        self._apply_knowledge_sources(sources.get("items"))
+        job = payload.get("job")
+        if isinstance(job, dict) and job.get("state") == "running":
+            self._apply_knowledge_job(job)
+
+    def _apply_knowledge_sources(self, values: Any) -> None:
+        records = []
+        if isinstance(values, list):
+            for value in values:
+                if not isinstance(value, dict):
+                    continue
+                source_id = value.get("source_id")
+                if not self._valid_knowledge_source_id(source_id):
+                    continue
+                records.append(dict(value))
+        combo = self.knowledge_source_combo
+        combo.blockSignals(True)
+        combo.clear()
+        if not records:
+            combo.addItem("没有已托管的用户资料", None)
+        else:
+            for record in records:
+                name = str(record.get("name") or record["source_id"])
+                status = str(record.get("index_status") or "状态未报告")
+                combo.addItem(f"{name} · {status}", record)
+                combo.setItemData(
+                    combo.count() - 1,
+                    f"{name}\n{record['source_id']}",
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                )
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+        self._on_knowledge_source_selected(0)
+
+    def _valid_knowledge_source_id(self, value: Any) -> bool:
+        if (
+            not isinstance(value, str)
+            or _KNOWLEDGE_SOURCE_ID.fullmatch(value) is None
+        ):
+            return False
+        return all(part not in {"", ".", ".."} for part in value.split("/"))
+
+    def _selected_knowledge_source(self) -> dict[str, Any] | None:
+        value = self.knowledge_source_combo.currentData()
+        if (
+            not isinstance(value, dict)
+            or not self._valid_knowledge_source_id(value.get("source_id"))
+        ):
+            return None
+        return value
+
+    def _on_knowledge_source_selected(self, _index: int = -1) -> None:
+        self._reset_knowledge_delete_confirmation()
+        record = self._selected_knowledge_source()
+        if record is None:
+            self.knowledge_source_details_text.clear()
+        else:
+            chunk_count = record.get("chunk_count")
+            vector_count = record.get("vector_count")
+            self.knowledge_source_details_text.setPlainText(
+                "\n".join(
+                    (
+                        f"名称：{record.get('name') or '无'}",
+                        f"原始文件：{record.get('original_path') or '未报告'}",
+                        f"托管副本：{record.get('managed_path') or '未报告'}",
+                        f"格式：{record.get('format') or '未报告'}",
+                        f"索引：{record.get('index_status') or '未报告'}",
+                        "Chunks / vectors："
+                        f"{chunk_count if isinstance(chunk_count, int) else '—'}"
+                        " / "
+                        f"{vector_count if isinstance(vector_count, int) else '—'}",
+                        f"Stable ID：{record['source_id']}",
+                    )
+                )
+            )
+        self._refresh_controls()
+
+    def _reset_knowledge_delete_confirmation(self) -> None:
+        self._knowledge_delete_confirm_id = None
+        self._knowledge_delete_confirm_not_before = None
+        timer = getattr(self, "_knowledge_confirm_timer", None)
+        if timer is not None:
+            timer.stop()
+        button = getattr(self, "knowledge_delete_button", None)
+        if button is not None:
+            button.setText("删除托管副本")
+            button.setToolTip("只删除当前所选托管副本；不会删除原文件")
+
+    def _delete_knowledge_source(self) -> None:
+        record = self._selected_knowledge_source()
+        if (
+            record is None
+            or self._knowledge_pending is not None
+            or self._knowledge_job_running()
+        ):
+            self._reset_knowledge_delete_confirmation()
+            return
+        source_id = record["source_id"]
+        now = time.monotonic()
+        if self._knowledge_delete_confirm_id != source_id:
+            self._knowledge_delete_confirm_id = source_id
+            self._knowledge_delete_confirm_not_before = (
+                now + _KNOWLEDGE_SOURCE_CONFIRM_MIN_SECONDS
+            )
+            self.knowledge_delete_button.setText("再次点击删除托管副本")
+            self.knowledge_delete_button.setToolTip(
+                f"仅删除托管副本：{source_id}；原文件保留"
+            )
+            self._knowledge_confirm_timer.start()
+            return
+        not_before = self._knowledge_delete_confirm_not_before
+        if not isinstance(not_before, (int, float)) or now < not_before:
+            return
+        self._reset_knowledge_delete_confirmation()
+        self._start_knowledge_job("delete", source_id=source_id)
+
+    def _choose_knowledge_sources(self, mode: str) -> None:
+        if (
+            self._knowledge_source_dialog is not None
+            or self._knowledge_pending is not None
+            or self._knowledge_job_running()
+            or mode not in {"files", "folder"}
+        ):
+            return
+        title = "导入本地知识文件" if mode == "files" else "导入本地知识文件夹"
+        dialog = QtWidgets.QFileDialog(self, title, str(Path.home()))
+        dialog.setOption(
+            QtWidgets.QFileDialog.Option.DontUseNativeDialog,
+            True,
+        )
+        if mode == "files":
+            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFiles)
+            dialog.setNameFilter(
+                "知识资料与带字幕媒体 "
+                "(*.md *.txt *.html *.htm *.srt *.vtt *.pdf "
+                f"{_KNOWLEDGE_MEDIA_GLOBS})"
+            )
+        else:
+            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+            dialog.setOption(
+                QtWidgets.QFileDialog.Option.ShowDirsOnly,
+                True,
+            )
+        dialog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+        dialog.filesSelected.connect(self._accept_knowledge_sources)
+        dialog.finished.connect(self._knowledge_source_dialog_finished)
+        dialog.destroyed.connect(self._knowledge_source_dialog_destroyed)
+        self._knowledge_source_dialog = dialog
+        self._knowledge_source_dialog_mode = mode
+        dialog.show()
+
+    @QtCore.Slot(list)
+    def _accept_knowledge_sources(self, paths: list[str]) -> None:
+        mode = self._knowledge_source_dialog_mode
+        selected = [
+            str(value)
+            for value in paths
+            if isinstance(value, str) and value.strip()
+        ]
+        if not selected:
+            return
+        if mode == "files":
+            self._start_knowledge_job("import_files", paths=selected)
+        elif mode == "folder":
+            self._start_knowledge_job("import_folder", paths=selected[:1])
+
+    @QtCore.Slot(int)
+    def _knowledge_source_dialog_finished(self, _result: int) -> None:
+        dialog = self._knowledge_source_dialog
+        self._knowledge_source_dialog = None
+        self._knowledge_source_dialog_mode = None
+        if dialog is not None:
+            dialog.deleteLater()
+
+    @QtCore.Slot(object)
+    def _knowledge_source_dialog_destroyed(self, dialog: Any = None) -> None:
+        if self._knowledge_source_dialog is dialog:
+            self._knowledge_source_dialog = None
+            self._knowledge_source_dialog_mode = None
+
+    def _apply_knowledge_job(self, value: Any) -> None:
+        if not isinstance(value, dict):
+            self.knowledge_status_label.setText(
+                "知识任务返回了无效状态；请刷新后重试。"
+            )
+            self._knowledge_job = None
+            self._knowledge_poll_timer.stop()
+            self.knowledge_progress_bar.setVisible(False)
+            self._refresh_controls()
+            return
+        job_id = value.get("job_id")
+        operation = str(value.get("operation") or "")
+        state = str(value.get("state") or "")
+        if (
+            not isinstance(job_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", job_id) is None
+            or operation
+            not in {
+                "repair",
+                "import_files",
+                "import_folder",
+                "delete",
+                "rebuild",
+                "import_thread",
+                "remove_thread",
+            }
+            or state not in {"running", "completed", "failed", "cancelled"}
+        ):
+            self.knowledge_status_label.setText(
+                "知识任务返回了无效状态；请刷新后重试。"
+            )
+            self._knowledge_job = None
+            self._knowledge_poll_timer.stop()
+            self.knowledge_progress_bar.setVisible(False)
+            self._refresh_controls()
+            return
+        self._knowledge_job = dict(value)
+        result = value.get("result")
+        result = result if isinstance(result, dict) else {}
+        log_path = str(result.get("log_path") or value.get("log_path") or "")
+        self.knowledge_log_label.setText(f"日志：{log_path or '—'}")
+        if state == "running":
+            elapsed = value.get("elapsed_seconds")
+            elapsed_text = (
+                f"（已运行 {elapsed:.1f} 秒）"
+                if isinstance(elapsed, (int, float))
+                else ""
+            )
+            labels = {
+                "repair": (
+                    "正在修复知识环境"
+                    f"{elapsed_text}。此流程没有安全取消契约；关闭 Panel "
+                    "不会回滚已经完成的步骤。"
+                ),
+                "import_files": f"正在导入所选文件{elapsed_text}…",
+                "import_folder": f"正在导入所选文件夹{elapsed_text}…",
+                "delete": f"正在删除所选托管副本{elapsed_text}…",
+                "import_thread": (
+                    f"正在索引当前任务的公开原文{elapsed_text}…"
+                ),
+                "remove_thread": (
+                    f"正在移除当前任务的知识索引{elapsed_text}…"
+                ),
+                "rebuild": (
+                    f"正在重建索引{elapsed_text}；取消只停止后续批次，"
+                    "已提交批次会保留。"
+                ),
+            }
+            self.knowledge_status_label.setText(labels[operation])
+            self.knowledge_state_label.setText(
+                "知识环境：正在修复"
+                if operation == "repair"
+                else f"知识环境：{self._knowledge_environment_label()}"
+            )
+            self.knowledge_progress_bar.setRange(0, 0)
+            self.knowledge_progress_bar.setFormat("任务进行中")
+            self.knowledge_progress_bar.setVisible(True)
+            self._knowledge_poll_timer.start()
+            self._refresh_controls()
+            return
+
+        self._knowledge_poll_timer.stop()
+        self._knowledge_job = None
+        self.knowledge_progress_bar.setVisible(False)
+        if state == "completed":
+            imported = result.get("imported")
+            message = {
+                "repair": "知识环境修复已完成，正在重新读取真实状态。",
+                "import_files": (
+                    f"文件导入完成"
+                    + (
+                        f"（新增 {imported} 项）"
+                        if isinstance(imported, int)
+                        else ""
+                    )
+                    + "，原文件保持不变。"
+                ),
+                "import_folder": (
+                    f"文件夹导入完成"
+                    + (
+                        f"（新增 {imported} 项）"
+                        if isinstance(imported, int)
+                        else ""
+                    )
+                    + "，原文件保持不变。"
+                ),
+                "delete": "托管副本已删除；原文件未删除。",
+                "import_thread": (
+                    "当前任务公开原文已索引；"
+                    "聊天仍不会自动转成项目记忆。"
+                ),
+                "remove_thread": (
+                    "当前任务原文索引已移除；聊天和项目记忆均未修改。"
+                ),
+                "rebuild": "索引重建已结束，正在重新读取真实进度。",
+            }[operation]
+        elif state == "cancelled":
+            message = (
+                "本次知识任务已停止；已经安全完成的导入或索引批次不会回滚。"
+            )
+        else:
+            error = value.get("error")
+            error = error if isinstance(error, dict) else {}
+            code = str(error.get("code") or "KNOWLEDGE_CLI_FAILED")
+            detail = str(error.get("message") or "未提供原因")
+            if code == "TRANSCRIPT_REQUIRED":
+                message = (
+                    "未找到可用字幕：请在媒体旁放置同名 "
+                    "SRT、VTT 或 TXT 后重试；视频本体没有复制。"
+                )
+            else:
+                message = f"知识任务失败：[{code}] {detail[:400]}"
+        warnings = value.get("warnings")
+        if isinstance(warnings, list):
+            warning_text = "；".join(
+                str(item).strip()[:300]
+                for item in warnings[:3]
+                if isinstance(item, str) and item.strip()
+            )
+            if warning_text:
+                message += f" 清理警告：{warning_text}"
+        self.knowledge_status_label.setText(message)
+        self._refresh_controls()
+        self._refresh_knowledge(preserve_status=True)
+
+    def _request_project_memories(self, *, query: str) -> None:
+        query = query.strip()
+        if query and len(query) < 2:
+            self.project_memory_status_label.setText(
+                "搜索关键词至少需要 2 个字符。"
+            )
+            return
+        arguments: dict[str, Any] = {
+            "action": "search" if query else "list",
+            "scope": "project",
+            "include_superseded": True,
+            "offset": 0,
+            "limit": 50,
+        }
+        if query:
+            arguments["query"] = query
+        self._submit_project_memory(arguments)
+
+    def _search_project_memories(self) -> None:
+        self._request_project_memories(
+            query=self.project_memory_search_edit.text()
+        )
+
+    def _refresh_project_memories(self) -> None:
+        self.project_memory_search_edit.clear()
+        self._request_project_memories(query="")
+
+    def _submit_project_memory(
+        self,
+        arguments: dict[str, Any],
+        *,
+        memory_id: str | None = None,
+    ) -> None:
+        if self._project_memory_pending is not None:
+            return
+        client = getattr(self, "_client", None)
+        if client is None or self._mcp_backend != "hia_v2":
+            self.project_memory_status_label.setText(
+                "项目记忆需要当前 HIA MCP V2 Bridge。"
+            )
+            return
+        action = str(arguments.get("action") or "")
+        context = f"{_PROJECT_MEMORY_CONTEXT_PREFIX}{action}:{uuid.uuid4().hex}"
+        self._project_memory_pending = {
+            "context": context,
+            "action": action,
+            "memory_id": memory_id,
+        }
+        labels = {
+            "list": "正在刷新项目记忆…",
+            "search": "正在搜索项目记忆…",
+            "record": "正在新增项目记忆…",
+            "supersede": "正在取代所选记忆…",
+            "delete": "正在删除所选记忆…",
+        }
+        self.project_memory_status_label.setText(
+            labels.get(action, "正在处理项目记忆…")
+        )
+        self._refresh_controls()
+        request_id = client.project_memory(arguments, context=context)
+        if request_id is None:
+            self._project_memory_pending = None
+            self.project_memory_status_label.setText(
+                "项目记忆请求未能发送；Bridge 可能正在关闭。"
+            )
+            self._refresh_controls()
+
+    def _project_memory_form_values(self) -> dict[str, Any] | None:
+        memory_type = self.project_memory_type_combo.currentData()
+        title = self.project_memory_title_edit.text().strip()
+        body = self.project_memory_body_edit.toPlainText().strip()
+        scope = self.project_memory_scope_edit.text().strip() or "project"
+        if (
+            memory_type not in _PROJECT_MEMORY_TYPE_LABELS
+            or not title
+            or not body
+        ):
+            self.project_memory_status_label.setText(
+                "请选择类型，并填写标题和正文。"
+            )
+            return None
+        tags: list[str] = []
+        for value in re.split(
+            r"[,，]",
+            self.project_memory_tags_edit.text(),
+        ):
+            tag = value.strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+        values = {
+            "memory_type": memory_type,
+            "title": title,
+            "body": body,
+            "tags": tags,
+            "scope": scope,
+        }
+        source_thread_id = getattr(self, "_selected_thread_id", None)
+        if isinstance(source_thread_id, str) and source_thread_id:
+            values["source_thread_id"] = source_thread_id
+            source_turn_id = getattr(self, "_stream_turn_id", None)
+            stream_thread_id = getattr(self, "_stream_thread_id", None)
+            if (
+                isinstance(source_turn_id, str)
+                and source_turn_id
+                and stream_thread_id == source_thread_id
+            ):
+                values["source_turn_id"] = source_turn_id
+        return values
+
+    def _record_project_memory(self) -> None:
+        values = self._project_memory_form_values()
+        if values is None:
+            return
+        self._submit_project_memory({"action": "record", **values})
+
+    def _supersede_project_memory(self) -> None:
+        record = self._selected_project_memory()
+        if record is None or record.get("status") != "active":
+            self.project_memory_status_label.setText(
+                "只能取代当前仍有效的所选记忆。"
+            )
+            return
+        values = self._project_memory_form_values()
+        if values is None:
+            return
+        memory_id = record["id"]
+        self._submit_project_memory(
+            {
+                "action": "supersede",
+                "memory_id": memory_id,
+                **values,
+            },
+            memory_id=memory_id,
+        )
+
+    def _selected_project_memory(self) -> dict[str, Any] | None:
+        value = self.project_memory_combo.currentData()
+        if not isinstance(value, dict):
+            return None
+        memory_id = value.get("id")
+        if (
+            not isinstance(memory_id, str)
+            or _PROJECT_MEMORY_STABLE_ID.fullmatch(memory_id) is None
+        ):
+            return None
+        return value
+
+    def _reset_project_memory_delete_confirmation(self) -> None:
+        self._project_memory_delete_confirm_id = None
+        self._project_memory_delete_confirm_not_before = None
+        timer = getattr(self, "_project_memory_confirm_timer", None)
+        if timer is not None:
+            timer.stop()
+        button = getattr(self, "project_memory_delete_button", None)
+        if button is not None:
+            button.setText("删除所选")
+            button.setToolTip("永久删除当前明确选中的一条项目记忆")
+
+    def _delete_project_memory(self) -> None:
+        record = self._selected_project_memory()
+        if (
+            record is None
+            or self._project_memory_pending is not None
+            or getattr(self, "_client", None) is None
+            or self._mcp_backend != "hia_v2"
+        ):
+            self._reset_project_memory_delete_confirmation()
+            return
+        memory_id = record["id"]
+        now = time.monotonic()
+        if self._project_memory_delete_confirm_id != memory_id:
+            self._project_memory_delete_confirm_id = memory_id
+            self._project_memory_delete_confirm_not_before = (
+                now + _PROJECT_MEMORY_CONFIRM_MIN_SECONDS
+            )
+            self.project_memory_delete_button.setText("再次点击删除")
+            self.project_memory_delete_button.setToolTip(
+                f"再次点击将永久删除项目记忆：{memory_id}"
+            )
+            self._project_memory_confirm_timer.start()
+            return
+        not_before = self._project_memory_delete_confirm_not_before
+        if not isinstance(not_before, (int, float)) or now < not_before:
+            return
+        self._reset_project_memory_delete_confirmation()
+        self._submit_project_memory(
+            {"action": "delete", "memory_id": memory_id},
+            memory_id=memory_id,
+        )
+
+    def _project_memory_provenance(
+        self,
+        record: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        thread_id = str(record.get("source_thread_id") or "").strip()
+        turn_id = str(record.get("source_turn_id") or "").strip()
+        if not thread_id and not turn_id:
+            return (
+                "旧记录：来源未记录",
+                "未记录",
+                "来源未记录",
+            )
+        related = []
+        if thread_id:
+            related.append(f"Thread：{thread_id}")
+        if turn_id:
+            related.append(f"Turn：{turn_id}")
+        short_label = (
+            "显式记录 · Thread"
+            if thread_id
+            else "显式记录 · Turn"
+        )
+        return (
+            "用户或 Codex 显式记录",
+            " · ".join(related),
+            short_label,
+        )
+
+    def _project_memory_date_label(self, record: dict[str, Any]) -> str:
+        created_at = str(record.get("created_at") or "").strip()
+        match = re.match(r"^\d{4}-\d{2}-\d{2}", created_at)
+        return match.group(0) if match is not None else "日期未记录"
+
+    def _on_project_memory_selected(self, _index: int = -1) -> None:
+        self._reset_project_memory_delete_confirmation()
+        record = self._selected_project_memory()
+        if record is None:
+            self.project_memory_details_text.setPlainText(
+                "暂无可显示的项目记忆。只有用户或 Codex 显式记录后，"
+                "这里才会出现内容；聊天不会自动转成项目记忆。"
+            )
+        else:
+            memory_type = str(record.get("memory_type") or "")
+            type_label = _PROJECT_MEMORY_TYPE_LABELS.get(
+                memory_type,
+                memory_type or "未知",
+            )
+            tags = record.get("tags")
+            tag_text = (
+                ", ".join(str(value) for value in tags)
+                if isinstance(tags, list) and tags
+                else "无"
+            )
+            status = str(record.get("status") or "")
+            status_text = (
+                "已取代"
+                if status == "superseded"
+                else ("有效" if status == "active" else status or "未报告")
+            )
+            superseded_by = str(record.get("superseded_by") or "")
+            status_detail = (
+                f"{status_text} → {superseded_by}"
+                if status == "superseded" and superseded_by
+                else status_text
+            )
+            creation_method, related_context, _short_label = (
+                self._project_memory_provenance(record)
+            )
+            self.project_memory_details_text.setPlainText(
+                "\n".join(
+                    (
+                        f"标题：{record.get('title') or '无标题'}",
+                        f"来源 / 创建方式：{creation_method}",
+                        f"创建时间：{record.get('created_at') or '未记录'}",
+                        f"关联 Task / Thread：{related_context}",
+                        f"状态：{status_detail}",
+                        f"Stable ID：{record['id']}",
+                        f"类型：{type_label} ({memory_type})",
+                        f"摘要：{record.get('summary') or '无'}",
+                        f"Tags：{tag_text}",
+                        f"Scope：{record.get('scope') or 'project'}",
+                    )
+                )
+            )
+        self._refresh_controls()
+
+    def _apply_project_memories(self, values: Any) -> None:
+        records = [
+            dict(value)
+            for value in values
+            if isinstance(value, dict)
+            and isinstance(value.get("id"), str)
+            and _PROJECT_MEMORY_STABLE_ID.fullmatch(value["id"]) is not None
+        ] if isinstance(values, list) else []
+        combo = self.project_memory_combo
+        combo.blockSignals(True)
+        combo.clear()
+        if not records:
+            combo.addItem("没有匹配的项目记忆", None)
+        else:
+            for record in records:
+                memory_type = str(record.get("memory_type") or "")
+                type_label = _PROJECT_MEMORY_TYPE_LABELS.get(
+                    memory_type,
+                    memory_type or "未知",
+                )
+                status = (
+                    "已取代"
+                    if record.get("status") == "superseded"
+                    else (
+                        "有效"
+                        if record.get("status") == "active"
+                        else str(record.get("status") or "未报告")
+                    )
+                )
+                title = str(record.get("title") or "无标题")
+                _method, _related, source_label = (
+                    self._project_memory_provenance(record)
+                )
+                date_label = self._project_memory_date_label(record)
+                status_suffix = " · 已取代" if status == "已取代" else ""
+                combo.addItem(
+                    f"{title} · {source_label} · {date_label}{status_suffix}",
+                    record,
+                )
+                combo.setItemData(
+                    combo.count() - 1,
+                    f"{title}\n{type_label} · {status}\n"
+                    f"{source_label} · {date_label}\n{record['id']}",
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                )
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+        self._on_project_memory_selected(0)
+
+    def _clear_project_memory_editor(self) -> None:
+        self.project_memory_title_edit.clear()
+        self.project_memory_body_edit.clear()
+        self.project_memory_tags_edit.clear()
+        self.project_memory_scope_edit.setText("project")
+
+    def _apply_responsive_layout(self, width: int) -> None:
+        if width < _RESPONSIVE_HIDE_BOTH_WIDTH:
+            mode = "compact"
+        elif width < _RESPONSIVE_HIDE_RIGHT_WIDTH:
+            mode = "medium"
+        else:
+            mode = "wide"
+        if mode == self._responsive_layout_mode:
+            return
+        self._responsive_layout_mode = mode
+
+        left = getattr(self, "left_column", None)
+        right = getattr(self, "right_column", None)
+        if mode == "compact":
+            if left is not None and left.isVisible():
+                self._responsive_left_auto_hidden = True
+                self._set_sidebar_visible("left", False, automatic=True)
+            if right is not None and right.isVisible():
+                self._responsive_right_auto_hidden = True
+                self._set_sidebar_visible("right", False, automatic=True)
+            return
+        if self._responsive_left_auto_hidden:
+            self._responsive_left_auto_hidden = False
+            self._set_sidebar_visible("left", True, automatic=True)
+        if mode == "medium":
+            if right is not None and right.isVisible():
+                self._responsive_right_auto_hidden = True
+                self._set_sidebar_visible("right", False, automatic=True)
+            return
+        if self._responsive_right_auto_hidden:
+            self._responsive_right_auto_hidden = False
+            self._set_sidebar_visible("right", True, automatic=True)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        size = event.size() if event is not None else None
+        width = size.width() if size is not None else self.width()
+        self._apply_responsive_layout(width)
 
     @staticmethod
     def _set_status_indicator(
@@ -1144,6 +2746,79 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and history_available
             and not self._session_action_pending
         )
+        project_memory_ready = (
+            getattr(self, "_client", None) is not None
+            and self._mcp_backend == "hia_v2"
+        )
+        project_memory_idle = (
+            project_memory_ready and self._project_memory_pending is None
+        )
+        selected_memory = self._selected_project_memory()
+        self.project_memory_search_edit.setEnabled(project_memory_ready)
+        self.project_memory_combo.setEnabled(project_memory_idle)
+        self.project_memory_search_button.setEnabled(project_memory_idle)
+        self.project_memory_refresh_button.setEnabled(project_memory_idle)
+        self.project_memory_record_button.setEnabled(project_memory_idle)
+        self.project_memory_supersede_button.setEnabled(
+            project_memory_idle
+            and selected_memory is not None
+            and selected_memory.get("status") == "active"
+        )
+        self.project_memory_delete_button.setEnabled(
+            project_memory_idle and selected_memory is not None
+        )
+        knowledge_ready = getattr(self, "_client", None) is not None
+        knowledge_running = self._knowledge_job_running()
+        knowledge_idle = (
+            knowledge_ready
+            and self._knowledge_pending is None
+            and not knowledge_running
+        )
+        environment_state = str(
+            self._knowledge_environment.get("state") or ""
+        )
+        selected_source = self._selected_knowledge_source()
+        self.knowledge_refresh_button.setEnabled(
+            knowledge_ready and self._knowledge_pending is None
+        )
+        self.knowledge_repair_button.setEnabled(
+            knowledge_idle
+            and environment_state in {"missing", "repair_required"}
+        )
+        ready_environment = environment_state == "ready"
+        self.knowledge_import_files_button.setEnabled(
+            knowledge_idle and ready_environment
+        )
+        self.knowledge_import_folder_button.setEnabled(
+            knowledge_idle and ready_environment
+        )
+        selected_thread_ready = (
+            knowledge_idle
+            and ready_environment
+            and isinstance(self._selected_thread_id, str)
+            and bool(self._selected_thread_id)
+            and not self._turn_state.busy
+        )
+        self.knowledge_import_thread_button.setEnabled(
+            selected_thread_ready
+        )
+        self.knowledge_remove_thread_button.setEnabled(
+            selected_thread_ready
+        )
+        self.knowledge_rebuild_button.setEnabled(
+            knowledge_idle and ready_environment
+        )
+        self.knowledge_cancel_button.setEnabled(
+            knowledge_running
+            and self._knowledge_pending is None
+            and self._knowledge_job.get("cancellable") is True
+        )
+        self.knowledge_source_combo.setEnabled(
+            knowledge_idle and selected_source is not None
+        )
+        self.knowledge_delete_button.setEnabled(
+            knowledge_idle and selected_source is not None
+        )
         self.send_button.setEnabled(
             (controls.send or steer_available) and request_ready
         )
@@ -1172,7 +2847,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         selection_enabled = (
             (self._connected or self._stop_recovery_state in {"recovering", "failed"})
-            and not self._turn_state.busy
             and session_enabled
         )
         self.model_combo.setEnabled(selection_enabled)
@@ -1204,7 +2878,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         attachment_strip = getattr(self, "attachment_strip", None)
         if attachment_strip is not None:
             attachment_strip.setEnabled(composer_enabled)
-        goal_enabled = (
+        goal_editor_enabled = (
             self._connected
             and isinstance(self._selected_thread_id, str)
             and self._goal_action_context is None
@@ -1218,11 +2892,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "goal_refresh_button",
             "goal_save_button",
             "goal_clear_button",
-            "goal_focus_checkbox",
         ):
             widget = getattr(self, name, None)
             if widget is not None:
-                widget.setEnabled(goal_enabled)
+                widget.setEnabled(goal_editor_enabled)
+        goal_focus_checkbox = getattr(self, "goal_focus_checkbox", None)
+        if goal_focus_checkbox is not None:
+            goal_focus_checkbox.setEnabled(
+                self._connected
+                and isinstance(self._selected_thread_id, str)
+                and self._goal_action_context is None
+                and not self._session_action_pending
+            )
 
     @QtCore.Slot(dict)
     def _on_health(self, payload: dict[str, Any]) -> None:
@@ -1456,6 +3137,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._clear_goal_display()
                 self._team_records.clear()
                 self._refresh_team_combo()
+                self._clear_task_insights()
                 self._clear_turn_performance()
             self._selected_thread_id = thread_id
             self._apply_focus_mode(thread_id, session.get("focus_mode", False))
@@ -1488,6 +3170,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._clear_goal_display()
             self._team_records.clear()
             self._refresh_team_combo()
+            self._clear_task_insights()
             self.thread_id_edit.setText("")
             self.thread_status_label.setText("Thread：未选择")
             self.thread_status_label.setToolTip("当前未选择 Codex Thread")
@@ -2739,6 +4422,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 focus_hint.setText("已关闭：普通聊天，不自动恢复或续做。")
             self._team_records.clear()
             self._refresh_team_combo()
+            self._clear_task_insights()
             self._clear_turn_performance()
             self._clear_diagnostic_context()
             self._discard_crash_recovery_candidate()
@@ -2874,6 +4558,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._clear_goal_display()
         self._team_records.clear()
         self._refresh_team_combo()
+        self._clear_task_insights()
         self._clear_turn_performance()
         self.thread_id_edit.setText(thread_id)
         for index in range(self.history_combo.count()):
@@ -3365,6 +5050,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if isinstance(time_used, int):
             metrics.append(f"已用 {time_used}s")
         self.goal_metrics_label.setText(" · ".join(metrics) or "Codex 原生 Goal")
+        self._apply_explicit_task_insights(
+            "thread/goal/updated",
+            {"threadId": thread_id, "goal": raw_goal},
+        )
         if status != "active":
             self._goal_continuation_boundary = None
             self._goal_auto_turn_token = None
@@ -3430,6 +5119,254 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
         return "当前跟进：等待下一轮任务进展"
 
+    def _clear_task_insights(self) -> None:
+        self._build_brief = None
+        self._build_brief_thread_id = None
+        self._context_pack_summary = None
+        self._stage_items = []
+        self._review_records = []
+        self._refresh_build_brief()
+        self._refresh_stage_progress()
+        self._refresh_review_cards()
+
+    def _capture_initial_task_brief(
+        self,
+        thread_id: str,
+        text: str,
+    ) -> None:
+        if (
+            thread_id != self._selected_thread_id
+            or self._build_brief_thread_id == thread_id
+            or not text.strip()
+        ):
+            return
+        self._build_brief_thread_id = thread_id
+        self._build_brief = {
+            "title": "首次任务摘要",
+            "summary": bounded_public_text(text, 2_000),
+            "constraints": (),
+            "deliverables": (),
+            "source": "首次用户请求",
+            "ready": False,
+        }
+        self._refresh_build_brief()
+
+    def _refresh_build_brief(self) -> None:
+        editor = getattr(self, "build_brief_text", None)
+        if editor is None:
+            return
+        brief = self._build_brief
+        if not isinstance(brief, dict):
+            editor.setPlainText(
+                "尚无执行蓝图。复杂任务开始后，这里会显示首次任务摘要"
+                "或后端公开的 Build Brief。"
+            )
+            return
+        lines: list[str] = []
+        title = bounded_public_text(brief.get("title"), 160)
+        summary = bounded_public_text(brief.get("summary"), 2_000)
+        source = bounded_public_text(brief.get("source"), 120)
+        if title:
+            lines.append(title)
+        if summary:
+            lines.extend(("目标摘要：", summary))
+        constraints = brief.get("constraints")
+        if isinstance(constraints, (list, tuple)) and constraints:
+            lines.extend(
+                (
+                    "约束：",
+                    *[
+                        f"- {bounded_public_text(item, 320)}"
+                        for item in constraints
+                        if bounded_public_text(item, 320)
+                    ],
+                )
+            )
+        deliverables = brief.get("deliverables")
+        if isinstance(deliverables, (list, tuple)) and deliverables:
+            lines.extend(
+                (
+                    "交付：",
+                    *[
+                        f"- {bounded_public_text(item, 320)}"
+                        for item in deliverables
+                        if bounded_public_text(item, 320)
+                    ],
+                )
+            )
+        if brief.get("ready") is not True:
+            lines.append("执行蓝图：等待 Codex 公开计划或 Build Brief。")
+        if source:
+            lines.append(f"来源：{source}")
+        context_pack = self._context_pack_summary
+        if isinstance(context_pack, dict):
+            metadata = [
+                bounded_public_text(context_pack.get("title"), 160),
+                bounded_public_text(context_pack.get("source"), 200),
+            ]
+            count = context_pack.get("count")
+            if isinstance(count, int):
+                metadata.append(f"{count} 项")
+            rendered = " · ".join(item for item in metadata if item)
+            if rendered:
+                lines.append(f"Context Pack：{rendered}")
+        editor.setPlainText("\n".join(lines))
+
+    def _apply_stage_plan(self, value: Any) -> None:
+        self._stage_items = normalize_stage_plan(value)
+        self._refresh_stage_progress()
+
+    def _refresh_stage_progress(self) -> None:
+        editor = getattr(self, "stage_details_text", None)
+        if editor is None:
+            return
+        lines: list[str] = []
+        for index, stage in enumerate(self._stage_items, start=1):
+            raw_status = stage.get("status", "unknown")
+            icon, label = _STAGE_STATUS_LABELS.get(
+                raw_status,
+                ("·", raw_status or "未知"),
+            )
+            lines.append(f"{icon} {index}. {stage.get('title', '')} · {label}")
+            summary = stage.get("summary")
+            if summary:
+                lines.append(f"   {summary}")
+        editor.setPlainText("\n".join(lines))
+
+    @staticmethod
+    def _format_review_record(record: dict[str, str]) -> str:
+        return "\n".join(
+            (
+                f"Domain：{record.get('domain') or '未提供'}",
+                f"Severity：{record.get('severity') or '未提供'}",
+                f"对象 / 路径：{record.get('object_path') or '未提供'}",
+                f"Evidence：{record.get('evidence') or '未提供'}",
+                "Suggested next action："
+                f"{record.get('next_action') or '未提供'}",
+            )
+        )
+
+    def _refresh_review_cards(self) -> None:
+        empty_label = getattr(self, "review_empty_label", None)
+        if empty_label is not None:
+            empty_label.setVisible(not self._review_records)
+        layout = getattr(self, "review_cards_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for record in self._review_records:
+            card = QtWidgets.QFrame()
+            card.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+            card.setMinimumWidth(0)
+            card_layout = QtWidgets.QVBoxLayout(card)
+            card_layout.setContentsMargins(8, 6, 8, 6)
+            header = QtWidgets.QLabel(
+                f"{record.get('domain') or '未分类'}"
+                f" · {record.get('severity') or '未分级'}"
+            )
+            header.setWordWrap(True)
+            body = QtWidgets.QLabel(self._format_review_record(record))
+            body.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            body.setWordWrap(True)
+            body.setMinimumWidth(0)
+            card_layout.addWidget(header)
+            card_layout.addWidget(body)
+            layout.addWidget(card)
+        layout.addStretch(1)
+
+    def _apply_explicit_task_insights(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> bool:
+        if method not in {
+            "thread/goal/updated",
+            "item/started",
+            "item/completed",
+        }:
+            return False
+        source_thread_id = params.get("threadId")
+        root_source = source_thread_id == self._selected_thread_id
+        team_source = self._team_source_is_current(source_thread_id)
+        if not root_source and not team_source:
+            return False
+        if method in {"item/started", "item/completed"}:
+            item = params.get("item")
+            if (
+                method != "item/completed"
+                or not isinstance(item, dict)
+                or item.get("type") != "taskInsight"
+            ):
+                return False
+            if root_source and not (
+                self._event_matches_active_stream(params)
+                or self._goal_turn_matches(
+                    source_thread_id,
+                    params.get("turnId"),
+                )
+            ):
+                return False
+
+        containers = [params]
+        for key in ("goal", "item"):
+            value = params.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+        changed = False
+        if root_source:
+            for container in containers:
+                raw_brief = container.get(
+                    "buildBrief",
+                    container.get("build_brief"),
+                )
+                brief = normalize_build_brief(raw_brief)
+                if brief is not None:
+                    self._build_brief = brief
+                    self._build_brief_thread_id = self._selected_thread_id
+                    changed = True
+                raw_context_pack = container.get(
+                    "contextPack",
+                    container.get("context_pack"),
+                )
+                context_pack = normalize_context_pack_summary(raw_context_pack)
+                if context_pack is not None:
+                    self._context_pack_summary = context_pack
+                    changed = True
+        review_candidates: list[dict[str, str]] = []
+        for container in containers:
+            for key in (
+                "review",
+                "reviews",
+                "professionalReview",
+                "professionalReviews",
+            ):
+                if key in container:
+                    review_candidates.extend(normalize_reviews(container.get(key)))
+        if review_candidates:
+            existing = {
+                tuple(record.get(key, "") for key in sorted(record))
+                for record in self._review_records
+            }
+            for record in review_candidates:
+                signature = tuple(
+                    record.get(key, "") for key in sorted(record)
+                )
+                if signature not in existing:
+                    self._review_records.append(record)
+                    existing.add(signature)
+            self._review_records = self._review_records[-24:]
+            changed = True
+        if changed:
+            self._refresh_build_brief()
+            self._refresh_review_cards()
+        return changed
+
     @staticmethod
     def _bounded_team_text(value: Any, limit: int = _TEAM_TEXT_LIMIT) -> str:
         if not isinstance(value, str):
@@ -3438,9 +5375,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             " " if ord(character) < 32 and character not in "\n\t" else character
             for character in value
         ).strip()
-        if len(cleaned) <= limit:
-            return cleaned
-        return cleaned[:limit] + "\n[…内容过长，已截断显示…]"
+        sanitized = RuntimeDiagnosticWriter._sanitize_text(
+            cleaned,
+            max(limit * 2, limit),
+        )
+        if len(sanitized) <= limit:
+            return sanitized
+        return sanitized[:limit] + "\n[…内容过长，已截断显示…]"
 
     def _team_source_is_current(self, thread_id: Any) -> bool:
         root_thread_id = self._selected_thread_id
@@ -3479,10 +5420,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._team_records.pop(stale_id, None)
         record = {
             "root_thread_id": self._selected_thread_id,
+            "role": "",
             "task": "",
             "status": "pendingInit",
             "path": "",
             "message": "",
+            "latest_summary": "",
+            "error": "",
             "events": [],
         }
         self._team_records[thread_id] = record
@@ -3537,16 +5481,19 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             details.setPlainText("")
             return
         lines = [
+            f"角色：{record.get('role') or record.get('path') or '协议未提供'}",
             f"任务：{record.get('task') or '协议未提供'}",
             f"状态：{record.get('status') or 'unknown'}",
-            f"路径：{record.get('path') or '未提供'}",
+            "最新公开摘要："
+            f"{record.get('latest_summary') or record.get('message') or '尚无'}",
+            f"错误：{record.get('error') or '无'}",
         ]
+        path = record.get("path")
+        if isinstance(path, str) and path:
+            lines.append(f"子任务路径：{path}")
         events = record.get("events")
         if isinstance(events, list) and events:
             lines.extend(("", "工具 / 活动：", *[f"- {item}" for item in events]))
-        message = record.get("message")
-        if isinstance(message, str) and message:
-            lines.extend(("", "最终回复 / 审阅发现 / 错误：", message))
         lines.extend(
             (
                 "",
@@ -3589,9 +5536,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     status = state.get("status")
                     if isinstance(status, str):
                         record["status"] = status
+                    role = self._bounded_team_text(state.get("role"), 160)
+                    if role:
+                        record["role"] = role
                     message = self._bounded_team_text(state.get("message"))
                     if message:
                         record["message"] = message
+                        record["latest_summary"] = message
+                    error = self._notice_text(state.get("error"))
+                    if error:
+                        record["error"] = self._bounded_team_text(error, 2_000)
                 self._team_note(
                     record,
                     f"{item.get('tool') or '协作'}："
@@ -3609,6 +5563,21 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             path = self._bounded_team_text(item.get("agentPath"), 512)
             if path:
                 record["path"] = path
+            role = self._bounded_team_text(item.get("role"), 160)
+            if role:
+                record["role"] = role
+            task = self._bounded_team_text(item.get("task"), 2_000)
+            if task:
+                record["task"] = task
+            summary = self._bounded_team_text(
+                item.get("summary") or item.get("message"),
+                4_000,
+            )
+            if summary:
+                record["latest_summary"] = summary
+            error = self._notice_text(item.get("error"))
+            if error:
+                record["error"] = self._bounded_team_text(error, 2_000)
             kind = item.get("kind")
             if isinstance(kind, str):
                 if kind == "started":
@@ -3638,6 +5607,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 record["message"] = self._bounded_team_text(
                     str(record.get("message") or "") + delta
                 )
+                record["latest_summary"] = record["message"]
+                self._refresh_team_combo()
             return True
         elif method in {"item/started", "item/completed"}:
             item = params.get("item")
@@ -3649,7 +5620,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     "collabAgentToolCall",
                     "subAgentActivity",
                 }:
-                    label = item.get("tool") or item.get("command") or item_type
+                    label = item.get("tool") or item_type
                     status = item.get("status") or method.rsplit("/", 1)[-1]
                     self._team_note(
                         record,
@@ -3657,6 +5628,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     )
                     error = self._notice_text(item.get("error"))
                     if error:
+                        record["error"] = self._bounded_team_text(error, 2_000)
                         self._team_note(record, f"错误：{error}")
         elif method == "turn/started":
             record["status"] = "running"
@@ -3734,6 +5706,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     restored.append(("agent", item["text"]))
         if hasattr(self.conversation, "clear_messages"):
             self.conversation.clear_messages()
+        if self._build_brief_thread_id != thread_id:
+            for role, value in restored:
+                if role != "user":
+                    continue
+                text, _attachments = value
+                if isinstance(text, str) and text.strip():
+                    self._capture_initial_task_brief(thread_id, text)
+                    break
         rendered = False
         for role, value in restored:
             if role == "user":
@@ -3835,6 +5815,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             else self._request_text_with_selection(text)
         )
         if not goal_auto_continue:
+            self._capture_initial_task_brief(thread_id, text)
             self._add_user_message(text, attachment_paths)
         self._begin_codex_message()
         self._stream_thread_id = thread_id
@@ -4275,6 +6256,109 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._apply_threads(payload.get("threads"))
             self._refresh_controls()
             return
+        if context.startswith(_KNOWLEDGE_CONTEXT_PREFIX):
+            pending = self._knowledge_pending
+            if (
+                not isinstance(pending, dict)
+                or pending.get("context") != context
+            ):
+                return
+            self._knowledge_pending = None
+            action = pending.get("action")
+            if payload.get("action") != action:
+                self.knowledge_status_label.setText(
+                    "知识响应与当前操作不匹配；未应用该响应。"
+                )
+                self._refresh_controls()
+                return
+            if action == "status":
+                self._apply_knowledge_status(payload)
+                self._knowledge_loaded = True
+                if (
+                    pending.get("preserve_status") is not True
+                    and not self._knowledge_job_running()
+                ):
+                    self.knowledge_status_label.setText(
+                        "知识状态已刷新；未自动修改任何资料或索引。"
+                    )
+                self._refresh_controls()
+                return
+            if action == "list":
+                sources = payload.get("sources")
+                sources = sources if isinstance(sources, dict) else {}
+                self._apply_knowledge_sources(sources.get("items"))
+                self._knowledge_loaded = True
+                self.knowledge_status_label.setText("用户资料列表已刷新。")
+                self._refresh_controls()
+                return
+            if action in {"start", "job_status", "cancel"}:
+                self._apply_knowledge_job(payload.get("job"))
+                return
+            self.knowledge_status_label.setText(
+                "知识响应包含未知操作；未应用该响应。"
+            )
+            self._refresh_controls()
+            return
+        if context.startswith(_PROJECT_MEMORY_CONTEXT_PREFIX):
+            pending = self._project_memory_pending
+            if (
+                not isinstance(pending, dict)
+                or pending.get("context") != context
+            ):
+                return
+            self._project_memory_pending = None
+            action = pending.get("action")
+            if payload.get("action") != action:
+                self.project_memory_status_label.setText(
+                    "项目记忆响应与当前操作不匹配；未应用该响应。"
+                )
+                self._refresh_controls()
+                return
+            if action in {"list", "search"}:
+                memories = payload.get("memories")
+                self._apply_project_memories(memories)
+                self._project_memory_loaded = True
+                total = payload.get("total")
+                count = len(memories) if isinstance(memories, list) else 0
+                if count:
+                    self.project_memory_status_label.setText(
+                        f"已显示 {count} 条 scope=project 项目记忆"
+                        + (
+                            f"（共 {total} 条）。"
+                            if isinstance(total, int) and total >= count
+                            else "。"
+                        )
+                    )
+                else:
+                    self.project_memory_status_label.setText(
+                        "scope=project 下暂无匹配记忆；"
+                        "这不代表其他 scope 的记忆丢失。"
+                    )
+                self._refresh_controls()
+                return
+            if action == "delete":
+                memory_id = pending.get("memory_id")
+                if (
+                    payload.get("deleted") is not True
+                    or payload.get("memory_id") != memory_id
+                ):
+                    self.project_memory_status_label.setText(
+                        "删除响应与所选 stable ID 不匹配；状态尚未确认。"
+                    )
+                    self._refresh_controls()
+                    return
+            elif action in {"record", "supersede"}:
+                self._clear_project_memory_editor()
+            self.project_memory_search_edit.clear()
+            self.project_memory_status_label.setText(
+                {
+                    "record": "项目记忆已新增，正在刷新列表…",
+                    "supersede": "所选记忆已取代，正在刷新列表…",
+                    "delete": "所选记忆已删除，正在刷新列表…",
+                }.get(str(action), "项目记忆已更新，正在刷新列表…")
+            )
+            self._request_project_memories(query="")
+            return
         if (
             context == _GOAL_GET_CONTEXT
             and isinstance(self._crash_recovery_marker, dict)
@@ -4479,6 +6563,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self._clear_goal_display()
                     self._team_records.clear()
                     self._refresh_team_combo()
+                    self._clear_task_insights()
                     self._clear_turn_performance()
                 self._selected_thread_id = thread_id
                 self._apply_focus_mode(
@@ -4794,6 +6879,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             if method == "thread/goal/updated":
                 thread_id = params.get("threadId")
                 goal = params.get("goal")
+                self._apply_explicit_task_insights(method, params)
                 if (
                     thread_id == self._selected_thread_id
                     and isinstance(goal, dict)
@@ -4828,6 +6914,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._apply_deleted_thread(thread_id)
                 return
             if method in {"item/started", "item/completed"}:
+                self._apply_explicit_task_insights(method, params)
                 if self._update_team_item(method, params):
                     if self._event_matches_active_stream(params):
                         self._mark_goal_auto_turn_progress()
@@ -4885,11 +6972,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 if active_stream or goal_plan:
                     steps = params.get("plan") or []
                     plan_steps = [step for step in steps if isinstance(step, dict)]
-                    rendered = " | ".join(
-                        f"{step.get('status', '?')}: {step.get('step', '')}"
-                        for step in plan_steps
-                    )
-                    self._append_system(f"计划：{rendered}")
+                    self._apply_stage_plan(plan_steps)
                     current_step = next(
                         (
                             step.get("step")
@@ -5275,6 +7358,53 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         details = details if isinstance(details, dict) else {}
         error_code = error.get("code") if isinstance(error, dict) else None
         formatted_error = format_bridge_error(payload)
+
+        if context.startswith(_KNOWLEDGE_CONTEXT_PREFIX):
+            pending = self._knowledge_pending
+            if (
+                not isinstance(pending, dict)
+                or pending.get("context") != context
+            ):
+                return
+            self._knowledge_pending = None
+            action = pending.get("action")
+            if action == "start":
+                self._knowledge_job = None
+            log_path = details.get("log_path")
+            if isinstance(log_path, str) and log_path.strip():
+                self.knowledge_log_label.setText(
+                    f"日志：{log_path.strip()[:2048]}"
+                )
+            if error_code == "TRANSCRIPT_REQUIRED":
+                self.knowledge_status_label.setText(
+                    "未找到可用字幕：请在媒体旁放置同名 "
+                    "SRT、VTT 或 TXT 后重试；视频本体没有复制。"
+                )
+            else:
+                self.knowledge_status_label.setText(
+                    f"知识操作失败：{formatted_error[:400]}"
+                )
+            if action == "job_status" and self._knowledge_job_running():
+                self.knowledge_status_label.setText(
+                    "知识任务状态尚未确认；Bridge 可能正在重连。"
+                )
+            self._refresh_controls()
+            return
+
+        if context.startswith(_PROJECT_MEMORY_CONTEXT_PREFIX):
+            pending = self._project_memory_pending
+            if (
+                not isinstance(pending, dict)
+                or pending.get("context") != context
+            ):
+                return
+            self._project_memory_pending = None
+            self._reset_project_memory_delete_confirmation()
+            self.project_memory_status_label.setText(
+                f"项目记忆操作失败：{formatted_error[:400]}"
+            )
+            self._refresh_controls()
+            return
 
         if (
             context == _GOAL_GET_CONTEXT
@@ -6046,6 +8176,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "_scene_work_timer",
             "_reconnect_timer",
             "_thread_delete_confirm_timer",
+            "_project_memory_confirm_timer",
+            "_knowledge_poll_timer",
+            "_knowledge_confirm_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:
@@ -6056,6 +8189,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._reconciliation_tokens.clear()
         self._stopping_turn_token = None
         self._thread_delete_pending = None
+        self._project_memory_pending = None
+        self._knowledge_pending = None
+        self._knowledge_job = None
         self._goal_continuation_boundary = None
         self._goal_auto_turn_token = None
         conversation = getattr(self, "conversation", None)
@@ -6065,6 +8201,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if dialog is not None:
             dialog.close()
         self._attachment_dialog = None
+        knowledge_dialog = getattr(self, "_knowledge_source_dialog", None)
+        if knowledge_dialog is not None:
+            knowledge_dialog.close()
+        self._knowledge_source_dialog = None
+        self._knowledge_source_dialog_mode = None
         self._scene_capability_pending = False
         self._scene_work_pending = False
         self._scene_attestation_digest = None

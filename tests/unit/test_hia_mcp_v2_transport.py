@@ -48,7 +48,12 @@ class FakeExecutor:
             "errors": [],
         }
         if tool_name == "hia_execute_hom":
-            result["phase_timings"] = {"runtime_hom_seconds": 0.02}
+            result["phase_timings"] = {
+                "queue_seconds": 0.005,
+                "hom_seconds": 0.02,
+                "validation_seconds": 0.003,
+                "total_seconds": 0.04,
+            }
         return result
 
 
@@ -139,17 +144,19 @@ class HiaMcpV2TransportTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual([("hia_execute_hom", {"script": "pass"})], executor.calls)
         timings = result["phase_timings"]
-        self.assertEqual(0.02, timings["runtime_hom_seconds"])
-        self.assertEqual(0.025, timings["stdio_queue_seconds"])
-        for key in (
-            "request_serialization_seconds",
-            "runtime_wait_seconds",
-            "runtime_serialization_seconds",
-            "response_read_seconds",
-            "response_decode_seconds",
-            "total_seconds",
-        ):
-            self.assertGreaterEqual(timings[key], 0.0)
+        self.assertEqual(
+            {
+                "queue_seconds",
+                "hom_seconds",
+                "validation_seconds",
+                "total_seconds",
+            },
+            set(timings),
+        )
+        self.assertEqual(0.03, timings["queue_seconds"])
+        self.assertEqual(0.02, timings["hom_seconds"])
+        self.assertEqual(0.003, timings["validation_seconds"])
+        self.assertGreaterEqual(timings["total_seconds"], timings["queue_seconds"])
         self.assertTrue(cancellation.accepted)
         self.assertEqual(".runtime\\hia-mcp-v2", str(session.runtime_directory.relative_to(REPOSITORY_ROOT)))
 
