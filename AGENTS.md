@@ -2,7 +2,7 @@
 
 These permanent rules apply to development in this repository.
 
-- Resolve the project root from `HIA_PROJECT_ROOT` or the repository location; do not assume a drive letter or fixed checkout path. Plugin source and internal data, including dependencies, virtual environments, caches, automatic screenshots and previews, attachments, temporary files, diagnostics, jobs, and logs, must stay under that root.
+- Resolve the project root from `HIA_PROJECT_ROOT` or the repository location; do not assume a drive letter or fixed checkout path. Plugin source and internal data, including dependencies, virtual environments, caches, previews, attachments, temporary files, diagnostics, jobs, and logs, must stay under that root. The only automatic-artifact exception is a safely saved current HIP: HIA viewport/flipbook captures and AI goal-stage checkpoints may use the HIP parent's `.hia/screenshots` and `.hia/checkpoints`; unsafe or unsaved scenes fall back to project runtime storage.
 - A final render, EXR, video, USD, simulation cache, or export explicitly requested by the user is a user deliverable and may use the ordinary local directory the user selected outside the project. Without an explicit directory, use `HIA_RENDER_OUTPUT_DIR`, which defaults to `<project-root>/.runtime/cache`; always report the actual final path.
 - Never delete, move, overwrite, reset, clean, or otherwise discard user files or Git changes. Read files before editing them and preserve unrelated work.
 - Except for a user-explicit final-output target described above, never modify the Houdini installation directory, Houdini user configuration, AppData, user-home directories, drive roots, or any path outside the project root.
@@ -11,6 +11,8 @@ These permanent rules apply to development in this repository.
 - A deterministic project-local SQLite FTS5 index over explicitly allowed documentation and explicitly written project memory is permitted, with optional Qwen embeddings and vector retrieval. Indexed bodies, vectors, models, caches, and the encoder virtual environment must remain under `.runtime` rather than Git; do not add another model family, Agent, network service, watcher, or scheduler.
 - Do not control Houdini through screen takeover or Computer Use. Use the Panel, Bridge, HIA MCP V2, HOM/`hou`, launcher, and native `hython` as appropriate; FXHoudiniMCP is an explicit compatibility fallback.
 - Current-scene creation and modification default to HIA MCP V2 and HOM. For complex work, prefer one or a few Codex-generated HOM batches through `hia_execute_hom`. Do not restrict Houdini to a fixed node-type allowlist or create a tool-call forest.
+- Before the first scene write for any creation, modification, or repair request, run one relevant batched local-knowledge search and reuse its results. For complex, reference-driven, material, FX, simulation, rendering, or version-sensitive work, also research current SideFX documentation and original sources before writing.
+- Local retrieval is the only mandatory research for a simple deterministic edit. External web research must remain proportional to the task; do not turn the pre-write requirement into repeated searches, a tool forest, or an approval gate.
 
 ## Houdini network authoring
 

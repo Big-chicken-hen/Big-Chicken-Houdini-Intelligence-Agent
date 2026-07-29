@@ -40,6 +40,14 @@ Before sharing a report publicly, read it in a text editor and remove any projec
 
 For a public bug report, pair the smallest relevant redacted excerpt with Big-Chicken Houdini Intelligence Agent, Windows, Houdini, Houdini Python, Bridge Python, Codex, and selected MCP backend versions. Security-sensitive reports should follow [SECURITY.md](../SECURITY.md) instead of a public issue.
 
+## Diagnostics and project memory are separate
+
+Deleting or superseding a record in the Panel's **Project Memory** tab changes only that exact explicit memory record. It does not delete a diagnostic report, Thread, knowledge source, attachment, HIP, render, or other project file. Project-memory request failures stay in the memory page as a short status and do not create chat messages or a second diagnostic store.
+
+The Panel reaches memory through the authenticated Bridge and fixed HIA MCP V2 tool route. The same route is available when starting with `scripts/launch-houdini.ps1` directly, without the WPF launcher. For administration without the Panel or Houdini GUI, use the project-relative `knowledge_index_cli.py memory ...` commands documented in the README; neither interface requires direct SQLite editing.
+
+The same Panel page reaches local-knowledge administration through the fixed Bridge `/v1/knowledge` route and project-relative `scripts/hia-knowledge.ps1`; it does not reuse project-memory storage. Status distinguishes environment readiness, FTS5 fallback, and index completion, and unknown counters remain unknown rather than being shown as zero. Explicit repair, import, delete, and index jobs write bounded logs below `.runtime\cache\knowledge-cli`. A managed-source delete removes only the exact copied source ID and never the original file. When an operation fails, use the displayed project-local log path; no diagnostic action should edit SQLite directly.
+
 ## Fictional example
 
 ```markdown

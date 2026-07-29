@@ -128,6 +128,11 @@ class EmbeddingContractTests(unittest.TestCase):
                 "active_profile",
                 "model_id",
                 "model_revision",
+                "model_path",
+                "python_path",
+                "venv_path",
+                "device",
+                "cuda_available",
                 "dim",
                 "normalized",
                 "initialized",
@@ -157,10 +162,10 @@ class EmbeddingContractTests(unittest.TestCase):
 
         expected_relative = {
             "toolchain_root": ".runtime/toolchains/hia-embedding",
-            "venv_root": ".runtime/toolchains/hia-embedding/venv",
-            "worker_python": (
-                ".runtime/toolchains/hia-embedding/venv/Scripts/python.exe"
-            ),
+            "venv_root": ".venv",
+            "legacy_venv_root": ".runtime/toolchains/hia-embedding/venv",
+            "worker_python": ".venv/Scripts/python.exe",
+            "activation_script": ".venv/Scripts/Activate.ps1",
             "models_root": ".runtime/models/qwen3-embedding",
             "model_0_6b": (
                 ".runtime/models/qwen3-embedding/qwen3-embedding-0.6b"
@@ -183,11 +188,29 @@ class EmbeddingContractTests(unittest.TestCase):
             self.assertTrue(Path(layout[key]).is_relative_to(root), key)
 
         runtime_root = (root / ".runtime").resolve()
-        for key in set(layout) - {"worker_source"}:
+        for key in set(layout) - {
+            "venv_root",
+            "worker_python",
+            "activation_script",
+            "worker_source",
+        }:
             self.assertTrue(
                 Path(layout[key]).is_relative_to(runtime_root),
                 key,
             )
+        self.assertEqual(
+            Path(layout["venv_root"]),
+            Path(layout["worker_python"]).parents[1],
+        )
+        self.assertEqual(
+            Path(layout["venv_root"]),
+            Path(layout["activation_script"]).parents[1],
+        )
+        self.assertTrue(
+            Path(layout["legacy_venv_root"]).is_relative_to(
+                Path(layout["toolchain_root"])
+            )
+        )
 
     def test_worker_contract_is_project_source_and_never_downloads(self) -> None:
         public = contract.launcher_contract()
@@ -198,10 +221,7 @@ class EmbeddingContractTests(unittest.TestCase):
                 "entry_point": "hia_embedding_worker",
                 "protocol": "hia-embedding-stdio/1",
                 "source_directory": "services/hia_mcp_v2/embedding_worker",
-                "python": (
-                    ".runtime/toolchains/hia-embedding/venv/"
-                    "Scripts/python.exe"
-                ),
+                "python": ".venv/Scripts/python.exe",
             },
             public["worker"],
         )
@@ -246,7 +266,19 @@ class EmbeddingContractTests(unittest.TestCase):
                     "houdini_package/python_libs",
                     "src",
                 ],
-                "commands": ["status", "build"],
+                "commands": [
+                    "status",
+                    "build",
+                    "sources.list",
+                    "sources.import",
+                    "sources.delete",
+                    "sources.refresh",
+                    "memory.record",
+                    "memory.list",
+                    "memory.delete",
+                    "memory.supersede",
+                ],
+                "formats": ["jsonl", "json"],
                 "default_batch_size": 32,
                 "max_batch_size": 64,
                 "events": [
@@ -280,6 +312,7 @@ class EmbeddingContractTests(unittest.TestCase):
                     "success": 0,
                     "runtime_error": 1,
                     "invalid_arguments": 2,
+                    "not_found": 3,
                     "interrupted": 130,
                 },
                 "resume": "missing_or_changed_chunks",

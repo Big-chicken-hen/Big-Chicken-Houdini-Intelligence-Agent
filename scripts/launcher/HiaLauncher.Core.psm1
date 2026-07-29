@@ -228,6 +228,373 @@ function Test-HiaEmbeddingProjectPath {
     }
 }
 
+function Resolve-HiaManagedPythonProjectPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [ValidateSet('file', 'directory')][string]$Kind,
+        [switch]$AllowMissingLeaf
+    )
+
+    $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $candidate = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $ordinary = if ($AllowMissingLeaf) {
+        Test-HiaEmbeddingProjectPath `
+            -ProjectRoot $root `
+            -Path $candidate `
+            -Kind $Kind `
+            -AllowMissingLeaf
+    } else {
+        Test-HiaEmbeddingProjectPath `
+            -ProjectRoot $root `
+            -Path $candidate `
+            -Kind $Kind
+    }
+    if ($ordinary) {
+        return $candidate
+    }
+
+    try {
+        $installRoot = [System.IO.Path]::GetFullPath(
+            (Join-Path $root '.runtime\toolchains\python')
+        ).TrimEnd('\')
+        if (-not (
+            Test-HiaEmbeddingProjectPath `
+                -ProjectRoot $root `
+                -Path $installRoot `
+                -Kind directory
+        )) {
+            return $null
+        }
+        if (-not $candidate.StartsWith(
+            $installRoot + [System.IO.Path]::DirectorySeparatorChar,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            return $null
+        }
+        $relative = $candidate.Substring($installRoot.Length).TrimStart('\')
+        $aliasName = @($relative -split '[\\/]')[0]
+        if ($aliasName -notmatch '^cpython-(\d+)\.(\d+)-windows-x86_64-none$') {
+            return $null
+        }
+        $major = [string]$matches[1]
+        $minor = [string]$matches[2]
+        $aliasPath = [System.IO.Path]::GetFullPath(
+            (Join-Path $installRoot $aliasName)
+        ).TrimEnd('\')
+        $aliasItem = Get-Item -LiteralPath $aliasPath -Force -ErrorAction Stop
+        $linkTypeProperty = $aliasItem.PSObject.Properties['LinkType']
+        $targetProperty = $aliasItem.PSObject.Properties['Target']
+        $targets = @()
+        if ($null -ne $targetProperty) {
+            $targets = @($targetProperty.Value)
+        }
+        $targetPath = if (
+            $targets.Count -eq 1 -and
+            [System.IO.Path]::IsPathRooted([string]$targets[0])
+        ) {
+            [System.IO.Path]::GetFullPath([string]$targets[0]).TrimEnd('\')
+        } else {
+            ''
+        }
+        if (
+            $aliasItem -isnot [System.IO.DirectoryInfo] -or
+            ([int]$aliasItem.Attributes -band
+                [int][System.IO.FileAttributes]::ReparsePoint) -eq 0 -or
+            $null -eq $linkTypeProperty -or
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                [string]$linkTypeProperty.Value,
+                'Junction'
+            ) -or
+            $targets.Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace($targetPath) -or
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                [System.IO.Path]::GetFullPath(
+                    (Split-Path -Parent $targetPath)
+                ).TrimEnd('\'),
+                $installRoot
+            ) -or
+            [System.IO.Path]::GetFileName($targetPath) -notmatch (
+                '^cpython-{0}\.{1}\.\d+-windows-x86_64-none$' -f
+                    [regex]::Escape($major),
+                    [regex]::Escape($minor)
+            ) -or
+            -not (
+                Test-HiaEmbeddingProjectPath `
+                    -ProjectRoot $root `
+                    -Path $targetPath `
+                    -Kind directory
+            ) -or
+            -not (
+                Test-HiaEmbeddingProjectPath `
+                    -ProjectRoot $root `
+                    -Path (Join-Path $targetPath 'python.exe') `
+                    -Kind file
+            )
+        ) {
+            return $null
+        }
+        $suffix = $candidate.Substring($aliasPath.Length).TrimStart('\')
+        $resolved = if ([string]::IsNullOrWhiteSpace($suffix)) {
+            $targetPath
+        } else {
+            [System.IO.Path]::GetFullPath((Join-Path $targetPath $suffix))
+        }
+        $safeResolved = if ($AllowMissingLeaf) {
+            Test-HiaEmbeddingProjectPath `
+                -ProjectRoot $root `
+                -Path $resolved `
+                -Kind $Kind `
+                -AllowMissingLeaf
+        } else {
+            Test-HiaEmbeddingProjectPath `
+                -ProjectRoot $root `
+                -Path $resolved `
+                -Kind $Kind
+        }
+        if (-not $safeResolved) {
+            return $null
+        }
+        return $resolved
+    } catch {
+        return $null
+    }
+}
+
+function Get-HiaManagedBridgePythonPath {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    return [System.IO.Path]::GetFullPath(
+        (Join-Path $root '.venv\Scripts\python.exe')
+    )
+}
+
+function Get-HiaManagedBridgePythonState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowNull()]$ProbePayloadOverride = $null,
+        [ValidateRange(2, 30)][int]$TimeoutSeconds = 8
+    )
+
+    $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
+    $python = Get-HiaManagedBridgePythonPath -ProjectRoot $root
+    $venvRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $root '.venv')
+    ).TrimEnd('\')
+    $configPath = Join-Path $venvRoot 'pyvenv.cfg'
+    try {
+        if (-not (
+            Test-HiaEmbeddingProjectPath `
+                -ProjectRoot $root `
+                -Path $python `
+                -Kind file
+        )) {
+            throw '项目本地 managed Python 不存在、不是普通文件，或路径经过 reparse point。'
+        }
+        if (-not (
+            Test-HiaEmbeddingProjectPath `
+                -ProjectRoot $root `
+                -Path $configPath `
+                -Kind file
+        )) {
+            throw '项目本地 venv 缺少安全的 pyvenv.cfg。'
+        }
+
+        $config = @{}
+        foreach ($line in @([System.IO.File]::ReadAllLines($configPath))) {
+            if ($line -notmatch '^\s*([^#=]+?)\s*=\s*(.*?)\s*$') { continue }
+            $config[$matches[1].Trim().ToLowerInvariant()] = $matches[2].Trim().Trim('"')
+        }
+        if (
+            -not $config.ContainsKey('include-system-site-packages') -or
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                [string]$config['include-system-site-packages'],
+                'false'
+            )
+        ) {
+            throw '项目本地 venv 必须设置 include-system-site-packages=false。'
+        }
+        $homeValue = if ($config.ContainsKey('home')) { [string]$config['home'] } else { '' }
+        if ([string]::IsNullOrWhiteSpace($homeValue) -or -not [System.IO.Path]::IsPathRooted($homeValue)) {
+            throw '项目本地 venv 的 Python home 无效。'
+        }
+        $pythonHomePath = Resolve-HiaManagedPythonProjectPath `
+                -ProjectRoot $root `
+                -Path $homeValue `
+                -Kind directory
+        if ([string]::IsNullOrWhiteSpace($pythonHomePath)) {
+            throw '项目本地 venv 的 Python home 不在项目内，或路径不安全。'
+        }
+
+        $payload = $ProbePayloadOverride
+        if ($null -eq $payload) {
+            $probeCode = @"
+import json
+import site
+import sys
+import sysconfig
+
+print("$script:HiaProbeMarker" + json.dumps({
+    "python": ".".join(str(value) for value in sys.version_info[:3]),
+    "executable": sys.executable,
+    "prefix": sys.prefix,
+    "base_prefix": sys.base_prefix,
+    "base_exec_prefix": sys.base_exec_prefix,
+    "purelib": sysconfig.get_path("purelib"),
+    "platlib": sysconfig.get_path("platlib"),
+    "site_packages": site.getsitepackages(),
+    "sys_path": sys.path,
+    "no_user_site": bool(sys.flags.no_user_site),
+    "enable_user_site": bool(site.ENABLE_USER_SITE),
+}, sort_keys=True))
+"@
+            $probe = Invoke-HiaProcess `
+                -FilePath $python `
+                -Arguments @('-I', '-B', '-c', $probeCode) `
+                -TimeoutSeconds $TimeoutSeconds `
+                -WorkingDirectory $root `
+                -Environment @{
+                    'HIA_PROJECT_ROOT' = $root
+                    'PYTHONDONTWRITEBYTECODE' = '1'
+                    'PYTHONNOUSERSITE' = '1'
+                }
+            if ([bool]$probe.timed_out -or $probe.exit_code -ne 0) {
+                throw '项目本地 managed Python 健康探针失败。'
+            }
+            $payload = Get-HiaProbePayload -Output ("$($probe.stdout)`n$($probe.stderr)")
+        }
+        if ($null -eq $payload) {
+            throw '项目本地 managed Python 未返回健康探针数据。'
+        }
+
+        $identityPaths = @(
+            [pscustomobject]@{ name = 'executable'; value = [string]$payload.executable; kind = 'file' },
+            [pscustomobject]@{ name = 'prefix'; value = [string]$payload.prefix; kind = 'directory' },
+            [pscustomobject]@{ name = 'base_prefix'; value = [string]$payload.base_prefix; kind = 'directory' },
+            [pscustomobject]@{ name = 'base_exec_prefix'; value = [string]$payload.base_exec_prefix; kind = 'directory' },
+            [pscustomobject]@{ name = 'purelib'; value = [string]$payload.purelib; kind = 'directory' },
+            [pscustomobject]@{ name = 'platlib'; value = [string]$payload.platlib; kind = 'directory' }
+        )
+        $resolvedIdentityPaths = @{}
+        foreach ($entry in $identityPaths) {
+            if ([string]::IsNullOrWhiteSpace([string]$entry.value)) {
+                throw "项目本地 managed Python 缺少 $($entry.name) 探针值。"
+            }
+            $resolvedValue = Resolve-HiaManagedPythonProjectPath `
+                    -ProjectRoot $root `
+                    -Path ([string]$entry.value) `
+                    -Kind ([string]$entry.kind)
+            if ([string]::IsNullOrWhiteSpace($resolvedValue)) {
+                throw "项目本地 managed Python 的 $($entry.name) 不在项目内，或路径不安全。"
+            }
+            $resolvedIdentityPaths[[string]$entry.name] = $resolvedValue
+        }
+        if (
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                $pythonHomePath,
+                [string]$resolvedIdentityPaths['base_prefix']
+            ) -or
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                $pythonHomePath,
+                [string]$resolvedIdentityPaths['base_exec_prefix']
+            )
+        ) {
+            throw '项目本地 managed Python 的基础解释器身份不匹配。'
+        }
+        if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            [System.IO.Path]::GetFullPath([string]$payload.executable),
+            $python
+        )) {
+            throw '项目本地 managed Python executable 身份不匹配。'
+        }
+        if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            [System.IO.Path]::GetFullPath([string]$payload.prefix).TrimEnd('\'),
+            $venvRoot
+        )) {
+            throw '项目本地 managed Python 的 venv prefix 不匹配。'
+        }
+        try {
+            if ([version]([string]$payload.python) -lt [version]'3.10') {
+                throw '项目本地 managed Python 版本低于 3.10。'
+            }
+        } catch {
+            if ($_.Exception.Message -like '*低于 3.10*') { throw }
+            throw '项目本地 managed Python 版本信息无效。'
+        }
+        if ($payload.no_user_site -ne $true -or $payload.enable_user_site -ne $false) {
+            throw '项目本地 managed Python 未隔离 user site-packages。'
+        }
+        foreach ($sitePath in @($payload.site_packages)) {
+            if (
+                [string]::IsNullOrWhiteSpace([string]$sitePath) -or
+                [string]::IsNullOrWhiteSpace(
+                    (Resolve-HiaManagedPythonProjectPath `
+                        -ProjectRoot $root `
+                        -Path ([string]$sitePath) `
+                        -Kind directory)
+                )
+            ) {
+                throw '项目本地 managed Python 探测到项目外 site-packages。'
+            }
+        }
+        foreach ($sysPath in @($payload.sys_path)) {
+            if ([string]::IsNullOrWhiteSpace([string]$sysPath)) { continue }
+            if (-not [System.IO.Path]::IsPathRooted([string]$sysPath)) {
+                throw '项目本地 managed Python 探测到相对 sys.path。'
+            }
+            $fullSysPath = [System.IO.Path]::GetFullPath([string]$sysPath)
+            $kind = if ([System.IO.Path]::GetExtension($fullSysPath) -eq '.zip') {
+                'file'
+            } else {
+                'directory'
+            }
+            $resolvedSysPath = Resolve-HiaManagedPythonProjectPath `
+                    -ProjectRoot $root `
+                    -Path $fullSysPath `
+                    -Kind $kind `
+                    -AllowMissingLeaf
+            if ([string]::IsNullOrWhiteSpace($resolvedSysPath)) {
+                throw '项目本地 managed Python 探测到项目外或不安全的 sys.path。'
+            }
+        }
+        return [pscustomobject]@{
+            path = $python
+            relative_path = '.venv/Scripts/python.exe'
+            healthy = $true
+            reason = '项目本地 managed Python 已验证。'
+            python_version = [string]$payload.python
+        }
+    } catch {
+        return [pscustomobject]@{
+            path = $python
+            relative_path = '.venv/Scripts/python.exe'
+            healthy = $false
+            reason = [string]$_.Exception.Message
+            python_version = ''
+        }
+    }
+}
+
+function Resolve-HiaManagedBridgePython {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowNull()]$ProbePayloadOverride = $null,
+        [ValidateRange(2, 30)][int]$TimeoutSeconds = 8
+    )
+
+    $state = Get-HiaManagedBridgePythonState `
+        -ProjectRoot $ProjectRoot `
+        -ProbePayloadOverride $ProbePayloadOverride `
+        -TimeoutSeconds $TimeoutSeconds
+    if (-not [bool]$state.healthy) {
+        throw "项目本地 managed Python 尚未就绪：$($state.reason)"
+    }
+    return [string]$state.path
+}
+
 function Resolve-HiaLauncherStoragePath {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
@@ -630,6 +997,73 @@ function New-HiaKnowledgeIndexProcessPlan {
     }
 }
 
+function New-HiaKnowledgeCliProcessPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [AllowEmptyString()][string]$BridgePython = '',
+        [Parameter(Mandatory = $true)]$EmbeddingData,
+        [AllowEmptyString()][string]$EmbeddingProfile = '',
+        [AllowEmptyString()][string]$EmbeddingDevice = '',
+        [ValidateSet('status', 'build')][string]$Action,
+        [AllowNull()]$ManagedProbePayloadOverride = $null
+    )
+
+    $managedPython = Resolve-HiaManagedBridgePython `
+        -ProjectRoot $ProjectRoot `
+        -ProbePayloadOverride $ManagedProbePayloadOverride
+    $indexPlan = New-HiaKnowledgeIndexProcessPlan `
+        -ProjectRoot $ProjectRoot `
+        -BridgePython $managedPython `
+        -EmbeddingData $EmbeddingData `
+        -EmbeddingProfile $EmbeddingProfile `
+        -EmbeddingDevice $EmbeddingDevice `
+        -Action $Action
+    $root = [string]$indexPlan.working_directory
+    $cliPath = Join-Path $root 'scripts\hia-knowledge.ps1'
+    if (-not (
+        Test-HiaEmbeddingProjectPath `
+            -ProjectRoot $root `
+            -Path $cliPath `
+            -Kind file
+    )) {
+        throw 'The project-local knowledge CLI is unavailable or unsafe.'
+    }
+    $powershellExe = Join-Path $env:SystemRoot (
+        'System32\WindowsPowerShell\v1.0\powershell.exe'
+    )
+    if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) {
+        throw 'Windows PowerShell is unavailable for the project-local knowledge CLI.'
+    }
+    [void](Resolve-HiaEmbeddingProfile `
+        -EmbeddingData $EmbeddingData `
+        -Profile $EmbeddingProfile)
+    [void](Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice)
+    $cliArguments = @(
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $cliPath,
+        "index-$Action"
+    )
+    if ($Action -eq 'build') {
+        $batchSize = [int]$EmbeddingData.contract.knowledge_index.default_batch_size
+        if ($batchSize -lt 1 -or $batchSize -gt 64) {
+            throw 'Knowledge index default batch size is invalid.'
+        }
+        $cliArguments += @('-BatchSize', [string]$batchSize)
+    }
+    return [pscustomobject]@{
+        action = $Action
+        file_path = $powershellExe
+        arguments = @($cliArguments)
+        working_directory = $root
+        environment = $indexPlan.environment
+        clear_environment_names = @($indexPlan.clear_environment_names)
+        protocol = [string]$indexPlan.protocol
+    }
+}
+
 function ConvertFrom-HiaKnowledgeIndexJsonLine {
     param(
         [Parameter(Mandatory = $true)][string]$Line,
@@ -655,6 +1089,23 @@ function ConvertFrom-HiaKnowledgeIndexJsonLine {
     $indexProperty = $payload.PSObject.Properties['index']
     if ($null -eq $indexProperty -or $null -eq $indexProperty.Value) {
         throw 'Knowledge index JSONL is missing index state.'
+    }
+    if (
+        [string]$payload.event -eq 'error' -and
+        @($indexProperty.Value.PSObject.Properties).Count -eq 0
+    ) {
+        return $payload
+    }
+    if (
+        $null -eq $indexProperty.Value.PSObject.Properties['profile_id'] -and
+        $null -ne $indexProperty.Value.PSObject.Properties['active_profile'] -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$indexProperty.Value.active_profile
+        )
+    ) {
+        $indexProperty.Value |
+            Add-Member -NotePropertyName 'profile_id' `
+                -NotePropertyValue ([string]$indexProperty.Value.active_profile)
     }
     foreach ($field in @(
         'profile_id',
@@ -1137,41 +1588,87 @@ function Get-HiaBridgePythonCandidates {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [AllowEmptyString()][string]$ExplicitPath = '',
-        [AllowEmptyString()][string]$SavedPath = ''
+        [AllowEmptyString()][string]$SavedPath = '',
+        [AllowNull()]$ManagedProbePayloadOverride = $null
     )
 
     $paths = @{}
+    if ([string]::IsNullOrWhiteSpace($SavedPath)) {
+        try {
+            $stored = Read-HiaLauncherSettings -ProjectRoot $ProjectRoot
+            $advancedProperty = $stored.PSObject.Properties['bridge_python_advanced']
+            if ($null -ne $advancedProperty) {
+                $SavedPath = [string]$advancedProperty.Value
+            }
+        } catch { }
+    }
     foreach ($record in @(
         [pscustomobject]@{ path = $ExplicitPath; source = 'explicit' },
         [pscustomobject]@{ path = $SavedPath; source = 'settings' },
-        [pscustomobject]@{ path = $env:HIA_BRIDGE_PYTHON; source = 'HIA_BRIDGE_PYTHON' },
-        [pscustomobject]@{ path = (Join-Path $ProjectRoot '.runtime\python\python.exe'); source = 'project runtime' }
+        [pscustomobject]@{ path = $env:HIA_BRIDGE_PYTHON; source = 'HIA_BRIDGE_PYTHON' }
     )) {
         if (-not $record.path) { continue }
         try { $full = [System.IO.Path]::GetFullPath([string]$record.path) } catch { continue }
-        if (Test-Path -LiteralPath $full -PathType Leaf) { $paths[$full] = $record.source }
-    }
-    foreach ($directory in @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot '.runtime\toolchains\python') -Directory -ErrorAction SilentlyContinue)) {
-        $path = Join-Path $directory.FullName 'python.exe'
-        if (Test-Path -LiteralPath $path -PathType Leaf) { $paths[$path] = 'project toolchain' }
+        if (Test-Path -LiteralPath $full -PathType Leaf) {
+            $paths[$full] = [pscustomobject]@{
+                path = $full
+                source = [string]$record.source
+                exists = $true
+                healthy = $false
+                automatic = $false
+                advanced = $true
+                display = "$full  [高级：$($record.source)]"
+            }
+        }
     }
     foreach ($command in @(Get-Command -Name 'python.exe' -All -ErrorAction SilentlyContinue)) {
         if ($command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) {
-            $paths[[System.IO.Path]::GetFullPath([string]$command.Source)] = 'PATH'
+            $full = [System.IO.Path]::GetFullPath([string]$command.Source)
+            if (-not $paths.ContainsKey($full)) {
+                $paths[$full] = [pscustomobject]@{
+                    path = $full
+                    source = 'PATH'
+                    exists = $true
+                    healthy = $false
+                    automatic = $false
+                    advanced = $true
+                    display = "$full  [高级：PATH]"
+                }
+            }
         }
     }
-    return @($paths.GetEnumerator() | ForEach-Object {
-        [pscustomobject]@{
-            path = [string]$_.Key
-            source = [string]$_.Value
-            display = "$($_.Key)  [$($_.Value)]"
+
+    $managedState = Get-HiaManagedBridgePythonState `
+        -ProjectRoot $ProjectRoot `
+        -ProbePayloadOverride $ManagedProbePayloadOverride
+    if (Test-Path -LiteralPath $managedState.path -PathType Leaf) {
+        $managedLabel = if ([bool]$managedState.healthy) {
+            '项目本地 managed（已验证）'
+        } else {
+            '项目本地 managed（需要修复）'
         }
-    } | Sort-Object -Property path)
+        $paths[[string]$managedState.path] = [pscustomobject]@{
+            path = [string]$managedState.path
+            source = 'project managed'
+            exists = $true
+            healthy = [bool]$managedState.healthy
+            automatic = [bool]$managedState.healthy
+            advanced = $false
+            display = "$($managedState.path)  [$managedLabel]"
+            reason = [string]$managedState.reason
+        }
+    }
+    return @(
+        $paths.Values |
+            Sort-Object `
+                -Property @{ Expression = { [bool]$_.automatic }; Descending = $true }, path
+    )
 }
 
 function ConvertTo-HiaProcessArgument {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
 
+    if ($Value.Length -eq 0) { return '""' }
     if ($Value -notmatch '[\s"]') { return $Value }
     $escaped = $Value -replace '(\\*)"', '$1$1\"'
     $escaped = $escaped -replace '(\\+)$', '$1$1'
@@ -1184,13 +1681,17 @@ function Invoke-HiaProcess {
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$Arguments = @(),
         [int]$TimeoutSeconds = 12,
+        [ValidateRange(0, 60)][int]$GraceTimeoutSeconds = 0,
         [hashtable]$Environment = @{},
+        [string[]]$RemoveEnvironmentVariables = @(),
         [AllowEmptyString()][string]$WorkingDirectory = ''
     )
 
     $result = [ordered]@{
         started = $false
         timed_out = $false
+        completed_after_grace = $false
+        elapsed_ms = 0
         exit_code = $null
         stdout = ''
         stderr = ''
@@ -1212,13 +1713,29 @@ function Invoke-HiaProcess {
                 $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
             }
         }
+        foreach ($name in $RemoveEnvironmentVariables) {
+            if (-not $name) { continue }
+            if ($null -ne $startInfo.Environment) {
+                [void]$startInfo.Environment.Remove([string]$name)
+            } else {
+                [void]$startInfo.EnvironmentVariables.Remove([string]$name)
+            }
+        }
         $process = [System.Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         if (-not $process.Start()) { throw 'process start returned false' }
         $result.started = $true
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit([Math]::Max(1, $TimeoutSeconds) * 1000)) {
+        $completed = $process.WaitForExit([Math]::Max(1, $TimeoutSeconds) * 1000)
+        if (-not $completed -and $GraceTimeoutSeconds -gt 0) {
+            $completed = $process.WaitForExit($GraceTimeoutSeconds * 1000)
+            if ($completed) { $result.completed_after_grace = $true }
+        }
+        $stopwatch.Stop()
+        $result.elapsed_ms = [long]$stopwatch.ElapsedMilliseconds
+        if (-not $completed) {
             $result.timed_out = $true
             try { $process.Kill() } catch { }
             [void]$process.WaitForExit(2000)
@@ -1254,7 +1771,9 @@ function Test-HiaHoudiniProbeConsistency {
         [AllowEmptyString()][string]$HythonOutput,
         [int]$HythonExitCode = 0,
         [switch]$HoudiniTimedOut,
-        [switch]$HythonTimedOut
+        [switch]$HythonTimedOut,
+        [switch]$HythonCompletedAfterGrace,
+        [long]$HythonElapsedMilliseconds = 0
     )
 
     $checks = @()
@@ -1291,11 +1810,47 @@ function Test-HiaHoudiniProbeConsistency {
         $null -ne $payload -and
         [bool]$payload.hou_import
     )
+    $hythonLevel = 'red'
+    $hythonMessage = 'hython 无法 import hou 或未返回有效探针数据。'
+    $hythonAdvice = '在命令行运行所选 hython.exe 的 import hou 探针；若仍失败，再检查该 Houdini 安装。'
+    if ($hythonPassed) {
+        if ($HythonCompletedAfterGrace) {
+            $elapsedSeconds = [string]::Format(
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                '{0:0.0}',
+                ($HythonElapsedMilliseconds / 1000.0)
+            )
+            $hythonLevel = 'yellow'
+            $hythonMessage = "hython 冷启动较慢（$elapsedSeconds 秒），但 import hou 已验证；Houdini build $($payload.build)；Python $($payload.python)"
+            $hythonAdvice = '所选 Houdini 与 import hou 已验证，无需修复；等待知识索引、渲染等重负载结束后重新扫描，可确认冷启动速度。'
+        } else {
+            $hythonLevel = 'green'
+            $hythonMessage = "import hou 成功；Houdini build $($payload.build)；Python $($payload.python)"
+            $hythonAdvice = '无需处理。'
+        }
+    } elseif ($licenseUnavailable) {
+        $hythonMessage = 'hython 无法取得 Houdini 许可证。'
+        $hythonAdvice = '检查 Houdini License Administrator 与许可证服务器；关闭可能占用许可证 seat 的实例后重新扫描。'
+    } elseif ($HythonTimedOut) {
+        $elapsedSeconds = [string]::Format(
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            '{0:0.0}',
+            ($HythonElapsedMilliseconds / 1000.0)
+        )
+        if ($houdiniProbePassed) {
+            $hythonMessage = "hython 在 $elapsedSeconds 秒的有界只读探针窗口内仍未完成；Houdini build $houdiniBuild 可读取，但本次尚未确认 import hou。"
+        } else {
+            $hythonMessage = "hython 在 $elapsedSeconds 秒的有界只读探针窗口内仍未完成，本次尚未确认 import hou。"
+        }
+        $hythonAdvice = '先等待知识索引、渲染等重负载结束后重新扫描；若连续超时，再在命令行运行所选 hython.exe 的 import hou 探针。'
+    } elseif ($HythonExitCode -ne 0) {
+        $hythonMessage = "hython 只读探针退出码为 $HythonExitCode，未能确认 import hou。"
+    }
     $checks += New-HiaCheckResult `
         -Id 'houdini.hython_probe' -Name 'Hython / hou probe' `
-        -Level $(if ($hythonPassed) { 'green' } else { 'red' }) `
-        -Message $(if ($hythonPassed) { "import hou 成功；Houdini build $($payload.build)；Python $($payload.python)" } elseif ($licenseUnavailable) { 'hython 无法取得 Houdini 许可证。' } elseif ($HythonTimedOut) { 'hython 只读探针超时。' } else { 'hython 无法 import hou 或未返回有效探针数据。' }) `
-        -Advice $(if ($hythonPassed) { '无需处理。' } elseif ($licenseUnavailable) { '检查 Houdini License Administrator 与许可证服务器；关闭可能占用许可证 seat 的实例后重新扫描。' } else { '修复所选 Houdini 安装，并确认 hython 可执行 import hou。' })
+        -Level $hythonLevel `
+        -Message $hythonMessage `
+        -Advice $hythonAdvice
 
     if ($null -ne $payload) {
         $expectedHython = [System.IO.Path]::GetFullPath($hythonExe)
@@ -1354,8 +1909,25 @@ function Invoke-HiaHoudiniChecks {
     if ($ProbeOverrides.ContainsKey('hython')) {
         $hythonProbe = $ProbeOverrides.hython
     } else {
-        $probeCode = "import json,sys,hou;print('$script:HiaProbeMarker'+json.dumps({'build':hou.applicationVersionString(),'python':str(sys.version_info[0])+'.'+str(sys.version_info[1]),'executable':sys.executable,'hou_import':True},sort_keys=True))"
-        $hythonProbe = Invoke-HiaProcess -FilePath $hythonExe -Arguments @('-B', '-c', $probeCode) -TimeoutSeconds $TimeoutSeconds
+        $probeCode = "import json,sys,hou;print('$script:HiaProbeMarker'+json.dumps({'build':hou.applicationVersionString(),'python':str(sys.version_info[0])+'.'+str(sys.version_info[1]),'executable':sys.executable,'hou_import':True},sort_keys=True),flush=True)"
+        $hythonGraceSeconds = [Math]::Max(
+            0,
+            [Math]::Min($TimeoutSeconds, 30 - $TimeoutSeconds)
+        )
+        $hythonProbe = Invoke-HiaProcess `
+            -FilePath $hythonExe `
+            -Arguments @('-B', '-c', $probeCode) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -GraceTimeoutSeconds $hythonGraceSeconds `
+            -RemoveEnvironmentVariables @('PYTHONPATH')
+    }
+    $hythonCompletedAfterGrace = $false
+    $hythonElapsedMilliseconds = 0
+    if ($null -ne $hythonProbe.PSObject.Properties['completed_after_grace']) {
+        $hythonCompletedAfterGrace = [bool]$hythonProbe.completed_after_grace
+    }
+    if ($null -ne $hythonProbe.PSObject.Properties['elapsed_ms']) {
+        $hythonElapsedMilliseconds = [long]$hythonProbe.elapsed_ms
     }
     return @(Test-HiaHoudiniProbeConsistency `
         -HoudiniExe $HoudiniExe `
@@ -1364,7 +1936,9 @@ function Invoke-HiaHoudiniChecks {
         -HythonOutput ("$($hythonProbe.stdout)`n$($hythonProbe.stderr)") `
         -HythonExitCode $(if ($null -eq $hythonProbe.exit_code) { -1 } else { [int]$hythonProbe.exit_code }) `
         -HoudiniTimedOut:([bool]$houdiniProbe.timed_out) `
-        -HythonTimedOut:([bool]$hythonProbe.timed_out))
+        -HythonTimedOut:([bool]$hythonProbe.timed_out) `
+        -HythonCompletedAfterGrace:$hythonCompletedAfterGrace `
+        -HythonElapsedMilliseconds $hythonElapsedMilliseconds)
 }
 
 function Get-HiaPinnedCodexExecutable {
@@ -1487,6 +2061,30 @@ function Resolve-HiaRenderOutputDirectory {
     }
     if ($resolved -match '(?i)\\Side Effects Software\\Houdini[^\\]*(?:\\|$)') {
         throw '最终输出目录不能位于 Houdini 安装目录中。'
+    }
+
+    $managedCacheRoots = @(
+        'screenshots',
+        'previews',
+        'tmp',
+        'embedding',
+        'dotnet'
+    ) | ForEach-Object {
+        [System.IO.Path]::GetFullPath(
+            (Join-Path $root ".runtime\cache\$_")
+        ).TrimEnd('\')
+    }
+    foreach ($managedCacheRoot in $managedCacheRoots) {
+        if (
+            Test-HiaPathWithinDirectory `
+                -Path $resolved `
+                -Directory $managedCacheRoot
+        ) {
+            throw (
+                '最终输出目录不能等于或位于启动器可清理的托管缓存分类中；' +
+                '请选择其他普通本地目录，或留空使用项目 .runtime\cache 根目录。'
+            )
+        }
     }
 
     if ((Test-Path -LiteralPath $resolved) -and -not (Test-Path -LiteralPath $resolved -PathType Container)) {
@@ -1860,15 +2458,15 @@ function Invoke-HiaProjectChecks {
     if (-not $BridgePython) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
             -Message '尚未选择有效的 Bridge Python executable。' `
-            -Advice '安装并选择 CPython 3.10+ 的 python.exe；当前测试基线为 3.10：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Python、提权或修改 PATH/注册表。'
+            -Advice '运行 scripts\hia-knowledge.ps1 environment-install。HIA Python 环境位于项目根目录 .venv；受管 CPython、uv、模型与缓存位于 .runtime。不要用全局 pip 或 PATH Python 修复。'
     } elseif (-not $bridgePathAllowed) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
             -Message 'Bridge Python 必须是普通本地盘绝对路径；WindowsApps、普通 AppData 路径、UNC、相对路径和 ADS 均不接受。' `
-            -Advice '选择项目本地工具链，或 python.org 默认安装在 AppData\Local\Programs\Python 下的 python.exe。'
+            -Advice '优先运行 scripts\hia-knowledge.ps1 environment-repair 并选择项目受管 Python；外部 Python 仅作为显式高级覆盖。'
     } elseif (-not (Test-Path -LiteralPath $BridgePython -PathType Leaf)) {
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level 'red' `
             -Message '尚未选择有效的 Bridge Python executable。' `
-            -Advice '安装并选择 CPython 3.10+ 的 python.exe；当前测试基线为 3.10：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Python、提权或修改 PATH/注册表。'
+            -Advice '运行 scripts\hia-knowledge.ps1 environment-repair。HIA Python 环境位于项目根目录 .venv；受管 CPython、uv、模型与缓存位于 .runtime。'
     } else {
         if ($ProbeOverrides.ContainsKey('bridge')) {
             $bridgeProbe = $ProbeOverrides.bridge
@@ -1913,7 +2511,7 @@ function Invoke-HiaProjectChecks {
         $bridgeLevel = if ($bridgePassed -and $versionPassed -and $identityPassed) { 'green' } else { 'red' }
         $checks += New-HiaCheckResult -Id 'bridge.python' -Name 'Bridge Python' -Level $bridgeLevel `
             -Message $(if ($bridgeLevel -eq 'green') { "Python $($bridgePayload.python)；Bridge 与所选 MCP backend import 成功。" } elseif ([bool]$bridgeProbe.timed_out) { 'Bridge Python 探针超时。' } else { 'Bridge Python 版本、executable 身份或所选 MCP backend import 不符合项目要求。' }) `
-            -Advice $(if ($bridgeLevel -eq 'green') { '无需处理。' } else { '选择 CPython 3.10+（测试基线 3.10）并按 README 验证项目 import：https://www.python.org/downloads/windows/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装或修改系统环境。' })
+            -Advice $(if ($bridgeLevel -eq 'green') { '无需处理。' } else { '运行 scripts\hia-knowledge.ps1 environment-repair，并重新检查项目受管 Python、共享 venv 与项目 import。' })
     }
 
     $embeddingOverride = if ($ProbeOverrides.ContainsKey('embedding')) {
@@ -2160,10 +2758,14 @@ function ConvertTo-HiaRedactedText {
         'pip_(?:config_file|extra_index_url|find_links|index_url|no_index|' +
         'trusted_host))'
     )
+    $proxyEnvironmentName = '(?:(?:http|https|all|no)_proxy)'
+    $sensitiveEnvironmentName = (
+        '(?:' + $indexEnvironmentName + '|' + $proxyEnvironmentName + ')'
+    )
     $sensitiveName = (
         '(?:token|cookie|api[_-]?key|authorization|password|secret|' +
         'auth(?:orization)?[_-]?code|' +
-        $indexEnvironmentName + ')'
+        $sensitiveEnvironmentName + ')'
     )
     $safe = [string]$Text
     $safe = [regex]::Replace(
@@ -2193,7 +2795,7 @@ function ConvertTo-HiaRedactedText {
     )
     $safe = [regex]::Replace(
         $safe,
-        '(?i)(' + $indexEnvironmentName +
+        '(?i)(' + $sensitiveEnvironmentName +
             '\s*[:=]\s*)(?:(?!\\[rn]|[\r\n"]).)*',
         '$1[REDACTED]'
     )
@@ -2220,10 +2822,11 @@ function ConvertTo-HiaRedactedJson {
         'pip_(?:config_file|extra_index_url|find_links|index_url|no_index|' +
         'trusted_host))'
     )
+    $proxyEnvironmentName = '(?:(?:http|https|all|no)_proxy)'
     $sensitiveName = (
         '(?:token|cookie|api[_-]?key|authorization|password|secret|' +
         'auth(?:orization)?[_-]?code|' +
-        $indexEnvironmentName + ')'
+        $indexEnvironmentName + '|' + $proxyEnvironmentName + ')'
     )
     $json = [regex]::Replace(
         $json,
@@ -2288,15 +2891,25 @@ function Get-HiaLatestLauncherCheckpoint {
     try {
         $directory = Get-Item -LiteralPath $CheckpointDirectory -Force -ErrorAction Stop
         if (
-            ([int]$directory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+            $directory -isnot [System.IO.DirectoryInfo] -or
+            $directory.Name -ne 'checkpoints' -or
+            $directory.Parent.Name -notmatch '^[0-9a-fA-F]{32}$' -or
+            $directory.Parent.Parent.Name -ne 'launcher-sessions' -or
+            ([int]$directory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            ([int]$directory.Parent.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            ([int]$directory.Parent.Parent.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            (($ThreadId -and -not $GoalBinding) -or ($GoalBinding -and -not $ThreadId))
         ) {
             return $null
         }
-        if ($ThreadId) {
-            if ($ThreadId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$') { return $null }
-            if ($GoalBinding -notmatch '^[0-9a-f]{64}$') { return $null }
-            $markerPath = Join-Path $directory.FullName '.hia-stage-checkpoint.json'
-            if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $null }
+        if (
+            ($ThreadId -and $ThreadId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$') -or
+            ($GoalBinding -and $GoalBinding -notmatch '^[0-9a-f]{64}$')
+        ) {
+            return $null
+        }
+        $markerPath = Join-Path $directory.FullName '.hia-stage-checkpoint.json'
+        if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
             $markerFile = Get-Item -LiteralPath $markerPath -Force -ErrorAction Stop
             if (
                 ([int]$markerFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
@@ -2306,34 +2919,178 @@ function Get-HiaLatestLauncherCheckpoint {
                 return $null
             }
             $marker = [System.IO.File]::ReadAllText($markerFile.FullName) | ConvertFrom-Json
+            $markerVersion = [int]$marker.version
+            $markerThread = [string]$marker.thread_id
+            $markerGoal = [string]$marker.goal_binding
             $checkpointName = [string]$marker.checkpoint_file
             if (
-                [int]$marker.version -ne 1 -or
-                -not [System.StringComparer]::Ordinal.Equals([string]$marker.thread_id, $ThreadId) -or
-                -not [System.StringComparer]::Ordinal.Equals([string]$marker.goal_binding, $GoalBinding) -or
+                $markerThread -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$' -or
+                $markerGoal -notmatch '^[0-9a-f]{64}$' -or
+                ($ThreadId -and -not [System.StringComparer]::Ordinal.Equals($markerThread, $ThreadId)) -or
+                ($GoalBinding -and -not [System.StringComparer]::Ordinal.Equals($markerGoal, $GoalBinding)) -or
                 -not $checkpointName -or
                 $checkpointName -ne [System.IO.Path]::GetFileName($checkpointName) -or
                 $checkpointName -notmatch '(?i)\.hip(?:lc|nc)?(?:_bak\d*)?$'
             ) {
                 return $null
             }
-            $checkpoint = Get-Item `
-                -LiteralPath (Join-Path $directory.FullName $checkpointName) `
-                -Force `
-                -ErrorAction Stop
-            if (
-                $checkpoint -isnot [System.IO.FileInfo] -or
-                ([int]$checkpoint.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                [long]$checkpoint.Length -le 0
-            ) {
+            $checkpointPath = $null
+            $storageScope = 'runtime_fallback'
+            $sourceHipPath = $null
+            if ($markerVersion -eq 2) {
+                $storageScope = [string]$marker.storage_scope
+                if (
+                    -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                        [string]$marker.launcher_session_id,
+                        $directory.Parent.Name
+                    ) -or
+                    $storageScope -notin @('hip', 'runtime_fallback')
+                ) {
+                    return $null
+                }
+                if ($storageScope -eq 'runtime_fallback') {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$marker.source_hip_path)) {
+                        return $null
+                    }
+                    $checkpointPath = Join-Path $directory.FullName $checkpointName
+                } else {
+                    $rawSourceHip = [string]$marker.source_hip_path
+                    if (
+                        [string]::IsNullOrWhiteSpace($rawSourceHip) -or
+                        -not [System.IO.Path]::IsPathRooted($rawSourceHip)
+                    ) {
+                        return $null
+                    }
+                    $sourceHipPath = [System.IO.Path]::GetFullPath($rawSourceHip)
+                    if (
+                        [System.IO.Path]::GetPathRoot($sourceHipPath) -notmatch
+                            '^[A-Za-z]:\\$'
+                    ) {
+                        return $null
+                    }
+                    $sourceHip = Get-Item -LiteralPath $sourceHipPath -Force -ErrorAction Stop
+                    $sourceParent = $sourceHip.Directory
+                    if (
+                        $sourceHip -isnot [System.IO.FileInfo] -or
+                        [long]$sourceHip.Length -le 0 -or
+                        $null -eq $sourceParent.Parent -or
+                        $sourceHip.Name -match '(?i)^untitled(?:\d+)?\.hip(?:lc|nc)?$' -or
+                        $sourceHip.Name -notmatch '(?i)\.hip(?:lc|nc)?$' -or
+                        ([int]$sourceHip.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                        ([int]$sourceParent.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                            $sourceHip.FullName,
+                            $sourceHipPath
+                        ) -or
+                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                            $rawSourceHip,
+                            $sourceHipPath
+                        )
+                    ) {
+                        return $null
+                    }
+                    $hiaDirectory = Get-Item `
+                        -LiteralPath (Join-Path $sourceParent.FullName '.hia') `
+                        -Force `
+                        -ErrorAction Stop
+                    $externalCheckpointDirectory = Get-Item `
+                        -LiteralPath (Join-Path $hiaDirectory.FullName 'checkpoints') `
+                        -Force `
+                        -ErrorAction Stop
+                    if (
+                        $hiaDirectory -isnot [System.IO.DirectoryInfo] -or
+                        $externalCheckpointDirectory -isnot [System.IO.DirectoryInfo] -or
+                        ([int]$hiaDirectory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                        ([int]$externalCheckpointDirectory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                            $hiaDirectory.Parent.FullName,
+                            $sourceParent.FullName
+                        ) -or
+                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                            $externalCheckpointDirectory.Parent.FullName,
+                            $hiaDirectory.FullName
+                        )
+                    ) {
+                        return $null
+                    }
+                    $externalMarkerPath = Join-Path `
+                        $externalCheckpointDirectory.FullName `
+                        '.hia-stage-checkpoint.json'
+                    $externalMarkerFile = Get-Item `
+                        -LiteralPath $externalMarkerPath `
+                        -Force `
+                        -ErrorAction Stop
+                    if (
+                        $externalMarkerFile -isnot [System.IO.FileInfo] -or
+                        ([int]$externalMarkerFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                        [long]$externalMarkerFile.Length -le 0 -or
+                        [long]$externalMarkerFile.Length -gt 65536
+                    ) {
+                        return $null
+                    }
+                    $externalMarker = (
+                        [System.IO.File]::ReadAllText($externalMarkerFile.FullName) |
+                            ConvertFrom-Json
+                    )
+                    if (
+                        [int]$externalMarker.version -ne 2 -or
+                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                            [string]$externalMarker.launcher_session_id,
+                            [string]$marker.launcher_session_id
+                        ) -or
+                        -not [System.StringComparer]::Ordinal.Equals(
+                            [string]$externalMarker.thread_id,
+                            $markerThread
+                        ) -or
+                        -not [System.StringComparer]::Ordinal.Equals(
+                            [string]$externalMarker.goal_binding,
+                            $markerGoal
+                        ) -or
+                        -not [System.StringComparer]::Ordinal.Equals(
+                            [string]$externalMarker.storage_scope,
+                            'hip'
+                        ) -or
+                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                            [string]$externalMarker.source_hip_path,
+                            $sourceHipPath
+                        ) -or
+                        -not [System.StringComparer]::Ordinal.Equals(
+                            [string]$externalMarker.checkpoint_file,
+                            $checkpointName
+                        )
+                    ) {
+                        return $null
+                    }
+                    $checkpointPath = Join-Path `
+                        $externalCheckpointDirectory.FullName `
+                        $checkpointName
+                }
+            } elseif ($markerVersion -eq 1 -and $ThreadId) {
+                $checkpointPath = Join-Path $directory.FullName $checkpointName
+            } elseif ($markerVersion -ne 1) {
                 return $null
             }
-            return [pscustomobject]@{
-                path = $checkpoint.FullName
-                last_write_utc_ticks = [long]$checkpoint.LastWriteTimeUtc.Ticks
-                thread_id = $ThreadId
-                goal_binding = $GoalBinding
+            if ($checkpointPath) {
+                $checkpoint = Get-Item -LiteralPath $checkpointPath -Force -ErrorAction Stop
+                if (
+                    $checkpoint -isnot [System.IO.FileInfo] -or
+                    ([int]$checkpoint.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    [long]$checkpoint.Length -le 0
+                ) {
+                    return $null
+                }
+                return [pscustomobject]@{
+                    path = $checkpoint.FullName
+                    last_write_utc_ticks = [long]$checkpoint.LastWriteTimeUtc.Ticks
+                    thread_id = $markerThread
+                    goal_binding = $markerGoal
+                    launcher_session_id = $directory.Parent.Name
+                    storage_scope = $storageScope
+                    source_hip_path = $sourceHipPath
+                }
             }
+        } elseif ($ThreadId) {
+            return $null
         }
         $candidates = [System.Collections.Generic.List[object]]::new()
         foreach ($file in @($directory.GetFiles())) {
@@ -2444,7 +3201,9 @@ function Copy-HiaLauncherRecoveryHip {
     param(
         [Parameter(Mandatory = $true)][string]$SessionRoot,
         [Parameter(Mandatory = $true)][string]$SourcePath,
-        [Parameter(Mandatory = $true)][ValidateRange(1, 99)][int]$Attempt
+        [Parameter(Mandatory = $true)][ValidateRange(1, 99)][int]$Attempt,
+        [AllowEmptyString()][string]$ThreadId = '',
+        [AllowEmptyString()][string]$GoalBinding = ''
     )
 
     $session = Get-Item -LiteralPath $SessionRoot -Force -ErrorAction Stop
@@ -2452,7 +3211,8 @@ function Copy-HiaLauncherRecoveryHip {
         $session -isnot [System.IO.DirectoryInfo] -or
         $session.Name -notmatch '^[0-9a-fA-F]{32}$' -or
         $session.Parent.Name -ne 'launcher-sessions' -or
-        ([int]$session.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+        ([int]$session.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ([int]$session.Parent.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
     ) {
         throw 'Recovery requires an ordinary launcher session directory.'
     }
@@ -2460,16 +3220,48 @@ function Copy-HiaLauncherRecoveryHip {
     $checkpoints = Join-Path $session.FullName 'checkpoints'
     $temp = Join-Path $session.FullName 'tmp'
     $sourceParent = $source.Directory.FullName.TrimEnd('\')
+    $sourceIsSessionLocal = (
+        [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            $sourceParent,
+            $checkpoints.TrimEnd('\')
+        ) -or
+        [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            $sourceParent,
+            $temp.TrimEnd('\')
+        )
+    )
+    if (-not $sourceIsSessionLocal) {
+        if (
+            $ThreadId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$' -or
+            $GoalBinding -notmatch '^[0-9a-f]{64}$'
+        ) {
+            throw 'External recovery requires the exact active Thread and Goal binding.'
+        }
+        $validatedCheckpoint = Get-HiaLatestLauncherCheckpoint `
+            -CheckpointDirectory $checkpoints `
+            -ThreadId $ThreadId `
+            -GoalBinding $GoalBinding
+        if (
+            $null -eq $validatedCheckpoint -or
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                [string]$validatedCheckpoint.path,
+                $source.FullName
+            ) -or
+            -not [System.StringComparer]::Ordinal.Equals(
+                [string]$validatedCheckpoint.storage_scope,
+                'hip'
+            )
+        ) {
+            throw 'External recovery source is not bound to this launcher session checkpoint marker.'
+        }
+    }
     if (
         $source -isnot [System.IO.FileInfo] -or
         ([int]$source.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
         [long]$source.Length -le 0 -or
-        -not (
-            [System.StringComparer]::OrdinalIgnoreCase.Equals($sourceParent, $checkpoints.TrimEnd('\')) -or
-            [System.StringComparer]::OrdinalIgnoreCase.Equals($sourceParent, $temp.TrimEnd('\'))
-        )
+        (-not $sourceIsSessionLocal -and $null -eq $validatedCheckpoint)
     ) {
-        throw 'Recovery source must be one ordinary top-level HIP in this launcher session.'
+        throw 'Recovery source must be an ordinary session HIP or a validated HIP-local checkpoint.'
     }
     $suffixMatch = [regex]::Match(
         $source.Name,
@@ -2664,6 +3456,16 @@ function Set-HiaLauncherRecoveryDecision {
 function Read-HiaLauncherSettings {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
+    $managedPath = Get-HiaManagedBridgePythonPath -ProjectRoot $ProjectRoot
+    $defaults = [ordered]@{
+        houdini_exe = ''
+        bridge_python = ''
+        bridge_python_mode = 'managed'
+        bridge_python_managed = $managedPath
+        bridge_python_advanced = ''
+        render_output_dir = ''
+        mcp_backend = 'hia_v2'
+    }
     $settingsPath = Resolve-HiaLauncherStoragePath `
         -ProjectRoot $ProjectRoot `
         -LeafName 'settings.json' `
@@ -2672,7 +3474,7 @@ function Read-HiaLauncherSettings {
         [string]::IsNullOrWhiteSpace($settingsPath) -or
         -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)
     ) {
-        return [pscustomobject]@{ houdini_exe = ''; bridge_python = ''; render_output_dir = ''; mcp_backend = 'hia_v2' }
+        return [pscustomobject]$defaults
     }
     try {
         $settings = [System.IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json
@@ -2682,6 +3484,7 @@ function Read-HiaLauncherSettings {
         }
         $houdiniProperty = $settings.PSObject.Properties['houdini_exe']
         $bridgeProperty = $settings.PSObject.Properties['bridge_python']
+        $bridgeModeProperty = $settings.PSObject.Properties['bridge_python_mode']
         $backendProperty = $settings.PSObject.Properties['mcp_backend']
         $backend = if ($null -eq $backendProperty) {
             'hia_v2'
@@ -2692,13 +3495,33 @@ function Read-HiaLauncherSettings {
                 'hia_v2'
             }
         }
+        $storedBridge = if ($null -eq $bridgeProperty) { '' } else { [string]$bridgeProperty.Value }
+        $bridgeMode = if ($null -eq $bridgeModeProperty) {
+            if ([System.IO.Path]::IsPathRooted($storedBridge)) { 'external' } else { 'managed' }
+        } else {
+            [string]$bridgeModeProperty.Value
+        }
+        if ($bridgeMode -notin @('managed', 'external')) {
+            $bridgeMode = 'managed'
+        }
+        $advancedBridge = ''
+        if (
+            $bridgeMode -eq 'external' -and
+            -not [string]::IsNullOrWhiteSpace($storedBridge) -and
+            [System.IO.Path]::IsPathRooted($storedBridge)
+        ) {
+            try { $advancedBridge = [System.IO.Path]::GetFullPath($storedBridge) } catch { }
+        }
         $values['houdini_exe'] = if ($null -eq $houdiniProperty) { '' } else { [string]$houdiniProperty.Value }
-        $values['bridge_python'] = if ($null -eq $bridgeProperty) { '' } else { [string]$bridgeProperty.Value }
+        $values['bridge_python'] = ''
+        $values['bridge_python_mode'] = $bridgeMode
+        $values['bridge_python_managed'] = $managedPath
+        $values['bridge_python_advanced'] = $advancedBridge
         $values['render_output_dir'] = if ($null -eq $settings.PSObject.Properties['render_output_dir']) { '' } else { [string]$settings.render_output_dir }
         $values['mcp_backend'] = $backend
         return [pscustomobject]$values
     } catch {
-        return [pscustomobject]@{ houdini_exe = ''; bridge_python = ''; render_output_dir = ''; mcp_backend = 'hia_v2' }
+        return [pscustomobject]$defaults
     }
 }
 
@@ -2739,7 +3562,15 @@ function Write-HiaLauncherSettings {
         } catch { }
     }
     $settings['houdini_exe'] = [System.IO.Path]::GetFullPath($HoudiniExe)
-    $settings['bridge_python'] = [System.IO.Path]::GetFullPath($BridgePython)
+    $bridgeFullPath = [System.IO.Path]::GetFullPath($BridgePython)
+    $managedBridge = Get-HiaManagedBridgePythonPath -ProjectRoot $ProjectRoot
+    if ([System.StringComparer]::OrdinalIgnoreCase.Equals($bridgeFullPath, $managedBridge)) {
+        $settings['bridge_python_mode'] = 'managed'
+        $settings['bridge_python'] = '.venv/Scripts/python.exe'
+    } else {
+        [void]$settings.Remove('bridge_python_mode')
+        $settings['bridge_python'] = $bridgeFullPath
+    }
     $settings['render_output_dir'] = $storedRenderOutput
     $settings['mcp_backend'] = $McpBackend
     if ($null -ne $EmbeddingData) {
@@ -2932,6 +3763,8 @@ Export-ModuleMember -Function @(
     'Get-HiaHoudiniCandidates',
     'Get-HiaLatestLauncherCheckpoint',
     'Get-HiaLatestLauncherCrashHip',
+    'Get-HiaManagedBridgePythonPath',
+    'Get-HiaManagedBridgePythonState',
     'Get-HiaMcpBackendChoices',
     'Get-HiaOverallLevel',
     'Get-HiaPinnedCodexExecutable',
@@ -2941,6 +3774,7 @@ Export-ModuleMember -Function @(
     'Invoke-HiaScreenshotCacheCleanup',
     'Invoke-HiaPreflight',
     'Invoke-HiaProcess',
+    'New-HiaKnowledgeCliProcessPlan',
     'New-HiaKnowledgeIndexProcessPlan',
     'Read-HiaLauncherSettings',
     'Repair-HiaSafeProject',
@@ -2948,6 +3782,7 @@ Export-ModuleMember -Function @(
     'Resolve-HiaLauncherStoragePath',
     'Resolve-HiaEmbeddingDevice',
     'Resolve-HiaEmbeddingProfile',
+    'Resolve-HiaManagedBridgePython',
     'Resolve-HiaMcpBackend',
     'Set-HiaLauncherRecoveryDecision',
     'Test-HiaHoudiniProbeConsistency',

@@ -1,4 +1,5 @@
 .runtime/
+.hia/
 **/__pycache__/
 *.pyc
 .ruff_cache/
@@ -43,6 +44,10 @@ Desktop.ini
 *.pfx
 *.p12
 *.key
+auth.json
+credentials.json
+secrets.json
+token.json
 
 *.hip
 *.hiplc
@@ -53,6 +58,11 @@ Desktop.ini
 *.vdb
 *.sim
 *.rat
+*.abc
+*.fbx
+*.usd
+*.usda
+*.usdc
 *.exr
 *.mov
 *.mp4
@@ -63,6 +73,7 @@ screenshots/
 previews/
 attachments/
 cache/
+models/
 tmp/
 jobs/
 logs/

@@ -7,7 +7,6 @@ import json
 import secrets
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +23,6 @@ EXECUTE_ROUTE = "/hia-mcp-v2/v1/execute"
 HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
 MAX_REQUEST_BYTES = 1_048_576
 MAX_RESPONSE_BYTES = 4_194_304
-SERIALIZATION_TIMING_HEADER = "X-HIA-MCP-V2-Serialize-Seconds"
 
 
 class _RuntimeHTTPServer(ThreadingHTTPServer):
@@ -167,7 +165,6 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _send_json(self, status: HTTPStatus, payload: Mapping[str, Any]) -> None:
-        serialization_started = time.monotonic()
         raw = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > MAX_RESPONSE_BYTES:
             status = HTTPStatus.INSUFFICIENT_STORAGE
@@ -183,17 +180,12 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
                 },
                 separators=(",", ":"),
             ).encode("utf-8")
-        serialization_seconds = max(0.0, time.monotonic() - serialization_started)
         try:
             self.send_response(int(status))
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header(
-                SERIALIZATION_TIMING_HEADER,
-                f"{serialization_seconds:.9f}",
-            )
             self.end_headers()
             self.wfile.write(raw)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):

@@ -69,8 +69,12 @@ KNOWLEDGE_INDEX_STATUS_FIELDS = (
 )
 
 EMBEDDING_TOOLCHAIN_ROOT = ".runtime/toolchains/hia-embedding"
-EMBEDDING_VENV_ROOT = f"{EMBEDDING_TOOLCHAIN_ROOT}/venv"
+EMBEDDING_VENV_ROOT = ".venv"
+EMBEDDING_LEGACY_VENV_ROOT = f"{EMBEDDING_TOOLCHAIN_ROOT}/venv"
 EMBEDDING_PYTHON_WINDOWS = f"{EMBEDDING_VENV_ROOT}/Scripts/python.exe"
+EMBEDDING_ACTIVATION_SCRIPT_WINDOWS = (
+    f"{EMBEDDING_VENV_ROOT}/Scripts/Activate.ps1"
+)
 EMBEDDING_MODELS_ROOT = ".runtime/models/qwen3-embedding"
 EMBEDDING_CACHE_ROOT = ".runtime/cache/embedding"
 HUGGINGFACE_CACHE_ROOT = f"{EMBEDDING_CACHE_ROOT}/huggingface"
@@ -99,6 +103,11 @@ EMBEDDING_PUBLIC_STATUS_FIELDS = (
     "active_profile",
     "model_id",
     "model_revision",
+    "model_path",
+    "python_path",
+    "venv_path",
+    "device",
+    "cuda_available",
     "dim",
     "normalized",
     "initialized",
@@ -178,7 +187,11 @@ def runtime_layout(project_root: str | Path) -> dict[str, str]:
     return {
         "toolchain_root": absolute(EMBEDDING_TOOLCHAIN_ROOT),
         "venv_root": absolute(EMBEDDING_VENV_ROOT),
+        "legacy_venv_root": absolute(EMBEDDING_LEGACY_VENV_ROOT),
         "worker_python": absolute(EMBEDDING_PYTHON_WINDOWS),
+        "activation_script": absolute(
+            EMBEDDING_ACTIVATION_SCRIPT_WINDOWS
+        ),
         "models_root": absolute(EMBEDDING_MODELS_ROOT),
         "model_0_6b": absolute(
             PROFILE_REGISTRY[
@@ -246,7 +259,19 @@ def launcher_contract() -> dict[str, Any]:
                 "houdini_package/python_libs",
                 "src",
             ],
-            "commands": ["status", "build"],
+            "commands": [
+                "status",
+                "build",
+                "sources.list",
+                "sources.import",
+                "sources.delete",
+                "sources.refresh",
+                "memory.record",
+                "memory.list",
+                "memory.delete",
+                "memory.supersede",
+            ],
+            "formats": ["jsonl", "json"],
             "default_batch_size": KNOWLEDGE_INDEX_DEFAULT_BATCH_SIZE,
             "max_batch_size": KNOWLEDGE_INDEX_MAX_BATCH_SIZE,
             "events": list(KNOWLEDGE_INDEX_CLI_EVENTS),
@@ -255,6 +280,7 @@ def launcher_contract() -> dict[str, Any]:
                 "success": 0,
                 "runtime_error": 1,
                 "invalid_arguments": 2,
+                "not_found": 3,
                 "interrupted": 130,
             },
             "resume": "missing_or_changed_chunks",

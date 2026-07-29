@@ -16,6 +16,12 @@ Choose the simplest Houdini system that preserves the requested quality, editabi
 | Final physically based rendering | Karma CPU or XPU chosen from required feature support | Solaris lighting/camera/AOV setup | Assuming CPU and XPU support the same shading features |
 | Rigged or art-directed animation | Keyframes, constraints, KineFX, or parameterized SOP deformation | CHOPs where signal processing helps; solvers only for history | Simulation merely to create motion that must remain directly art-directable |
 
+## Karma material default
+
+For newly authored Karma material and render work, prefer Solaris/USD, a Material Library LOP, and MaterialX. Start conceptually from `mtlxstandard_surface` when a standard surface fits, then add only the MaterialX nodes required by the visual model. Do not default to `/mat`, Principled Shader, legacy VOP materials, or Mantra-era construction.
+
+Use a legacy material context only when the user explicitly requests it, the existing project has a real compatibility dependency, or the target renderer is not Karma. Record the reason briefly. Before authoring, reuse local help and confirm uncertain current node types with narrow serial `hia_search_node_types` and `hia_node_help` calls; do not hard-code versioned internal names.
+
 ## Decision heuristics
 
 1. Start from the required final evidence: editable asset, animation, close-up render, texture set, USD asset, or simulation cache.
@@ -41,6 +47,6 @@ For complex work, use one or a small number of `hia_execute_hom` calls for a coh
 
 When node knowledge is missing, call `hia_search_node_types` narrowly and serially first, then reuse its returned `category`, `name`, or `resolved_name`. Call `hia_node_help` with `node_path`, with `category` plus a bare `node_type`, or with the supported qualified form `node_type="Category/name"`. Never fan out repeated search/help calls for the same target: this can cause `QUEUE_FULL`. If either tool fails, preserve the exact error and continue from already retrieved catalog results or local help when possible instead of retrying blindly.
 
-Work in the live scene through HIA MCP V2/HOM by default. Keep current-scene `hia_*` I/O few and serial, and never parallelize repeated node-type/help searches. Use FXHoudiniMCP only when the launcher explicitly selects that compatibility fallback. Use `hython` only for an explicitly requested offline, batch, independent-HIP, or background-render workflow.
+Work in the live scene through HIA MCP V2/HOM by default. Keep current-scene `hia_*` I/O few and serial, and never parallelize repeated node-type/help searches. Use FXHoudiniMCP only when the active HIA configuration explicitly selects that compatibility fallback. Use `hython` only for an explicitly requested offline, batch, independent-HIP, or background-render workflow.
 
 Primary references: [HOM](https://www.sidefx.com/docs/houdini/hom/), [Attribute Wrangle](https://www.sidefx.com/docs/houdini/nodes/sop/attribwrangle), [Solaris/USD basics](https://www.sidefx.com/docs/houdini/solaris/usd.html), and [Karma](https://www.sidefx.com/docs/houdini/solaris/karma.html).

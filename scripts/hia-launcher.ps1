@@ -49,19 +49,26 @@ function Get-SelectedInputs {
         $selectedHoudini = [string]$candidates[0].path
     }
 
+    $savedBridgeCandidate = ''
+    $savedAdvancedProperty = $Settings.PSObject.Properties['bridge_python_advanced']
+    if ($null -ne $savedAdvancedProperty) {
+        $savedBridgeCandidate = [string]$savedAdvancedProperty.Value
+    }
     $bridgeCandidates = @(Get-HiaBridgePythonCandidates `
         -ProjectRoot $projectRoot `
         -ExplicitPath $RequestedBridge `
-        -SavedPath ([string]$Settings.bridge_python))
+        -SavedPath $savedBridgeCandidate)
     $selectedBridge = $RequestedBridge
     if ($RequestedBridge) {
         try { $selectedBridge = [System.IO.Path]::GetFullPath($RequestedBridge) } catch { }
     }
-    if (-not $selectedBridge -and $Settings.bridge_python -and (Test-Path -LiteralPath $Settings.bridge_python -PathType Leaf)) {
-        $selectedBridge = [string]$Settings.bridge_python
-    }
-    if (-not $selectedBridge -and $bridgeCandidates.Count -eq 1) {
-        $selectedBridge = [string]$bridgeCandidates[0].path
+    if (-not $selectedBridge) {
+        $automaticBridge = @($bridgeCandidates | Where-Object {
+            $_.PSObject.Properties['automatic'] -and [bool]$_.automatic
+        })
+        if ($automaticBridge.Count -eq 1) {
+            $selectedBridge = [string]$automaticBridge[0].path
+        }
     }
     $selectedBackend = if ($RequestedBackend) {
         Resolve-HiaMcpBackend -Backend $RequestedBackend

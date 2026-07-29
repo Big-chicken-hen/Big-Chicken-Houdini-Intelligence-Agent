@@ -84,6 +84,74 @@ Import-Module -Force {_ps_literal(MODULE_PATH)}
         )
         return completed.stdout.strip()
 
+    def test_process_argument_converters_preserve_empty_string(self) -> None:
+        probe = self.sandbox / "empty argument probe.ps1"
+        probe.write_text(
+            """
+param([AllowEmptyString()][string]$Profile = 'missing')
+if ($Profile.Length -eq 0) { 'EMPTY' } else { "VALUE:$Profile" }
+""".strip(),
+            encoding="utf-8-sig",
+        )
+        wrapper = REPOSITORY_ROOT / "scripts" / "hia-knowledge.ps1"
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(wrapper)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'hia-knowledge.ps1 did not parse.' }}
+$definition = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'ConvertTo-HiaKnowledgeProcessArgument'
+}}, $true))
+if ($definition.Count -ne 1) {{ throw 'wrapper converter is unavailable.' }}
+. ([scriptblock]::Create($definition[0].Extent.Text))
+
+function Invoke-EmptyArgumentProbe([string]$Encoded) {{
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = (Get-Process -Id $PID).Path
+    $info.Arguments = (
+        '-NoProfile -ExecutionPolicy Bypass -File ' +
+        (ConvertTo-HiaProcessArgument -Value {_ps_literal(probe)}) +
+        ' -Profile ' + $Encoded
+    )
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) {{ throw 'probe did not start.' }}
+    $stdout = $process.StandardOutput.ReadToEnd().Trim()
+    $stderr = $process.StandardError.ReadToEnd().Trim()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    if ($exitCode -ne 0) {{ throw "probe failed: $stderr" }}
+    return $stdout
+}}
+
+$core = ConvertTo-HiaProcessArgument -Value ''
+$wrapperValue = ConvertTo-HiaKnowledgeProcessArgument -Value ''
+[pscustomobject]@{{
+    core_encoded = $core
+    wrapper_encoded = $wrapperValue
+    core_received = Invoke-EmptyArgumentProbe -Encoded $core
+    wrapper_received = Invoke-EmptyArgumentProbe -Encoded $wrapperValue
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual('""', payload["core_encoded"])
+        self.assertEqual('""', payload["wrapper_encoded"])
+        self.assertEqual("EMPTY", payload["core_received"])
+        self.assertEqual("EMPTY", payload["wrapper_received"])
+
     def make_houdini_install(self, name: str, *, hython: bool = True) -> Path:
         bin_directory = self.sandbox / "Side Effects Software" / name / "bin"
         bin_directory.mkdir(parents=True, exist_ok=True)
@@ -205,6 +273,189 @@ $checks | Where-Object id -eq 'houdini.hython_probe' | ConvertTo-Json -Compress
         self.assertIn("License Administrator", check["advice"])
         self.assertNotIn("超时", check["message"])
 
+    def test_process_grace_waits_for_the_same_process_and_reports_elapsed_time(
+        self,
+    ) -> None:
+        probe = self.sandbox / "slow-probe.ps1"
+        probe.write_text(
+            "Start-Sleep -Milliseconds 1400\nWrite-Output 'READY'\n",
+            encoding="utf-8-sig",
+        )
+        output = self.run_powershell(
+            f"""
+$result = Invoke-HiaProcess `
+    -FilePath (Get-Process -Id $PID).Path `
+    -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', {_ps_literal(probe)}) `
+    -TimeoutSeconds 1 `
+    -GraceTimeoutSeconds 2
+$result | ConvertTo-Json -Compress
+""",
+            timeout=10,
+        )
+        result = json.loads(output)
+        self.assertTrue(result["started"])
+        self.assertFalse(result["timed_out"])
+        self.assertTrue(result["completed_after_grace"])
+        self.assertEqual(0, result["exit_code"])
+        self.assertEqual("READY", result["stdout"].strip())
+        self.assertGreaterEqual(result["elapsed_ms"], 1000)
+        self.assertLess(result["elapsed_ms"], 3500)
+
+    def test_process_exceeding_primary_and_grace_windows_stays_timed_out(
+        self,
+    ) -> None:
+        probe = self.sandbox / "timeout-probe.ps1"
+        probe.write_text("Start-Sleep -Seconds 5\n", encoding="utf-8-sig")
+        output = self.run_powershell(
+            f"""
+$result = Invoke-HiaProcess `
+    -FilePath (Get-Process -Id $PID).Path `
+    -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', {_ps_literal(probe)}) `
+    -TimeoutSeconds 1 `
+    -GraceTimeoutSeconds 1
+$result | ConvertTo-Json -Compress
+""",
+            timeout=10,
+        )
+        result = json.loads(output)
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(result["completed_after_grace"])
+        self.assertGreaterEqual(result["elapsed_ms"], 1800)
+        self.assertLess(result["elapsed_ms"], 3500)
+
+    def test_process_can_remove_pythonpath_from_child_without_changing_parent(
+        self,
+    ) -> None:
+        probe = self.sandbox / "environment-probe.ps1"
+        probe.write_text(
+            """
+$value = [Environment]::GetEnvironmentVariable('PYTHONPATH', 'Process')
+if ($null -eq $value) { 'REMOVED' } else { "VALUE:$value" }
+""".strip(),
+            encoding="utf-8-sig",
+        )
+        output = self.run_powershell(
+            f"""
+$original = $env:PYTHONPATH
+try {{
+    $env:PYTHONPATH = 'external-probe-path'
+    $result = Invoke-HiaProcess `
+        -FilePath (Get-Process -Id $PID).Path `
+        -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', {_ps_literal(probe)}) `
+        -RemoveEnvironmentVariables @('PYTHONPATH')
+    [pscustomobject]@{{
+        child = [string]$result.stdout.Trim()
+        parent = [string]$env:PYTHONPATH
+    }} | ConvertTo-Json -Compress
+}} finally {{
+    $env:PYTHONPATH = $original
+}}
+"""
+        )
+        result = json.loads(output)
+        self.assertEqual("REMOVED", result["child"])
+        self.assertEqual("external-probe-path", result["parent"])
+
+    def test_hython_cold_start_completed_in_grace_is_a_timed_yellow_warning(
+        self,
+    ) -> None:
+        houdini = self.make_houdini_install("Houdini 21.0.440")
+        payload = {
+            "build": "21.0.440",
+            "python": "3.11",
+            "executable": str(houdini.with_name("hython.exe")),
+            "hou_import": True,
+        }
+        marker_output = "__HIA_LAUNCHER_PROBE__" + json.dumps(payload)
+        output = self.run_powershell(
+            f"""
+$checks = @(Test-HiaHoudiniProbeConsistency `
+    -HoudiniExe {_ps_literal(houdini)} `
+    -HoudiniOutput 'Houdini 21.0.440' `
+    -HythonOutput {_ps_literal(marker_output)} `
+    -HythonCompletedAfterGrace `
+    -HythonElapsedMilliseconds 13500)
+$checks | Where-Object id -eq 'houdini.hython_probe' | ConvertTo-Json -Compress
+"""
+        )
+        check = json.loads(output)
+        self.assertEqual("yellow", check["level"])
+        self.assertIn("13.5 秒", check["message"])
+        self.assertIn("import hou 已验证", check["message"])
+        self.assertIn("无需修复", check["advice"])
+
+    def test_hython_final_timeout_remains_red_without_claiming_install_damage(
+        self,
+    ) -> None:
+        houdini = self.make_houdini_install("Houdini 21.0.440")
+        output = self.run_powershell(
+            f"""
+$checks = @(Test-HiaHoudiniProbeConsistency `
+    -HoudiniExe {_ps_literal(houdini)} `
+    -HoudiniOutput 'Houdini 21.0.440' `
+    -HoudiniExitCode 0 `
+    -HythonOutput '' `
+    -HythonExitCode -1 `
+    -HythonTimedOut `
+    -HythonElapsedMilliseconds 24012)
+$checks | Where-Object id -eq 'houdini.hython_probe' | ConvertTo-Json -Compress
+"""
+        )
+        check = json.loads(output)
+        self.assertEqual("red", check["level"])
+        self.assertIn("24.0 秒", check["message"])
+        self.assertIn("Houdini build 21.0.440 可读取", check["message"])
+        self.assertIn("尚未确认 import hou", check["message"])
+        self.assertIn("重负载结束后重新扫描", check["advice"])
+        self.assertNotIn("修复所选 Houdini 安装", check["advice"])
+
+    def test_hython_nonzero_or_missing_marker_remains_red(self) -> None:
+        houdini = self.make_houdini_install("Houdini 21.0.440")
+        output = self.run_powershell(
+            f"""
+$nonzero = @(Test-HiaHoudiniProbeConsistency `
+    -HoudiniExe {_ps_literal(houdini)} `
+    -HoudiniOutput 'Houdini 21.0.440' `
+    -HythonOutput 'probe failed' `
+    -HythonExitCode 7) | Where-Object id -eq 'houdini.hython_probe'
+$missingMarker = @(Test-HiaHoudiniProbeConsistency `
+    -HoudiniExe {_ps_literal(houdini)} `
+    -HoudiniOutput 'Houdini 21.0.440' `
+    -HythonOutput '{{"hou_import":true}}' `
+    -HythonExitCode 0) | Where-Object id -eq 'houdini.hython_probe'
+@($nonzero, $missingMarker) | ConvertTo-Json -Compress
+"""
+        )
+        checks = json.loads(output)
+        self.assertEqual(["red", "red"], [check["level"] for check in checks])
+        self.assertIn("退出码为 7", checks[0]["message"])
+        self.assertIn("未返回有效探针数据", checks[1]["message"])
+
+    def test_hython_probe_alone_gets_bounded_grace_and_clean_pythonpath(
+        self,
+    ) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8-sig")
+        function_source = source[
+            source.index("function Invoke-HiaHoudiniChecks"):
+            source.index("function Get-HiaPinnedCodexExecutable")
+        ]
+        self.assertIn("-GraceTimeoutSeconds $hythonGraceSeconds", function_source)
+        self.assertIn(
+            "-RemoveEnvironmentVariables @('PYTHONPATH')",
+            function_source,
+        )
+        self.assertIn(",flush=True)", function_source)
+        self.assertIn(
+            "[Math]::Min($TimeoutSeconds, 30 - $TimeoutSeconds)",
+            function_source,
+        )
+        self.assertEqual(1, function_source.count("-GraceTimeoutSeconds"))
+        self.assertEqual(1, function_source.count("-FilePath $hythonExe"))
+        self.assertLess(
+            function_source.index("Invoke-HiaProcess -FilePath $HoudiniExe"),
+            function_source.index("-GraceTimeoutSeconds $hythonGraceSeconds"),
+        )
+
     def test_houdini_and_hython_build_mismatch_is_blocking(self) -> None:
         houdini = self.make_houdini_install("Houdini 22.0.100")
         levels = self.probe_consistency(
@@ -252,7 +503,9 @@ $selected | ConvertTo-Json -Depth 5 -Compress
             checks,
         )
 
-    def test_bridge_python_accepts_python_org_per_user_install(self) -> None:
+    def test_explicit_advanced_bridge_override_accepts_python_org_install(
+        self,
+    ) -> None:
         fake_root = self.sandbox / "bridge-project"
         fake_root.mkdir()
         bridge = (
@@ -471,6 +724,7 @@ $value = [pscustomobject]@{
     cookie = 'cookie-value-must-not-survive'
     api_key = 'sk-abcdefghijklmnop'
     UV_INDEX_URL = 'https://private-index.example/simple'
+    HTTPS_PROXY = 'https://proxy-user:proxy-pass@proxy.example:8443/path'
     note = @'
 Authorization: Basic dXNlcjpwYXNz
 Authorization: Bearer bearer-value-must-not-survive
@@ -478,6 +732,8 @@ https://url-user:url-password@example.test/simple
 https://token-only-core@example.test/simple
 PIP_EXTRA_INDEX_URL=https://pip-secret.example/simple
 UV_INDEX=https://first-index.example/simple https://second-index.example/simple
+HTTP_PROXY=http://plain-proxy.example:8080
+NO_PROXY=localhost,internal.example
 next-line-visible
 '@
 }
@@ -498,6 +754,9 @@ ConvertTo-HiaRedactedJson -Value $value -Compress
         self.assertNotIn("pip-secret.example", output)
         self.assertNotIn("first-index.example", output)
         self.assertNotIn("second-index.example", output)
+        self.assertNotIn("proxy.example", output)
+        self.assertNotIn("plain-proxy.example", output)
+        self.assertNotIn("internal.example", output)
         self.assertIn("next-line-visible", payload["note"])
         self.assertIn("[REDACTED]", output)
 
@@ -896,7 +1155,7 @@ $deviceKey = [string]$data.contract.settings.device
         self.assertIn("UV_CACHE_DIR", installer_source)
         self.assertIn("--torch-backend=cu128", installer_source)
         self.assertIn("'--python', $workerPython", installer_source)
-        self.assertEqual(2, installer_source.count("'--default-index'"))
+        self.assertEqual(3, installer_source.count("'--default-index'"))
         self.assertIn("https://pypi.org/simple", installer_source)
         self.assertEqual(
             2,
@@ -967,6 +1226,10 @@ try {{
         -RequestedDevice auto `
         -TorchProbe $cpuTorch `
         -NvidiaAvailable $false
+    automatic_hardware_only = Resolve-HiaEmbeddingInstallDevice `
+        -RequestedDevice auto `
+        -TorchProbe $cpuTorch `
+        -NvidiaAvailable $true
     failure = $failure
 }} | ConvertTo-Json -Compress
 """
@@ -976,6 +1239,7 @@ try {{
         self.assertEqual("cuda", payload["automatic_cuda"])
         self.assertEqual("cuda", payload["repair_cuda"])
         self.assertEqual("cpu", payload["automatic_cpu"])
+        self.assertEqual("cpu", payload["automatic_hardware_only"])
         self.assertIn("neither CUDA-enabled PyTorch", payload["failure"])
 
         installer_source = EMBEDDING_INSTALLER_PATH.read_text(encoding="utf-8-sig")
@@ -987,7 +1251,7 @@ try {{
             decision_call,
         )
         self.assertIn(
-            "-not $torchCudaAvailable",
+            "-not $priorTorchCudaAvailable",
             installer_source[decision_call:cuda_install],
         )
         self.assertIn(
@@ -1057,6 +1321,8 @@ https://token-only-installer@example.test/simple
 UV_INDEX_URL=https://uv-secret.example/simple
 PIP_EXTRA_INDEX_URL=https://pip-secret.example/simple
 UV_INDEX=https://first-index.example/simple https://second-index.example/simple
+HTTPS_PROXY=https://proxy-user:proxy-pass@proxy.example:8443/path
+NO_PROXY=localhost,internal.example
 next-line-visible
 sk-abcdefghijk
 '@
@@ -1082,6 +1348,8 @@ sk-abcdefghijk
         self.assertNotIn("pip-secret.example", payload["safe"])
         self.assertNotIn("first-index.example", payload["safe"])
         self.assertNotIn("second-index.example", payload["safe"])
+        self.assertNotIn("proxy.example", payload["safe"])
+        self.assertNotIn("internal.example", payload["safe"])
         self.assertIn("next-line-visible", payload["safe"])
         self.assertIn("[REDACTED]", payload["safe"])
 
@@ -1189,6 +1457,252 @@ $duplicate = New-TestResult @(
             },
             json.loads(output),
         )
+
+    def test_gui_environment_repair_actions_cover_parser_only_and_existing_model(
+        self,
+    ) -> None:
+        base = {
+            "state": "ready",
+            "venv": {"portable": True},
+            "python": {"managed_marker": {"valid": True}},
+            "uv": {"available": True},
+            "parser": {"installed": True},
+            "torch": {"installed": False},
+            "embedding_worker": {"installed": False},
+            "models": {
+                "items": [
+                    {
+                        "profile_id": "qwen3-embedding-0.6b",
+                        "installed": False,
+                    }
+                ]
+            },
+            "embedding_mode": "fts5",
+        }
+        missing = json.loads(json.dumps(base))
+        missing["state"] = "missing"
+        missing_with_model = json.loads(json.dumps(missing))
+        missing_with_model["models"]["items"][0]["installed"] = True
+        legacy = json.loads(json.dumps(base))
+        legacy["state"] = "repair_required"
+        legacy["venv"]["portable"] = False
+        legacy["python"]["managed_marker"]["valid"] = False
+        legacy["parser"]["installed"] = False
+        legacy["torch"] = {
+            "installed": True,
+            "cuda_available": True,
+        }
+        legacy["embedding_worker"]["installed"] = True
+        legacy_with_model = json.loads(json.dumps(legacy))
+        legacy_with_model["models"]["items"][0]["installed"] = True
+        repair_required_with_model = json.loads(json.dumps(base))
+        repair_required_with_model["state"] = "repair_required"
+        repair_required_with_model["parser"]["installed"] = False
+        repair_required_with_model["models"]["items"][0]["installed"] = True
+        unsafe = json.loads(json.dumps(base))
+        unsafe["state"] = "unsafe"
+        existing_model = json.loads(json.dumps(base))
+        existing_model["models"]["items"][0]["installed"] = True
+        ready_model = json.loads(json.dumps(existing_model))
+        ready_model["torch"]["installed"] = True
+        ready_model["embedding_worker"]["installed"] = True
+
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(WPF_SCRIPT_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'HiaLauncher.Wpf.ps1 did not parse.' }}
+foreach ($name in @(
+    'Get-HiaKnowledgeEnvironmentAction',
+    'Get-HiaKnowledgeEnvironmentReason',
+    'Get-HiaKnowledgeEnvironmentStageFromLog'
+)) {{
+    $definition = @($ast.FindAll({{
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name
+    }}, $true))
+    if ($definition.Count -ne 1) {{ throw "missing helper: $name" }}
+    Invoke-Expression $definition[0].Extent.Text
+}}
+$missing = {_ps_literal(json.dumps(missing))} | ConvertFrom-Json
+$missingWithModel = {_ps_literal(json.dumps(missing_with_model))} | ConvertFrom-Json
+$legacy = {_ps_literal(json.dumps(legacy))} | ConvertFrom-Json
+$legacyWithModel = {_ps_literal(json.dumps(legacy_with_model))} | ConvertFrom-Json
+$repairWithModel = {_ps_literal(json.dumps(repair_required_with_model))} | ConvertFrom-Json
+$unsafe = {_ps_literal(json.dumps(unsafe))} | ConvertFrom-Json
+$existing = {_ps_literal(json.dumps(existing_model))} | ConvertFrom-Json
+$readyModel = {_ps_literal(json.dumps(ready_model))} | ConvertFrom-Json
+$fts = {_ps_literal(json.dumps(base))} | ConvertFrom-Json
+$profile = 'qwen3-embedding-0.6b'
+[pscustomobject]@{{
+    missing_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $missing -SelectedProfile $profile
+    missing_model_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $missingWithModel -SelectedProfile $profile
+    legacy_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $legacy -SelectedProfile $profile
+    legacy_model_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $legacyWithModel -SelectedProfile $profile
+    repair_model_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $repairWithModel -SelectedProfile $profile
+    unsafe_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $unsafe -SelectedProfile $profile
+    existing_model_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $existing -SelectedProfile $profile
+    ready_model_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $readyModel -SelectedProfile $profile
+    fts_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $fts -SelectedProfile $profile
+    legacy_reason = Get-HiaKnowledgeEnvironmentReason `
+        -Environment $legacy -SelectedProfile $profile
+    legacy_model_reason = Get-HiaKnowledgeEnvironmentReason `
+        -Environment $legacyWithModel -SelectedProfile $profile
+    existing_model_reason = Get-HiaKnowledgeEnvironmentReason `
+        -Environment $existing -SelectedProfile $profile
+    parser_stage = Get-HiaKnowledgeEnvironmentStageFromLog `
+        -LogText 'Installing and validating pypdf'
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual("environment-install", payload["missing_action"])
+        self.assertEqual(
+            "environment-install-embedding",
+            payload["missing_model_action"],
+        )
+        self.assertEqual("environment-repair", payload["legacy_action"])
+        self.assertEqual(
+            "environment-repair-embedding",
+            payload["legacy_model_action"],
+        )
+        self.assertEqual(
+            "environment-repair-embedding",
+            payload["repair_model_action"],
+        )
+        self.assertEqual("environment-repair", payload["unsafe_action"])
+        self.assertEqual(
+            "environment-repair-embedding",
+            payload["existing_model_action"],
+        )
+        self.assertEqual("", payload["ready_model_action"])
+        self.assertEqual("", payload["fts_action"])
+        self.assertIn("项目外 Python", payload["legacy_reason"])
+        self.assertIn("受管标记", payload["legacy_reason"])
+        self.assertIn("一次修复", payload["legacy_model_reason"])
+        self.assertIn("复用现有模型和项目缓存", payload["legacy_model_reason"])
+        self.assertIn("PyTorch", payload["existing_model_reason"])
+        self.assertIn("复用模型和项目缓存", payload["existing_model_reason"])
+        self.assertIn("pypdf", payload["parser_stage"])
+
+    def test_gui_knowledge_environment_repair_is_async_logged_and_retryable(
+        self,
+    ) -> None:
+        wpf = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        wrapper = (
+            REPOSITORY_ROOT / "scripts" / "hia-knowledge.ps1"
+        ).read_text(encoding="utf-8-sig")
+        xaml = XAML_PATH.read_text(encoding="utf-8")
+
+        start = wpf[
+            wpf.index("function Start-HiaKnowledgeEnvironmentRepair"):
+            wpf.index("function Update-PathSummaries")
+        ]
+        complete = wpf[
+            wpf.index("function Complete-HiaKnowledgeEnvironmentRepair"):
+            wpf.index("$script:knowledgeEnvironmentTimer.Add_Tick")
+        ]
+        dedicated_click = wpf[
+            wpf.index("$repairKnowledgeEnvironmentButton.Add_Click"):
+            wpf.index("$importKnowledgeFileButton.Add_Click")
+        ]
+        repair_click = wpf[
+            wpf.index("$repairButton.Add_Click"):
+            wpf.index("$launchButton.Add_Click")
+        ]
+
+        self.assertIn("Get-HiaEmbeddingInstallLockInfo", start)
+        self.assertIn("New-HiaEmbeddingInstallLogPath", start)
+        self.assertIn(
+            "Join-Path $projectRoot 'scripts\\hia-knowledge.ps1'",
+            start,
+        )
+        self.assertIn("'-LogPath', $environmentLogPath", start)
+        self.assertIn("$selectedProfile = Get-ComboEmbeddingProfile", start)
+        self.assertIn(
+            "[string]::IsNullOrWhiteSpace($selectedProfile)",
+            start,
+        )
+        self.assertIn(
+            "$arguments += @('-Profile', $selectedProfile)",
+            start,
+        )
+        self.assertIn("'-Device', (Get-ComboEmbeddingDevice)", start)
+        self.assertIn("'environment-install'", start)
+        self.assertIn("'environment-repair'", start)
+        self.assertNotIn("Start-HiaEmbeddingInstall", start)
+        self.assertNotIn("Install-HiaEmbedding.ps1", start)
+        self.assertIn("ReadToEndAsync()", start)
+        self.assertIn("$script:knowledgeEnvironmentTimer.Start()", start)
+        self.assertNotIn("WaitForExit", start)
+        self.assertIn("Get-HiaEmbeddingInstallFailureSummary", complete)
+        self.assertIn("$script:knowledgeEnvironmentLastFailure", complete)
+        self.assertIn("$knowledgeEnvironmentLogExpander.IsExpanded = $true", complete)
+        self.assertIn("可直接重试", complete)
+        self.assertIn("Refresh-HiaKnowledgeDisplay -Quiet", complete)
+        self.assertIn("Invoke-GuiScan", complete)
+        self.assertIn(
+            "$completedAction -like 'environment-*-embedding'",
+            complete,
+        )
+        self.assertIn(
+            "$nextAction -like 'environment-*-embedding'",
+            complete,
+        )
+        self.assertLess(
+            complete.index("$nextAction -like 'environment-*-embedding'"),
+            complete.index(
+                "项目本地 Python、uv、pypdf、PyTorch 与 "
+                "embedding worker 已完成验证"
+            ),
+        )
+        self.assertNotIn("Start-HiaKnowledgeIndexProcess -Action 'build'", start)
+        self.assertNotIn(
+            "Start-HiaKnowledgeIndexProcess -Action 'build'",
+            complete,
+        )
+        for released_state in (
+            "$script:knowledgeEnvironmentProcess = $null",
+            "$script:knowledgeEnvironmentOutputTask = $null",
+            "$script:knowledgeEnvironmentErrorTask = $null",
+        ):
+            self.assertIn(released_state, complete)
+        self.assertIn(
+            "Start-HiaKnowledgeEnvironmentRepair",
+            dedicated_click,
+        )
+        self.assertIn("Get-HiaKnowledgeEnvironmentAction", repair_click)
+        self.assertLess(
+            repair_click.index("Test-CurrentRedCheck -Id 'codex.executable'"),
+            repair_click.index("Get-HiaKnowledgeEnvironmentAction"),
+        )
+        self.assertIn("[string]$LogPath = ''", wrapper)
+        self.assertIn("$installArguments += @('-LogPath', $LogPath)", wrapper)
+        for control in (
+            "KnowledgeEnvironmentReasonText",
+            "KnowledgeEnvironmentProgressBar",
+            "KnowledgeEnvironmentStageText",
+            "KnowledgeEnvironmentLogExpander",
+            "KnowledgeEnvironmentLogPathText",
+            "KnowledgeEnvironmentLogTextBox",
+        ):
+            self.assertIn(f'x:Name="{control}"', xaml)
+        self.assertIn("正在准备项目本地工具链", xaml)
 
     def test_embedding_install_lock_blocks_second_launcher_and_releases(
         self,
@@ -1632,11 +2146,34 @@ $build = New-HiaKnowledgeIndexProcessPlan `
             "recoverable": True,
             "index": base_index,
         }
+        early_error = {
+            "protocol": protocol,
+            "event": "error",
+            "action": "build",
+            "code": "BUILD_FAILED",
+            "message": "source validation failed",
+            "recoverable": True,
+            "index": {},
+        }
         invalid_protocol = {**progress, "protocol": "wrong/1"}
         missing_index = {key: value for key, value in progress.items() if key != "index"}
         negative_index = {**base_index, "pending_chunks": -1}
         negative = {**progress, "index": negative_index}
-        lines = [progress, completed, error]
+        active_profile_index = {**base_index}
+        active_profile_index["active_profile"] = active_profile_index.pop(
+            "profile_id"
+        )
+        active_profile_only = {
+            **progress,
+            "index": active_profile_index,
+        }
+        lines = [
+            progress,
+            completed,
+            error,
+            active_profile_only,
+            early_error,
+        ]
         invalid_lines = [invalid_protocol, missing_index, negative]
         ps_lines = ",\n".join(
             _ps_literal(json.dumps(item, ensure_ascii=False))
@@ -1674,15 +2211,20 @@ $rejected = @(
         )
         payload = json.loads(output)
         self.assertEqual(
-            ["progress", "completed", "error"],
+            ["progress", "completed", "error", "progress", "error"],
             [event["event"] for event in payload["events"]],
         )
         self.assertEqual(3, payload["events"][0]["index"]["vector_chunks"])
         self.assertTrue(payload["events"][1]["index"]["complete"])
         self.assertEqual(
+            public["default_profile"],
+            payload["events"][3]["index"]["profile_id"],
+        )
+        self.assertEqual(
             "VECTOR_INDEX_NO_PROGRESS",
             payload["events"][2]["code"],
         )
+        self.assertEqual("BUILD_FAILED", payload["events"][4]["code"])
         self.assertTrue(all(message != "accepted" for message in payload["rejected"]))
 
     def test_embedding_preflight_rejects_reparse_ancestors_before_worker_probe(self) -> None:
@@ -1780,10 +2322,9 @@ $cacheState = Get-HiaEmbeddingRuntimeState `
             self.assertTrue(
                 Path(plan["model_dir"]).is_relative_to(REPOSITORY_ROOT / ".runtime")
             )
-            self.assertTrue(
-                Path(plan["layout"]["worker_python"]).is_relative_to(
-                    REPOSITORY_ROOT / ".runtime"
-                )
+            self.assertEqual(
+                REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe",
+                Path(plan["layout"]["worker_python"]),
             )
             for directory in plan["required_directories"]:
                 self.assertTrue(Path(directory).is_relative_to(REPOSITORY_ROOT))
@@ -2009,6 +2550,8 @@ function Get-RenderOutputError([string]$Value) {{
     outside = $outside
     windows_error = (Get-RenderOutputError (Join-Path $env:SystemRoot 'HIA-output-test'))
     houdini_error = (Get-RenderOutputError (Join-Path {_ps_literal(houdini_root)} 'renders'))
+    previews_error = (Get-RenderOutputError (Join-Path $root '.runtime\cache\previews\final'))
+    tmp_error = (Get-RenderOutputError (Join-Path $root '.runtime\cache\tmp'))
 }} | ConvertTo-Json -Compress
 """
         )
@@ -2025,6 +2568,8 @@ function Get-RenderOutputError([string]$Value) {{
             "device_error",
             "windows_error",
             "houdini_error",
+            "previews_error",
+            "tmp_error",
         ):
             self.assertTrue(payload[key], key)
         self.assertEqual([], list(custom_output.glob(".hia-write-probe-*.tmp")))
@@ -2267,27 +2812,39 @@ try {{
         )
 
         wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
-        handler_start = wpf_source.index("$cleanupScreenshotsButton.Add_Click")
-        handler_end = wpf_source.index("$copyReportButton.Add_Click", handler_start)
-        cleanup_handler = wpf_source[handler_start:handler_end]
-        preview_call = cleanup_handler.index("Invoke-HiaScreenshotCacheCleanup")
-        confirmation = cleanup_handler.index("[System.Windows.MessageBox]::Show")
-        delete_call = cleanup_handler.index("-Delete", confirmation)
+        helper_start = wpf_source.index("function Invoke-HiaCacheCleanup")
+        helper_end = wpf_source.index(
+            "$cleanupScreenshotsButton.Add_Click",
+            helper_start,
+        )
+        cleanup_helper = wpf_source[helper_start:helper_end]
+        handler_end = wpf_source.index("$openReportButton.Add_Click", helper_end)
+        cleanup_handler = wpf_source[helper_end:handler_end]
+        preview_call = cleanup_helper.index("-Arguments @('-Action', 'list'")
+        confirmation = cleanup_helper.index("[System.Windows.MessageBox]::Show")
+        delete_call = cleanup_helper.index("'-Action', 'clear'", confirmation)
         self.assertLess(preview_call, confirmation)
         self.assertLess(confirmation, delete_call)
+        self.assertIn("Invoke-HiaCacheCleanup -CategoryIds @(", cleanup_handler)
         for required in (
-            "唯一允许目标",
-            "匹配 PNG 文件",
-            "总大小",
+            "hia-cache.ps1",
+            "'-Category', $categoryCsv",
+            "'-SnapshotHash', [string]$preview.snapshot_hash",
+            "预计释放",
+            "项目资料、模型、工具链、附件、会话检查点、HIP 与最终输出不会被清理",
             "[System.Windows.MessageBoxButton]::YesNo",
             "[System.Windows.MessageBoxResult]::No",
             "未删除任何文件",
-            "已删除 {0} 个",
-            "跳过 {2} 个",
-            "失败 {3} 个",
-            "$cleanupScreenshotsButton.IsEnabled = -not $Busy",
+            "缓存清理完成",
+            "Update-HiaCacheActions",
         ):
             self.assertIn(required, wpf_source)
+        for forbidden in (
+            "Invoke-HiaScreenshotCacheCleanup",
+            "[System.IO.File]::Delete",
+            "Remove-Item",
+        ):
+            self.assertNotIn(forbidden, cleanup_helper + cleanup_handler)
 
     def test_preflight_checks_only_the_selected_mcp_backend(self) -> None:
         fake_root = self.sandbox / "backend-preflight"
@@ -2334,7 +2891,7 @@ $fxResult = Invoke-HiaPreflight `
             self.assertIn(required, xaml_source)
 
         for required in (
-            "New-HiaKnowledgeIndexProcessPlan",
+            "New-HiaKnowledgeCliProcessPlan",
             "ConvertFrom-HiaKnowledgeIndexJsonLine",
             "ReadLineAsync()",
             "ReadToEndAsync()",
@@ -2447,6 +3004,11 @@ $fxResult = Invoke-HiaPreflight `
         ET.parse(XAML_PATH)
         required_types = {
             "LayoutRoot": "System.Windows.Controls.Grid",
+            "CustomTitleBar": "System.Windows.Controls.Border",
+            "MinimizeWindowButton": "System.Windows.Controls.Button",
+            "MaximizeWindowButton": "System.Windows.Controls.Button",
+            "MaximizeWindowGlyph": "System.Windows.Controls.TextBlock",
+            "CloseWindowButton": "System.Windows.Controls.Button",
             "NavigationColumn": "System.Windows.Controls.ColumnDefinition",
             "NavigationRail": "System.Windows.Controls.Border",
             "SidebarPanel": "System.Windows.Controls.Grid",
@@ -2485,6 +3047,12 @@ $fxResult = Invoke-HiaPreflight `
             "RecoveryCheckpointText": "System.Windows.Controls.TextBlock",
             "RecoverCheckpointOption": "System.Windows.Controls.RadioButton",
             "NormalLaunchOption": "System.Windows.Controls.RadioButton",
+            "OverviewQuickActionsPanel": "System.Windows.Controls.Border",
+            "QuickRescanButton": "System.Windows.Controls.Button",
+            "QuickRepairButton": "System.Windows.Controls.Button",
+            "QuickCleanupScreenshotsButton": "System.Windows.Controls.Button",
+            "QuickOpenReportButton": "System.Windows.Controls.Button",
+            "QuickCopyReportButton": "System.Windows.Controls.Button",
             "OverallStatusBadge": "System.Windows.Controls.Border",
             "OverallStatusDot": "System.Windows.Shapes.Ellipse",
             "OverallStatusText": "System.Windows.Controls.TextBlock",
@@ -2499,12 +3067,36 @@ $fxResult = Invoke-HiaPreflight `
             "BridgePathText": "System.Windows.Controls.TextBlock",
             "RenderOutputTextBox": "System.Windows.Controls.TextBox",
             "BrowseRenderOutputButton": "System.Windows.Controls.Button",
+            "EnvironmentKnowledgeRuntimeText": "System.Windows.Controls.TextBlock",
+            "EnvironmentKnowledgeRuntimePathText": "System.Windows.Controls.TextBlock",
+            "EnvironmentActivationCommandText": "System.Windows.Controls.TextBlock",
+            "CopyActivationCommandButton": "System.Windows.Controls.Button",
+            "KnowledgeEnvironmentStatusText": "System.Windows.Controls.TextBlock",
+            "KnowledgeEnvironmentPathText": "System.Windows.Controls.TextBlock",
+            "RepairKnowledgeEnvironmentButton": "System.Windows.Controls.Button",
+            "KnowledgeEnvironmentReasonText": "System.Windows.Controls.TextBlock",
+            "KnowledgeEnvironmentProgressPanel": "System.Windows.Controls.Grid",
+            "KnowledgeEnvironmentProgressBar": "System.Windows.Controls.ProgressBar",
+            "KnowledgeEnvironmentStageText": "System.Windows.Controls.TextBlock",
+            "KnowledgeEnvironmentLogExpander": "System.Windows.Controls.Expander",
+            "KnowledgeEnvironmentLogPathText": "System.Windows.Controls.TextBlock",
+            "KnowledgeEnvironmentLogTextBox": "System.Windows.Controls.TextBox",
+            "KnowledgeSourcesSummaryText": "System.Windows.Controls.TextBlock",
+            "ImportKnowledgeFileButton": "System.Windows.Controls.Button",
+            "ImportKnowledgeFolderButton": "System.Windows.Controls.Button",
+            "RefreshKnowledgeSourcesButton": "System.Windows.Controls.Button",
+            "KnowledgeSourcesList": "System.Windows.Controls.ListBox",
+            "DeleteKnowledgeSourceButton": "System.Windows.Controls.Button",
+            "RescanKnowledgeSourcesButton": "System.Windows.Controls.Button",
             "KnowledgeIndexPanel": "System.Windows.Controls.Border",
             "KnowledgeIndexModelText": "System.Windows.Controls.TextBlock",
             "KnowledgeIndexCountText": "System.Windows.Controls.TextBlock",
             "KnowledgeIndexProgressBar": "System.Windows.Controls.ProgressBar",
             "KnowledgeIndexStatusText": "System.Windows.Controls.TextBlock",
             "KnowledgeIndexActionButton": "System.Windows.Controls.Button",
+            "CacheSummaryText": "System.Windows.Controls.TextBlock",
+            "RefreshCacheButton": "System.Windows.Controls.Button",
+            "CacheCategoriesList": "System.Windows.Controls.ListBox",
             "PassCountText": "System.Windows.Controls.TextBlock",
             "WarningCountText": "System.Windows.Controls.TextBlock",
             "BlockedCountText": "System.Windows.Controls.TextBlock",
@@ -2519,6 +3111,7 @@ $fxResult = Invoke-HiaPreflight `
             "RescanButton": "System.Windows.Controls.Button",
             "RepairButton": "System.Windows.Controls.Button",
             "CleanupScreenshotsButton": "System.Windows.Controls.Button",
+            "OpenReportButton": "System.Windows.Controls.Button",
             "CopyReportButton": "System.Windows.Controls.Button",
             "LaunchButton": "System.Windows.Controls.Button",
         }
@@ -2534,6 +3127,8 @@ $reader = [Xml.XmlNodeReader]::new($xaml)
 try {{
     $window = [Windows.Markup.XamlReader]::Load($reader)
     $launchButton = $window.FindName('LaunchButton')
+    # Logical viewports cover the default 100%, 125%, 150%, and the
+    # minimum-size 200% DPI scenarios without opening a real window.
     foreach ($size in @(
         [Windows.Size]::new(1180, 820),
         [Windows.Size]::new(944, 656),
@@ -2560,6 +3155,21 @@ try {{
         $control = $window.FindName($name)
         if ($null -eq $control) {{ throw "Missing control: $name" }}
         $types[$name] = $control.GetType().FullName
+    }}
+    $recoveryTransform = $window.FindName('RecoveryCard').RenderTransform
+    $quickActionsTransform = (
+        $window.FindName('OverviewQuickActionsPanel').RenderTransform
+    )
+    $knowledgeIndexTransform = $window.FindName('KnowledgeIndexPanel').RenderTransform
+    if (
+        $recoveryTransform -isnot [Windows.Media.ScaleTransform] -or
+        $quickActionsTransform -isnot [Windows.Media.ScaleTransform] -or
+        $knowledgeIndexTransform -isnot [Windows.Media.ScaleTransform] -or
+        [object]::ReferenceEquals($recoveryTransform, $quickActionsTransform) -or
+        [object]::ReferenceEquals($recoveryTransform, $knowledgeIndexTransform) -or
+        [object]::ReferenceEquals($quickActionsTransform, $knowledgeIndexTransform)
+    ) {{
+        throw 'Hover cards must own independent layout-neutral transforms.'
     }}
     $loadedWindow = $window
     $layoutRoot = $loadedWindow.FindName('LayoutRoot')
@@ -2685,7 +3295,7 @@ try {{
         )
         self.assertEqual(required_types, json.loads(completed.stdout))
 
-    def test_wpf_xaml_is_self_contained_static_and_uses_standard_chrome(self) -> None:
+    def test_wpf_xaml_is_self_contained_and_uses_safe_dark_window_chrome(self) -> None:
         xaml_source = XAML_PATH.read_text(encoding="utf-8")
         wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
@@ -2694,6 +3304,28 @@ try {{
         self.assertIn('FontFamily="Segoe UI"', xaml_source)
         self.assertRegex(xaml_source, r'MinWidth="\d+"')
         self.assertRegex(xaml_source, r'MinHeight="\d+"')
+        self.assertIn('WindowStyle="None"', xaml_source)
+        self.assertIn('AllowsTransparency="False"', xaml_source)
+        self.assertIn('Background="#090C18"', xaml_source)
+        self.assertIn('x:Name="CustomTitleBar"', xaml_source)
+        self.assertIn('Background="{StaticResource TitleBarGradientBrush}"', xaml_source)
+        self.assertIn('x:Name="MinimizeWindowButton"', xaml_source)
+        self.assertIn('x:Name="MaximizeWindowButton"', xaml_source)
+        self.assertIn('x:Name="CloseWindowButton"', xaml_source)
+        self.assertIn("[System.Windows.Shell.WindowChrome]::new()", wpf_source)
+        self.assertIn("$windowChrome.CaptionHeight = 42", wpf_source)
+        self.assertIn("$windowChrome.ResizeBorderThickness", wpf_source)
+        self.assertIn("$windowChrome.GlassFrameThickness", wpf_source)
+        self.assertIn("$windowChrome.UseAeroCaptionButtons = $false", wpf_source)
+        self.assertIn("SetIsHitTestVisibleInChrome", wpf_source)
+        for command in (
+            "MinimizeWindow",
+            "MaximizeWindow",
+            "RestoreWindow",
+            "CloseWindow",
+        ):
+            self.assertIn(f"[System.Windows.SystemCommands]::{command}", wpf_source)
+        self.assertIn("$window.Add_StateChanged", wpf_source)
         self.assertIn('x:Name="BusyProgressBar"', xaml_source)
         self.assertIn('IsIndeterminate="True"', xaml_source)
         self.assertIn('Title="Big-Chicken Houdini Intelligence Agent"', xaml_source)
@@ -2736,13 +3368,7 @@ try {{
             "assembly=",
             "pack://",
             "file://",
-            "Storyboard",
-            "BeginStoryboard",
-            "EventTrigger",
-            "Animation",
-            'WindowStyle="None"',
             'AllowsTransparency="True"',
-            "WindowChrome",
             "DragMove",
             "x:Class=",
             ".jpg",
@@ -2823,16 +3449,30 @@ try {{
         columns = layout_root.find(f"{presentation}Grid.ColumnDefinitions")
         rows = layout_root.find(f"{presentation}Grid.RowDefinitions")
         self.assertIsNotNone(columns)
-        self.assertIsNone(rows)
+        self.assertIsNotNone(rows)
+        self.assertEqual(
+            ["42", "*"],
+            [row.attrib["Height"] for row in list(rows)],
+        )
         self.assertEqual(
             ["212", "*"],
             [column.attrib["Width"] for column in list(columns)],
         )
         self.assertEqual("212", named["NavigationColumn"].attrib["Width"])
 
+        title_bar = named["CustomTitleBar"]
         navigation_rail = named["NavigationRail"]
         main_shell = named["MainShell"]
+        self.assertEqual("0", title_bar.attrib["Grid.Row"])
+        self.assertEqual("2", title_bar.attrib["Grid.ColumnSpan"])
+        self.assertEqual("42", title_bar.attrib["Height"])
+        self.assertEqual(
+            "{StaticResource TitleBarGradientBrush}",
+            title_bar.attrib["Background"],
+        )
+        self.assertEqual("1", navigation_rail.attrib["Grid.Row"])
         self.assertEqual("0", navigation_rail.attrib["Grid.Column"])
+        self.assertEqual("1", main_shell.attrib["Grid.Row"])
         self.assertEqual("1", main_shell.attrib["Grid.Column"])
         main_rows = main_shell.find(f"{presentation}Grid.RowDefinitions")
         self.assertIsNotNone(main_rows)
@@ -2953,6 +3593,112 @@ try {{
         self.assertLessEqual(
             xaml_source.count('Style="{StaticResource SectionCardStyle}"'),
             1,
+        )
+
+    def test_wpf_subtle_hover_motion_is_scoped_and_layout_neutral(self) -> None:
+        tree = ET.parse(XAML_PATH)
+        root = tree.getroot()
+        presentation = "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}"
+        xaml_key = "{http://schemas.microsoft.com/winfx/2006/xaml}Key"
+        xaml_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
+        named = {
+            element.attrib.get(xaml_name): element
+            for element in root.iter()
+            if xaml_name in element.attrib
+        }
+        styles = {
+            element.attrib.get(xaml_key): element
+            for element in root.iter(f"{presentation}Style")
+            if xaml_key in element.attrib
+        }
+        xaml_source = XAML_PATH.read_text(encoding="utf-8")
+
+        hover_style = styles["SubtleInteractiveCardStyle"]
+        hover_source = ET.tostring(hover_style, encoding="unicode")
+        self.assertEqual("Border", hover_style.attrib["TargetType"])
+        self.assertIn("RenderTransformOrigin", hover_source)
+        self.assertNotIn("LayoutTransform", hover_source)
+        self.assertNotIn('<Setter Property="RenderTransform"', hover_source)
+        self.assertIn("ScaleTransform.ScaleX", hover_source)
+        self.assertIn("ScaleTransform.ScaleY", hover_source)
+        self.assertNotIn("TranslateTransform", hover_source)
+        self.assertNotIn("RotateTransform", hover_source)
+
+        event_triggers = list(hover_style.iter(f"{presentation}EventTrigger"))
+        self.assertEqual(
+            {"MouseEnter", "MouseLeave"},
+            {trigger.attrib["RoutedEvent"] for trigger in event_triggers},
+        )
+        animations = list(hover_style.iter(f"{presentation}DoubleAnimation"))
+        self.assertEqual(4, len(animations))
+        self.assertEqual(
+            {"0:0:0.14", "0:0:0.16"},
+            {animation.attrib["Duration"] for animation in animations},
+        )
+        self.assertEqual(
+            {"1", "1.006"},
+            {animation.attrib["To"] for animation in animations},
+        )
+        self.assertEqual(
+            {
+                "(UIElement.RenderTransform).(ScaleTransform.ScaleX)",
+                "(UIElement.RenderTransform).(ScaleTransform.ScaleY)",
+            },
+            {
+                animation.attrib["Storyboard.TargetProperty"]
+                for animation in animations
+            },
+        )
+        self.assertTrue(
+            all(
+                abs(float(animation.attrib["To"]) - 1.0) <= 0.0061
+                for animation in animations
+            )
+        )
+        self.assertTrue(
+            all("RepeatBehavior" not in animation.attrib for animation in animations)
+        )
+        self.assertTrue(
+            all("AutoReverse" not in animation.attrib for animation in animations)
+        )
+        self.assertEqual(2, xaml_source.count("<EventTrigger"))
+        self.assertEqual(2, xaml_source.count("<BeginStoryboard"))
+        self.assertEqual(4, xaml_source.count("<DoubleAnimation"))
+        for forbidden in (
+            "RepeatBehavior",
+            "AutoReverse",
+            "Forever",
+            "BounceEase",
+            "ElasticEase",
+        ):
+            self.assertNotIn(forbidden, xaml_source)
+        for button_style in ("ActionButtonStyle", "PrimaryButtonStyle"):
+            button_source = ET.tostring(styles[button_style], encoding="unicode")
+            self.assertNotIn("Storyboard", button_source)
+            self.assertNotIn("Animation", button_source)
+
+        animated_cards = {
+            name
+            for name, element in named.items()
+            if element.attrib.get("Style")
+            == "{StaticResource SubtleInteractiveCardStyle}"
+        }
+        self.assertEqual(
+            {
+                "RecoveryCard",
+                "OverviewQuickActionsPanel",
+                "KnowledgeIndexPanel",
+            },
+            animated_cards,
+        )
+        for name in animated_cards:
+            card_source = ET.tostring(named[name], encoding="unicode")
+            self.assertIn("ScaleTransform", card_source)
+            self.assertIn('ScaleX="1"', card_source)
+            self.assertIn('ScaleY="1"', card_source)
+        self.assertEqual(
+            "{StaticResource PrimaryButtonStyle}",
+            named["LaunchButton"].attrib["Style"],
         )
 
     def test_wpf_runtime_pickers_have_explicit_high_contrast_templates(self) -> None:
@@ -3145,7 +3891,7 @@ try {{
             for element in root.iter()
             if "TabIndex" in element.attrib
         )
-        self.assertEqual(list(range(22)), tab_indices)
+        self.assertEqual(list(range(39)), tab_indices)
         expected_tab_order = {
             "OverviewNavButton": 0,
             "EnvironmentNavButton": 1,
@@ -3153,22 +3899,39 @@ try {{
             "ReportsSettingsNavButton": 3,
             "RecoverCheckpointOption": 4,
             "NormalLaunchOption": 5,
-            "McpBackendComboBox": 6,
-            "EmbeddingProfileComboBox": 7,
-            "EmbeddingDeviceComboBox": 8,
-            "HoudiniComboBox": 9,
-            "BrowseHoudiniButton": 10,
-            "BridgePythonComboBox": 11,
-            "BrowseBridgeButton": 12,
-            "RenderOutputTextBox": 13,
-            "BrowseRenderOutputButton": 14,
-            "KnowledgeIndexActionButton": 15,
-            "ReportPathTextBox": 16,
-            "RescanButton": 17,
-            "RepairButton": 18,
-            "CleanupScreenshotsButton": 19,
-            "CopyReportButton": 20,
-            "LaunchButton": 21,
+            "QuickRescanButton": 6,
+            "QuickRepairButton": 7,
+            "QuickCleanupScreenshotsButton": 8,
+            "QuickOpenReportButton": 9,
+            "QuickCopyReportButton": 10,
+            "McpBackendComboBox": 11,
+            "EmbeddingProfileComboBox": 12,
+            "EmbeddingDeviceComboBox": 13,
+            "HoudiniComboBox": 14,
+            "BrowseHoudiniButton": 15,
+            "BridgePythonComboBox": 16,
+            "BrowseBridgeButton": 17,
+            "RenderOutputTextBox": 18,
+            "BrowseRenderOutputButton": 19,
+            "CopyActivationCommandButton": 20,
+            "RepairKnowledgeEnvironmentButton": 21,
+            "KnowledgeEnvironmentLogExpander": 22,
+            "ImportKnowledgeFileButton": 23,
+            "ImportKnowledgeFolderButton": 24,
+            "RefreshKnowledgeSourcesButton": 25,
+            "KnowledgeSourcesList": 26,
+            "DeleteKnowledgeSourceButton": 27,
+            "RescanKnowledgeSourcesButton": 28,
+            "KnowledgeIndexActionButton": 29,
+            "RefreshCacheButton": 30,
+            "CacheCategoriesList": 31,
+            "CleanupScreenshotsButton": 32,
+            "ReportPathTextBox": 33,
+            "RescanButton": 34,
+            "RepairButton": 35,
+            "OpenReportButton": 36,
+            "CopyReportButton": 37,
+            "LaunchButton": 38,
         }
         named_tab_order = {
             element.attrib[xaml_name]: int(element.attrib["TabIndex"])
@@ -3199,6 +3962,28 @@ try {{
             for element in root.iter()
             if xaml_name in element.attrib
         }
+        for name in (
+            "MinimizeWindowButton",
+            "MaximizeWindowButton",
+            "CloseWindowButton",
+        ):
+            button = named[name]
+            self.assertEqual(
+                "{StaticResource "
+                + (
+                    "CloseCaptionButtonStyle"
+                    if name == "CloseWindowButton"
+                    else "CaptionButtonStyle"
+                )
+                + "}",
+                button.attrib["Style"],
+            )
+            self.assertIn("AutomationProperties.Name", button.attrib)
+
+        caption_style_source = styles["CaptionButtonStyle"]
+        self.assertIn('Property="Focusable" Value="False"', caption_style_source)
+        self.assertIn('Property="IsTabStop" Value="False"', caption_style_source)
+
         self.assertEqual("True", named["LaunchButton"].attrib["IsDefault"])
         self.assertEqual(
             "{StaticResource PrimaryButtonStyle}",
@@ -3213,9 +3998,15 @@ try {{
         self.assertEqual(["LaunchButton"], primary_buttons)
         for secondary_name in (
             "KnowledgeIndexActionButton",
+            "QuickRescanButton",
+            "QuickRepairButton",
+            "QuickCleanupScreenshotsButton",
+            "QuickOpenReportButton",
+            "QuickCopyReportButton",
             "RescanButton",
             "RepairButton",
             "CleanupScreenshotsButton",
+            "OpenReportButton",
             "CopyReportButton",
         ):
             self.assertEqual(
@@ -3224,6 +4015,10 @@ try {{
             )
 
         for event_binding in (
+            "$minimizeWindowButton.Add_Click",
+            "$maximizeWindowButton.Add_Click",
+            "$closeWindowButton.Add_Click",
+            "$window.Add_StateChanged",
             "$overviewNavButton.Add_Click",
             "$environmentNavButton.Add_Click",
             "$preflightNavButton.Add_Click",
@@ -3239,7 +4034,14 @@ try {{
             "$browseRenderOutputButton.Add_Click",
             "$repairButton.Add_Click",
             "$cleanupScreenshotsButton.Add_Click",
+            "$openReportButton.Add_Click",
             "$copyReportButton.Add_Click",
+            "$copyActivationCommandButton.Add_Click",
+            "$quickRescanButton.Add_Click",
+            "$quickRepairButton.Add_Click",
+            "$quickCleanupScreenshotsButton.Add_Click",
+            "$quickOpenReportButton.Add_Click",
+            "$quickCopyReportButton.Add_Click",
             "$launchButton.Add_Click",
             "$window.Add_SizeChanged",
             "$window.Add_ContentRendered",
@@ -3249,6 +4051,169 @@ try {{
             1,
             wpf_source.count("function Set-HiaLauncherPage"),
         )
+
+    def test_overview_quick_actions_reuse_handlers_and_show_canonical_venv(self) -> None:
+        xaml_source = XAML_PATH.read_text(encoding="utf-8")
+        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        core_source = MODULE_PATH.read_text(encoding="utf-8-sig")
+        managed_environment_message = (
+            "HIA Python 环境位于项目根目录 .venv；"
+            "受管 CPython、uv、模型与缓存位于 .runtime。"
+        )
+        self.assertGreaterEqual(wpf_source.count(managed_environment_message), 3)
+        self.assertEqual(2, core_source.count(managed_environment_message))
+        self.assertNotIn(
+            ".runtime/toolchains/hia-embedding/venv",
+            xaml_source + wpf_source,
+        )
+        self.assertIn(r".\.venv\Scripts\Activate.ps1", xaml_source)
+        self.assertIn("$script:embeddingData.layout.venv_root", wpf_source)
+        self.assertIn("$script:embeddingData.layout.activation_script", wpf_source)
+        self.assertIn("Join-Path $projectRoot '.venv'", wpf_source)
+        self.assertIn(
+            "Join-Path $projectRoot '.venv\\Scripts\\Activate.ps1'",
+            wpf_source,
+        )
+
+        quick_rescan = wpf_source[
+            wpf_source.index("$quickRescanButton.Add_Click"):
+            wpf_source.index("$quickRepairButton.Add_Click")
+        ]
+        quick_repair = wpf_source[
+            wpf_source.index("$quickRepairButton.Add_Click"):
+            wpf_source.index("$quickCleanupScreenshotsButton.Add_Click")
+        ]
+        quick_cleanup = wpf_source[
+            wpf_source.index("$quickCleanupScreenshotsButton.Add_Click"):
+            wpf_source.index("$quickOpenReportButton.Add_Click")
+        ]
+        quick_open = wpf_source[
+            wpf_source.index("$quickOpenReportButton.Add_Click"):
+            wpf_source.index("$quickCopyReportButton.Add_Click")
+        ]
+        quick_copy = wpf_source[
+            wpf_source.index("$quickCopyReportButton.Add_Click"):
+            wpf_source.index("$launchButton.Add_Click")
+        ]
+        self.assertIn("$rescanButton.RaiseEvent", quick_rescan)
+        self.assertIn("$repairButton.RaiseEvent", quick_repair)
+        self.assertIn("Invoke-HiaCacheCleanup -CategoryIds @('screenshots')", quick_cleanup)
+        self.assertIn("$openReportButton.RaiseEvent", quick_open)
+        self.assertIn("$copyReportButton.RaiseEvent", quick_copy)
+        self.assertEqual(1, wpf_source.count("function Invoke-HiaCacheCleanup"))
+        self.assertIn(
+            "Invoke-HiaCacheCleanup -CategoryIds @(",
+            wpf_source[
+                wpf_source.index("$cleanupScreenshotsButton.Add_Click"):
+                wpf_source.index("$openReportButton.Add_Click")
+            ],
+        )
+
+        update_repair = wpf_source[
+            wpf_source.index("function Update-RepairButton"):
+            wpf_source.index("function New-CheckView")
+        ]
+        self.assertIn("'环境无需修复'", update_repair)
+        self.assertIn("$quickRepairButton.IsEnabled = $repairButton.IsEnabled", update_repair)
+        report_actions = wpf_source[
+            wpf_source.index("function Update-HiaReportActions"):
+            wpf_source.index("function Initialize-HiaOptionalArtwork")
+        ]
+        for control in (
+            "$openReportButton",
+            "$copyReportButton",
+            "$quickOpenReportButton",
+            "$quickCopyReportButton",
+        ):
+            self.assertIn(f"{control}.IsEnabled = $enabled", report_actions)
+        busy_state = wpf_source[
+            wpf_source.index("function Set-BusyState"):
+            wpf_source.index("function Test-CurrentRedCheck")
+        ]
+        self.assertIn("$quickRescanButton.IsEnabled = -not $Busy", busy_state)
+        self.assertIn("$copyActivationCommandButton.IsEnabled = -not $Busy", busy_state)
+        self.assertIn("Update-HiaReportActions", busy_state)
+
+    def test_quick_action_disabled_states_are_derived_from_shared_state(self) -> None:
+        output = self.run_powershell(
+            f"""
+Add-Type -AssemblyName PresentationFramework
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(WPF_SCRIPT_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'WPF script did not parse.' }}
+$required = @(
+    'Get-HiaKnowledgeEnvironmentAction',
+    'Test-CurrentRedCheck',
+    'Test-CurrentNonGreenCheck',
+    'Update-RepairButton',
+    'Test-HiaLatestReportAvailable',
+    'Update-HiaReportActions',
+    'Update-HiaCacheActions'
+)
+$definitions = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -in $required
+}}, $true))
+foreach ($name in $required) {{
+    $definition = @($definitions | Where-Object Name -eq $name)
+    if ($definition.Count -ne 1) {{ throw "Missing function: $name" }}
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+}}
+function Get-ComboEmbeddingProfile {{ return '' }}
+$repairButton = [System.Windows.Controls.Button]::new()
+$quickRepairButton = [System.Windows.Controls.Button]::new()
+$openReportButton = [System.Windows.Controls.Button]::new()
+$copyReportButton = [System.Windows.Controls.Button]::new()
+$quickOpenReportButton = [System.Windows.Controls.Button]::new()
+$quickCopyReportButton = [System.Windows.Controls.Button]::new()
+$cleanupScreenshotsButton = [System.Windows.Controls.Button]::new()
+$quickCleanupScreenshotsButton = [System.Windows.Controls.Button]::new()
+$cacheCategoriesList = [System.Windows.Controls.ListBox]::new()
+$script:isBusy = $false
+$script:preflightFailed = $false
+$script:knowledgeEnvironmentLastFailure = ''
+$script:embeddingData = $null
+$script:lastReportPath = ''
+$script:cachePreview = $null
+$script:knowledgeEnvironmentStatus = [pscustomobject]@{{
+    state = 'ready'
+    models = [pscustomobject]@{{ items = @() }}
+    torch = [pscustomobject]@{{ installed = $false }}
+    embedding_worker = [pscustomobject]@{{ installed = $false }}
+}}
+$script:currentResult = [pscustomobject]@{{
+    overall = 'green'
+    checks = @()
+}}
+Update-RepairButton
+Update-HiaReportActions
+Update-HiaCacheActions
+[pscustomobject]@{{
+    repair_label = [string]$repairButton.Content
+    repair_enabled = [bool]$repairButton.IsEnabled
+    quick_repair_label = [string]$quickRepairButton.Content
+    quick_repair_enabled = [bool]$quickRepairButton.IsEnabled
+    open_enabled = [bool]$openReportButton.IsEnabled
+    copy_enabled = [bool]$copyReportButton.IsEnabled
+    quick_open_enabled = [bool]$quickOpenReportButton.IsEnabled
+    quick_copy_enabled = [bool]$quickCopyReportButton.IsEnabled
+    cleanup_enabled = [bool]$cleanupScreenshotsButton.IsEnabled
+    quick_cleanup_enabled = [bool]$quickCleanupScreenshotsButton.IsEnabled
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual("环境无需修复", payload["repair_label"])
+        self.assertEqual(payload["repair_label"], payload["quick_repair_label"])
+        for key, value in payload.items():
+            if key.endswith("_enabled"):
+                self.assertFalse(value, key)
 
     def test_optional_artwork_and_recovery_ui_are_nonblocking_and_explicit(self) -> None:
         tree = ET.parse(XAML_PATH)
@@ -3862,12 +4827,34 @@ Add-Type -TypeDefinition $source -Language CSharp
             "RescanButton",
             "RepairButton",
             "CleanupScreenshotsButton",
+            "OpenReportButton",
             "CopyReportButton",
+            "QuickRescanButton",
+            "QuickRepairButton",
+            "QuickCleanupScreenshotsButton",
+            "QuickOpenReportButton",
+            "QuickCopyReportButton",
             "LaunchButton",
             "RenderOutputTextBox",
             "BrowseRenderOutputButton",
             "KnowledgeIndexPanel",
             "KnowledgeIndexActionButton",
+            "KnowledgeEnvironmentStatusText",
+            "EnvironmentActivationCommandText",
+            "CopyActivationCommandButton",
+            "RepairKnowledgeEnvironmentButton",
+            "KnowledgeEnvironmentReasonText",
+            "KnowledgeEnvironmentProgressBar",
+            "KnowledgeEnvironmentStageText",
+            "KnowledgeEnvironmentLogExpander",
+            "KnowledgeEnvironmentLogPathText",
+            "KnowledgeEnvironmentLogTextBox",
+            "ImportKnowledgeFileButton",
+            "ImportKnowledgeFolderButton",
+            "KnowledgeSourcesList",
+            "DeleteKnowledgeSourceButton",
+            "CacheCategoriesList",
+            "RefreshCacheButton",
         ):
             self.assertIn(f'x:Name="{control_name}"', xaml_source)
         self.assertEqual(
@@ -3885,7 +4872,26 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertIn("'HIA_RENDER_OUTPUT_DIR'", launcher_source)
         self.assertNotIn("'-RenderOutputDir'", launcher_source)
         self.assertNotIn("$env:HIA_RENDER_OUTPUT_DIR =", combined)
-        self.assertIn("Invoke-HiaScreenshotCacheCleanup", wpf_source)
+        self.assertIn("Invoke-HiaLauncherJsonCli", wpf_source)
+        self.assertIn("'hia-cache.ps1'", wpf_source)
+        self.assertIn("'hia-knowledge.ps1'", wpf_source)
+        self.assertNotIn("Invoke-HiaScreenshotCacheCleanup", wpf_source)
+        environment_completion = wpf_source[
+            wpf_source.index("function Complete-HiaKnowledgeEnvironmentRepair"):
+            wpf_source.index("$script:knowledgeEnvironmentTimer.Add_Tick")
+        ]
+        self.assertIn(
+            "[string]$script:knowledgeEnvironmentStatus.state -ne 'ready'",
+            environment_completion,
+        )
+        self.assertLess(
+            environment_completion.index(
+                "[string]$script:knowledgeEnvironmentStatus.state -ne 'ready'"
+            ),
+            environment_completion.index(
+                "项目本地 Python、uv 与文档解析环境已完成验证"
+            ),
+        )
         self.assertIn("Start-HiaCodexBootstrap", wpf_source)
         self.assertIn("Start-HiaEmbeddingInstall", wpf_source)
         self.assertIn("Write-HiaEmbeddingPreference", wpf_source)
@@ -3965,8 +4971,12 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertIn("[AllowEmptyString()][string]$RecoveryCheckpoint = ''", source)
         self.assertIn("[AllowEmptyString()][string]$RecoveryDecision = ''", source)
         self.assertIn("$sourceFile -isnot [System.IO.FileInfo]", source)
-        self.assertIn("$sourceParent", source)
         self.assertIn("$sourceSessionCheckpoints", source)
+        self.assertIn("$validatedRecoveryCheckpoint", source)
+        self.assertIn(
+            "Recovery checkpoint is not bound to the selected launcher session.",
+            source,
+        )
         self.assertIn(
             "[System.IO.File]::Copy($recoverySourceCheckpoint, $knownHipPath, $false)",
             source,

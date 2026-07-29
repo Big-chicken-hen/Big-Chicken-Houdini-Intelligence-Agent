@@ -9,7 +9,11 @@
     MinHeight="480"
     WindowStartupLocation="CenterScreen"
     ResizeMode="CanResize"
-    Background="#080B11"
+    WindowStyle="None"
+    AllowsTransparency="False"
+    Background="#090C18"
+    BorderBrush="#303951"
+    BorderThickness="1"
     Foreground="#F4F7FB"
     FontFamily="Segoe UI"
     FontSize="13"
@@ -19,9 +23,9 @@
     SnapsToDevicePixels="True"
     TextOptions.TextFormattingMode="Ideal">
     <Window.Resources>
-        <SolidColorBrush x:Key="CardRaisedBrush" Color="#171C2A" />
-        <SolidColorBrush x:Key="BorderBrush" Color="#35405A" />
-        <SolidColorBrush x:Key="BorderSoftBrush" Color="#252C42" />
+        <SolidColorBrush x:Key="CardRaisedBrush" Color="#151A28" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#39435E" />
+        <SolidColorBrush x:Key="BorderSoftBrush" Color="#272F46" />
         <SolidColorBrush x:Key="TextPrimaryBrush" Color="#F5F6FC" />
         <SolidColorBrush x:Key="TextSecondaryBrush" Color="#BCC3D6" />
         <SolidColorBrush x:Key="TextMutedBrush" Color="#858EA8" />
@@ -35,9 +39,9 @@
         <SolidColorBrush x:Key="PickerSelectedBrush" Color="#26234B" />
         <SolidColorBrush x:Key="PickerBorderBrush" Color="#485576" />
         <SolidColorBrush x:Key="PickerFocusBrush" Color="#63D9DA" />
-        <SolidColorBrush x:Key="AccentPurpleBrush" Color="#9283FF" />
-        <SolidColorBrush x:Key="AccentCyanBrush" Color="#5ADDD6" />
-        <SolidColorBrush x:Key="AccentPinkBrush" Color="#F29BC2" />
+        <SolidColorBrush x:Key="AccentPurpleBrush" Color="#9A86FF" />
+        <SolidColorBrush x:Key="AccentCyanBrush" Color="#62DFD7" />
+        <SolidColorBrush x:Key="AccentPinkBrush" Color="#ED83B6" />
         <SolidColorBrush x:Key="DisabledPrimaryBackgroundBrush" Color="#5B3D29" />
         <SolidColorBrush x:Key="DisabledPrimaryBorderBrush" Color="#9B765E" />
         <SolidColorBrush x:Key="DisabledPrimaryTextBrush" Color="#E1E5EC" />
@@ -61,20 +65,25 @@
             <GradientStop Color="#73E3DD" Offset="1" />
         </LinearGradientBrush>
         <LinearGradientBrush x:Key="WorkspaceGradientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#0B0D1B" Offset="0" />
-            <GradientStop Color="#0D1120" Offset="0.55" />
-            <GradientStop Color="#09171B" Offset="1" />
+            <GradientStop Color="#090B17" Offset="0" />
+            <GradientStop Color="#0C1020" Offset="0.55" />
+            <GradientStop Color="#09171A" Offset="1" />
         </LinearGradientBrush>
         <LinearGradientBrush x:Key="CardGradientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#121625" Offset="0" />
-            <GradientStop Color="#0E1420" Offset="1" />
+            <GradientStop Color="#111625" Offset="0" />
+            <GradientStop Color="#0D131F" Offset="1" />
+        </LinearGradientBrush>
+        <LinearGradientBrush x:Key="TitleBarGradientBrush" StartPoint="0,0" EndPoint="1,0">
+            <GradientStop Color="#101426" Offset="0" />
+            <GradientStop Color="#0E1222" Offset="0.58" />
+            <GradientStop Color="#0A111C" Offset="1" />
         </LinearGradientBrush>
 
         <Style x:Key="SectionCardStyle" TargetType="Border">
             <Setter Property="Background" Value="{StaticResource CardGradientBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderSoftBrush}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="16" />
+            <Setter Property="CornerRadius" Value="14" />
             <Setter Property="Padding" Value="0" />
         </Style>
 
@@ -429,6 +438,93 @@
 
         </DataTemplate>
 
+        <Style x:Key="CaptionButtonStyle" TargetType="Button">
+            <Setter Property="Width" Value="46" />
+            <Setter Property="Height" Value="40" />
+            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="Cursor" Value="Arrow" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border
+                            x:Name="CaptionButtonChrome"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="7">
+                            <ContentPresenter
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+                                <Setter TargetName="CaptionButtonChrome" Property="Background" Value="#273047" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="CaptionButtonChrome" Property="Background" Value="#343D57" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style
+            x:Key="CloseCaptionButtonStyle"
+            TargetType="Button"
+            BasedOn="{StaticResource CaptionButtonStyle}">
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="White" />
+                    <Setter Property="Background" Value="#B83E5E" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="#902E49" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="SubtleInteractiveCardStyle" TargetType="Border">
+            <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+            <Style.Triggers>
+                <EventTrigger RoutedEvent="MouseEnter">
+                    <BeginStoryboard HandoffBehavior="SnapshotAndReplace">
+                        <Storyboard>
+                            <DoubleAnimation
+                                DecelerationRatio="0.82"
+                                Duration="0:0:0.16"
+                                Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                To="1.006" />
+                            <DoubleAnimation
+                                DecelerationRatio="0.82"
+                                Duration="0:0:0.16"
+                                Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                To="1.006" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+                <EventTrigger RoutedEvent="MouseLeave">
+                    <BeginStoryboard HandoffBehavior="SnapshotAndReplace">
+                        <Storyboard>
+                            <DoubleAnimation
+                                DecelerationRatio="0.76"
+                                Duration="0:0:0.14"
+                                Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                To="1" />
+                            <DoubleAnimation
+                                DecelerationRatio="0.76"
+                                Duration="0:0:0.14"
+                                Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                To="1" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+            </Style.Triggers>
+        </Style>
+
         <Style x:Key="ActionButtonStyle" TargetType="Button">
             <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
             <Setter Property="Background" Value="{StaticResource CardRaisedBrush}" />
@@ -482,6 +578,57 @@
         <Style x:Key="CompactButtonStyle" TargetType="Button" BasedOn="{StaticResource ActionButtonStyle}">
             <Setter Property="Padding" Value="12,7" />
             <Setter Property="MinHeight" Value="36" />
+        </Style>
+
+        <Style x:Key="KnowledgeListBoxItemStyle" TargetType="ListBoxItem">
+            <Setter Property="Margin" Value="0,0,0,5" />
+            <Setter Property="Padding" Value="10,8" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="Background" Value="#80131928" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderSoftBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border
+                            x:Name="KnowledgeItemChrome"
+                            Padding="{TemplateBinding Padding}"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="9">
+                            <ContentPresenter />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="KnowledgeItemChrome" Property="Background" Value="#B51A2134" />
+                                <Setter TargetName="KnowledgeItemChrome" Property="BorderBrush" Value="#53617B" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="KnowledgeItemChrome" Property="Background" Value="#D126234B" />
+                                <Setter TargetName="KnowledgeItemChrome" Property="BorderBrush" Value="{StaticResource AccentPurpleBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="KnowledgeItemChrome" Property="BorderBrush" Value="{StaticResource AccentCyanBrush}" />
+                                <Setter TargetName="KnowledgeItemChrome" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="KnowledgeItemChrome" Property="Opacity" Value="0.58" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="KnowledgeListBoxStyle" TargetType="ListBox">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="ItemContainerStyle" Value="{StaticResource KnowledgeListBoxItemStyle}" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
         </Style>
 
         <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ActionButtonStyle}">
@@ -568,19 +715,19 @@
             </Border>
         </DataTemplate>
         <RadialGradientBrush x:Key="PinkFogBrush" Center="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
-            <GradientStop Color="#46F29BC2" Offset="0" />
-            <GradientStop Color="#12B47CFF" Offset="0.55" />
+            <GradientStop Color="#3AED83B6" Offset="0" />
+            <GradientStop Color="#109A86FF" Offset="0.55" />
             <GradientStop Color="#00101424" Offset="1" />
         </RadialGradientBrush>
         <RadialGradientBrush x:Key="PurpleFogBrush" Center="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
-            <GradientStop Color="#409282FF" Offset="0" />
-            <GradientStop Color="#145ADDD6" Offset="0.62" />
+            <GradientStop Color="#369A86FF" Offset="0" />
+            <GradientStop Color="#1262DFD7" Offset="0.62" />
             <GradientStop Color="#00080B11" Offset="1" />
         </RadialGradientBrush>
         <LinearGradientBrush x:Key="SidebarGradientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#111526" Offset="0" />
-            <GradientStop Color="#0D1020" Offset="0.56" />
-            <GradientStop Color="#171126" Offset="1" />
+            <GradientStop Color="#101426" Offset="0" />
+            <GradientStop Color="#0C1020" Offset="0.56" />
+            <GradientStop Color="#151025" Offset="1" />
         </LinearGradientBrush>
         <LinearGradientBrush x:Key="OverviewHeroGradientBrush" StartPoint="0,0" EndPoint="1,1">
             <GradientStop Color="#19192E" Offset="0" />
@@ -702,10 +849,10 @@
             <Setter Property="MinHeight" Value="88" />
             <Setter Property="Margin" Value="0,0,12,12" />
             <Setter Property="Padding" Value="15,13" />
-            <Setter Property="Background" Value="#B30D1220" />
-            <Setter Property="BorderBrush" Value="#303A54" />
+            <Setter Property="Background" Value="#AC0D1220" />
+            <Setter Property="BorderBrush" Value="#303951" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="CornerRadius" Value="11" />
         </Style>
 
         <Style x:Key="EnvironmentLabelStyle" TargetType="TextBlock">
@@ -730,12 +877,102 @@
     <Grid
         x:Name="LayoutRoot"
         Background="{StaticResource WorkspaceGradientBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="42" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition x:Name="NavigationColumn" Width="212" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
+        <Border
+            x:Name="CustomTitleBar"
+            Grid.Row="0"
+            Grid.ColumnSpan="2"
+            Height="42"
+            Panel.ZIndex="10"
+            AutomationProperties.Name="Big-Chicken Houdini Intelligence Agent"
+            Background="{StaticResource TitleBarGradientBrush}"
+            BorderBrush="#283149"
+            BorderThickness="0,0,0,1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel
+                    Margin="16,0,12,0"
+                    VerticalAlignment="Center"
+                    Orientation="Horizontal">
+                    <Border
+                        Width="3"
+                        Height="18"
+                        Margin="0,0,10,0"
+                        Background="{StaticResource AccentPinkBrush}"
+                        CornerRadius="2" />
+                    <TextBlock
+                        x:Name="WindowBrandTitleText"
+                        VerticalAlignment="Center"
+                        Foreground="{StaticResource BrandGradientBrush}"
+                        FontSize="12"
+                        FontWeight="Bold"
+                        Text="BIG-CHICKEN" />
+                    <Border
+                        Width="1"
+                        Height="13"
+                        Margin="10,0"
+                        Background="#46506A" />
+                    <TextBlock
+                        x:Name="WindowBrandSubtitleText"
+                        VerticalAlignment="Center"
+                        Foreground="{StaticResource TextMutedBrush}"
+                        FontSize="10"
+                        Text="Houdini Intelligence Agent"
+                        TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+                <StackPanel
+                    Grid.Column="1"
+                    Margin="0,1,2,1"
+                    Orientation="Horizontal">
+                    <Button
+                        x:Name="MinimizeWindowButton"
+                        AutomationProperties.Name="最小化窗口"
+                        Style="{StaticResource CaptionButtonStyle}"
+                        ToolTip="最小化">
+                        <TextBlock
+                            Margin="0,-5,0,0"
+                            FontFamily="Segoe UI"
+                            FontSize="17"
+                            Text="—" />
+                    </Button>
+                    <Button
+                        x:Name="MaximizeWindowButton"
+                        AutomationProperties.Name="最大化窗口"
+                        Style="{StaticResource CaptionButtonStyle}"
+                        ToolTip="最大化">
+                        <TextBlock
+                            x:Name="MaximizeWindowGlyph"
+                            FontFamily="Segoe UI Symbol"
+                            FontSize="14"
+                            Text="□" />
+                    </Button>
+                    <Button
+                        x:Name="CloseWindowButton"
+                        AutomationProperties.Name="关闭窗口"
+                        Style="{StaticResource CloseCaptionButtonStyle}"
+                        ToolTip="关闭">
+                        <TextBlock
+                            FontFamily="Segoe UI"
+                            FontSize="17"
+                            Text="×" />
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
         <Canvas
+            Grid.Row="1"
             Grid.ColumnSpan="2"
             ClipToBounds="True"
             IsHitTestVisible="False">
@@ -745,18 +982,19 @@
                 Width="430"
                 Height="360"
                 Fill="{StaticResource PinkFogBrush}"
-                Opacity="0.34" />
+                Opacity="0.25" />
             <Ellipse
                 Canvas.Right="-170"
                 Canvas.Top="-110"
                 Width="510"
                 Height="420"
                 Fill="{StaticResource PurpleFogBrush}"
-                Opacity="0.28" />
+                Opacity="0.22" />
         </Canvas>
 
         <Border
             x:Name="NavigationRail"
+            Grid.Row="1"
             Grid.Column="0"
             Background="{StaticResource SidebarGradientBrush}"
             BorderBrush="#293048"
@@ -769,14 +1007,13 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <StackPanel
-                    AutomationProperties.Name="Big-Chicken Houdini Intelligence Agent">
+                <StackPanel AutomationProperties.Name="启动器导航">
                     <TextBlock
                         x:Name="BrandTitleText"
-                        Foreground="{StaticResource BrandGradientBrush}"
-                        FontSize="19"
-                        FontWeight="Bold"
-                        Text="BIG-CHICKEN"
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        FontSize="13"
+                        FontWeight="SemiBold"
+                        Text="LAUNCHER"
                         TextTrimming="CharacterEllipsis" />
                     <TextBlock
                         x:Name="BrandSubtitleText"
@@ -784,7 +1021,7 @@
                         Foreground="{StaticResource TextMutedBrush}"
                         FontSize="10"
                         LineHeight="14"
-                        Text="Houdini Intelligence Agent"
+                        Text="环境 · 自检 · 本地知识"
                         TextWrapping="Wrap" />
                 </StackPanel>
 
@@ -822,8 +1059,8 @@
                         TabIndex="2" />
                     <RadioButton
                         x:Name="ReportsSettingsNavButton"
-                        AutomationProperties.Name="报告与设置"
-                        Content="报告与设置"
+                        AutomationProperties.Name="本地知识"
+                        Content="本地知识"
                         GroupName="LauncherNavigation"
                         Style="{StaticResource NavigationButtonStyle}"
                         TabIndex="3" />
@@ -877,7 +1114,7 @@
             </Grid>
         </Border>
 
-        <Grid x:Name="MainShell" Grid.Column="1">
+        <Grid x:Name="MainShell" Grid.Row="1" Grid.Column="1">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -989,7 +1226,7 @@
                                                 x:Name="OptionalArtworkImage"
                                                 HorizontalAlignment="Stretch"
                                                 VerticalAlignment="Stretch"
-                                                Opacity="0.9"
+                                                Opacity="0.72"
                                                 RenderOptions.BitmapScalingMode="HighQuality"
                                                 SnapsToDevicePixels="True"
                                                 Stretch="UniformToFill">
@@ -1008,8 +1245,8 @@
                                                 <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
                                                     <GradientStop Color="#F518192E" Offset="0" />
                                                     <GradientStop Color="#EC15182A" Offset="0.42" />
-                                                    <GradientStop Color="#B8151725" Offset="0.66" />
-                                                    <GradientStop Color="#42101520" Offset="1" />
+                                                    <GradientStop Color="#C6151725" Offset="0.66" />
+                                                    <GradientStop Color="#72101520" Offset="1" />
                                                 </LinearGradientBrush>
                                             </Border.Background>
                                         </Border>
@@ -1114,7 +1351,11 @@
                                     BorderBrush="{StaticResource StatusYellowBrush}"
                                     BorderThickness="1"
                                     CornerRadius="12"
+                                    Style="{StaticResource SubtleInteractiveCardStyle}"
                                     Visibility="Collapsed">
+                                    <Border.RenderTransform>
+                                        <ScaleTransform ScaleX="1" ScaleY="1" />
+                                    </Border.RenderTransform>
                                     <Grid>
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="Auto" />
@@ -1128,6 +1369,79 @@
                                         <WrapPanel Grid.Row="1" Margin="0,10,0,0">
                                             <RadioButton x:Name="RecoverCheckpointOption" AutomationProperties.Name="恢复副本" Content="恢复副本（推荐）" Foreground="{StaticResource TextPrimaryBrush}" GroupName="RecoveryChoice" IsChecked="True" TabIndex="4" />
                                             <RadioButton x:Name="NormalLaunchOption" Margin="18,0,0,0" AutomationProperties.Name="正常启动" Content="正常启动" Foreground="{StaticResource TextPrimaryBrush}" GroupName="RecoveryChoice" TabIndex="5" />
+                                        </WrapPanel>
+                                    </Grid>
+                                </Border>
+
+                                <Border
+                                    x:Name="OverviewQuickActionsPanel"
+                                    Margin="0,3,0,14"
+                                    Padding="2,11,2,12"
+                                    BorderBrush="{StaticResource BorderSoftBrush}"
+                                    BorderThickness="0,1,0,1"
+                                    Style="{StaticResource SubtleInteractiveCardStyle}">
+                                    <Border.RenderTransform>
+                                        <ScaleTransform ScaleX="1" ScaleY="1" />
+                                    </Border.RenderTransform>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Width="112" Margin="0,1,18,0">
+                                            <TextBlock
+                                                Foreground="{StaticResource TextPrimaryBrush}"
+                                                FontSize="11"
+                                                FontWeight="SemiBold"
+                                                Text="快捷操作" />
+                                            <TextBlock
+                                                Margin="0,3,0,0"
+                                                Foreground="{StaticResource TextMutedBrush}"
+                                                FontSize="9.5"
+                                                Text="常用维护入口"
+                                                TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <WrapPanel Grid.Column="1" Margin="0,0,-7,-7">
+                                            <Button
+                                                x:Name="QuickRescanButton"
+                                                Margin="0,0,7,7"
+                                                AutomationProperties.Name="快捷重新扫描"
+                                                Content="重新扫描"
+                                                Style="{StaticResource ActionButtonStyle}"
+                                                TabIndex="6" />
+                                            <Button
+                                                x:Name="QuickRepairButton"
+                                                Margin="0,0,7,7"
+                                                AutomationProperties.Name="快捷修复环境"
+                                                Content="请先重新扫描"
+                                                IsEnabled="False"
+                                                Style="{StaticResource ActionButtonStyle}"
+                                                TabIndex="7" />
+                                            <Button
+                                                x:Name="QuickCleanupScreenshotsButton"
+                                                Margin="0,0,7,7"
+                                                AutomationProperties.Name="快捷清理截图缓存"
+                                                Content="清理截图缓存"
+                                                IsEnabled="False"
+                                                Style="{StaticResource ActionButtonStyle}"
+                                                TabIndex="8"
+                                                ToolTip="仅清理项目 .runtime/cache/screenshots 中经过安全核验的截图缓存" />
+                                            <Button
+                                                x:Name="QuickOpenReportButton"
+                                                Margin="0,0,7,7"
+                                                AutomationProperties.Name="快捷打开最新报告"
+                                                Content="打开报告"
+                                                IsEnabled="False"
+                                                Style="{StaticResource ActionButtonStyle}"
+                                                TabIndex="9" />
+                                            <Button
+                                                x:Name="QuickCopyReportButton"
+                                                Margin="0,0,7,7"
+                                                AutomationProperties.Name="快捷复制最新报告路径"
+                                                Content="复制报告路径"
+                                                IsEnabled="False"
+                                                Style="{StaticResource ActionButtonStyle}"
+                                                TabIndex="10" />
                                         </WrapPanel>
                                     </Grid>
                                 </Border>
@@ -1199,7 +1513,7 @@
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="MCP backend" />
-                                            <ComboBox x:Name="McpBackendComboBox" Grid.Column="1" AutomationProperties.Name="MCP backend" IsEditable="False" ItemTemplate="{StaticResource BackendPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="6" />
+                                            <ComboBox x:Name="McpBackendComboBox" Grid.Column="1" AutomationProperties.Name="MCP backend" IsEditable="False" ItemTemplate="{StaticResource BackendPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="11" />
                                         </Grid>
                                         <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
                                         <Grid Margin="18,15">
@@ -1208,7 +1522,7 @@
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="知识向量模型" />
-                                            <ComboBox x:Name="EmbeddingProfileComboBox" Grid.Column="1" AutomationProperties.Name="知识向量模型" IsEditable="False" ItemTemplate="{StaticResource EmbeddingProfilePickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="7" />
+                                            <ComboBox x:Name="EmbeddingProfileComboBox" Grid.Column="1" AutomationProperties.Name="知识向量模型" IsEditable="False" ItemTemplate="{StaticResource EmbeddingProfilePickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="12" />
                                         </Grid>
                                         <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
                                         <Grid Margin="18,15">
@@ -1217,7 +1531,7 @@
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="向量计算设备" />
-                                            <ComboBox x:Name="EmbeddingDeviceComboBox" Grid.Column="1" AutomationProperties.Name="知识向量计算设备" IsEditable="False" ItemTemplate="{StaticResource BackendPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="8" />
+                                            <ComboBox x:Name="EmbeddingDeviceComboBox" Grid.Column="1" AutomationProperties.Name="知识向量计算设备" IsEditable="False" ItemTemplate="{StaticResource BackendPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="13" />
                                         </Grid>
                                         <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
                                         <Grid Margin="18,15">
@@ -1231,8 +1545,8 @@
                                                 <ColumnDefinition Width="78" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="Houdini 版本" />
-                                            <ComboBox x:Name="HoudiniComboBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="Houdini 版本" IsEditable="False" ItemTemplate="{StaticResource HoudiniPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="9" />
-                                            <Button x:Name="BrowseHoudiniButton" Grid.Column="2" AutomationProperties.Name="浏览 houdini.exe" Content="浏览…" Style="{StaticResource CompactButtonStyle}" TabIndex="10" />
+                                            <ComboBox x:Name="HoudiniComboBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="Houdini 版本" IsEditable="False" ItemTemplate="{StaticResource HoudiniPickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="14" />
+                                            <Button x:Name="BrowseHoudiniButton" Grid.Column="2" AutomationProperties.Name="浏览 houdini.exe" Content="浏览…" Style="{StaticResource CompactButtonStyle}" TabIndex="15" />
                                             <TextBlock x:Name="HoudiniPathText" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,6,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="尚未选择 houdini.exe" TextTrimming="CharacterEllipsis" ToolTip="尚未选择 houdini.exe" />
                                         </Grid>
                                         <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
@@ -1247,8 +1561,8 @@
                                                 <ColumnDefinition Width="78" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="Bridge Python" />
-                                            <ComboBox x:Name="BridgePythonComboBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="Bridge Python" IsEditable="False" ItemTemplate="{StaticResource BridgePickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="11" />
-                                            <Button x:Name="BrowseBridgeButton" Grid.Column="2" AutomationProperties.Name="浏览 Bridge python.exe" Content="浏览…" Style="{StaticResource CompactButtonStyle}" TabIndex="12" />
+                                            <ComboBox x:Name="BridgePythonComboBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="Bridge Python" IsEditable="False" ItemTemplate="{StaticResource BridgePickerItemTemplate}" Style="{StaticResource DarkPickerComboBoxStyle}" TabIndex="16" />
+                                            <Button x:Name="BrowseBridgeButton" Grid.Column="2" AutomationProperties.Name="浏览 Bridge python.exe" Content="浏览…" Style="{StaticResource CompactButtonStyle}" TabIndex="17" />
                                             <TextBlock x:Name="BridgePathText" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,6,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="尚未选择 Bridge python.exe" TextTrimming="CharacterEllipsis" ToolTip="尚未选择 Bridge python.exe" />
                                         </Grid>
                                         <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
@@ -1263,9 +1577,65 @@
                                                 <ColumnDefinition Width="78" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="最终输出目录" />
-                                            <TextBox x:Name="RenderOutputTextBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="最终渲染输出目录" Style="{StaticResource FlatTextBoxStyle}" TabIndex="13" ToolTip="留空时使用项目 .runtime/cache" />
-                                            <Button x:Name="BrowseRenderOutputButton" Grid.Column="2" AutomationProperties.Name="选择最终渲染输出目录" Content="选择…" Style="{StaticResource CompactButtonStyle}" TabIndex="14" />
+                                            <TextBox x:Name="RenderOutputTextBox" Grid.Column="1" Margin="0,0,8,0" AutomationProperties.Name="最终渲染输出目录" Style="{StaticResource FlatTextBoxStyle}" TabIndex="18" ToolTip="留空时使用项目 .runtime/cache" />
+                                            <Button x:Name="BrowseRenderOutputButton" Grid.Column="2" AutomationProperties.Name="选择最终渲染输出目录" Content="选择…" Style="{StaticResource CompactButtonStyle}" TabIndex="19" />
                                             <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,6,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="最终 EXR、图片、视频、USD、导出和模拟缓存可放这里；留空使用项目 .runtime/cache。它与内部截图、预览和临时缓存目录不同。" TextWrapping="Wrap" />
+                                        </Grid>
+                                        <Border Height="1" Margin="18,0" Background="{StaticResource BorderSoftBrush}" />
+                                        <Grid Margin="18,15">
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="108" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Style="{StaticResource EnvironmentLabelStyle}" Text="本地知识环境" />
+                                            <TextBlock
+                                                x:Name="EnvironmentKnowledgeRuntimeText"
+                                                Grid.Column="1"
+                                                Grid.ColumnSpan="2"
+                                                Foreground="{StaticResource TextPrimaryBrush}"
+                                                FontSize="11"
+                                                FontWeight="SemiBold"
+                                                Text="等待读取项目本地 venv"
+                                                TextTrimming="CharacterEllipsis"
+                                                ToolTip="等待读取项目本地 venv" />
+                                            <TextBlock
+                                                x:Name="EnvironmentKnowledgeRuntimePathText"
+                                                Grid.Row="1"
+                                                Grid.Column="1"
+                                                Grid.ColumnSpan="2"
+                                                Margin="3,6,0,0"
+                                                Foreground="{StaticResource TextMutedBrush}"
+                                                FontSize="10"
+                                                Text=".venv"
+                                                TextTrimming="CharacterEllipsis"
+                                                ToolTip=".venv" />
+                                            <TextBlock
+                                                x:Name="EnvironmentActivationCommandText"
+                                                Grid.Row="2"
+                                                Grid.Column="1"
+                                                Margin="3,7,10,0"
+                                                VerticalAlignment="Center"
+                                                Foreground="{StaticResource TextSecondaryBrush}"
+                                                FontFamily="Consolas"
+                                                FontSize="10"
+                                                Text=".\.venv\Scripts\Activate.ps1"
+                                                TextTrimming="CharacterEllipsis"
+                                                ToolTip=".\.venv\Scripts\Activate.ps1" />
+                                            <Button
+                                                x:Name="CopyActivationCommandButton"
+                                                Grid.Row="2"
+                                                Grid.Column="2"
+                                                Margin="0,6,0,0"
+                                                AutomationProperties.Name="复制本地知识环境激活命令"
+                                                Content="复制激活命令"
+                                                Style="{StaticResource CompactButtonStyle}"
+                                                TabIndex="20" />
                                         </Grid>
                                     </StackPanel>
                                 </Border>
@@ -1318,10 +1688,220 @@
                         <Grid x:Name="ReportsSettingsPage" Visibility="Collapsed">
                             <StackPanel>
                                 <StackPanel Margin="0,0,0,15">
-                                    <TextBlock Foreground="{StaticResource AccentPurpleBrush}" FontSize="10" FontWeight="SemiBold" Text="REPORTS &amp; OPERATIONS" />
-                                    <TextBlock Margin="0,5,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="18" FontWeight="SemiBold" Text="报告与安全操作" />
-                                    <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="11" Text="这里集中放置可重复执行的项目本地动作。" />
+                                    <TextBlock Foreground="{StaticResource AccentPurpleBrush}" FontSize="10" FontWeight="SemiBold" Text="LOCAL KNOWLEDGE" />
+                                    <TextBlock Margin="0,5,0,0" Foreground="{StaticResource TextPrimaryBrush}" FontSize="18" FontWeight="SemiBold" Text="本地知识" />
+                                    <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="11" Text="把资料复制到项目内管理，随时检查解析环境、继续索引或安全清理缓存。" />
                                 </StackPanel>
+
+                                <Grid Margin="0,0,0,14">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="12" FontWeight="SemiBold" Text="本地知识环境" />
+                                        <TextBlock
+                                            x:Name="KnowledgeEnvironmentStatusText"
+                                            Margin="0,4,0,0"
+                                            Foreground="{StaticResource TextSecondaryBrush}"
+                                            FontSize="10"
+                                            Text="等待读取 Python、uv、解析器、PyTorch、CUDA 与模型状态"
+                                            TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="KnowledgeEnvironmentPathText"
+                                            Margin="0,4,0,0"
+                                            Foreground="{StaticResource TextMutedBrush}"
+                                            FontSize="9.5"
+                                            Text=".venv"
+                                            TextTrimming="CharacterEllipsis"
+                                            ToolTip=".venv" />
+                                    </StackPanel>
+                                    <Button
+                                        x:Name="RepairKnowledgeEnvironmentButton"
+                                        Grid.Column="1"
+                                        MinWidth="116"
+                                        Margin="14,0,0,0"
+                                        VerticalAlignment="Center"
+                                        AutomationProperties.Name="安装或修复本地知识环境"
+                                        Content="修复本地知识环境"
+                                        Style="{StaticResource ActionButtonStyle}"
+                                        TabIndex="21" />
+                                    <TextBlock
+                                        x:Name="KnowledgeEnvironmentReasonText"
+                                        Grid.Row="1"
+                                        Grid.ColumnSpan="2"
+                                        Margin="0,8,0,0"
+                                        Foreground="{StaticResource StatusYellowBrush}"
+                                        FontSize="10"
+                                        Text="正在判断是否需要迁移或补全项目本地环境。"
+                                        TextWrapping="Wrap" />
+                                    <Grid
+                                        x:Name="KnowledgeEnvironmentProgressPanel"
+                                        Grid.Row="2"
+                                        Grid.ColumnSpan="2"
+                                        Margin="0,10,0,0"
+                                        Visibility="Collapsed">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="150" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <ProgressBar
+                                            x:Name="KnowledgeEnvironmentProgressBar"
+                                            Height="5"
+                                            Margin="0,5,12,0"
+                                            Background="#252B40"
+                                            BorderThickness="0"
+                                            Foreground="{StaticResource AccentPurpleBrush}"
+                                            IsIndeterminate="True" />
+                                        <TextBlock
+                                            x:Name="KnowledgeEnvironmentStageText"
+                                            Grid.Column="1"
+                                            Foreground="{StaticResource TextSecondaryBrush}"
+                                            FontSize="10"
+                                            Text="正在准备项目本地工具链"
+                                            TextWrapping="Wrap" />
+                                    </Grid>
+                                    <Expander
+                                        x:Name="KnowledgeEnvironmentLogExpander"
+                                        Grid.Row="3"
+                                        Grid.ColumnSpan="2"
+                                        Margin="0,9,0,0"
+                                        AutomationProperties.Name="展开本地知识环境安装日志"
+                                        Foreground="{StaticResource TextSecondaryBrush}"
+                                        Header="查看安装日志"
+                                        IsExpanded="False"
+                                        TabIndex="22"
+                                        Visibility="Collapsed">
+                                        <StackPanel Margin="0,7,0,0">
+                                            <TextBlock
+                                                x:Name="KnowledgeEnvironmentLogPathText"
+                                                Foreground="{StaticResource TextMutedBrush}"
+                                                FontSize="9.5"
+                                                Text="尚未生成安装日志"
+                                                TextTrimming="CharacterEllipsis"
+                                                ToolTip="尚未生成安装日志" />
+                                            <TextBox
+                                                x:Name="KnowledgeEnvironmentLogTextBox"
+                                                MinHeight="72"
+                                                MaxHeight="150"
+                                                Margin="0,7,0,0"
+                                                AcceptsReturn="True"
+                                                AutomationProperties.Name="本地知识环境安装日志内容"
+                                                IsReadOnly="True"
+                                                IsTabStop="False"
+                                                Style="{StaticResource FlatTextBoxStyle}"
+                                                Text="等待安装日志…"
+                                                TextWrapping="Wrap"
+                                                VerticalScrollBarVisibility="Auto" />
+                                        </StackPanel>
+                                    </Expander>
+                                </Grid>
+
+                                <Border Height="1" Margin="0,2,0,16" Background="{StaticResource BorderSoftBrush}" />
+
+                                <Grid Margin="0,0,0,9">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="12" FontWeight="SemiBold" Text="已导入资料" />
+                                        <TextBlock
+                                            x:Name="KnowledgeSourcesSummaryText"
+                                            Margin="0,3,0,0"
+                                            Foreground="{StaticResource TextMutedBrush}"
+                                            FontSize="9.5"
+                                            Text="支持 md、txt、html、htm、srt、vtt、pdf；删除托管副本不会删除原文件。" />
+                                    </StackPanel>
+                                    <WrapPanel Grid.Column="1" Margin="12,0,0,0">
+                                        <Button
+                                            x:Name="ImportKnowledgeFileButton"
+                                            Margin="0,0,7,0"
+                                            AutomationProperties.Name="导入本地知识文件"
+                                            Content="导入文件"
+                                            Style="{StaticResource CompactButtonStyle}"
+                                            TabIndex="23" />
+                                        <Button
+                                            x:Name="ImportKnowledgeFolderButton"
+                                            Margin="0,0,7,0"
+                                            AutomationProperties.Name="导入本地知识文件夹"
+                                            Content="导入文件夹"
+                                            Style="{StaticResource CompactButtonStyle}"
+                                            TabIndex="24" />
+                                        <Button
+                                            x:Name="RefreshKnowledgeSourcesButton"
+                                            AutomationProperties.Name="刷新已导入资料"
+                                            Content="刷新"
+                                            Style="{StaticResource CompactButtonStyle}"
+                                            TabIndex="25" />
+                                    </WrapPanel>
+                                </Grid>
+
+                                <ListBox
+                                    x:Name="KnowledgeSourcesList"
+                                    Height="188"
+                                    AutomationProperties.Name="已导入本地知识资料"
+                                    SelectionMode="Single"
+                                    Style="{StaticResource KnowledgeListBoxStyle}"
+                                    TabIndex="26">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid ToolTip="{Binding tooltip}">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel>
+                                                    <TextBlock
+                                                        Foreground="{StaticResource TextPrimaryBrush}"
+                                                        FontSize="11"
+                                                        FontWeight="SemiBold"
+                                                        Text="{Binding name}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        Margin="0,3,0,0"
+                                                        Foreground="{StaticResource TextMutedBrush}"
+                                                        FontSize="9.5"
+                                                        Text="{Binding details}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                                <TextBlock
+                                                    Grid.Column="1"
+                                                    Margin="14,0,0,0"
+                                                    VerticalAlignment="Center"
+                                                    Foreground="{StaticResource AccentCyanBrush}"
+                                                    FontSize="9.5"
+                                                    Text="{Binding status_label}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+
+                                <WrapPanel Margin="0,8,-7,0">
+                                    <Button
+                                        x:Name="DeleteKnowledgeSourceButton"
+                                        Margin="0,0,7,0"
+                                        AutomationProperties.Name="删除所选托管知识副本"
+                                        Content="删除所选"
+                                        IsEnabled="False"
+                                        Style="{StaticResource ActionButtonStyle}"
+                                        TabIndex="27" />
+                                    <Button
+                                        x:Name="RescanKnowledgeSourcesButton"
+                                        Margin="0,0,7,0"
+                                        AutomationProperties.Name="重新扫描托管知识资料"
+                                        Content="重新扫描资料"
+                                        Style="{StaticResource ActionButtonStyle}"
+                                        TabIndex="28" />
+                                </WrapPanel>
+
+                                <Border Height="1" Margin="0,17" Background="{StaticResource BorderSoftBrush}" />
 
                                 <Border
                                     x:Name="KnowledgeIndexPanel"
@@ -1329,7 +1909,11 @@
                                     Background="#9B0D1220"
                                     BorderBrush="{StaticResource BorderSoftBrush}"
                                     BorderThickness="1"
-                                    CornerRadius="14">
+                                    CornerRadius="14"
+                                    Style="{StaticResource SubtleInteractiveCardStyle}">
+                                    <Border.RenderTransform>
+                                        <ScaleTransform ScaleX="1" ScaleY="1" />
+                                    </Border.RenderTransform>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="110" />
@@ -1357,9 +1941,86 @@
                                             <ProgressBar x:Name="KnowledgeIndexProgressBar" Grid.Row="1" Height="5" Margin="0,7,0,0" Background="#252B40" BorderThickness="0" Foreground="{StaticResource AccentCyanBrush}" Maximum="100" Minimum="0" Value="0" />
                                             <TextBlock x:Name="KnowledgeIndexStatusText" Grid.Row="2" Margin="0,6,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="重新扫描后显示索引进度" TextTrimming="CharacterEllipsis" ToolTip="重新扫描后显示索引进度" />
                                         </Grid>
-                                        <Button x:Name="KnowledgeIndexActionButton" Grid.Column="2" MinWidth="132" VerticalAlignment="Center" AutomationProperties.Name="构建或继续本地知识索引" Content="构建/继续索引" IsEnabled="False" Style="{StaticResource ActionButtonStyle}" TabIndex="15" />
+                                        <Button x:Name="KnowledgeIndexActionButton" Grid.Column="2" MinWidth="132" VerticalAlignment="Center" AutomationProperties.Name="构建或继续本地知识索引" Content="构建/继续索引" IsEnabled="False" Style="{StaticResource ActionButtonStyle}" TabIndex="29" />
                                     </Grid>
                                 </Border>
+
+                                <Border Height="1" Margin="0,18" Background="{StaticResource BorderSoftBrush}" />
+
+                                <Grid Margin="0,0,0,9">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="12" FontWeight="SemiBold" Text="项目缓存" />
+                                        <TextBlock
+                                            x:Name="CacheSummaryText"
+                                            Margin="0,3,0,0"
+                                            Foreground="{StaticResource TextMutedBrush}"
+                                            FontSize="9.5"
+                                            Text="只显示 .runtime/cache 下的已知托管分类；清理前会重新校验精确路径。" />
+                                    </StackPanel>
+                                    <Button
+                                        x:Name="RefreshCacheButton"
+                                        Grid.Column="1"
+                                        Margin="12,0,0,0"
+                                        AutomationProperties.Name="刷新项目缓存分类"
+                                        Content="刷新"
+                                        Style="{StaticResource CompactButtonStyle}"
+                                        TabIndex="30" />
+                                </Grid>
+
+                                <ListBox
+                                    x:Name="CacheCategoriesList"
+                                    Height="138"
+                                    AutomationProperties.Name="可清理的项目缓存分类"
+                                    SelectionMode="Extended"
+                                    Style="{StaticResource KnowledgeListBoxStyle}"
+                                    TabIndex="31">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid ToolTip="{Binding tooltip}">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel>
+                                                    <TextBlock
+                                                        Foreground="{StaticResource TextPrimaryBrush}"
+                                                        FontSize="11"
+                                                        FontWeight="SemiBold"
+                                                        Text="{Binding label}" />
+                                                    <TextBlock
+                                                        Margin="0,3,0,0"
+                                                        Foreground="{StaticResource TextMutedBrush}"
+                                                        FontSize="9.5"
+                                                        Text="{Binding relative_path}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                                <TextBlock
+                                                    Grid.Column="1"
+                                                    Margin="14,0,0,0"
+                                                    VerticalAlignment="Center"
+                                                    Foreground="{StaticResource TextSecondaryBrush}"
+                                                    FontSize="10"
+                                                    Text="{Binding size_label}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+
+                                <Button
+                                    x:Name="CleanupScreenshotsButton"
+                                    MinWidth="132"
+                                    Margin="0,8,0,0"
+                                    HorizontalAlignment="Left"
+                                    AutomationProperties.Name="清理所选项目缓存"
+                                    Content="清理所选缓存"
+                                    IsEnabled="False"
+                                    Style="{StaticResource ActionButtonStyle}"
+                                    TabIndex="32"
+                                    ToolTip="只清理列表中经过项目边界验证的已知缓存分类" />
 
                                 <Border Height="1" Margin="0,18" Background="{StaticResource BorderSoftBrush}" />
 
@@ -1373,18 +2034,18 @@
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <TextBlock VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Text="最新报告 / 日志" />
-                                    <TextBox x:Name="ReportPathTextBox" Grid.Column="1" AutomationProperties.Name="最新自检报告路径" IsReadOnly="True" Style="{StaticResource FlatTextBoxStyle}" TabIndex="16" Text="尚未生成报告" TextWrapping="NoWrap" ToolTip="尚未生成报告" />
+                                    <TextBox x:Name="ReportPathTextBox" Grid.Column="1" AutomationProperties.Name="最新自检报告路径" IsReadOnly="True" Style="{StaticResource FlatTextBoxStyle}" TabIndex="33" Text="尚未生成报告" TextWrapping="NoWrap" ToolTip="尚未生成报告" />
                                     <TextBlock Grid.Row="1" Grid.Column="1" Margin="3,5,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" Text="安装失败时也会在这里显示脱敏日志路径。" />
                                 </Grid>
 
                                 <WrapPanel Margin="0,18,-8,-8">
-                                    <Button x:Name="RescanButton" Margin="0,0,8,8" AutomationProperties.Name="重新扫描" Content="重新扫描" Style="{StaticResource ActionButtonStyle}" TabIndex="17" />
-                                    <Button x:Name="RepairButton" Margin="0,0,8,8" AutomationProperties.Name="自动修复安全项" Content="自动修复安全项" Style="{StaticResource ActionButtonStyle}" TabIndex="18" />
-                                    <Button x:Name="CleanupScreenshotsButton" Margin="0,0,8,8" AutomationProperties.Name="清理截图缓存" Content="清理截图缓存" Style="{StaticResource ActionButtonStyle}" TabIndex="19" ToolTip="只清理项目 .runtime/cache/screenshots 第一层的 Big-Chicken PNG 截图" />
-                                    <Button x:Name="CopyReportButton" Margin="0,0,8,8" AutomationProperties.Name="复制报告路径" Content="复制报告路径" IsEnabled="False" Style="{StaticResource ActionButtonStyle}" TabIndex="20" />
+                                    <Button x:Name="RescanButton" Margin="0,0,8,8" AutomationProperties.Name="重新扫描" Content="重新扫描" Style="{StaticResource ActionButtonStyle}" TabIndex="34" />
+                                    <Button x:Name="RepairButton" Margin="0,0,8,8" AutomationProperties.Name="自动修复安全项" Content="请先重新扫描" IsEnabled="False" Style="{StaticResource ActionButtonStyle}" TabIndex="35" />
+                                    <Button x:Name="OpenReportButton" Margin="0,0,8,8" AutomationProperties.Name="打开最新报告" Content="打开报告" IsEnabled="False" Style="{StaticResource ActionButtonStyle}" TabIndex="36" />
+                                    <Button x:Name="CopyReportButton" Margin="0,0,8,8" AutomationProperties.Name="复制报告路径" Content="复制报告路径" IsEnabled="False" Style="{StaticResource ActionButtonStyle}" TabIndex="37" />
                                 </WrapPanel>
 
-                                <TextBlock Margin="0,15,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" LineHeight="17" Text="安全修复只处理项目本地运行环境；截图清理会先预览并再次确认精确目标。" TextWrapping="Wrap" />
+                                <TextBlock Margin="0,15,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="10" LineHeight="17" Text="安全修复与资料、索引、缓存命令都只操作项目本地运行环境；最终输出目录、原始资料和 Houdini 工程不属于缓存。" TextWrapping="Wrap" />
                             </StackPanel>
                         </Grid>
                     </Grid>
@@ -1416,7 +2077,7 @@
                         IsDefault="True"
                         IsEnabled="False"
                         Style="{StaticResource PrimaryButtonStyle}"
-                        TabIndex="21" />
+                TabIndex="38" />
                 </Grid>
             </Border>
         </Grid>

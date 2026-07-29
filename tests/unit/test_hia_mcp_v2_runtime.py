@@ -24,9 +24,14 @@ def fake_png(width: int = 640, height: int = 360) -> bytes:
 class FakeHipFile:
     def __init__(self) -> None:
         self.dirty = False
+        self.current_path = "untitled.hip"
+        self.new_file = True
 
     def path(self) -> str:
-        return "E:/houdini-intelligence-agent/test.hip"
+        return self.current_path
+
+    def isNewFile(self) -> bool:  # noqa: N802
+        return self.new_file
 
     def hasUnsavedChanges(self) -> bool:
         return self.dirty
@@ -339,9 +344,7 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
             self.assertEqual("INVALID_ARGUMENTS", captured.exception.code)
 
     def test_viewport_defaults_to_portable_timestamped_screenshot_cache(self) -> None:
-        temp_root = REPOSITORY_ROOT / ".runtime" / "tmp"
-        temp_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=temp_root) as temporary:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY_ROOT / "tests") as temporary:
             project_root = Path(temporary) / "portable-project"
             project_root.mkdir()
             cache_root = project_root / ".runtime" / "cache"
@@ -360,6 +363,11 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
 
             first_relative = first["result"]["path"]
             second_relative = second["result"]["path"]
+            self.assertEqual("runtime_fallback", first["result"]["storage_scope"])
+            self.assertEqual(
+                str((project_root / first_relative).resolve()),
+                first["result"]["absolute_path"],
+            )
             self.assertRegex(
                 first_relative,
                 re.compile(

@@ -146,24 +146,9 @@ if (Test-InstalledCodex) {
     Write-Output "[bootstrap] Installed and verified Codex ${version}: $(Join-Path $installRoot 'codex.exe')"
 }
 
-$pythonCandidates = @(
-    Get-Command -Name 'python.exe' -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue
+Write-Output (
+    '[bootstrap] Bridge and local knowledge use the project-managed Python. ' +
+    'Run scripts\hia-knowledge.ps1 environment-install or environment-repair; ' +
+    'a global or PATH Python is not used by the normal setup.'
 )
-$pythonMessage = 'Install Python 3.10+ yourself, then select python.exe as Bridge Python in the launcher.'
-foreach ($pythonCandidate in $pythonCandidates) {
-    try {
-        $pythonVersion = (
-            & $pythonCandidate -c 'import sys; print(sys.version_info.major, sys.version_info.minor, sep=chr(46))'
-        ).Trim()
-        if ($LASTEXITCODE -eq 0 -and $pythonVersion -match '^(3\.(?:1[0-9]|[2-9][0-9]))$') {
-            $pythonMessage = "Bridge Python prerequisite found: $pythonCandidate (Python $pythonVersion)"
-            break
-        }
-    } catch {
-        continue
-    }
-}
-
-Write-Output "[bootstrap] $pythonMessage"
 Write-Output '[bootstrap] No global PATH, registry, Houdini installation, or user configuration was changed.'

@@ -1,0 +1,613 @@
+{
+  "schema_version": 2,
+  "pack_id": "sidefx-official-workflows-v2",
+  "pack_version": "2.0.0",
+  "target_houdini_version": "21",
+  "coverage_basis": "Original workflow summaries grounded in the registered SideFX sources and organized around production tasks rather than node definitions.",
+  "evidence_status": "documented/static",
+  "live_validation": "not-run",
+  "status_semantics": "covered and partial describe documentation coverage only; neither status means live-verified.",
+  "validation_boundary": "Documentation coverage was validated statically. Houdini 21 change-note claims may be change-note-supported, but no live Houdini scene, renderer, solver, GUI, or production build was run during this rebuild.",
+  "domains": [
+    {
+      "id": "sop-procedural-modeling-and-attributes",
+      "title": "SOP procedural modeling and attributes",
+      "aliases": ["sop", "procedural modeling", "attribute", "topology"],
+      "status": "covered",
+      "card_ids": ["sop-procedural-attributes", "curve-nurbs-subdivision"],
+      "source_ids": ["src-63415f84fa3db2c1", "src-c27d3b1fc5e546bf", "src-6a32e44726e088b6", "src-372a64688b638458"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "vex-and-wrangle",
+      "title": "VEX and Wrangle",
+      "aliases": ["vex", "wrangle", "geometry queries", "volume queries"],
+      "status": "covered",
+      "card_ids": ["vex-snippets", "vex-neighbor-volume-debug", "opencl-sop-compiled-dop"],
+      "source_ids": ["src-a6356e91955897fc", "src-70009f0fc3269b60", "src-c7555aaa9a7cfb10", "src-23792f31e11003b6", "src-478cfed1dc374cac", "src-962fd422166d605a"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "foreach-compiled-blocks-and-copy",
+      "title": "For-Each, compiled blocks, and Copy to Points",
+      "aliases": ["foreach", "compile", "copy", "pack", "instance"],
+      "status": "covered",
+      "card_ids": ["foreach-compile-copy", "pack-copy-instances", "opencl-sop-compiled-dop"],
+      "source_ids": ["src-c2ff0c589af019d7", "src-f8e5535e67a2fe4e", "src-f24f8c73ba0ad363", "src-a01943d6fbd65c9a", "src-9681de9ec02382ca", "src-598bd3bd10e6929a", "src-25f117fac81d18ae"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "uv-and-coordinate-workflows",
+      "title": "UV and coordinate workflows",
+      "aliases": ["uv", "unwrap", "layout", "udim", "coordinate"],
+      "status": "covered",
+      "card_ids": ["uv-workflows", "groom-guides-uv-transfer"],
+      "source_ids": ["src-5fa0130b0705fb56", "src-a8214c567cf1f035", "src-cd5b14c717ffe21a", "src-17f384f134e0664c"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "materialx-and-karma",
+      "title": "MaterialX and Karma",
+      "aliases": ["materialx", "karma", "lookdev", "shader", "volume material"],
+      "status": "covered",
+      "card_ids": ["materialx-solaris", "materialx-layers-displacement-volume", "karma-xpu", "karma-sampling-aov-denoise"],
+      "source_ids": ["src-ba3e5264685e4a4b", "src-2b36ae774c342ef9", "src-53bc674d00abb6fe", "src-82375011a98b4f24"],
+      "remaining_gaps": ["Renderer-specific material translation outside Karma and MaterialX is intentionally excluded."]
+    },
+    {
+      "id": "solaris-usd-and-lops",
+      "title": "Solaris, USD, and LOPs",
+      "aliases": ["solaris", "usd", "lop", "component", "payload"],
+      "status": "covered",
+      "card_ids": ["usd-basics", "component-builder-variants-payloads", "solaris-scene-import-layout", "solaris-performance"],
+      "source_ids": ["src-29c0a36cda491f18", "src-8fb9c7ce695a0cc5", "src-a89de2ea068ee62d", "src-da36d5f4085889a4", "src-1aaa267d153596c5", "src-42edce04dc784d18", "src-71ff7e4aaa349d7d"],
+      "remaining_gaps": ["Studio-specific USD asset resolver and naming policies remain project decisions."]
+    },
+    {
+      "id": "lighting-cameras-rendering-and-aovs",
+      "title": "Lighting, cameras, rendering, and AOVs",
+      "aliases": ["lighting", "camera", "render", "aov", "sampling"],
+      "status": "covered",
+      "card_ids": ["lighting-camera-aov", "karma-sampling-aov-denoise"],
+      "source_ids": ["src-65dcb2d0e10c8742", "src-9ea200f734e480b7", "src-82375011a98b4f24", "src-bf5e8172f380c2a2", "src-8efa9a1eea869c97", "src-92f624f531e79a55", "src-9eda7a39e87d031c", "src-ddab2b3e61f2b8d0"],
+      "remaining_gaps": ["Deep compositing workflows after EXR delivery are outside the pack."]
+    },
+    {
+      "id": "rbd",
+      "title": "RBD fracture, constraints, Bullet, and cache",
+      "aliases": ["rbd", "bullet", "fracture", "constraint"],
+      "status": "covered",
+      "card_ids": ["rbd-fracture-name-pack", "rbd-constraints-bullet-cache"],
+      "source_ids": ["src-3f37ebfa66962bb4", "src-90d6e0ae943f0cfa", "src-901bda654cc502de", "src-630b0a2595aec918", "src-a67cbfc83ad80745", "src-48dee028e8cc7bb6", "src-a0dcdf60d69cfc08", "src-84c5281141dea184"],
+      "remaining_gaps": ["Vehicle dynamics and specialized RBD render procedurals are not standalone cards."]
+    },
+    {
+      "id": "vellum",
+      "title": "Vellum cloth, hair, soft bodies, and grains",
+      "aliases": ["vellum", "cloth", "hair", "softbody", "grains"],
+      "status": "covered",
+      "card_ids": ["vellum-overview", "vellum-softbody-grains"],
+      "source_ids": ["src-6b68ac314eae8004", "src-43702b102c72e1a5", "src-5d2e56401db87d4d", "src-7a365029b6af72a7", "src-c771b08cd8814fec"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "pyro",
+      "title": "Pyro sourcing, sparse solving, caching, shading, and rendering",
+      "aliases": ["pyro", "smoke", "fire", "sparse volume"],
+      "status": "covered",
+      "card_ids": ["pyro-intro", "pyro-cache-shade-render", "copernicus-pyro-cop2-migration"],
+      "source_ids": ["src-b68c19290c3f5ba2", "src-764640f96f6ced88", "src-a0dcdf60d69cfc08", "src-67c0dc4f9d8de96e", "src-80120fe89ed9a821", "src-53bc674d00abb6fe", "src-a736e17312cfaf23", "src-1a5be461e0e3a973"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "flip-and-oceans",
+      "title": "FLIP and oceans",
+      "aliases": ["flip", "ocean", "whitewater", "fluid"],
+      "status": "covered",
+      "card_ids": ["flip-source-collision-narrowband", "flip-mesh-whitewater-cache", "ocean-spectrum-evaluate-render"],
+      "source_ids": ["src-49c84a9ca51bc748", "src-f863a3fbe0b7cddd", "src-2b214185409a4a74", "src-81f3e5fe7117587e", "src-dfec8e0b6a03e6cc", "src-42d515f822d13b02", "src-a0dcdf60d69cfc08", "src-c27962f5fc6d406f", "src-c49334a365d79881", "src-1c5f0a851efa5eae"],
+      "remaining_gaps": ["Distributed large-domain fluid scheduling remains pipeline-specific."]
+    },
+    {
+      "id": "heightfields",
+      "title": "Height fields",
+      "aliases": ["heightfield", "terrain", "erosion", "scatter"],
+      "status": "covered",
+      "card_ids": ["heightfields", "heightfield-scatter-export"],
+      "source_ids": ["src-febf2a6d9cd1082d", "src-690388aa35e3cc42", "src-961d03304a4c4f3e"],
+      "remaining_gaps": ["Engine-specific terrain import settings are not covered."]
+    },
+    {
+      "id": "kinefx-animation-and-chops",
+      "title": "KineFX, animation, and CHOPs",
+      "aliases": ["kinefx", "animation", "chop", "retarget", "motionclip"],
+      "status": "covered",
+      "card_ids": ["kinefx-rig-capture", "kinefx-retarget-motionclip", "chops-channels-export", "animation-keyframes-curves"],
+      "source_ids": ["src-a3571e7c8c333027", "src-f2f397e7fba6168c", "src-d537e568b883e572", "src-291b474b53d6d103", "src-0370267f9e4402da", "src-35410f0344886259", "src-e6fa998e58c74311", "src-0b754dc9b2e48673", "src-f919c38e69f70481", "src-984b26fa0fe81a6f"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "crowds",
+      "title": "Crowds",
+      "aliases": ["crowd", "agent", "state", "transition"],
+      "status": "covered",
+      "card_ids": ["crowds-agent-state", "crowds-transition-render"],
+      "source_ids": ["src-b8ff9c2f5ce3feba", "src-d4a6600f10db92a1", "src-c23e275c05ce903e", "src-ac994e7c114ebe70", "src-f4b89447823a0b6a"],
+      "remaining_gaps": ["Ragdoll integration is not a standalone workflow."]
+    },
+    {
+      "id": "tops-and-pdg",
+      "title": "TOPs and PDG",
+      "aliases": ["top", "pdg", "work item", "scheduler", "partition"],
+      "status": "covered",
+      "card_ids": ["pdg-tops", "pdg-partition-scheduler-cache-debug"],
+      "source_ids": ["src-935b52f92be9f4a2", "src-26da3d85db1ca293", "src-9a1d594e39f1f7e4", "src-2abd7a33e65420ce", "src-a47886787542ec74", "src-0535a15c4840ca99"],
+      "remaining_gaps": ["Scheduler-vendor and farm-administrator configuration remains site-specific."]
+    },
+    {
+      "id": "copernicus-and-cops",
+      "title": "Copernicus and COPs",
+      "aliases": ["copernicus", "cop", "texture", "feedback"],
+      "status": "covered",
+      "card_ids": ["copernicus", "copernicus-feedback-texture-output", "copernicus-pyro-cop2-migration"],
+      "source_ids": ["src-81d565a9a098c5e0", "src-c100f17e38202b4b", "src-4bcbfbd2e9f2b7f0", "src-f73d0328dbdb8aad", "src-0072d10dce67caa3", "src-2a7122995b71e110", "src-f40af1438b6d5c3c", "src-4244a497e296979e"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "hda-interfaces-and-versioning",
+      "title": "HDA interfaces and versioning",
+      "aliases": ["hda", "interface", "version", "library"],
+      "status": "covered",
+      "card_ids": ["hda-authoring-versioning", "hda-library-debug"],
+      "source_ids": ["src-cfbff8cfb44d0a3a", "src-d8376c4f31741f10", "src-cc1ea19df759bf02"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "hom-and-debugging",
+      "title": "HOM and debugging",
+      "aliases": ["hom", "debug", "python", "cook", "exception"],
+      "status": "covered",
+      "card_ids": ["hom-debugging", "hom-cook-exception-performance", "python-viewer-state"],
+      "source_ids": ["src-c3df40d55d8a4913", "src-8cc10ce690bfeeda", "src-97534928cf22c038", "src-b264a6a53cd69e7d", "src-91cdf8dfd04aef00", "src-d119e391b932ca8f", "src-e8368bd65bd82d95"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "groom-and-hair",
+      "title": "Groom and hair",
+      "aliases": ["groom", "hair", "guide", "uv transfer"],
+      "status": "covered",
+      "card_ids": ["groom-guides-uv-transfer"],
+      "source_ids": ["src-78ce1abdd60e1d9d", "src-17f384f134e0664c", "src-0095e5ab1a110091", "src-43449d114dc44b41"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "fem-and-mpm",
+      "title": "FEM and MPM",
+      "aliases": ["fem", "mpm", "finite element", "material point"],
+      "status": "covered",
+      "card_ids": ["fem-solids-constraints", "mpm-material-simulation"],
+      "source_ids": ["src-cbe854a337c72960", "src-ed104669bd6fb34c", "src-84239f2274b3ed8c", "src-fce378fac68820fc", "src-a5c773fbc87b0c28"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "hdk-and-package-distribution",
+      "title": "HDK and package distribution",
+      "aliases": ["hdk", "compiled plugin", "package", "distribution"],
+      "status": "covered",
+      "card_ids": ["hdk-package-distribution"],
+      "source_ids": ["src-d686d4a112f05d88", "src-8e324b07e8f3853a", "src-dd2a31529b5f84e8", "src-e87959a68c9b98a1", "src-a799701a9215fbe8"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "cache-packaging-performance-and-troubleshooting",
+      "title": "Cache, packaging, performance, and troubleshooting",
+      "aliases": ["cache", "packaging", "performance", "troubleshoot", "delivery"],
+      "status": "covered",
+      "card_ids": ["cache-packaging-performance", "diagnostics-performance", "h21-foundations"],
+      "source_ids": ["src-42e01f6f3c8d358e", "src-1bd24e5fc72508ef", "src-951bc6a108e599ac", "src-e90dbd73d4b94400"],
+      "remaining_gaps": ["Storage-vendor, render-farm, and asset-resolver deployment details remain project-specific."]
+    }
+  ],
+  "workflows": [
+    {
+      "id": "sop-procedural-modeling",
+      "title": "SOP primary forms, topology, semantic stages, and delivery",
+      "status": "covered",
+      "card_ids": ["sop-procedural-attributes"],
+      "source_ids": ["src-63415f84fa3db2c1", "src-c27d3b1fc5e546bf"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "sop-attribute-design",
+      "title": "SOP attribute ownership, stability, transformation, and validation",
+      "status": "covered",
+      "card_ids": ["sop-procedural-attributes"],
+      "source_ids": ["src-63415f84fa3db2c1", "src-c27d3b1fc5e546bf"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "vex-wrangle-authoring",
+      "title": "VEX execution classes, geometry writes, neighbor and volume queries",
+      "status": "covered",
+      "card_ids": ["vex-snippets", "vex-neighbor-volume-debug"],
+      "source_ids": ["src-a6356e91955897fc", "src-70009f0fc3269b60", "src-c7555aaa9a7cfb10", "src-23792f31e11003b6"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "foreach-loop-processing",
+      "title": "For-Each piece, count, and feedback processing",
+      "status": "covered",
+      "card_ids": ["foreach-compile-copy"],
+      "source_ids": ["src-c2ff0c589af019d7", "src-f8e5535e67a2fe4e"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "compiled-block-optimization",
+      "title": "Compiled-block eligibility, wiring, profiling, and fallback",
+      "status": "covered",
+      "card_ids": ["foreach-compile-copy"],
+      "source_ids": ["src-c2ff0c589af019d7", "src-f8e5535e67a2fe4e"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "copy-to-points-instancing",
+      "title": "Pack, Copy to Points, orientation, variants, and instancing",
+      "status": "covered",
+      "card_ids": ["pack-copy-instances"],
+      "source_ids": ["src-f24f8c73ba0ad363", "src-a01943d6fbd65c9a", "src-9681de9ec02382ca"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "uv-unwrapping-and-layout",
+      "title": "UV seams, unwrap, layout, padding, and UDIM delivery",
+      "status": "covered",
+      "card_ids": ["uv-workflows"],
+      "source_ids": ["src-5fa0130b0705fb56", "src-a8214c567cf1f035", "src-cd5b14c717ffe21a"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "uv-transfer-and-coordinate-selection",
+      "title": "UV ownership, geodesic coordinates, preservation, and fallback",
+      "status": "covered",
+      "card_ids": ["uv-workflows"],
+      "source_ids": ["src-5fa0130b0705fb56", "src-a8214c567cf1f035", "src-cd5b14c717ffe21a"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "materialx-karma-authoring",
+      "title": "Modern Solaris MaterialX material authoring and binding",
+      "status": "covered",
+      "card_ids": ["materialx-solaris", "materialx-layers-displacement-volume"],
+      "source_ids": ["src-ba3e5264685e4a4b", "src-2b36ae774c342ef9"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "materialx-textures-and-primvars",
+      "title": "MaterialX textures, color spaces, primvars, layers, and displacement",
+      "status": "covered",
+      "card_ids": ["materialx-solaris", "materialx-layers-displacement-volume"],
+      "source_ids": ["src-ba3e5264685e4a4b", "src-2b36ae774c342ef9"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "karma-cpu-xpu-validation",
+      "title": "Karma CPU/XPU feature, device, and render validation",
+      "status": "covered",
+      "card_ids": ["karma-xpu"],
+      "source_ids": ["src-53bc674d00abb6fe", "src-9749a162ca39d076"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "usd-layer-composition",
+      "title": "USD references, payloads, variants, instances, and layer opinions",
+      "status": "covered",
+      "card_ids": ["usd-basics"],
+      "source_ids": ["src-29c0a36cda491f18", "src-65dcb2d0e10c8742", "src-71ff7e4aaa349d7d"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "solaris-asset-assembly",
+      "title": "Component Builder publication and shot-level Scene Import/layout",
+      "status": "covered",
+      "card_ids": ["component-builder-variants-payloads", "solaris-scene-import-layout"],
+      "source_ids": ["src-8fb9c7ce695a0cc5", "src-a89de2ea068ee62d", "src-1aaa267d153596c5", "src-42edce04dc784d18"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "solaris-instancing-payload-performance",
+      "title": "Solaris payload, instancing, population, and stage-performance decisions",
+      "status": "covered",
+      "card_ids": ["component-builder-variants-payloads", "solaris-performance"],
+      "source_ids": ["src-8fb9c7ce695a0cc5", "src-da36d5f4085889a4"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "lighting-setup",
+      "title": "Karma lighting intent, hierarchy, exposure, linking, and validation",
+      "status": "covered",
+      "card_ids": ["lighting-camera-aov"],
+      "source_ids": ["src-65dcb2d0e10c8742", "src-9ea200f734e480b7", "src-92f624f531e79a55"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "camera-setup",
+      "title": "Solaris camera framing, optics, clipping, focus, and motion",
+      "status": "covered",
+      "card_ids": ["lighting-camera-aov"],
+      "source_ids": ["src-65dcb2d0e10c8742", "src-9ea200f734e480b7", "src-8efa9a1eea869c97"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "karma-render-configuration",
+      "title": "Karma render settings, products, delegates, paths, and frame delivery",
+      "status": "covered",
+      "card_ids": ["lighting-camera-aov", "karma-xpu"],
+      "source_ids": ["src-65dcb2d0e10c8742", "src-53bc674d00abb6fe", "src-9eda7a39e87d031c", "src-ddab2b3e61f2b8d0"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "render-products-and-aovs",
+      "title": "Render products, AOV design, sampling diagnosis, denoising, and statistics",
+      "status": "covered",
+      "card_ids": ["lighting-camera-aov", "karma-sampling-aov-denoise"],
+      "source_ids": ["src-9ea200f734e480b7", "src-82375011a98b4f24", "src-bf5e8172f380c2a2", "src-ddab2b3e61f2b8d0"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "rbd-fracture-and-pack",
+      "title": "RBD fracture, piece naming, proxy generation, and packing",
+      "status": "covered",
+      "card_ids": ["rbd-fracture-name-pack"],
+      "source_ids": ["src-3f37ebfa66962bb4", "src-90d6e0ae943f0cfa", "src-a67cbfc83ad80745", "src-84c5281141dea184"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "rbd-constraints-and-simulation",
+      "title": "RBD constraints, Bullet solving, checkpoints, and cache",
+      "status": "covered",
+      "card_ids": ["rbd-constraints-bullet-cache"],
+      "source_ids": ["src-901bda654cc502de", "src-630b0a2595aec918", "src-48dee028e8cc7bb6", "src-a0dcdf60d69cfc08"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "vellum-constraints-and-simulation",
+      "title": "Vellum cloth, hair, soft-body, grain, constraint, and collision workflows",
+      "status": "covered",
+      "card_ids": ["vellum-overview", "vellum-softbody-grains"],
+      "source_ids": ["src-6b68ac314eae8004", "src-5d2e56401db87d4d", "src-c771b08cd8814fec"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "pyro-source-solve-cache-render",
+      "title": "Pyro source fields, sparse solve, cache optimization, shading, and render",
+      "status": "covered",
+      "card_ids": ["pyro-intro", "pyro-cache-shade-render"],
+      "source_ids": ["src-b68c19290c3f5ba2", "src-764640f96f6ced88", "src-a0dcdf60d69cfc08", "src-67c0dc4f9d8de96e", "src-80120fe89ed9a821", "src-53bc674d00abb6fe"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "flip-sourcing-and-simulation",
+      "title": "FLIP sourcing, collision, narrow-band solve, meshing, whitewater, and cache",
+      "status": "covered",
+      "card_ids": ["flip-source-collision-narrowband", "flip-mesh-whitewater-cache"],
+      "source_ids": ["src-49c84a9ca51bc748", "src-2b214185409a4a74", "src-42d515f822d13b02", "src-a0dcdf60d69cfc08", "src-c27962f5fc6d406f", "src-c49334a365d79881"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "ocean-spectrum-and-rendering",
+      "title": "Ocean spectrum, evaluation, foam, extension, and Karma delivery",
+      "status": "covered",
+      "card_ids": ["ocean-spectrum-evaluate-render"],
+      "source_ids": ["src-81f3e5fe7117587e", "src-dfec8e0b6a03e6cc", "src-1c5f0a851efa5eae"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "heightfield-terrain-authoring",
+      "title": "Heightfield masks, erosion, scatter attributes, conversion, and export",
+      "status": "covered",
+      "card_ids": ["heightfields", "heightfield-scatter-export"],
+      "source_ids": ["src-febf2a6d9cd1082d", "src-961d03304a4c4f3e"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "kinefx-rigging-and-deformation",
+      "title": "KineFX skeleton, rig, capture, APEX assembly, and deformation",
+      "status": "covered",
+      "card_ids": ["kinefx-rig-capture"],
+      "source_ids": ["src-a3571e7c8c333027", "src-86f62b4a006f3246", "src-0370267f9e4402da"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "animation-keyframes-and-channels",
+      "title": "Traditional keyframes, curve refinement, retargeting, MotionClip, and channel decisions",
+      "status": "covered",
+      "card_ids": ["kinefx-retarget-motionclip", "chops-channels-export", "animation-keyframes-curves"],
+      "source_ids": ["src-f2f397e7fba6168c", "src-d537e568b883e572", "src-291b474b53d6d103", "src-35410f0344886259", "src-e6fa998e58c74311", "src-0b754dc9b2e48673", "src-f919c38e69f70481", "src-984b26fa0fe81a6f"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "chops-motion-processing",
+      "title": "CHOP channel fetch, processing, rate handling, export, and cycle diagnosis",
+      "status": "covered",
+      "card_ids": ["chops-channels-export"],
+      "source_ids": ["src-291b474b53d6d103", "src-41626e03a05013fe"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "crowd-agent-preparation",
+      "title": "Crowd agent definitions, clips, metadata, layout, states, and caches",
+      "status": "covered",
+      "card_ids": ["crowds-agent-state"],
+      "source_ids": ["src-b8ff9c2f5ce3feba", "src-d4a6600f10db92a1", "src-ac994e7c114ebe70"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "crowd-simulation-and-rendering",
+      "title": "Crowd transitions, motion paths, simulation, cache, and rendering",
+      "status": "covered",
+      "card_ids": ["crowds-transition-render"],
+      "source_ids": ["src-b8ff9c2f5ce3feba", "src-c23e275c05ce903e", "src-f4b89447823a0b6a"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "pdg-work-item-dependencies",
+      "title": "PDG work items, attributes, outputs, dependencies, and batching",
+      "status": "covered",
+      "card_ids": ["pdg-tops"],
+      "source_ids": ["src-935b52f92be9f4a2", "src-26da3d85db1ca293", "src-a47886787542ec74", "src-0535a15c4840ca99"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "pdg-cache-and-farm-execution",
+      "title": "PDG partitions, cache modes, schedulers, services, and debugging",
+      "status": "covered",
+      "card_ids": ["pdg-partition-scheduler-cache-debug"],
+      "source_ids": ["src-9a1d594e39f1f7e4", "src-2abd7a33e65420ce"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "copernicus-image-processing",
+      "title": "Copernicus typed layers, signatures, masks, cables, and data flow",
+      "status": "covered",
+      "card_ids": ["copernicus"],
+      "source_ids": ["src-81d565a9a098c5e0", "src-c100f17e38202b4b", "src-0072d10dce67caa3"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "copernicus-texture-authoring",
+      "title": "Copernicus feedback, caching, UDIM texture, material, and file output",
+      "status": "covered",
+      "card_ids": ["copernicus-feedback-texture-output"],
+      "source_ids": ["src-4bcbfbd2e9f2b7f0", "src-f73d0328dbdb8aad", "src-2a7122995b71e110", "src-0072d10dce67caa3"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "hda-interface-authoring",
+      "title": "HDA creation, namespace, parameter interface, defaults, and fresh-instance validation",
+      "status": "covered",
+      "card_ids": ["hda-authoring-versioning"],
+      "source_ids": ["src-cfbff8cfb44d0a3a", "src-d8376c4f31741f10"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "hda-versioning-and-upgrades",
+      "title": "HDA library resolution, definition versioning, upgrades, and dependency debug",
+      "status": "covered",
+      "card_ids": ["hda-authoring-versioning", "hda-library-debug"],
+      "source_ids": ["src-d8376c4f31741f10", "src-cc1ea19df759bf02"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "hom-scene-authoring",
+      "title": "HOM node, parameter, connection, geometry, naming, and layout authoring",
+      "status": "covered",
+      "card_ids": ["hom-debugging"],
+      "source_ids": ["src-c3df40d55d8a4913", "src-8cc10ce690bfeeda", "src-b264a6a53cd69e7d", "src-91cdf8dfd04aef00"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "hom-debugging-and-errors",
+      "title": "HOM cook state, errors, warnings, exceptions, updates, and performance",
+      "status": "covered",
+      "card_ids": ["hom-cook-exception-performance"],
+      "source_ids": ["src-97534928cf22c038", "src-c3df40d55d8a4913"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "cache-versioning-and-resume",
+      "title": "File Cache contracts, versioning, reload, frame coverage, and resume",
+      "status": "covered",
+      "card_ids": ["cache-packaging-performance"],
+      "source_ids": ["src-42e01f6f3c8d358e", "src-1bd24e5fc72508ef"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "project-packaging-and-portability",
+      "title": "Cache representation, dependencies, package boundaries, and portable delivery",
+      "status": "partial",
+      "card_ids": ["cache-packaging-performance", "usd-basics"],
+      "source_ids": ["src-42e01f6f3c8d358e", "src-e9209b63e2cd65a1", "src-c436db02b5900452", "src-29c0a36cda491f18"],
+      "remaining_gaps": ["Official file-cache, dependency, and USD/package foundations are covered; asset-resolver configuration, render-farm submission, and storage-vendor policies remain target-environment validation boundaries rather than missing SideFX fundamentals."]
+    },
+    {
+      "id": "performance-profiling",
+      "title": "Performance Monitor measurement, bottleneck classification, and evidence-based optimization",
+      "status": "covered",
+      "card_ids": ["diagnostics-performance", "solaris-performance"],
+      "source_ids": ["src-951bc6a108e599ac", "src-da36d5f4085889a4"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "cross-domain-troubleshooting",
+      "title": "Cross-domain contract, cache, support, output, and visual-failure diagnosis",
+      "status": "covered",
+      "card_ids": ["diagnostics-performance", "h21-foundations"],
+      "source_ids": ["src-951bc6a108e599ac", "src-e90dbd73d4b94400"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "curve-nurbs-subdivision",
+      "title": "Curve, NURBS, sweep, trim, subdivision, and crease construction",
+      "status": "covered",
+      "card_ids": ["curve-nurbs-subdivision"],
+      "source_ids": ["src-6a32e44726e088b6", "src-c8fd3af4211ee445", "src-938e55e1f77f42ff", "src-4a56296848d075de", "src-372a64688b638458", "src-d21e5fa0652c79a9"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "opencl-sop-compiled-dop",
+      "title": "OpenCL SOP kernels and compiled SOP-block invocation from a SOP Solver DOP",
+      "status": "covered",
+      "card_ids": ["opencl-sop-compiled-dop"],
+      "source_ids": ["src-478cfed1dc374cac", "src-962fd422166d605a", "src-598bd3bd10e6929a", "src-f8e5535e67a2fe4e", "src-25f117fac81d18ae", "src-b4a20021b370b172"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "groom-guides-uv-transfer",
+      "title": "Rest-groom authoring, guide transfer, UV correspondence, and hair generation",
+      "status": "covered",
+      "card_ids": ["groom-guides-uv-transfer"],
+      "source_ids": ["src-78ce1abdd60e1d9d", "src-17f384f134e0664c", "src-0095e5ab1a110091", "src-43449d114dc44b41"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "fem-solids-constraints",
+      "title": "FEM tetrahedral solids, constraints, collisions, solving, and render deformation",
+      "status": "covered",
+      "card_ids": ["fem-solids-constraints"],
+      "source_ids": ["src-cbe854a337c72960", "src-ed104669bd6fb34c", "src-199fb469b620e554", "src-1782d2e651a02e54", "src-050bee0f04d9ffc6", "src-84239f2274b3ed8c"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "mpm-material-simulation",
+      "title": "MPM material sourcing, collision, solving, caching, and surfacing",
+      "status": "covered",
+      "card_ids": ["mpm-material-simulation"],
+      "source_ids": ["src-d405fb36c91ff904", "src-fce378fac68820fc", "src-39fdb8cfd25871ab", "src-4783cccfaf652c3f", "src-e6daa355f466c7af", "src-a5c773fbc87b0c28", "src-de4b8555662430a7"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "copernicus-pyro-cop2-migration",
+      "title": "Houdini 21 Copernicus Pyro and output-driven Legacy COP2 migration",
+      "status": "covered",
+      "card_ids": ["copernicus-pyro-cop2-migration"],
+      "source_ids": ["src-a736e17312cfaf23", "src-4244a497e296979e", "src-f40af1438b6d5c3c", "src-1a5be461e0e3a973", "src-af12dfdd365a334d", "src-cb0eccde101ff82d"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "python-viewer-state",
+      "title": "Python Viewer State registration, event handling, undo, guide, and debug workflow",
+      "status": "covered",
+      "card_ids": ["python-viewer-state"],
+      "source_ids": ["src-d119e391b932ca8f", "src-6eb6a3a3feb4d53f", "src-9f0c889bc2d21076", "src-56d23e651e92bbe4", "src-2ffb8f4351ff0e14", "src-e8368bd65bd82d95"],
+      "remaining_gaps": []
+    },
+    {
+      "id": "hdk-package-distribution",
+      "title": "HDK compilation, ABI compatibility, package distribution, and DSO diagnosis",
+      "status": "covered",
+      "card_ids": ["hdk-package-distribution"],
+      "source_ids": ["src-d686d4a112f05d88", "src-8e324b07e8f3853a", "src-786491caaa0ebfbb", "src-dd2a31529b5f84e8", "src-e87959a68c9b98a1", "src-a799701a9215fbe8"],
+      "remaining_gaps": []
+    }
+  ]
+}

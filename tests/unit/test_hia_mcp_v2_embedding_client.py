@@ -288,11 +288,18 @@ for line in sys.stdin:
             revision.exception.code,
         )
 
-    def test_python_and_model_paths_cannot_escape_project_runtime(self) -> None:
-        outside_python = self.project_root / "outside-python.exe"
-        outside_python.write_bytes(b"outside")
+    def test_python_must_use_canonical_venv_and_models_stay_in_runtime(
+        self,
+    ) -> None:
+        legacy_python = (
+            Path(runtime_layout(self.project_root)["legacy_venv_root"])
+            / "Scripts"
+            / "python.exe"
+        )
+        legacy_python.parent.mkdir(parents=True)
+        legacy_python.write_bytes(b"legacy")
         environment = self._environment()
-        environment[PYTHON_ENVIRONMENT] = str(outside_python)
+        environment[PYTHON_ENVIRONMENT] = str(legacy_python)
         with self.assertRaises(EmbeddingConfigurationError) as python_error:
             EmbeddingClient.from_environment(
                 self.project_root,
@@ -342,6 +349,20 @@ for line in sys.stdin:
             self.assertFalse(configured_status["ready"])
             self.assertFalse(configured_status["initialized"])
             self.assertFalse(configured_status["loaded"])
+            self.assertEqual(
+                str(self.python_path.resolve()),
+                configured_status["python_path"],
+            )
+            self.assertEqual(
+                str(self.python_path.resolve().parent.parent),
+                configured_status["venv_path"],
+            )
+            self.assertEqual(
+                str(self.model_0_6b.resolve()),
+                configured_status["model_path"],
+            )
+            self.assertEqual("cpu", configured_status["device"])
+            self.assertIsNone(configured_status["cuda_available"])
             with self._popen_patch():
                 first = client.encode(
                     documents=["document one", "document two"],

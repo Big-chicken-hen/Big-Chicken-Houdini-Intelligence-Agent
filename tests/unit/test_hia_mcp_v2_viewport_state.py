@@ -5,6 +5,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
@@ -16,8 +17,41 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "houdini_package" / "python_libs"))
 from hia_mcp_runtime.executor import HoudiniExecutor, HiaRuntimeError  # noqa: E402
 
 
-def _png_bytes(width: int, height: int) -> bytes:
-    return b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", width, height)
+_UNSET = object()
+
+
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    checksum = zlib.crc32(chunk_type)
+    checksum = zlib.crc32(payload, checksum) & 0xFFFFFFFF
+    return (
+        struct.pack(">I", len(payload))
+        + chunk_type
+        + payload
+        + struct.pack(">I", checksum)
+    )
+
+
+def _png_bytes(
+    width: int,
+    height: int,
+    color: tuple[int, int, int] = (72, 104, 136),
+    alternate_color: tuple[int, int, int] | None = None,
+) -> bytes:
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    rows = []
+    for row_index in range(height):
+        row_color = (
+            alternate_color
+            if alternate_color is not None and row_index % 2
+            else color
+        )
+        rows.append(b"\x00" + bytes(row_color) * width)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + _png_chunk(b"IEND", b"")
+    )
 
 
 @dataclass(frozen=True)
@@ -33,6 +67,52 @@ class FakeViewportCamera:
         return FakeViewportCamera(self.state)
 
 
+class FakeDisplaySet:
+    def shadedMode(self) -> str:  # noqa: N802
+        return "Smooth"
+
+
+class FakeViewportSettings:
+    def displaySet(self, _display_set_type: object) -> FakeDisplaySet:  # noqa: N802
+        return FakeDisplaySet()
+
+    def viewportType(self) -> str:  # noqa: N802
+        return "Perspective"
+
+    def lighting(self) -> str:
+        return "HighQualityWithShadows"
+
+    def showingMaterials(self) -> bool:  # noqa: N802
+        return True
+
+    def showingDiffuse(self) -> bool:  # noqa: N802
+        return True
+
+    def showingSpecular(self) -> bool:  # noqa: N802
+        return True
+
+    def showingAmbient(self) -> bool:  # noqa: N802
+        return True
+
+    def showingEmission(self) -> bool:  # noqa: N802
+        return True
+
+    def usingTransparency(self) -> bool:  # noqa: N802
+        return True
+
+    def showingGeometryColor(self) -> bool:  # noqa: N802
+        return True
+
+    def usingAspectRatio(self) -> bool:  # noqa: N802
+        return False
+
+    def aspectRatio(self) -> float:  # noqa: N802
+        return 16 / 9
+
+    def viewAspectRatio(self, _masked: bool) -> float:  # noqa: N802
+        return 16 / 9
+
+
 class FakeViewport:
     def __init__(
         self,
@@ -41,6 +121,8 @@ class FakeViewport:
         default_camera_state: str,
         camera_locked: bool,
         image_size: tuple[int, int],
+        image_color: tuple[int, int, int] = (72, 104, 136),
+        alternate_image_color: tuple[int, int, int] | None = None,
         fail_save: bool = False,
         fail_restore_camera_path: str | None = None,
     ) -> None:
@@ -48,14 +130,32 @@ class FakeViewport:
         self._default_camera = FakeViewportCamera(default_camera_state)
         self._camera_locked = camera_locked
         self._image_size = image_size
+        self._image_color = image_color
+        self._alternate_image_color = alternate_image_color
         self._fail_save = fail_save
         self._fail_restore_camera_path = fail_restore_camera_path
+        self._settings = FakeViewportSettings()
         self.camera_at_save: FakeCamera | None = None
         self.camera_lock_at_save: bool | None = None
         self.camera_restore_calls: list[str] = []
 
     def camera(self) -> FakeCamera | None:
         return self._camera
+
+    def name(self) -> str:
+        return "persp1"
+
+    def isVisible(self) -> bool:  # noqa: N802
+        return True
+
+    def size(self) -> tuple[int, int, int, int]:
+        return (0, 0, self._image_size[0], self._image_size[1])
+
+    def type(self) -> str:
+        return "Perspective"
+
+    def settings(self) -> FakeViewportSettings:
+        return self._settings
 
     def defaultCamera(self) -> FakeViewportCamera:  # noqa: N802
         return self._default_camera
@@ -86,7 +186,13 @@ class FakeViewport:
         self.camera_lock_at_save = self._camera_locked
         if self._fail_save:
             raise RuntimeError("simulated viewport capture failure")
-        Path(path).write_bytes(_png_bytes(*self._image_size))
+        Path(path).write_bytes(
+            _png_bytes(
+                *self._image_size,
+                color=self._image_color,
+                alternate_color=self._alternate_image_color,
+            )
+        )
 
 
 class FakeFlipbookSettings:
@@ -98,6 +204,11 @@ class FakeFlipbookSettings:
         self.output_zoom = 50
         self.use_sheet_size = True
         self.output_to_mplay = True
+        self.crop_mask = False
+        self.override_gamma = False
+        self.gamma_value = 2.2
+        self.override_lut = False
+        self.lut_path = ""
 
     def stash(self) -> "FakeFlipbookSettings":
         copy = FakeFlipbookSettings()
@@ -108,6 +219,11 @@ class FakeFlipbookSettings:
         copy.output_zoom = self.output_zoom
         copy.use_sheet_size = self.use_sheet_size
         copy.output_to_mplay = self.output_to_mplay
+        copy.crop_mask = self.crop_mask
+        copy.override_gamma = self.override_gamma
+        copy.gamma_value = self.gamma_value
+        copy.override_lut = self.override_lut
+        copy.lut_path = self.lut_path
         return copy
 
     def frameRange(self, value: tuple[float, float]) -> None:  # noqa: N802
@@ -131,14 +247,55 @@ class FakeFlipbookSettings:
     def outputToMPlay(self, value: bool) -> None:  # noqa: N802
         self.output_to_mplay = value
 
+    def cropOutMaskOverlay(self) -> bool:  # noqa: N802
+        return self.crop_mask
+
+    def overrideGamma(self, value: object = _UNSET) -> bool | None:  # noqa: N802
+        if value is _UNSET:
+            return self.override_gamma
+        self.override_gamma = bool(value)
+        return None
+
+    def gamma(self, value: object = _UNSET) -> float | None:
+        if value is _UNSET:
+            return self.gamma_value
+        self.gamma_value = float(value)
+        return None
+
+    def overrideLUT(self, value: object = _UNSET) -> bool | None:  # noqa: N802
+        if value is _UNSET:
+            return self.override_lut
+        self.override_lut = bool(value)
+        return None
+
+    def LUT(self, value: object = _UNSET) -> str | None:  # noqa: N802
+        if value is _UNSET:
+            return self.lut_path
+        self.lut_path = str(value)
+        return None
+
 
 class FakeHipFile:
+    def __init__(self) -> None:
+        self.current_path = "untitled.hip"
+        self.new_file = True
+
+    def path(self) -> str:
+        return self.current_path
+
+    def isNewFile(self) -> bool:  # noqa: N802
+        return self.new_file
+
     def hasUnsavedChanges(self) -> bool:  # noqa: N802
         return False
 
 
 class FakePaneTabType:
     SceneViewer = object()
+
+
+class FakeDisplaySetType:
+    DisplayModel = object()
 
 
 class FakeSceneViewer:
@@ -152,6 +309,29 @@ class FakeSceneViewer:
         self.mplay_launches = 0
         self.camera_at_flipbook: FakeCamera | None = None
         self.camera_lock_at_flipbook: bool | None = None
+        self.flipbook_output_size: tuple[int, int] | None = None
+        self.color_state_available = True
+
+    def name(self) -> str:
+        return "sceneviewer1"
+
+    def viewportLayout(self) -> str:  # noqa: N802
+        return "Single"
+
+    def usingOCIO(self) -> bool:  # noqa: N802
+        if not self.color_state_available:
+            raise RuntimeError("OCIO state unavailable")
+        return True
+
+    def getOCIODisplay(self) -> str:  # noqa: N802
+        if not self.color_state_available:
+            raise RuntimeError("OCIO display unavailable")
+        return "sRGB"
+
+    def getOCIOView(self) -> str:  # noqa: N802
+        if not self.color_state_available:
+            raise RuntimeError("OCIO view unavailable")
+        return "ACES 1.0 - SDR Video"
 
     def curViewport(self) -> FakeViewport:  # noqa: N802
         return self.viewport
@@ -177,11 +357,20 @@ class FakeSceneViewer:
             self.focus_calls += 1
         if settings.output_to_mplay:
             self.mplay_launches += 1
+        if self.viewport._fail_save:
+            raise RuntimeError("simulated viewport capture failure")
         end = float(settings.frame_range[1])
         self.hou.setFrame(end)
         first = int(round(float(settings.frame_range[0])))
         output_path = settings.output_path.replace("$F4", f"{first:04d}")
-        Path(output_path).write_bytes(_png_bytes(*settings.image_resolution))
+        output_size = self.flipbook_output_size or settings.image_resolution
+        Path(output_path).write_bytes(
+            _png_bytes(
+                *output_size,
+                color=self.viewport._image_color,
+                alternate_color=self.viewport._alternate_image_color,
+            )
+        )
 
 
 class FakeDesktop:
@@ -206,6 +395,7 @@ class FakeHou:
         self.frame_history: list[float] = []
         self.hipFile = FakeHipFile()
         self.paneTabType = FakePaneTabType()
+        self.displaySetType = FakeDisplaySetType()
         self._cameras = {camera.path: camera for camera in cameras}
         self.scene_viewer = FakeSceneViewer(viewport, self)
         self.ui = FakeUi(FakeDesktop(self.scene_viewer))
@@ -226,9 +416,9 @@ class FakeHou:
 
 class HiaMcpV2ViewportStateTests(unittest.TestCase):
     def setUp(self) -> None:
-        temporary_root = REPOSITORY_ROOT / ".runtime" / "tmp"
-        temporary_root.mkdir(parents=True, exist_ok=True)
-        self._temporary = tempfile.TemporaryDirectory(dir=temporary_root)
+        self._temporary = tempfile.TemporaryDirectory(
+            dir=REPOSITORY_ROOT / "tests"
+        )
         self.project_root = Path(self._temporary.name) / "viewport-state-project"
         self.project_root.mkdir()
 
@@ -250,7 +440,197 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
             )
         return hou_module, executor
 
-    def test_viewport_reports_png_ihdr_dimensions_and_restores_camera(self) -> None:
+    def test_saved_hip_capture_and_save_as_choose_current_hip_directory(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(640, 360),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        first_parent = Path(self._temporary.name) / "first-scene"
+        second_parent = Path(self._temporary.name) / "second-scene"
+        first_parent.mkdir()
+        second_parent.mkdir()
+        first_hip = first_parent / "first.hip"
+        second_hip = second_parent / "second.hip"
+        first_hip.write_bytes(b"hip")
+        second_hip.write_bytes(b"hip")
+        hou_module.hipFile.current_path = str(first_hip)
+        hou_module.hipFile.new_file = False
+
+        first = executor.dispatch(
+            "hia_capture_viewport",
+            {"return_image": False},
+        )
+        hou_module.hipFile.current_path = str(second_hip)
+        second = executor.dispatch(
+            "hia_capture_viewport",
+            {
+                "mode": "flipbook",
+                "frame_range": [12, 12],
+                "return_image": False,
+            },
+        )
+
+        self.assertEqual("hip", first["result"]["storage_scope"])
+        self.assertEqual("hip", second["result"]["storage_scope"])
+        self.assertEqual(
+            first_parent / ".hia" / "screenshots",
+            Path(first["result"]["absolute_path"]).parent,
+        )
+        self.assertEqual(
+            second_parent / ".hia" / "screenshots",
+            Path(second["result"]["absolute_path"]).parent,
+        )
+        self.assertTrue(Path(first["result"]["path"]).is_file())
+        self.assertTrue(Path(second["result"]["path"]).is_file())
+
+    def test_unsafe_saved_hip_parent_falls_back_to_runtime_cache(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 200),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        scene_parent = Path(self._temporary.name) / "unsafe-scene"
+        scene_parent.mkdir()
+        hip_path = scene_parent / "scene.hip"
+        hip_path.write_bytes(b"hip")
+        hou_module.hipFile.current_path = str(hip_path)
+        hou_module.hipFile.new_file = False
+
+        with mock.patch(
+            "hia_mcp_runtime.executor._is_reparse_point",
+            side_effect=lambda path: Path(path) == scene_parent,
+        ):
+            response = executor.dispatch(
+                "hia_capture_viewport",
+                {"return_image": False},
+            )
+
+        self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
+        self.assertTrue(
+            Path(response["result"]["absolute_path"]).is_relative_to(
+                self.project_root / ".runtime" / "cache" / "screenshots"
+            )
+        )
+        self.assertFalse((scene_parent / ".hia").exists())
+
+    def test_reparse_ancestor_falls_back_before_creating_hip_local_storage(
+        self,
+    ) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 200),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        reparse_ancestor = Path(self._temporary.name) / "linked-ancestor"
+        scene_parent = reparse_ancestor / "nested" / "scene"
+        scene_parent.mkdir(parents=True)
+        hip_path = scene_parent / "scene.hip"
+        hip_path.write_bytes(b"hip")
+        hou_module.hipFile.current_path = str(hip_path)
+        hou_module.hipFile.new_file = False
+
+        with mock.patch(
+            "hia_mcp_runtime.executor._is_reparse_point",
+            side_effect=lambda path: Path(path) == reparse_ancestor,
+        ):
+            response = executor.dispatch(
+                "hia_capture_viewport",
+                {"return_image": False},
+            )
+
+        self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
+        self.assertFalse((scene_parent / ".hia").exists())
+
+    def test_unwritable_saved_hip_parent_falls_back_to_runtime_cache(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 200),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        scene_parent = Path(self._temporary.name) / "read-only-scene"
+        scene_parent.mkdir()
+        hip_path = scene_parent / "scene.hip"
+        hip_path.write_bytes(b"hip")
+        hou_module.hipFile.current_path = str(hip_path)
+        hou_module.hipFile.new_file = False
+
+        with mock.patch(
+            "hia_mcp_runtime.executor.os.access",
+            return_value=False,
+        ):
+            response = executor.dispatch(
+                "hia_capture_viewport",
+                {"return_image": False},
+            )
+
+        self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
+        self.assertFalse((scene_parent / ".hia").exists())
+
+    def test_reparse_hia_directory_is_rejected_before_leaf_creation(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 200),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        scene_parent = Path(self._temporary.name) / "linked-hia-scene"
+        hia_directory = scene_parent / ".hia"
+        hia_directory.mkdir(parents=True)
+        hip_path = scene_parent / "scene.hip"
+        hip_path.write_bytes(b"hip")
+        hou_module.hipFile.current_path = str(hip_path)
+        hou_module.hipFile.new_file = False
+
+        with mock.patch(
+            "hia_mcp_runtime.executor._is_reparse_point",
+            side_effect=lambda path: Path(path) == hia_directory,
+        ):
+            response = executor.dispatch(
+                "hia_capture_viewport",
+                {"return_image": False},
+            )
+
+        self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
+        self.assertFalse((hia_directory / "screenshots").exists())
+
+    def test_reparse_runtime_screenshot_fallback_is_rejected_before_write(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 200),
+        )
+        _hou_module, executor = self.make_executor(viewport)
+        screenshot_root = (
+            self.project_root / ".runtime" / "cache" / "screenshots"
+        )
+        screenshot_root.mkdir(parents=True)
+
+        with (
+            mock.patch(
+                "hia_mcp_runtime.executor._is_reparse_point",
+                side_effect=lambda path: Path(path) == screenshot_root,
+            ),
+            self.assertRaises(HiaRuntimeError),
+        ):
+            executor.dispatch(
+                "hia_capture_viewport",
+                {"return_image": False},
+            )
+
+        self.assertEqual([], list(screenshot_root.glob("*.png")))
+
+    def test_viewport_uses_display_flipbook_and_restores_camera(self) -> None:
         original_camera = FakeCamera("/obj/original_camera")
         capture_camera = FakeCamera("/obj/capture_camera")
         viewport = FakeViewport(
@@ -272,14 +652,268 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual((913, 517), (response["result"]["width"], response["result"]["height"]))
-        self.assertIs(capture_camera, viewport.camera_at_save)
-        self.assertFalse(viewport.camera_lock_at_save)
+        self.assertEqual((1280, 720), (response["result"]["width"], response["result"]["height"]))
+        self.assertEqual("scene_viewer.flipbook", response["result"]["capture_api"])
+        self.assertTrue(response["result"]["capture_ok"])
+        self.assertEqual("passed", response["result"]["quality_status"])
+        self.assertEqual("unverified", response["result"]["visual_match"])
+        self.assertEqual("unverified", response["result"]["display_match"])
+        self.assertEqual("persp1", response["result"]["source_state"]["viewport"]["name"])
+        self.assertEqual(
+            capture_camera.path,
+            response["result"]["source_state"]["camera"]["path"],
+        )
+        self.assertEqual(
+            "HighQualityWithShadows",
+            response["result"]["source_state"]["display_options"]["lighting"],
+        )
+        self.assertEqual(
+            "Smooth",
+            response["result"]["source_state"]["display_options"]["shading"],
+        )
+        self.assertTrue(
+            response["result"]["source_state"]["display_options"]["materials"]
+        )
+        self.assertEqual(
+            "Perspective",
+            response["result"]["source_state"]["viewport"]["projection"],
+        )
+        self.assertEqual(
+            "sRGB",
+            response["result"]["source_state"]["color_management"]["ocio_display"],
+        )
+        self.assertIs(capture_camera, hou_module.scene_viewer.camera_at_flipbook)
+        self.assertFalse(hou_module.scene_viewer.camera_lock_at_flipbook)
         self.assertIs(original_camera, viewport.camera())
         self.assertEqual("original-camera-view", viewport.defaultCamera().state)
         self.assertNotIn("set_default", viewport.camera_restore_calls)
         self.assertTrue(viewport.isCameraLockedToView())
         self.assertEqual(0, hou_module.scene_viewer.focus_calls)
+
+    def test_quality_gate_rejects_black_and_overexposed_captures(self) -> None:
+        cases = (
+            ((0, 0, 0), "near_all_black"),
+            ((255, 255, 255), "severe_highlight_clipping"),
+        )
+        for color, expected_code in cases:
+            with self.subTest(color=color):
+                viewport = FakeViewport(
+                    original_camera=None,
+                    default_camera_state="view",
+                    camera_locked=False,
+                    image_size=(640, 360),
+                    image_color=color,
+                )
+                _hou_module, executor = self.make_executor(viewport)
+
+                response = executor.dispatch(
+                    "hia_capture_viewport",
+                    {"return_image": False},
+                )
+
+                self.assertFalse(response["ok"])
+                self.assertTrue(response["result"]["capture_ok"])
+                self.assertEqual("failed", response["result"]["quality_status"])
+                self.assertEqual("failed", response["result"]["visual_match"])
+                self.assertIn(
+                    expected_code,
+                    {
+                        reason["code"]
+                        for reason in response["result"]["quality_reasons"]
+                    },
+                )
+
+    def test_quality_gate_rejects_flat_neutral_no_content_capture(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(640, 360),
+            image_color=(96, 96, 96),
+        )
+        _hou_module, executor = self.make_executor(viewport)
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"return_image": False},
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertTrue(response["result"]["capture_ok"])
+        self.assertEqual("failed", response["result"]["quality_status"])
+        self.assertEqual("failed", response["result"]["visual_match"])
+        self.assertIn(
+            "flat_no_content",
+            {
+                reason["code"]
+                for reason in response["result"]["quality_reasons"]
+            },
+        )
+
+    def test_quality_gate_keeps_low_contrast_image_with_real_detail(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(640, 360),
+            image_color=(96, 96, 96),
+            alternate_image_color=(99, 99, 99),
+        )
+        _hou_module, executor = self.make_executor(viewport)
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"return_image": False},
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["result"]["capture_ok"])
+        self.assertEqual("passed", response["result"]["quality_status"])
+        self.assertEqual(
+            [3, 3, 3],
+            response["result"]["quality_metrics"]["channel_ranges"],
+        )
+
+    def test_quality_gate_warns_for_extreme_single_channel_cast(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(640, 360),
+            image_color=(220, 5, 5),
+        )
+        _hou_module, executor = self.make_executor(viewport)
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"return_image": False},
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual("warning", response["result"]["quality_status"])
+        self.assertIn(
+            "single_channel_cast",
+            {
+                reason["code"]
+                for reason in response["result"]["quality_reasons"]
+            },
+        )
+
+    def test_quality_gate_rejects_resolution_and_aspect_mismatches(self) -> None:
+        cases = (
+            ((640, 480), "aspect_ratio_mismatch"),
+            ((800, 450), "resolution_mismatch"),
+        )
+        for output_size, expected_code in cases:
+            with self.subTest(output_size=output_size):
+                viewport = FakeViewport(
+                    original_camera=None,
+                    default_camera_state="view",
+                    camera_locked=False,
+                    image_size=(640, 360),
+                )
+                hou_module, executor = self.make_executor(viewport)
+                hou_module.scene_viewer.flipbook_output_size = output_size
+
+                response = executor.dispatch(
+                    "hia_capture_viewport",
+                    {"width": 640, "height": 360, "return_image": False},
+                )
+
+                self.assertFalse(response["ok"])
+                self.assertEqual("failed", response["result"]["quality_status"])
+                self.assertIn(
+                    expected_code,
+                    {
+                        reason["code"]
+                        for reason in response["result"]["quality_reasons"]
+                    },
+                )
+
+    def test_quality_gate_rejects_requested_camera_mismatch(self) -> None:
+        capture_camera = FakeCamera("/obj/capture_camera")
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(640, 360),
+        )
+        _hou_module, executor = self.make_executor(viewport, capture_camera)
+
+        with mock.patch.object(viewport, "setCamera", return_value=None):
+            response = executor.dispatch(
+                "hia_capture_viewport",
+                {
+                    "camera_path": capture_camera.path,
+                    "return_image": False,
+                },
+            )
+
+        self.assertFalse(response["ok"])
+        self.assertIn(
+            "camera_mismatch",
+            {
+                reason["code"]
+                for reason in response["result"]["quality_reasons"]
+            },
+        )
+
+    def test_missing_ocio_and_hdr_state_are_explicitly_unverified(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(640, 360),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.color_state_available = False
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"return_image": False},
+        )
+
+        source_state = response["result"]["source_state"]
+        self.assertEqual(
+            "unverified",
+            source_state["color_management"]["ocio_enabled"],
+        )
+        self.assertIn(
+            "color_management.ocio_display",
+            source_state["unverified"],
+        )
+        self.assertEqual("unverified", source_state["hdr"]["os_hdr"])
+        self.assertEqual("unverified", response["result"]["display_match"])
+        self.assertEqual(
+            "unverified",
+            response["result"]["hdr_display_mismatch_risk"],
+        )
+
+    def test_legacy_viewport_api_is_only_an_explicit_degraded_fallback(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(640, 360),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.flipbook = None  # type: ignore[method-assign]
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"return_image": False},
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(
+            "viewport.saveViewToImage_fallback",
+            response["result"]["capture_api"],
+        )
+        self.assertEqual("passed", response["result"]["quality_status"])
+        self.assertEqual("unverified", response["result"]["visual_match"])
+        self.assertTrue(
+            any("legacy viewport image API" in item for item in response["warnings"])
+        )
 
     def test_failed_viewport_capture_restores_default_camera_and_lock(self) -> None:
         capture_camera = FakeCamera("/obj/capture_camera")
@@ -299,8 +933,8 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
             )
 
         self.assertEqual("VIEWPORT_CAPTURE_FAILED", raised.exception.code)
-        self.assertIs(capture_camera, viewport.camera_at_save)
-        self.assertFalse(viewport.camera_lock_at_save)
+        self.assertIs(capture_camera, hou_module.scene_viewer.camera_at_flipbook)
+        self.assertFalse(hou_module.scene_viewer.camera_lock_at_flipbook)
         self.assertIsNone(viewport.camera())
         self.assertEqual("original-free-view", viewport.defaultCamera().state)
         self.assertIn("set_default", viewport.camera_restore_calls)
@@ -315,6 +949,10 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         )
         hou_module, executor = self.make_executor(viewport)
         original_settings = hou_module.scene_viewer.original_flipbook_settings
+        original_settings.override_gamma = True
+        original_settings.gamma_value = 1.8
+        original_settings.override_lut = True
+        original_settings.lut_path = str(self.project_root / "display.cube")
 
         response = executor.dispatch(
             "hia_capture_viewport",
@@ -335,6 +973,13 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertEqual(100, used.output_zoom)
         self.assertFalse(used.use_sheet_size)
         self.assertFalse(used.output_to_mplay)
+        self.assertTrue(used.override_gamma)
+        self.assertEqual(1.8, used.gamma_value)
+        self.assertTrue(used.override_lut)
+        self.assertEqual(
+            str(self.project_root / "display.cube"),
+            used.lut_path,
+        )
         self.assertFalse(hou_module.scene_viewer.open_dialog)
         self.assertEqual((640, 360), (response["result"]["width"], response["result"]["height"]))
         self.assertEqual(12.0, hou_module.frame())
@@ -343,6 +988,18 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertEqual(0, hou_module.scene_viewer.mplay_launches)
         self.assertTrue(original_settings.output_to_mplay)
         self.assertFalse(original_settings.use_resolution)
+        self.assertEqual(
+            1.8,
+            response["result"]["source_state"]["color_management"][
+                "flipbook_gamma"
+            ],
+        )
+        self.assertEqual(
+            str(self.project_root / "display.cube"),
+            response["result"]["source_state"]["color_management"][
+                "flipbook_lut"
+            ],
+        )
         self.assertEqual("original-free-view", viewport.defaultCamera().state)
         self.assertIsNone(viewport.camera())
         self.assertEqual([], viewport.camera_restore_calls)

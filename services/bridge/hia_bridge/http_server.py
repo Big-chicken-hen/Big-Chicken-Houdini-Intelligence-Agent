@@ -8,9 +8,11 @@ import re
 import sys
 import threading
 import time
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlsplit
@@ -19,6 +21,7 @@ from hia_core.houdini_contract import ContractError, SchemaRegistry, strict_json
 
 from .errors import BridgeError
 from .events import EventBuffer
+from .knowledge_cli import KnowledgeCliError, KnowledgeCliRunner
 from .scene_queue import (
     B2_READ_ONLY_PROFILE,
     RequestSnapshot,
@@ -32,11 +35,19 @@ MAX_REQUEST_BYTES = 1024 * 1024
 MAX_SCENE_REQUEST_BYTES = 262_144
 MAX_SCENE_POLL_MS = 1_000
 MAX_MCP_HEALTH_RESPONSE_BYTES = 65_536
+MAX_MCP_TOOL_RESPONSE_BYTES = 4_194_304
 SCENE_EXECUTOR_HEADER = "X-HIA-Executor-Token"
 HIA_MCP_V2_BACKEND = "hia_v2"
 FXHOUDINI_MCP_BACKEND = "fxhoudini"
 HIA_MCP_V2_HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
+HIA_MCP_V2_EXECUTE_ROUTE = "/hia-mcp-v2/v1/execute"
 HIA_MCP_V2_WIRE_PROTOCOL = "hia-mcp-v2/1"
+_PROJECT_MEMORY_TOOL = "hia_project_memory"
+_PROJECT_MEMORY_ACTIONS = frozenset(
+    {"record", "search", "list", "delete", "supersede"}
+)
+_PROJECT_MEMORY_ID = re.compile(r"^mem_[0-9a-f]{32}$")
+_PROJECT_MEMORY_TIMEOUT_SECONDS = 60.0
 _SCENE_CAPABILITY_PATH = "/v1/scene/capabilities"
 _SCENE_STATUS_PATH = "/v1/scene/status"
 _SCENE_RESULT_PATH = re.compile(
@@ -48,6 +59,205 @@ _SCENE_APPROVAL_PATH = re.compile(
 _SCENE_CANCEL_PATH = re.compile(
     r"^/v1/scene/requests/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/cancel$"
 )
+
+
+def _bounded_project_memory_text(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.replace("\x00", " ").split())
+    return text[:limit]
+
+
+def _project_memory_runtime_error(
+    raw: bytes,
+) -> tuple[str, str, dict[str, Any]]:
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = {}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return (
+            "PROJECT_MEMORY_FAILED",
+            "The project-memory runtime rejected the request",
+            {},
+        )
+    code = _bounded_project_memory_text(error.get("code"), 128)
+    message = _bounded_project_memory_text(error.get("message"), 2_048)
+    details = error.get("details")
+    return (
+        code or "PROJECT_MEMORY_FAILED",
+        message or "The project-memory runtime rejected the request",
+        dict(details) if isinstance(details, dict) else {},
+    )
+
+
+def _project_memory_item(
+    value: Any,
+    *,
+    search_result: bool,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BridgeError(
+            "INVALID_PROJECT_MEMORY_RESPONSE",
+            "A project-memory item was malformed",
+            HTTPStatus.BAD_GATEWAY,
+        )
+    metadata = value.get("metadata") if search_result else value
+    if not isinstance(metadata, dict):
+        raise BridgeError(
+            "INVALID_PROJECT_MEMORY_RESPONSE",
+            "Project-memory metadata was malformed",
+            HTTPStatus.BAD_GATEWAY,
+        )
+    memory_id = metadata.get("memory_id") if search_result else value.get("id")
+    if not isinstance(memory_id, str) or _PROJECT_MEMORY_ID.fullmatch(memory_id) is None:
+        raise BridgeError(
+            "INVALID_PROJECT_MEMORY_RESPONSE",
+            "A project-memory item had an invalid stable ID",
+            HTTPStatus.BAD_GATEWAY,
+        )
+    raw_tags = metadata.get("tags") if search_result else value.get("tags")
+    tags = (
+        [
+            text
+            for text in (
+                _bounded_project_memory_text(tag, 128)
+                for tag in raw_tags[:32]
+            )
+            if text
+        ]
+        if isinstance(raw_tags, list)
+        else []
+    )
+    status = _bounded_project_memory_text(
+        metadata.get("status") if search_result else value.get("status"),
+        32,
+    )
+    superseded_by = _bounded_project_memory_text(
+        (
+            metadata.get("superseded_by")
+            if search_result
+            else value.get("superseded_by")
+        ),
+        36,
+    )
+    if (
+        superseded_by
+        and _PROJECT_MEMORY_ID.fullmatch(superseded_by) is None
+    ):
+        superseded_by = ""
+    projected = {
+        "id": memory_id,
+        "memory_type": _bounded_project_memory_text(
+            (
+                metadata.get("memory_type")
+                if search_result
+                else value.get("memory_type")
+            ),
+            32,
+        ),
+        "title": _bounded_project_memory_text(value.get("title"), 512),
+        "summary": _bounded_project_memory_text(
+            value.get("snippet") if search_result else value.get("body"),
+            800,
+        ),
+        "tags": tags,
+        "scope": _bounded_project_memory_text(
+            metadata.get("scope") if search_result else value.get("scope"),
+            256,
+        ),
+        "status": status or "active",
+        "superseded_by": superseded_by,
+        "created_at": _bounded_project_memory_text(
+            (
+                metadata.get("created_at")
+                if search_result
+                else value.get("created_at")
+            ),
+            64,
+        ),
+        "updated_at": _bounded_project_memory_text(
+            (
+                metadata.get("updated_at")
+                if search_result
+                else value.get("updated_at")
+            ),
+            64,
+        ),
+    }
+    for field in ("source_thread_id", "source_turn_id"):
+        if field in metadata:
+            projected[field] = _bounded_project_memory_text(
+                metadata.get(field),
+                256,
+            )
+    return projected
+
+
+def _project_memory_projection(
+    action: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if action in {"list", "search"}:
+        field = "items" if action == "list" else "matches"
+        values = payload.get(field)
+        total = payload.get("total")
+        if (
+            not isinstance(values, list)
+            or isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < 0
+        ):
+            raise BridgeError(
+                "INVALID_PROJECT_MEMORY_RESPONSE",
+                "The project-memory collection result was malformed",
+                HTTPStatus.BAD_GATEWAY,
+            )
+        return {
+            "action": action,
+            "memories": [
+                _project_memory_item(
+                    value,
+                    search_result=action == "search",
+                )
+                for value in values
+            ],
+            "total": total,
+        }
+    if action == "record":
+        return {
+            "action": action,
+            "memory": _project_memory_item(
+                payload.get("memory"),
+                search_result=False,
+            ),
+        }
+    if action == "supersede":
+        return {
+            "action": action,
+            "superseded": _project_memory_item(
+                payload.get("superseded"),
+                search_result=False,
+            ),
+            "replacement": _project_memory_item(
+                payload.get("replacement"),
+                search_result=False,
+            ),
+        }
+    memory_id = payload.get("memory_id")
+    if (
+        action != "delete"
+        or not isinstance(memory_id, str)
+        or _PROJECT_MEMORY_ID.fullmatch(memory_id) is None
+        or payload.get("deleted") is not True
+    ):
+        raise BridgeError(
+            "INVALID_PROJECT_MEMORY_RESPONSE",
+            "The project-memory delete result was malformed",
+            HTTPStatus.BAD_GATEWAY,
+        )
+    return {"action": action, "memory_id": memory_id, "deleted": True}
 
 
 class BridgeApplication:
@@ -63,6 +273,7 @@ class BridgeApplication:
         houdini_mcp_port: int | None = None,
         houdini_mcp_token: str | None = None,
         houdini_mcp_backend: str = FXHOUDINI_MCP_BACKEND,
+        knowledge_cli: KnowledgeCliRunner | None = None,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Bearer token must contain at least 32 characters")
@@ -125,6 +336,7 @@ class BridgeApplication:
         self._houdini_mcp_port = houdini_mcp_port
         self._houdini_mcp_token = houdini_mcp_token
         self._houdini_mcp_backend = houdini_mcp_backend
+        self._knowledge_cli = knowledge_cli or KnowledgeCliRunner()
 
     def authorized(self, value: str | None) -> bool:
         return value is not None and hmac.compare_digest(
@@ -224,6 +436,146 @@ class BridgeApplication:
         )
         return status
 
+    def project_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Forward one explicit memory action to the existing HIA V2 tool."""
+
+        action = arguments.get("action")
+        if not isinstance(action, str) or action not in _PROJECT_MEMORY_ACTIONS:
+            raise BridgeError(
+                "INVALID_PROJECT_MEMORY_ACTION",
+                "Project memory action must be record, search, list, delete, or supersede",
+                HTTPStatus.BAD_REQUEST,
+            )
+        if (
+            self._houdini_mcp_backend != HIA_MCP_V2_BACKEND
+            or self._houdini_mcp_port is None
+            or self._houdini_mcp_token is None
+        ):
+            raise BridgeError(
+                "PROJECT_MEMORY_UNAVAILABLE",
+                "Project memory requires the live HIA MCP V2 runtime",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        try:
+            from hia_mcp_v2.errors import InputError
+            from hia_mcp_v2.tools import validate_input
+        except ImportError as exc:
+            raise BridgeError(
+                "PROJECT_MEMORY_UNAVAILABLE",
+                "The HIA MCP V2 project-memory contract is unavailable",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            ) from exc
+        try:
+            validate_input(_PROJECT_MEMORY_TOOL, arguments)
+        except InputError as exc:
+            raise BridgeError(
+                exc.code,
+                exc.message,
+                HTTPStatus.BAD_REQUEST,
+                dict(exc.details) if exc.details is not None else None,
+            ) from exc
+
+        request_id = f"bridge-memory-{uuid.uuid4().hex}"
+        body = json.dumps(
+            {
+                "protocol": HIA_MCP_V2_WIRE_PROTOCOL,
+                "id": request_id,
+                "tool": _PROJECT_MEMORY_TOOL,
+                "arguments": arguments,
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = urllib_request.Request(
+            (
+                f"http://127.0.0.1:{self._houdini_mcp_port}"
+                f"{HIA_MCP_V2_EXECUTE_ROUTE}"
+            ),
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self._houdini_mcp_token}",
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(
+                request,
+                timeout=_PROJECT_MEMORY_TIMEOUT_SECONDS,
+            ) as response:
+                raw = response.read(MAX_MCP_TOOL_RESPONSE_BYTES + 1)
+        except urllib_error.HTTPError as exc:
+            raw_error = exc.read(MAX_MCP_TOOL_RESPONSE_BYTES + 1)
+            code, message, details = _project_memory_runtime_error(raw_error)
+            status = (
+                HTTPStatus.BAD_REQUEST
+                if exc.code == HTTPStatus.BAD_REQUEST
+                else HTTPStatus.SERVICE_UNAVAILABLE
+            )
+            raise BridgeError(code, message, status, details) from exc
+        except Exception as exc:
+            raise BridgeError(
+                "PROJECT_MEMORY_UNAVAILABLE",
+                "The live HIA MCP V2 project-memory tool is unavailable",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            ) from exc
+        if len(raw) > MAX_MCP_TOOL_RESPONSE_BYTES:
+            raise BridgeError(
+                "PROJECT_MEMORY_RESPONSE_TOO_LARGE",
+                "The project-memory response exceeded the Bridge byte limit",
+                HTTPStatus.BAD_GATEWAY,
+            )
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BridgeError(
+                "INVALID_PROJECT_MEMORY_RESPONSE",
+                "The project-memory runtime returned invalid JSON",
+                HTTPStatus.BAD_GATEWAY,
+            ) from exc
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"protocol", "ok", "id", "result"}
+            or payload.get("protocol") != HIA_MCP_V2_WIRE_PROTOCOL
+            or payload.get("ok") is not True
+            or payload.get("id") != request_id
+            or not isinstance(payload.get("result"), dict)
+        ):
+            raise BridgeError(
+                "INVALID_PROJECT_MEMORY_RESPONSE",
+                "The project-memory runtime response was malformed",
+                HTTPStatus.BAD_GATEWAY,
+            )
+        runtime_result = payload["result"].get("result")
+        if not isinstance(runtime_result, dict):
+            raise BridgeError(
+                "INVALID_PROJECT_MEMORY_RESPONSE",
+                "The project-memory tool result was malformed",
+                HTTPStatus.BAD_GATEWAY,
+            )
+        return _project_memory_projection(action, runtime_result)
+
+    def project_knowledge(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run one fixed project-local knowledge CLI action."""
+
+        try:
+            return self._knowledge_cli.handle(
+                arguments,
+                thread_reader=self.session.read_thread,
+            )
+        except KnowledgeCliError as exc:
+            raise BridgeError(
+                exc.code,
+                exc.message,
+                HTTPStatus(exc.http_status),
+                exc.details,
+            ) from exc
+
+    def close(self) -> None:
+        self._knowledge_cli.close()
+
 
 class LoopbackHTTPServer(ThreadingHTTPServer):
     """A ThreadingHTTPServer that refuses every non-loopback bind address."""
@@ -241,6 +593,12 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
             raise ValueError("Bridge may bind only to 127.0.0.1")
         self.application = application
         super().__init__((host, port), BridgeRequestHandler)
+
+    def server_close(self) -> None:
+        try:
+            self.application.close()
+        finally:
+            super().server_close()
 
 
 class BridgeRequestHandler(BaseHTTPRequestHandler):
@@ -439,6 +797,12 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 local_image_paths=body.get("local_image_paths"),
                 service_tier=body.get("service_tier"),
             )
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/project-memory":
+            result = application.project_memory(body)
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/knowledge":
+            result = application.project_knowledge(body)
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/threads/name":
             self._require_exact_fields(body, {"thread_id", "name"})

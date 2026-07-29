@@ -2,6 +2,10 @@
 
 本报告记录本轮 `feature/panel-ui` 开发与测试中实际观察到的问题。已解决条目不会删除；同一根因再次出现时更新出现次数与证据。
 
+> 本文件是追加式历史记录。各节中的“当前”、发行包版本和测试计数只描述该节
+> 当时的工作树，不代表最新发行候选；发布前必须以最新提交上的 source preflight、
+> 定向/完整测试和新构建归档为准，不复用旧 `.runtime/release` ZIP 或校验文件。
+
 ## 问题记录
 
 ### TR-001：真实 Houdini GUI 验收等待人工执行
@@ -1109,7 +1113,7 @@
 - HIA MCP V2 registry 当前为 17 个工具。`hia_local_help_search` 保留既有单项/批量、`sources`、分页和 `refresh` 兼容形状，新增 `lexical|vector|hybrid`，默认 hybrid；SQLite FTS5 始终是硬基线。唯一新增持久记忆入口为 `hia_project_memory`，actions 为 `record/search/list/delete/supersede`，types 为 `decision/preference/asset/lesson/workflow`。只有显式 record/supersede/delete 改写记忆，不保存聊天、不从 compaction 或诊断自动总结。
 - SQLite `knowledge.sqlite3` 同时保存正文、FTS5、显式 memory 和向量行；向量行保留 `model_id` 与 `dim`。刷新按 chunk SHA-256 增量处理，来源删除同步删除正文/FTS/向量；切换 profile/revision/dimension 只重建向量层，不重建正文或 FTS5。结果保留 provenance/verification，并公开 requested/active profile、status、degraded、fallback reason 和 repair。
 - 普通 hybrid 每次最多渐进补齐 256 chunks，优先本次 lexical candidates，再处理 backlog；在 `retrieval.vector.index` 返回 `complete/vector_chunks/total_chunks/pending_chunks/chunks_indexed_this_call`，不宣称首次查询完成全量向量化。向量排名使用 SQLite 流式游标与 bounded heap，不把全库向量物化到内存。
-- encoder 是独立、持久、串行 JSONL stdio worker，使用项目内 `.runtime/toolchains/hia-embedding/venv/Scripts/python.exe` 与 `hia-embedding-stdio/1`，不会进入 Houdini Python/UI 主线程。MRL 通过构造 `SentenceTransformer` 时的 `truncate_dim=profile.dim` 实现，并在截断维度 normalize，不在 Python 返回后 slice。Codex 仍是唯一推理、规划、记忆正文和 HOM 生成主体；Qwen 只编码文本。搜索/import 不下载，不增加量化、reranker、第三模型、Agent、watcher、网络服务或 scheduler。
+- encoder 是独立、持久、串行 JSONL stdio worker，不会进入 Houdini Python/UI 主线程。该轮当时使用 `.runtime/toolchains/hia-embedding/venv/Scripts/python.exe`；当前权威环境是项目根 `<project-root>/.venv`，旧路径仅作为 legacy migration source。协议仍为 `hia-embedding-stdio/1`。MRL 通过构造 `SentenceTransformer` 时的 `truncate_dim=profile.dim` 实现，并在截断维度 normalize，不在 Python 返回后 slice。Codex 仍是唯一推理、规划、记忆正文和 HOM 生成主体；Qwen 只编码文本。搜索/import 不下载，不增加量化、reranker、第三模型、Agent、watcher、网络服务或 scheduler。
 
 ### 双 profile 与 launcher contract
 
@@ -1307,3 +1311,498 @@
   AST、真实 `XamlReader.Load` 均通过。`-CheckOnly -Json` 返回 overall green、
   24 项检查，未显示窗口、未启动 Houdini。
 - 尚未在真实显示器上人工验证 125%/150%/200% DPI、窗口最大化及实际交互焦点。
+
+## Panel 复杂任务信息架构第一批（2026-07-26，离线通过）
+
+- 根因是历史、对话和 Goal/团队长期固定并排，复杂任务的公开计划又混入聊天
+  System 行；侧栏内容会争夺中央宽度，蓝图、阶段和审阅也没有稳定展示位置。
+- Panel 现以中央对话为最高伸缩优先级：右栏先自动收起、更窄时再收起历史栏，
+  用户仍可手动展开；中央列忽略复合控件的横向 minimumSizeHint，避免反向锁住
+  Houdini Pane。右栏收敛为“任务蓝图 / 阶段进度 / 审阅 / 团队”四个标签。
+- Build Brief 只显示首次公开用户请求或显式 `taskInsight`/Goal 公共字段；阶段只
+  显示匹配当前 Turn 的公开 plan；审阅统一为 domain、severity、对象/路径、
+  evidence 和 suggested next action。跨 Thread、迟到旧 Turn、reasoning、未知
+  事件和原始 JSON 不进入这些视图，公开文本复用现有凭据脱敏。
+- 历史会话仍默认空白并需手动打开；精确崩溃恢复、中文 IME、非模态附件、
+  Stop/steer 和现有工具活动路径未改。Panel 相邻定向回归 `184/184` 通过，
+  `git diff --check` 通过。
+- 尚需在真实 Houdini GUI 人工验证窄 Pane/高 DPI 下的侧栏断点、四个标签和审阅
+  卡片换行，以及中文 IME、附件焦点和 Stop 冻结在真实 Qt 事件循环中无回归。
+
+## Panel 活动 Turn 与 Goal 专注控件回归（2026-07-26，离线通过）
+
+- 用户实测中，Turn/Goal 运行时模型、推理强度和速度选择被 `busy` 一并禁用；
+  Goal 保存启动 Turn 后，专注复选框也被同一门槛锁住，必须先 Stop 才能开启。
+- 模型、推理强度和速度现仅在 turn/start 尚未 ACK 或会话状态正在切换/对账时
+  暂停编辑；活动 Turn 中可为下一轮调整，当前已发请求不被改写。Goal 文本、
+  保存和清除仍在活动 Turn 中保持禁用，但 Goal 保存响应完成后，专注开关可在
+  该 Goal Turn 运行期间直接开启。
+- 最终快速定向回归 `test_panel_wiring + test_panel_state` 共 `135/135` 通过，
+  耗时 `0.031s`；`git diff --check` 通过。此前完整 discover 在外部 `240s`
+  时限内未产生最终汇总，只能记为超时边界，不能宣称完整套件通过。
+- 尚需真实 Houdini GUI 验证：普通 Turn ACK 后三个选择器立即可用且只影响下一
+  Turn；保存 active Goal 后无需 Stop 即可勾选专注模式。
+
+## Panel 顶栏运行设置宽度回归（2026-07-26，离线通过）
+
+- 用户截图显示顶栏只剩“模型 / 推理 / 速度”标签，三个下拉框被压到接近零宽。
+  根因是所有状态和选择器共用单个横向布局，尾部 stretch 与三个 selector 的
+  `minimumWidth=0`、水平 `Ignored` 策略允许字段在空间竞争中完全让出宽度。
+- 三个选择器现移入独立的“运行设置（下一轮）”表单；字段使用非零最小宽度和
+  `Expanding`，Qt `WrapLongRows` 在窄 Pane 时把长字段换到标签下一行。没有隐藏
+  设置、横向滚动、固定大宽度或新 resize 状态；中央 splitter 仍保持最高伸缩
+  优先级和水平 `Ignored`，三个 selector 的最小宽度也不会再横向累加成外层
+  Pane 的大宽度门槛。
+- 快速 Panel 定向回归覆盖常规/窄宽可见性与合理最小宽、活动 Turn 下一轮
+  model/effort/speed 选择、Goal Turn 中开启专注、对话卡和 composer，相邻测试
+  共 `151/151` 通过，耗时 `0.037s`；未运行已知会超时的整仓 discover。
+- 尚需在真实 Houdini GUI 验证：常规与窄 Pane 下三个下拉框可见可点击、窄宽
+  自动换行，以及中央对话区和 Houdini 外层 splitter 的实际拖动行为。
+
+## Panel 项目记忆可见管理（2026-07-26，离线通过）
+
+- 旧界面没有项目记忆列表与显式维护入口，用户无法确认哪些长期记录仍在生效，
+  也无法从 Panel 精确新增、取代或删除一条不再需要的记忆。
+- 右侧现增加紧凑的“项目记忆”页，支持搜索、刷新、查看类型/摘要/tags/scope/
+  状态/稳定 ID，并显式执行 `record`、`supersede` 和单 ID `delete`。删除采用
+  非模态二次点击和最小防双击间隔；没有自动记忆、清空全部或对聊天、知识资料、
+  附件和项目文件的删除副作用。
+- Panel 只调用 Bridge 的固定 `/v1/project-memory` 合约；Bridge 复用实时
+  `hia_project_memory` 校验与认证 HIA MCP V2 runtime，返回有界展示投影，不开放
+  任意工具代理、不直接操作 SQLite。直接运行 `scripts/launch-houdini.ps1` 时也
+  使用同一 Bridge/runtime 路径，不依赖 WPF；项目内 CLI 仍可独立管理显式记忆。
+- Panel/Bridge 相邻定向回归共 `196/196` 通过，耗时 `11.132s`。覆盖五种动作、
+  固定工具与认证、响应投影、HIA V2 不可用、窄 Pane、IME 友好编辑、状态隔离、
+  单 ID 二次确认及相邻 conversation/composer/task-insights 行为。
+- 尚未启动真实 Houdini GUI。仍需人工验证窄 Pane/高 DPI 下第五页滚动与焦点、
+  中文输入、真实 runtime 的五种操作和长 cook 期间请求等待；本轮未运行完整套件。
+
+## 项目本地环境与知识/缓存 CLI 文档收口（2026-07-26，问题记录）
+
+- 审计时现有 `.runtime\toolchains\hia-embedding\venv` 的 `pyvenv.cfg` 仍把基础
+  Python 指向项目外部目录，因此项目移动或换机后不能视为便携、
+  同源且已验证的生产环境；当时该 venv 也缺少 PDF 解析依赖 `pypdf`。
+- 旧的外部/PATH Bridge Python 路径即使设置 `PYTHONNOUSERSITE=1`，也只能排除
+  user site-packages，不能证明系统 `site-packages` 没有参与。正式边界改为由
+  项目本地 uv 在 `.runtime\toolchains\python` 准备 managed Python，并在同一个
+  `.runtime\toolchains\hia-embedding\venv` 内安装 Bridge、解析器与可选 embedding
+  依赖；最终健康检查要求 executable、prefix、base prefix 与 import path 均留在
+  项目根内。Houdini Python、全局 Python、用户 site-packages 和系统 PATH 不作为
+  安装目标。
+- 安装与修复必须走同源项目命令：WPF 调用 `scripts\hia-knowledge.ps1`、
+  `scripts\hia-cache.ps1` 及显式 embedding installer；不使用 WPF 的用户运行
+  相同命令。基础修复只准备 managed Python、uv、共享 venv 与 `pypdf`，没有
+  PyTorch/模型时明确降级 FTS5，且不阻断 Houdini。
+- 本节是文档与已观察问题的收口记录。本次文档任务没有修改产品代码，没有运行
+  unittest、PowerShell AST、XAML 或完整套件，也不新增或声称任何测试通过数量。
+  上文已有数字仍分别属于其原始历史轮次。
+- 真实 WPF GUI 仍未在本次任务中人工验证。待验项目包括完整 venv 路径的
+  Tooltip/报告、环境四类状态、文件/文件夹导入与托管副本删除提示、索引继续、
+  缓存分类/大小/快照确认/逐类结果，以及不同 DPI、项目移动、代理、磁盘不足和
+  NVIDIA/AMD/CPU-only 主机上的可读降级表现。
+
+## 启动器本地知识、受管环境与缓存安全收口（2026-07-26，定向通过）
+
+- 系统掉线后从共享工作树当前磁盘状态原地恢复，没有回滚或重做其他模块。
+  WPF 的环境、资料、索引与缓存操作均调用项目相对 CLI；资料导入、列表、删除和
+  重扫委托既有 `knowledge_index_cli`，删除托管副本不会删除原文件。
+- Bridge、本地知识解析器和可选 embedding 复用唯一项目受管 venv。基础安装/
+  修复只准备项目本地 Python、uv、同一 venv 与固定 `pypdf`，不会使用全局 pip、
+  用户 site-packages、系统 PATH 或 Houdini 安装目录；模型缺失或设备不可用仍可
+  降级 FTS5，不阻断基础 Houdini 启动。
+- 当前机器的既有 venv 是未带受管 marker 的旧环境，基础 Python 仍来自项目外，
+  且缺少 `pypdf`。真实 `environment-status` 因而正确返回
+  `repair_required`、保留已探测到的 Torch/CUDA 信息并降级 FTS5；未在本轮执行
+  安装或修复。`-CheckOnly -Json` 也因没有可接受的 Bridge Python 返回 red，
+  没有伪报环境可用，也没有启动 Houdini GUI。
+- 缓存 CLI 只暴露六个固定分类并采用双快照、精确解析路径、reparse/逃逸拒绝和
+  整批零写。新增阻断确认：任一选中分类出现普通 `.hip/.hiplc/.hipnc` 文件时，
+  整组选中分类不删除；最终输出可以使用 `.runtime/cache` 根，但不能等于或位于
+  `screenshots`、`previews`、`tmp`、`embedding` 或 `dotnet` 分类下。真实只读
+  `list` 因 Hugging Face snapshot 的 symlink 安全阻断下载缓存分类，未删除内容。
+- Release 使用显式生产文件 allowlist，包含知识/缓存 CLI、安装 helper、受管
+  contract 和 Panel 当前直接依赖的 `task_insights.py`；资产示例
+  `src/hia_core/vending_machine.py` 不进入 ZIP。启动图说明统一为项目自有
+  `assets/launcher/launcher-hero.png`，缺图时仍可回退。
+- 合并定向 unittest 共运行 132 项：128 项通过，4 项因当前 Windows 会话缺少
+  symlink 创建权限而按条件跳过。9 个 PowerShell 文件 AST、XAML XML 与真实
+  `XamlReader.Load`、4 个 Python 文件 AST、固定盘符扫描、缓存危险删除模式扫描
+  和 `git diff --check` 均通过；暂存区为空。
+- 未运行完整项目套件，也未启动真实 WPF/Houdini GUI。仍需人工执行一次
+  `environment-repair`，再验证真实文件/文件夹导入、托管副本删除、索引继续、
+  缓存确认界面，以及 125%/150%/200% DPI、项目移动、代理、磁盘不足和
+  NVIDIA/AMD/CPU-only 主机的自适应表现。
+
+## 主审最终回归（2026-07-26，通过）
+
+- 初次测试超时由当前 Codex 沙箱无 E 盘测试临时目录写权限引起；
+  `faulthandler` 定位到 `tempfile.mkdtemp`。获批以正确权限运行后不再超时，
+  确认为测试环境权限问题，不是产品死锁。
+- 跨模块定向回归 `466/466` 通过，耗时 `70.995s`。
+- 该轮当时的完整 unittest `992/992` 通过，耗时 `72.028s`；同轮 Release
+  hygiene 通过。该计数不覆盖 2026-07-27 及之后的变更，不能作为最新发行候选
+  的当前完整测试结论。
+- 9 个 PowerShell 文件 AST 为 0 错误；XAML XML 解析和真实
+  `Windows.Markup.XamlReader.Load` 均成功。
+- 真实 WPF/Houdini GUI、0.6B/8B 的 CPU/CUDA 组合及项目目录迁移仍需人工验收。
+
+## 启动器一键修复旧本地知识环境（2026-07-26，定向通过）
+
+- 真实问题：旧共享 venv 仍存在，但 `pyvenv.cfg` 的 `home` 指向项目外旧 Python，
+  项目内 managed Python 不存在。严格探针正确返回 `repair_required`，但此前 WPF
+  只提示运行 `environment-repair`，普通 GUI 用户无法直接完成修复。已解决。
+- WPF 现在根据 `missing`、`repair_required`、`unsafe` 和复检结果显示原因与
+  一键安装/修复动作；它异步调用同源 `scripts\hia-knowledge.ps1`，展示阶段、
+  不确定进度、脱敏项目日志和重试入口，不在 UI 中复制安装逻辑。旧 venv 的实际
+  迁移仍由 installer 先验证 staging、再在项目 `.runtime` 内备份并发布，发布失败
+  时恢复旧目录。
+- 没有已验证模型的新用户只准备项目 managed Python、uv、共享 venv 与 `pypdf`，
+  不会被动安装 PyTorch 或下载 Qwen。若修复前已验证模型存在，同一次
+  `environment-repair` 会按当前 Automatic/CUDA/CPU 选择恢复 PyTorch 与
+  embedding worker，并复用模型和项目缓存，不再要求第二次修复。任何失败都保留
+  FTS5、知识库和模型，且不阻断 Houdini。
+- 收口中修复了两项 UI 回归：非阻断知识环境不再抢占 Codex 红色阻断的通用修复
+  按钮；复用跨窗口安装锁时会立即切换并读取所属日志，不再让新路径配旧正文。
+  同时补全 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 的日志/报告值
+  脱敏，仍只报告代理是否存在。
+- launcher 定向 unittest 共运行 `90` 项：`86` 项通过，`4` 项因当前 Windows
+  会话没有文件 symlink 创建权限而条件跳过，耗时 `35.270s`。覆盖 WPF/XAML 真实加载、
+  PowerShell AST、missing/legacy/unsafe 动作、异步与重试状态释放、旧 venv
+  staging/backup/publish/rollback 顺序、已安装模型的 `already_installed` 无下载
+  复用、项目移动路径重解析和无 GUI 的 `-CheckOnly`。
+- 本轮没有执行环境下载/安装、没有启动真实 WPF 或 Houdini GUI。仍需人工点击
+  验证真实旧 venv 修复、全新空 `.runtime` 首装、已装模型后的 CPU/CUDA 运行时
+  补全、网络/代理/磁盘不足失败后的重试，以及项目移动后的真实 GUI 显示。
+
+## Panel/Bridge 本地知识入口（2026-07-26，定向通过）
+
+- 原入口缺少非 WPF 用户可用的知识环境、资料与索引管理；环境 loaded、FTS5
+  fallback 和索引 complete 也没有独立展示。现于既有“知识与记忆”页增加紧凑
+  本地知识区，保留项目记忆 CRUD，不新增页面、数据库或安装实现。
+- Panel 通过 Bridge 固定 `/v1/knowledge` 合约调用项目相对
+  `scripts\hia-knowledge.ps1`。环境状态分为可用、FTS5 降级、需修复和正在修复；
+  官方包、用户资料数与索引进度独立显示。文件/文件夹选择保持非模态，精确
+  source ID 删除只移除托管副本；修复无安全取消契约，索引取消保留已提交批次。
+- 同源 CLI 收口后，`environment-repair` 会复用已安装 profile/device 执行完整
+  一键修复；Bridge 不传 `KnowledgeParserOnly`，也不复制 Torch/安装逻辑。本轮
+  未实际执行修复、导入、删除或重建。
+- 真实只读状态 smoke 返回：环境 `repair_required`、FTS5、官方包
+  `sidefx-official-workflows-v2 2.0.0 / 42` 张卡、用户资料 `0`、索引
+  `30987 / 31812`、待处理 `825`、complete=false；未知计数保持“未报告”，不再
+  伪装成 `0/0`。
+- Panel/Bridge/同源 CLI 及相邻 Stop、Goal、历史、IME、附件定向回归共运行
+  `241` 项：`240` 项通过，`1` 项按环境条件跳过，耗时 `15.926s`。开发中首轮
+  定向测试暴露旧 Panel shim 缺少新控件；最终合并首轮又暴露旧 launcher 测试
+  依赖只读 `list` 顺带初始化目录，均只修正测试夹具后通过。
+- 未启动真实 Houdini GUI。仍需人工验证窄 Pane/高 DPI、中文输入与焦点、真实
+  完整修复进度/日志、文件和文件夹导入、托管副本删除、索引取消后继续，以及
+  直接 `launch-houdini.ps1` 路径下的同一 Bridge 入口。
+
+## 版本化内置工作流知识包与完整正文检索（2026-07-26，定向通过）
+
+- 原实现直接从 checkout 读取一组很短的卡片，没有版本化 runtime 安装层；
+  `full` 仍只是命中 chunk，status 也不能区分内置官方 workflow、用户资料与项目
+  记忆。现已消费 2.0.0 manifest/coverage/source registry，把声明卡与元文件
+  离线、幂等复制到 `.runtime/knowledge/builtin/<pack-id>/<version>-<digest>`，
+  并用独立 built-in collection 索引完整正文。升级不覆盖用户资料或项目记忆。
+- 该轮当时的磁盘包为 42 张卡、116 条 SideFX source registry 记录。加载时不假设固定
+  卡数或单 URL；每卡 `source_ids` 解析并去重为多个 SideFX HTTPS 来源。安装前
+  严格验证 UTF-8、非空正文、路径、可选正文 hash，以及三份元数据中的 pack
+  ID/version 一致性。
+- `refresh=false` 和 CLI `status` 均走 `initialize=False` 只读路径：无数据库时
+  不创建 `.runtime`，已有数据库时不执行 WAL 初始化、schema migration 或写入。
+  显式 `bootstrap` 才安装包并建立 FTS5；可选向量仍由可恢复的 `build` 分批完成。
+- `response_format=full|diagnostic` 会按 ordinal 重建 built-in card 全文；默认预算
+  足够时返回整卡，小预算时保留 match/provenance、设置
+  `content_truncated=true` 并保证分页 offset 前进。compact、batch 与 17 个 MCP
+  工具集合未改变。
+- 全新独立临时项目的真实离线 smoke 得到 42 documents / 296 chunks、0 个混入的
+  project-reference documents。长查询“FLIP particles + liquid mesh + whitewater
+  + motion blur velocity”首名为 `flip-mesh-whitewater-cache`，重建正文 5460
+  字符且包含尾部 production-lighting 验证段，未截断、无 warning。
+- Release checker 现在要求 `manifest.json`、`coverage.json`、`sources.json` 均为
+  普通有效 JSON，并强制磁盘卡、manifest 卡和 ZIP 内普通 Markdown 卡集合相等；
+  该轮定向归档验证为 42/42/42。Release builder 仍使用 `git ls-files`，所以当时
+  未跟踪的新卡必须进入最终提交后才会进入正式 ZIP；若遗漏，checker 会拒绝归档。
+- 合并定向 unittest 共运行 100 项，全部通过，耗时 6.400s；覆盖 runtime/index/
+  hybrid/CLI/MCP protocol、严格只读、包升级隔离、深正文长查询、compact/full
+  预算、source registry、Release hygiene 与六项语料结构检查。`git diff --check`
+  通过，仅报告既有 LF→CRLF 提示。并行语料任务最后补充 source registry 后，
+  又对最新磁盘包运行 8 项 pack/manifest/Release 集合检查，8/8 通过。
+- 一次直接运行完整语料测试在耗时的 near-duplicate 对比项前超过 120s；相关的
+  version、manifest/source、正文结构、coverage 与 canonical inventory 六项已
+  独立通过。本轮未跑完整项目套件、未构建正式 Release ZIP，也未启动真实
+  Houdini/WPF；仍需随最终提交做一次正式 ZIP 和非开发机首次 bootstrap 验收。
+
+## 旧 CUDA venv 一次修复与知识状态零写收口（2026-07-26，定向通过）
+
+- 主审真实状态为：旧 venv 的 `base_prefix` 位于项目外且缺 `pypdf`，但仍有可用
+  CUDA PyTorch、embedding worker 与已验证模型。此前 parser-only repair 会备份
+  旧 venv，却留下不含向量运行时的新 active venv，仍需第二步。现同源
+  `environment-repair` 会在探针确认已有模型时，于同一次用户动作中重建 managed
+  Python/venv、`pypdf`、PyTorch 与 worker，并复用模型及项目 uv/Hugging Face
+  缓存；无模型的新用户仍只安装解析器基线，不会隐式下载模型。
+- `hia-knowledge.ps1 status` 此前会通过默认 `initialize=True` 打开已有 SQLite，
+  在只读环境可能触发 WAL/schema migration 并报
+  `attempt to write a readonly database`。现 aggregate status 和 `sources list`
+  均以 `initialize=False`/read-only 打开；缺数据库只报告 `not_initialized`，
+  不创建目录、数据库、WAL 或迁移。
+- 真实项目只读 smoke 返回 `30987 / 31812`、剩余 `825`、complete=false；
+  运行前后 342 MB SQLite 的 SHA-256、bytes 与 mtime 均不变。缺 runtime/DB 的
+  PowerShell `status`/`environment-status` 回归还确认不会创建 `.runtime`，
+  只有变更动作才建立项目内 cache/home/tmp。修复完成后 WPF 只刷新 status，
+  显示该进度并启用“构建/继续索引”；不会自动启动长时间索引。
+- 最终定向 unittest 运行 `115` 项：`111` 项通过，`4` 项因当前 Windows 会话缺少
+  symlink 创建权限而条件跳过，耗时 `35.708s`。覆盖 legacy CUDA/model
+  fail-closed、一次完整修复路由、exit 0 后严格复检、失败回滚与重试、项目移动、
+  缺库零写和 partial DB 只读。
+- 6 个相关 PowerShell 文件 AST 为 0 错误；XAML XML 解析及真实
+  `Windows.Markup.XamlReader.Load` 成功；`git diff --check` 退出码为 0。
+  本轮未执行真实安装、未自动构建索引、未启动 WPF/Houdini。仍需人工点击验证
+  真实旧 venv 的 CUDA 一键修复、安装失败后重试，以及修复后实际显示
+  `30987 / 31812` 并可手动继续。
+
+## 知识分页、内置包激活与 Release Git 完整性收口（2026-07-27，定向通过）
+
+- batch `hia_local_help_search` 过去把各 query 的续页游标取最小值作为公共
+  `next_offset`，当首屏实际消费量不同时会重复或错位。现每个 query 保留独立
+  cursor；只有所有待续页 cursor 一致时才返回兼容性的顶层 cursor。7 条与 4 条
+  不同体积结果的第二页回归确认无重复。
+- built-in pack 过去会在 SQLite 刷新前切换 `active.json`，且 freshness 窗口可能
+  跳过已变更 digest。现刷新明确读取 staged pack，新 digest 强制刷新 project
+  collection；active 原子切换与 SQLite 事务配对，刷新或 commit 失败会 rollback
+  数据库并恢复旧 active bytes。失败注入确认旧正文仍可检索、新正文不可检索，
+  status 与 active 均保持旧版本；成功路径则同步升级。
+- Release source preflight 现在在 launcher 构建与 ZIP 创建前以真实
+  `git ls-files -z` 核对磁盘卡、manifest 卡、tracked 卡以及
+  `manifest.json`/`coverage.json`/`sources.json`。临时 Git fixture 证明完整包通过、
+  未跟踪卡或元文件被拒绝。当前共享工作树的真实预检按预期返回 1：43 张卡中
+  10 张已跟踪，尚缺 33 张卡及 `coverage.json`、`sources.json`；最终提交纳入
+  这些文件后才允许正式构包。
+- 文档现明确 partial vector 的 `ranking_scope=lexical_candidates` 只重排本 query
+  的词法候选；一次 AND→OR 放宽不等于零词汇重合的全库 semantic。`refresh=false`
+  保证 corpus/index 零写，不夸大为首次 embedding worker 的绝对文件系统零写。
+  full 以卡为分页单位，预算截断的卡尾没有卡内 continuation cursor。
+- MCP/知识定向回归 `8/8` 通过（`0.494s`）；Release hygiene/packaging
+  `25/25` 通过（`1.052s`）；PowerShell AST 随 Release 测试通过，
+  `git diff --check` 退出码 0。未运行完整套件、未构建真实 ZIP、未启动 Houdini。
+
+## 本地知识环境事务回滚与只读 list（2026-07-27，定向通过）
+
+- 已解决：旧可用 venv 被备份、新 venv 发布后，pypdf、Torch/worker 或模型安装/
+  验证失败时，原实现不会恢复旧环境。现在显式 repair 的发布带唯一事务标识；
+  完整 embedding 安装即使已有健康 parser venv 也强制事务发布。发布后探针返回
+  false 或直接抛异常，以及后续任一阶段失败，都会先把本次新 venv 隔离到精确
+  项目内路径，再恢复精确备份；marker 不匹配、重复回滚、reparse 或非 canonical
+  路径均 fail-closed。故障注入覆盖 pypdf、Torch/worker、模型验证三类及发布后
+  探针异常，项目外 sentinel 保持不变。
+- 已解决：`hia-knowledge.ps1 list` 过去会建立
+  `.runtime/cache/knowledge-cli/{home,tmp}`。现与 `status`、
+  `environment-status` 共用只读子环境；缺 `.runtime` 或数据库时不创建项目路径。
+- 合并定向 unittest 共 `91` 项：`87` 项通过，`4` 项因当前 Windows 会话缺少
+  symlink 权限而条件跳过，耗时 `31.756s`；两份相关 PowerShell 脚本 AST 均为
+  0 错误。
+  开发中首轮定向运行仅暴露一条仍断言旧 repair 分支的测试，更新为当前事务语义
+  后通过。
+- 本轮未运行真实安装器、未启动 WPF/Houdini、未清理 `.runtime`。仍需人工验证：
+  真实旧 CUDA venv 在依赖失败时的恢复、项目跨目录/跨盘移动后的可执行性及一次
+  修复重建。进程在目录改名之间被强制终止的恢复需要持久事务日志，未在本次窄
+  修复中扩展实现。
+
+## HIP-local HIA 截图与 AI stage checkpoint（2026-07-27，定向通过）
+
+- 原行为把所有自动 viewport/flipbook 放入项目
+  `.runtime/cache/screenshots`，AI Goal stage checkpoint 只写当前 launcher
+  session；用户已保存 HIP 后，产物与场景交付目录分离。
+- runtime 现在每次调用重新读取 `hou.hipFile.path()`。真实已保存 HIP、普通非
+  reparse 且可写父目录使用同级唯一 `.hia/screenshots` 与
+  `.hia/checkpoints`；untitled、不存在、相对、只读、reparse 或异常路径均回退
+  原项目/session 目录。结果返回 `storage_scope` 和实际绝对路径；Save As 后同一
+  executor 的下一次调用自然切换。
+- HIP-local checkpoint 在实际目录和当前 session checkpoints 各写一份原子 v2
+  marker，绑定 launcher session、Thread、Goal、canonical saved HIP 与
+  checkpoint basename。launcher 只从 session marker 出发推导
+  `<hip-parent>/.hia/checkpoints`，逐项拒绝路径逃逸、reparse、marker 不一致和旧
+  session，再复制到既有 session recovery 目录；没有新增恢复数据库或守护进程。
+- 定向 unittest：runtime/viewport/checkpoint/recovery 共 `45/45` 通过；既有
+  launcher v1 checkpoint、crash-HIP 与 lifecycle 兼容回归 `4/4` 通过；MCP protocol/tool
+  集合回归 `15/15` 通过。未运行完整套件，未启动 Houdini/WPF，未清理
+  `.runtime`。仍需真实 Houdini 验证当前 build 中临时
+  `hou.putenv("HOUDINI_BACKUP_DIR", ...)` 对 `saveAsBackup()` 即时生效、环境恢复
+  不影响手工备份，以及实际 Save As 后截图/checkpoint/崩溃恢复闭环。
+
+## 启动器基础知识环境空 Profile 参数（2026-07-27，定向通过）
+
+- 真实 GUI 复验发现，根 `.venv` 尚未建立且当前没有可用模型选择时，WPF 仍把
+  `-Profile` 连同空字符串拼进 `powershell.exe` 命令行。空值在进程参数序列化后
+  消失，导致 `hia-knowledge.ps1` 在真正安装前以
+  `MissingArgument, hia-knowledge.ps1` 退出。
+- WPF 现在只在模型 profile 非空时传递 `-Profile`；未选择模型时完全省略该
+  可选参数，由同源 CLI 正常执行基础 managed Python、根 `.venv`、uv 与
+  `pypdf` 安装，并保留 FTS5 降级路径。没有修改模型、索引、旧 venv 或任何
+  项目外路径。
+- 同时修正启动器核心与知识 CLI 共用的 Windows 进程参数编码器：真正的空字符串
+  现在编码为 `""`，不会在 `ProcessStartInfo.Arguments` 中消失。新增回归测试会
+  启动短生命周期 PowerShell 子进程，确认两个编码器都把空参数原样交给目标脚本。
+- 启动器与知识 CLI 定向 unittest 共 `87/87` 通过，耗时 `29.029s`。仍需重启
+  最新启动器并点击一次“安装/修复本地知识环境”，完成人工 GUI 与真实安装验证。
+
+## 启动器误拒绝 uv Python 别名（2026-07-27，定向通过）
+
+- uv 为 Python 3.10 建立的标准 Junction 别名被启动器误判，导致健康的项目
+  `.venv` 无法成为 Bridge Python，模型与设备下拉框随之为空。
+- 修复只识别项目内 uv 的标准版本别名，并映射到同目录的普通版本化 Python；
+  其他 reparse 路径仍然拒绝。没有重建 venv、重装模型或清理目录。
+- 启动器相关定向测试 `95/95` 通过；真实只读探针返回 managed Python 健康，
+  并能读取 0.6B/8B 与自动/CUDA/CPU 选项。WPF 显示仍需重启启动器人工确认。
+
+## Validation / inspect / Context Pack 收敛（2026-07-27，定向通过）
+
+- `hia_validate(cook=false)` 原先仍可能通过 geometry 读取触发待 cook SOP；OBJ
+  inspect 也先尝试 `geometry()` 再靠异常降级。现在待 cook SOP 只报告
+  `cook_not_requested`，非 SOP 在访问 geometry 前按类别返回；fake 合约确认没有
+  cook、geometry 调用或 dirty 变化。
+- `empty_output` 现在只检查显式目标或 display/render/`OUT_*` 最终输出职责；
+  root-only 扫描受 `limit` 约束，部分有效 geometry 统计明确为 `partial`。
+  重复 `Cooking was interrupted` 折叠为根因、代表路径和受影响数量。
+- Context Pack recent evidence 保留内部路径做 scope 匹配，对外只给最多 4 条
+  代表路径、真实 `path_count` 与检查摘要；64 条长路径在 4 KiB Pack 中不再导致
+  evidence 被整体裁掉。Panel 记忆列表显式使用 `scope=project`，空结果说明其他
+  scope 并未丢失。
+- 验证/协议/runtime/执行 envelope/Panel 定向回归共 `185/185` 通过，其中新
+  validation/context 契约 `11/11` 通过。未启动真实 Houdini；仍需 GUI 验证
+  `cook=false` 在真实 OBJ/SOP 网络不主动 cook、HIP dirty 不变，以及 Panel
+  project-scope 空态文案。
+
+## 本地知识检索性能复核（2026-07-27，定向通过）
+
+- 真实只读基准使用完整 `qwen3-embedding-0.6b/main/1024` 索引（12,867 documents /
+  32,184 chunks/vectors）及查询 `velocity advected ripple field`。分段结果为：
+  模型首次载入约 `4.733s`，首条直接 encode 约 `0.266s`、热 encode 约 `0.031s`，
+  FTS 约 `0.092–0.097s`，结果序列化约 `0.00005s`。现有同 session worker 已持久复用，
+  `refresh=false` 未触发索引维护，未发现重复模型载入。
+- 明确瓶颈为纯 Python 全库向量扫描。修复保持候选、打分、Top-K、tie、去重及降级语义：
+  第一阶段只流式读取 ID 与 vector BLOB，第二阶段仅有界 hydrate 胜出项；相同乘积顺序改用
+  `math.fsum(map(operator.mul, ...))`，微基准 checksum 与 Top-80 分数逐位一致。
+- 同一索引前后，热 vector scan `4.433s → 2.755s`（`-37.9%`），热端到端
+  `4.643s → 2.952s`（`-36.4%`）；冷端到端 `9.588s → 7.737s`（`-19.3%`）。
+  Top-5 顺序不变，SQLite bytes/mtime 不变。首次 Qwen 载入仍是不可避免的固定成本，
+  本轮未增加缓存系统、服务、线程池、并发或模型。
+- 定向测试 `21/21` 通过；独立复审无阻断，`git diff --check` 通过。未运行完整套件，
+  未启动 Houdini。
+
+## SideFX 官方知识高价值缺口补齐（2026-07-27，定向通过）
+
+- 新增 8 张 documented/static 工作流卡，覆盖曲线/NURBS/Subdivision、OpenCL SOP
+  与 SOP Solver 编译块、Groom/UV transfer、FEM、MPM、H21 Copernicus Pyro 与
+  Legacy COP2 迁移、Python Viewer State、HDK/package distribution；覆盖统计为
+  51 cards / 213 sources / 22 domains / 50 workflows（49 covered、1 partial）。
+- 研究中发现 SideFX 当前节点/HDK 页面常显示 H22，卡片已用 H21 change notes、
+  `Since` 信息和版本边界避免冒充 H21 live 验证；`/copernicus/pyro.html` 路由返回
+  Internal Error，最终改用 H21 Pyro release note、COP 节点页和迁移页作证据。
+- 知识包定向 unittest `18/18` 通过，范围 `git diff --check` 与新增卡静态扫描通过。
+  未运行 Houdini；GUI、GPU、solver 与 HDK 二进制加载仍属真实环境验收边界。
+
+## Knowledge CLI 跨项目 Python 隔离（2026-07-27，已解决）
+
+- 全量回归中，临时项目的 user-site 隔离用例被根仓库 `.venv` 内真实 `pypdf`
+  解析无效 PDF，产生 `Stream has ended unexpectedly`；测试注入的伪造
+  `PYTHONPATH/pypdf` 实际从未加载。
+- 根因是外层 CLI 已剔除非当前项目的 site-packages，但内层 source CLI 曾无条件
+  复用 `sys.executable -I`，新进程启动时又加入该解释器所属的另一项目
+  `.venv`。现在仅当解释器不属于所选项目 contract 指定的 `.venv` 时使用
+  `-I -S -B`；当前项目受管 `.venv` 仍保留其受控 `pypdf`，PDF 未安装与解析失败
+  的既有诊断没有被吞掉。
+- 原失败用例分别由 PATH Python 和项目 `.venv` 运行均通过；同链 launcher/core
+  knowledge CLI 定向回归 `8/8` 通过。未再次运行完整套件，未启动 Houdini。
+
+## 启动器 hython 冷启动超时误报（2026-07-27，已解决）
+
+- 真实报告中，同一 Houdini 21.0.440 的 executable、sibling hython 与
+  `houdini.exe -version` build 探针均通过，只有一次 12 秒
+  `import hou` 探针超时；该路径在此前和约两分钟后均返回 build 21.0.440 /
+  Python 3.11，随后受控 Houdini 会话也以退出码 0 正常结束。因此不能据这次
+  超时判断安装损坏。知识索引数据库在失败前不久有写入，存在资源竞争的时序
+  关联，但现有证据不足以认定它是唯一原因。
+- 使用同一生产探针只读复现时，第一次 `hython -B -c` 成功耗时
+  `22.286s`，超过原通用 `12s` 阈值；紧接的热启动约 `1.105s`。确认的直接
+  根因是冷启动所需时间可超过通用阈值，并非 stdout/stderr 管道死锁。父进程
+  同时存在外部 `PYTHONPATH`，它是本探针不应继承的污染入口。
+- 修复仍只创建一个 hython 进程：主窗口到期后仅等待同一进程的一段有界
+  grace，默认总窗口为 24 秒；主窗口小于 30 秒时总窗口最多 30 秒，显式主
+  窗口达到 30 秒后不再追加 grace。子进程单独移除 `PYTHONPATH`，父环境不变，
+  marker 显式 flush。grace 内成功会标黄、显示
+  实际耗时并明确 `import hou` 已验证；最终超时、非零退出或缺少 marker 仍标
+  红。若 Houdini build 已可读取，超时建议改为等待索引/渲染等重负载结束后
+  重扫，不再直接误导用户修复安装。
+- 新增子进程测试第一次因测试子 PowerShell 未显式使用 process-local
+  `ExecutionPolicy Bypass` 而失败；修正夹具后未改系统策略。hython/grace/
+  环境隔离/错误分级定向 unittest `10/10` 通过，PowerShell AST 解析通过。
+  修复后的同一路径只读实测中 build、`import hou`、Python identity 与 build
+  match 全部绿色；未启动 Houdini GUI。
+- 仍需在知识索引或渲染高负载期间通过真实 WPF 重新扫描，人工确认冷启动落入
+  grace 时黄色耗时文案、最终超时红色文案及按钮状态。
+
+## Panel“知识与记忆”界面精简（2026-07-28，定向通过）
+
+- 原界面把资料库状态、导入与索引维护、项目记忆搜索、详情和编辑表单放在同一条
+  长滚动列中，窄侧栏信息密度过高，也没有解释项目记忆的创建来源。
+- 现在“本地资料库”和“项目记忆”使用页内二级标签分开。资料库默认只显示环境、
+  文档/内置卡片、向量和最近更新时间，维护操作默认折叠；项目记忆默认只显示
+  显式记忆说明、搜索、摘要列表和选中详情，新增/取代/删除默认折叠。页面仍只有
+  一个外层滚动区，没有增加后台机制或修改知识、记忆 API。
+- 记忆摘要优先显示标题、来源短标签和日期；详情显示创建方式、创建时间、
+  Thread/Turn、状态和 stable ID。只有用户或 Codex 显式记录才会出现，聊天不会
+  自动转成项目记忆。审计发现存储/tool 结果已有 `source_thread_id` /
+  `source_turn_id`，但 Bridge 的安全投影曾丢弃它们，导致新记录也被误标成旧记录。
+  现仅在上游实际提供字段时限长透传；缺字段仍保持缺失，Panel 才显示
+  “旧记录：来源未记录”，不做推断或修改存储 schema。
+- Bridge HTTP/client 与 Panel wiring、任务洞察、状态机、网络响应、附件和资源
+  相邻定向回归 `212/212` 通过；其中来源投影到 Panel 的精确链路 `4/4` 通过，
+  `panel.py` Python AST 解析通过。未启动 Houdini GUI。
+- 仍需真实 Houdini 人工确认：窄侧栏中二级标签与折叠区可达、中文 IME 输入、
+  资料任务运行时进度显示、真实记忆来源字段展示，以及历史/Goal/Stop 操作不回归。
+
+## Viewport/flipbook 色彩与质量证据（2026-07-28，定向通过）
+
+- 根因是旧捕获只检查 PNG 头、尺寸和文件存在，随后无条件返回 `ok=true`；
+  响应没有记录实际 Scene Viewer、viewport、camera/free view、投影、显示选项或
+  OCIO 状态，也无法区分“文件写成”与“画面可信”。`viewport` 还优先调用当前
+  SideFX HOM 文档未列出的 `saveViewToImage`，无法证明保存的是用户所见显示变换。
+- `viewport` 和 `flipbook` 现优先复用文档化的 `SceneViewer.flipbook`，不改变
+  当前 gamma/LUT override，并继续恢复 camera/free view、相机锁和帧；旧
+  `saveViewToImage` 只作为单帧、明确标注的降级路径。响应记录 capture API、
+  viewer/viewport、camera、投影、分辨率/裁剪、shading/lighting/display options、
+  OCIO display/view、flipbook gamma/LUT 及所有不可观察项。
+- 新的标准库 PNG 检查受文件、像素和采样预算限制，区分 `capture_ok`、
+  `quality_status`、`visual_match` 与 `display_match`。近全黑、严重过曝、
+  分辨率/宽高比或请求相机不符返回 failed；明显单通道偏色返回 warning。
+  Windows HDR/OS compositor 无 HOM 证据，始终诚实标为 unverified，不做屏幕
+  接管、系统 HDR 修改或写死色彩配置。
+- capture/viewport 定向 unittest `23/23` 通过；5 个相关 Python 文件 AST 与
+  unstaged/cached `git diff --check` 均通过。未启动 Houdini、Bridge 或 launcher，
+  未捕获或修改用户场景；仍需真实 Houdini GUI 对比 SDR、OCIO 与 Windows HDR
+  下的视口和输出，并确认真实相机 mask/crop、Solaris viewport 与多帧 flipbook。
+
+## Panel 当前任务原文索引接线（2026-07-28，定向通过）
+
+- “本地资料库”维护区新增手动“索引当前任务原文 / 移除当前任务索引”。只有明确
+  选中 Thread、知识环境可用且没有活动 Turn、待处理知识请求或运行中知识任务时
+  可用；结果只刷新知识状态，不修改聊天、Goal 或显式项目记忆。
+- Bridge 复用现有 `thread/read` 投影，只把公开 user text 与 assistant final text
+  写入 `hia-thread-snapshot/1`；安全的 Turn/Item ID 原样保留，reasoning、
+  commentary、工具输出、附件正文和本地图片路径均排除。快照正文不进入命令行、
+  日志或 HTTP 响应。
+- 随机快照严格限制在项目 `.runtime/cache/knowledge-cli` 的非 reparse 目录和
+  4 MiB 上限内；`thread-import` 成功、失败、取消或 Bridge 关闭都会只清理本次
+  精确临时文件。路径逃逸与 reparse 条件 fail-closed；清理失败仅返回不含正文的
+  项目内相对路径 warning。`thread-remove` 只传 Thread ID，不读取正文。
+- 文件选择器加入常见音视频后缀，并明确只托管现有 SRT/VTT/TXT sidecar、不会
+  复制视频本体；`TRANSCRIPT_REQUIRED` 显示可操作的中文提示，文件夹导入规则
+  未改变。
+- Bridge/Panel 定向回归 `244/244` 通过；launcher knowledge CLI 相邻回归
+  `24/24` 通过，另有 `1` 项因当前 Windows 无文件 symlink 创建权限按既有条件
+  跳过。4 个相关生产 Python 文件 AST 解析及限定范围 `git diff --check` 通过。
+- 未启动真实 Houdini GUI，也未运行真实 Qwen 向量重建。仍需人工确认窄侧栏按钮
+  可达、活动 Turn 中禁用、无字幕媒体提示，以及真实 Thread 导入后 FTS/Qwen
+  检索结果与移除后的状态刷新。

@@ -217,7 +217,7 @@ class EmbeddingClient:
         python_path = _required_runtime_file(
             values.get(PYTHON_ENVIRONMENT),
             field=PYTHON_ENVIRONMENT,
-            allowed_root=Path(layout["toolchain_root"]),
+            allowed_root=Path(layout["venv_root"]),
         )
 
         raw_profile = values.get(PROFILE_ENVIRONMENT, DEFAULT_PROFILE).strip()
@@ -302,6 +302,23 @@ class EmbeddingClient:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            model_directory = self._model_directories.get(
+                self._active_profile.profile_id
+            )
+            device = self._device
+            if self._loaded and device.casefold().startswith("cuda"):
+                cuda_available: bool | None = True
+            else:
+                cuda_available = None
+            venv_path = (
+                self._python_path.parent.parent
+                if (
+                    self._python_path.name.casefold().startswith("python")
+                    and self._python_path.parent.name.casefold()
+                    in {"scripts", "bin"}
+                )
+                else None
+            )
             return {
                 "contract_version": EMBEDDING_CONTRACT_VERSION,
                 "status": self._status,
@@ -318,6 +335,15 @@ class EmbeddingClient:
                 "active_profile": self._active_profile.profile_id,
                 "model_id": self._active_model_id(),
                 "model_revision": self._active_revision(),
+                "model_path": (
+                    str(model_directory)
+                    if model_directory is not None
+                    else ""
+                ),
+                "python_path": str(self._python_path),
+                "venv_path": str(venv_path) if venv_path is not None else "",
+                "device": device,
+                "cuda_available": cuda_available,
                 "dim": self._active_dim,
                 "normalized": True,
                 "initialized": self._initialized,
