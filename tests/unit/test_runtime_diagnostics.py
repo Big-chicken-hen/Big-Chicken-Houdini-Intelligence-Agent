@@ -47,6 +47,7 @@ class RuntimeDiagnosticWriterTests(unittest.TestCase):
             "turn_id": "turn-example",
             "model": "codex-test",
             "effort": "high",
+            "service_tier": "default",
             "user_goal": "修改当前 Houdini 场景",
             "expected": "生成可编辑节点网络",
             "actual": "执行未完成",
@@ -109,6 +110,7 @@ class RuntimeDiagnosticWriterTests(unittest.TestCase):
             "Turn",
             "Model",
             "Effort",
+            "Service tier",
             "用户目标摘要",
             "预期结果",
             "实际结果",
@@ -140,6 +142,7 @@ class RuntimeDiagnosticWriterTests(unittest.TestCase):
         self.assertIn("side.webp", content)
         self.assertNotIn(r"E:\private\references", content)
         self.assertNotIn("/private/references", content)
+        self.assertIn("- Service tier：default", content)
 
     def test_same_turn_appends_updates_to_one_file(self) -> None:
         writer = self.writer()

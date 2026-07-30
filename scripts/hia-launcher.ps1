@@ -9,6 +9,7 @@ param(
     [switch]$CheckOnly,
     [switch]$Json,
     [switch]$RepairSafeProject,
+    [switch]$PrintCodexLoginCommand,
     [ValidateRange(2, 60)][int]$ProbeTimeoutSeconds = 12
 )
 
@@ -18,6 +19,15 @@ Set-StrictMode -Version Latest
 $modulePath = Join-Path $PSScriptRoot 'launcher\HiaLauncher.Core.psm1'
 Import-Module -Force $modulePath
 $projectRoot = Get-HiaProjectRoot -StartingPath $PSScriptRoot
+
+if (
+    $PrintCodexLoginCommand -and
+    ($CheckOnly -or $RepairSafeProject)
+) {
+    throw (
+        '-PrintCodexLoginCommand cannot be combined with check or repair actions.'
+    )
+}
 
 function Get-SelectedInputs {
     param(
@@ -257,6 +267,21 @@ function Start-ExistingHoudiniLauncher {
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { throw 'The existing Houdini launcher process did not start.' }
     $process.Dispose()
+}
+
+if ($PrintCodexLoginCommand) {
+    $loginCommand = Get-HiaCodexLoginCommand -ProjectRoot $projectRoot
+    if ($Json) {
+        Write-Output (ConvertTo-HiaRedactedJson -Value ([ordered]@{
+            schema = 'hia-launcher-cli/1'
+            action = 'codex-login-command'
+            ok = $true
+            command = $loginCommand
+        }) -Depth 4)
+    } else {
+        Write-Output $loginCommand
+    }
+    exit 0
 }
 
 if ($RepairSafeProject) {

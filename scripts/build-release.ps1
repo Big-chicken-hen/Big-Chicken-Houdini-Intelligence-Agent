@@ -2,7 +2,8 @@
 param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.-]*$')]
     [string]$Version = '0.1.1-preview',
-    [switch]$InstallLocalSdk
+    [switch]$InstallLocalSdk,
+    [switch]$PreflightOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,7 +15,7 @@ $releaseRoot = Join-Path $runtimeRoot 'release'
 $workRoot = Join-Path $releaseRoot 'work'
 $packageName = "Big-Chicken-Houdini-Intelligence-Agent-v$Version-win-x64"
 $archivePath = Join-Path $releaseRoot "$packageName.zip"
-$checksumsPath = Join-Path $releaseRoot 'SHA256SUMS.txt'
+$checksumsPath = Join-Path $releaseRoot "SHA256SUMS-v$Version.txt"
 $stageRoot = Join-Path $workRoot ([guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $stageRoot $packageName
 $launcherDist = $packageRoot
@@ -95,6 +96,23 @@ $releaseDirectoryAllowlist = @(
     'services/bridge/',
     'services/hia_mcp_v2/'
 )
+$releaseBuildInputFiles = @(
+    'scripts/build-launcher.ps1',
+    'scripts/build-release.ps1',
+    'scripts/check-public-release.py',
+    'launcher/HoudiniIntelligenceLauncher/App.xaml',
+    'launcher/HoudiniIntelligenceLauncher/App.xaml.cs',
+    'launcher/HoudiniIntelligenceLauncher/HoudiniIntelligenceLauncher.csproj',
+    'launcher/HoudiniIntelligenceLauncher/ProjectRootLocator.cs'
+)
+$releaseSourceRequiredFiles = @(
+    $releaseFileAllowlist + $releaseBuildInputFiles |
+        Sort-Object -Unique
+)
+$releaseBuildSourcePrefixes = @(
+    'launcher/HoudiniIntelligenceLauncher/',
+    'scripts/launcher/'
+)
 $managedVenvDenyPattern = '(^|/)\.venv(/|$)'
 $releaseDenyPatterns = @(
     '(^|/)\.runtime(/|$)',
@@ -159,6 +177,125 @@ function Test-ReleasePathAllowed {
     return $false
 }
 
+function Test-ReleaseOrdinaryFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    return (
+        $item -is [System.IO.FileInfo] -and
+        (([int]$item.Attributes -band
+            [int][System.IO.FileAttributes]::ReparsePoint) -eq 0)
+    )
+}
+
+function Invoke-ReleaseSourcePreflight {
+    $releasePython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+    foreach ($path in @(
+        (Join-Path $projectRoot '.venv'),
+        (Join-Path $projectRoot '.venv\Scripts')
+    )) {
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+            throw (
+                'Release preflight requires the canonical project .venv. ' +
+                'Run scripts\hia-knowledge.ps1 environment-install first.'
+            )
+        }
+        $item = Get-Item -LiteralPath $path -Force
+        if (
+            $item -isnot [System.IO.DirectoryInfo] -or
+            (([int]$item.Attributes -band
+                [int][System.IO.FileAttributes]::ReparsePoint) -ne 0)
+        ) {
+            throw "Release preflight refused a reparse-point .venv path: $path"
+        }
+    }
+    if (-not (Test-ReleaseOrdinaryFile -Path $releasePython)) {
+        throw (
+            'Release preflight requires .venv\Scripts\python.exe. ' +
+            'Run scripts\hia-knowledge.ps1 environment-install first.'
+        )
+    }
+
+    $trackedFiles = @(& git -C $projectRoot ls-files --)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'git ls-files failed during release source preflight.'
+    }
+    $tracked = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($relativePath in $trackedFiles) {
+        [void]$tracked.Add(
+            ([string]$relativePath).Replace('\', '/').TrimStart('/')
+        )
+    }
+    foreach ($relativePath in $releaseSourceRequiredFiles) {
+        $normalized = ([string]$relativePath).Replace('\', '/').TrimStart('/')
+        if (
+            [System.IO.Path]::IsPathRooted($normalized) -or
+            @($normalized.Split('/')) -contains '..'
+        ) {
+            throw "Release source requirement is not project-relative: $normalized"
+        }
+        $source = [System.IO.Path]::GetFullPath(
+            (Join-Path $projectRoot $normalized)
+        )
+        if (-not (Test-ReleaseOrdinaryFile -Path $source)) {
+            throw "Required release source is missing or not ordinary: $normalized"
+        }
+        if (-not $tracked.Contains($normalized)) {
+            throw "Required release source is not tracked by git: $normalized"
+        }
+    }
+
+    $untrackedFiles = @(
+        & git -C $projectRoot ls-files --others --exclude-standard --
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw 'git ls-files --others failed during release source preflight.'
+    }
+    $untrackedReleaseInputs = [System.Collections.Generic.List[string]]::new()
+    foreach ($relativePath in $untrackedFiles) {
+        $normalized = ([string]$relativePath).Replace('\', '/').TrimStart('/')
+        $isBuildInput = $false
+        foreach ($prefix in $releaseBuildSourcePrefixes) {
+            if ($normalized.StartsWith(
+                $prefix,
+                [System.StringComparison]::Ordinal
+            )) {
+                $isBuildInput = $true
+                break
+            }
+        }
+        if (
+            (Test-ReleasePathAllowed -RelativePath $normalized) -or
+            $isBuildInput
+        ) {
+            $untrackedReleaseInputs.Add($normalized)
+        }
+    }
+    if ($untrackedReleaseInputs.Count -gt 0) {
+        throw (
+            'Untracked release source would be omitted or embedded only in ' +
+            'the built launcher: ' +
+            (@($untrackedReleaseInputs | Sort-Object) -join ', ')
+        )
+    }
+
+    $checkerOutput = @(
+        & $releasePython -I -B $publicReleaseChecker --source-tree $projectRoot
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw (
+            'Release source preflight rejected the built-in knowledge pack ' +
+            "with code $LASTEXITCODE."
+        )
+    }
+    return $releasePython
+}
+
 function Copy-ReleaseFile {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
 
@@ -195,6 +332,18 @@ function Remove-GeneratedStage {
     [System.IO.Directory]::Delete($safePath, $true)
 }
 
+if (-not (Test-Path -LiteralPath $publicReleaseChecker -PathType Leaf)) {
+    throw "Public release checker is missing: $publicReleaseChecker"
+}
+$releasePython = Invoke-ReleaseSourcePreflight
+if ($PreflightOnly) {
+    Write-Output (
+        '[release-preflight] tracked release sources, build inputs, ' +
+        'project .venv, and built-in knowledge passed.'
+    )
+    exit 0
+}
+
 foreach ($directory in @($runtimeRoot, $releaseRoot, $workRoot)) {
     [System.IO.Directory]::CreateDirectory($directory) | Out-Null
 }
@@ -203,21 +352,6 @@ if (Test-Path -LiteralPath $archivePath) {
 }
 if (Test-Path -LiteralPath $checksumsPath) {
     throw "Release checksum file already exists and was not overwritten: $checksumsPath"
-}
-if (-not (Test-Path -LiteralPath $publicReleaseChecker -PathType Leaf)) {
-    throw "Public release checker is missing: $publicReleaseChecker"
-}
-$python = Get-Command -Name 'python.exe' -ErrorAction SilentlyContinue
-if ($null -eq $python) {
-    throw 'Python 3.10+ is required to run the public release checker.'
-}
-
-# Refuse an incomplete built-in knowledge release before building the launcher
-# or creating a ZIP. The checker compares disk and manifest cards, then requires
-# every card plus manifest/coverage/sources to appear in real git ls-files.
-& $python.Source -B $publicReleaseChecker --source-tree $projectRoot
-if ($LASTEXITCODE -ne 0) {
-    throw "Release source preflight rejected the built-in knowledge pack with code $LASTEXITCODE."
 }
 
 # Remove only the six known generated launcher outputs so this invocation cannot
@@ -311,7 +445,9 @@ try {
         $archiveStream.Dispose()
     }
 
-    & $python.Source -B $publicReleaseChecker $archivePath
+    & $releasePython -I -B $publicReleaseChecker `
+        $archivePath `
+        --forbid-text $projectRoot
     if ($LASTEXITCODE -ne 0) {
         if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
             [System.IO.File]::Delete($archivePath)

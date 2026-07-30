@@ -114,7 +114,28 @@ have the same capabilities through project-relative commands:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-runtime.ps1
 powershell -File .\scripts\hia-knowledge.ps1 environment-install
+powershell -File .\scripts\hia-launcher.ps1 -PrintCodexLoginCommand
 ```
+
+### Cold start from Houdini or Houdini plus Codex
+
+The minimum supported starting point is a licensed Houdini installation. If the
+project-pinned Codex runtime is missing or damaged, preflight reports
+`codex.executable` as red and the GUI offers **安装/修复 Codex**. The equivalent
+CLI is `scripts\bootstrap-runtime.ps1`; it downloads only the fixed official
+archive, verifies its hash and signatures, and installs it below this project's
+`.runtime`. It never borrows an unrelated PATH Codex as the runtime contract.
+After that step, use `-PrintCodexLoginCommand` and complete the official device
+login yourself. The launcher neither stores nor bypasses account credentials.
+
+If the pinned project-local Codex runtime is already verified, that download is
+skipped. Preflight then proceeds to the project-root `.venv`, Bridge/MCP imports,
+the knowledge parser/index, and the optional selected embedding runtime. A fresh
+user installs the parser baseline with `environment-install`; an existing
+incomplete environment uses `environment-repair`. Optional model installation
+is always a separate explicit click or CLI command. Missing CUDA or model files
+degrade embedding to CPU or FTS5 and do not make a usable Houdini installation
+look broken.
 
 ### Manual Codex placement for troubleshooting
 
@@ -252,6 +273,35 @@ index view. The WPF page uses these same probes, groups them as environment,
 parser, model, and index status with repair/log actions, and may shorten a
 visible path while retaining the complete path in its tooltip/report.
 
+## GUI and command-line parity
+
+WPF is a thin client over the same PowerShell module and project-relative
+commands. GUI-only conveniences such as a file picker, clipboard copy, report
+opening, and confirmation dialogs do not own discovery, installation, indexing,
+cleanup, or lifecycle rules.
+
+| Existing GUI capability | Equivalent project-root command | Output and exit contract |
+| --- | --- | --- |
+| Discover Houdini, diagnose, preflight, refresh status, write report | `powershell -File .\scripts\hia-launcher.ps1 -CheckOnly -Json` | Structured preflight JSON including candidates/report paths; `0` green/yellow, `2` red |
+| Repair safe project-local directories/config | `powershell -File .\scripts\hia-launcher.ps1 -RepairSafeProject -CheckOnly -Json` | Same post-repair preflight JSON; `0` or `2` |
+| Install/verify pinned Codex | `powershell -File .\scripts\bootstrap-runtime.ps1` | Clear stage text; `0` verified, nonzero failure |
+| Obtain the official login command | `powershell -File .\scripts\hia-launcher.ps1 -PrintCodexLoginCommand -Json` | `hia-launcher-cli/1`; `0` success. Login itself remains interactive |
+| Inspect/install/repair `.venv`, Python, uv and parser | `powershell -File .\scripts\hia-knowledge.ps1 environment-status`, `environment-install`, or `environment-repair` | `hia-knowledge-launcher-cli/1` JSON; `0` success/status, nonzero diagnosed failure |
+| Install/verify selected Qwen model and CPU/CUDA worker | `powershell -File .\scripts\launcher\Install-HiaEmbedding.ps1 -ProjectRoot (Resolve-Path .) -Profile <profile> -Device <auto\|cuda\|cpu>` | Final JSON plus project-local log; `0` verified, `1` failure |
+| Import/list/delete/rescan knowledge and build/status index | `scripts\hia-knowledge.ps1` actions shown above | JSON for source actions; index JSON/JSONL; `0` success, `130` interrupted inner index CLI |
+| Preview/clear managed cache | `powershell -File .\scripts\hia-cache.ps1 -Action <list\|clear> ...` | `hia-cache-json/1`; `0` success, `2` command error, `3` safety block, `4` stale snapshot, `5` partial file failure |
+| Start Houdini after passing preflight | `powershell -File .\scripts\launch-houdini.ps1 -HoudiniExe "<path>" -BridgePython ".\.venv\Scripts\python.exe"` | The same sole lifecycle entry used by WPF; returns Houdini's confirmed exit code or nonzero startup/lifecycle failure |
+| Cancel an active index build | Press `Ctrl+C` in its foreground index command | Inner index CLI returns `130`; committed batches remain and the next build continues |
+| View/copy latest report | Read `report.json_path` / `report.log_path` from `-CheckOnly -Json` | No second report implementation |
+| Release source preflight/build | `scripts\build-release.ps1 -PreflightOnly` / full `build-release.ps1` | Clear text; `0` pass, nonzero rejection. `check-public-release.py` uses `0` pass, `1` policy rejection, `2` invocation/I/O failure |
+
+There is intentionally no separate background Houdini stop service. Close
+Houdini normally; the foreground `scripts\launch-houdini.ps1` lifecycle then
+returns and cleans up only its verified Bridge process. The WPF launcher does
+not expose a different Houdini-stop action. Uninstall likewise needs no helper:
+after closing Houdini and the launcher, delete this exact extracted project
+directory as described below.
+
 ### Optional embedding without WPF
 
 Install the base environment first. To opt into the default embedding model
@@ -264,6 +314,14 @@ powershell -File .\scripts\launcher\Install-HiaEmbedding.ps1 `
   -Profile qwen3-embedding-0.6b `
   -Device auto
 ```
+
+Before downloading, the GUI and install log identify the official Hugging Face
+model ID/revision, the resolved project-local target, and the official model
+file size (about 1.21 GB for 0.6B or 15.2 GB for 8B). The running GUI uses an
+indeterminate stage indicator and an expandable project-local log rather than
+inventing a byte percentage that the bounded child does not publish. A failed
+or interrupted retry reuses the Hugging Face and uv caches under `.runtime`;
+it does not restart from an unrelated global cache.
 
 `auto` accepts CUDA only after the project-local PyTorch runtime actually reports
 `torch.cuda.is_available()` and a GPU name. A visible NVIDIA adapter alone is not

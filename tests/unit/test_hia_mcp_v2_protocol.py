@@ -90,6 +90,27 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("capture quality", description)
         self.assertIn("unverified os hdr", description)
 
+    def test_effect_experiment_is_one_bounded_domain_neutral_tool(self) -> None:
+        experiment = next(
+            spec
+            for spec in TOOL_SPECS
+            if spec.name == "hia_run_effect_experiment"
+        )
+        properties = experiment.input_schema["properties"]
+
+        self.assertEqual("effect_experiment", experiment.domain)
+        self.assertFalse(experiment.read_only)
+        self.assertEqual(2, properties["candidates"]["minItems"])
+        self.assertEqual(3, properties["candidates"]["maxItems"])
+        self.assertEqual(6, properties["sample_frames"]["maxItems"])
+        self.assertEqual(
+            ["contact_sheet"],
+            properties["capture_mode"]["enum"],
+        )
+        self.assertIn("cache-reset button", experiment.description)
+        self.assertIn("never scores", experiment.description)
+        self.assertNotIn("effectspec", properties)
+
     def test_initialize_identifies_the_independent_server(self) -> None:
         adapter = HiaMcpAdapter(FakeTransport())
         response = adapter.handle_message(
@@ -124,7 +145,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                 capability["parameters"],
             )
             self.assertEqual(list(spec.aliases), capability["aliases"])
-        self.assertEqual(17, len(names))
+        self.assertEqual(18, len(names))
         self.assertNotIn("hia_create_node", names)
         self.assertNotIn("hia_set_parameter", names)
         self.assertNotIn("hia_connect_nodes", names)
@@ -136,6 +157,10 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         )
         context_properties = context_tool["inputSchema"]["properties"]
         self.assertIn("include_context_pack", context_properties)
+        self.assertNotIn(
+            "default",
+            context_properties["include_context_pack"],
+        )
         self.assertEqual(4, context_properties["knowledge_queries"]["maxItems"])
         self.assertEqual(
             32768,
@@ -283,9 +308,42 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("mutable_root", execute_properties)
         self.assertIn("protected_paths", execute_properties)
         self.assertIn("expected_outputs", execute_properties)
+        self.assertIn("expected_deletions", execute_properties)
+        self.assertIn("fresh_validation", execute_properties)
+        self.assertIn("require_scene_change", execute_properties)
         self.assertIn("checks", execute_properties)
         self.assertIn("semantic_checks", execute_properties)
         self.assertIn("not an ir", execute_description)
+        self.assertIn("native houdini nodes", execute_description)
+        self.assertIn("suitable existing nodes", execute_description)
+        self.assertIn("undo group", execute_description)
+        self.assertIn("external file/render", execute_description)
+        self.assertIn("unknown or partial evidence", execute_description)
+        self.assertIn("no_observed_effect do not trigger undo", execute_description)
+        self.assertIn("only a verified rolled-back batch", execute_description)
+        self.assertIn("critical-path existence and node-error checks", execute_description)
+        self.assertIn("changed or stale runtime rejects the write", execute_description)
+        self.assertIn("read-only tools remain available", execute_description)
+        self.assertNotIn(
+            "failed requested postconditions are undone",
+            execute_description,
+        )
+        self.assertIn("before/after local-network facts", execute_description)
+        self.assertIn("not an execution gate", execute_description)
+        self.assertIn("bare successful script", execute_description)
+        self.assertIn("fully observed structural assertions", execute_description)
+
+        inspect_tool = next(
+            item for item in response["result"]["tools"] if item["name"] == "hia_inspect"
+        )
+        self.assertIn(
+            "evidence",
+            inspect_tool["inputSchema"]["properties"]["views"]["items"]["enum"],
+        )
+        self.assertIn(
+            "subjective quality",
+            inspect_tool["description"].casefold(),
+        )
 
         validate_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_validate"
@@ -323,14 +381,19 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         )
         capture_description = capture_tool["description"].casefold()
         capture_properties = capture_tool["inputSchema"]["properties"]
-        self.assertIn("640 x 360", capture_description)
-        self.assertIn("selected key frames", capture_description)
-        self.assertIn("at most 240 frames", capture_description)
+        self.assertIn("derive from the live viewport", capture_description)
+        self.assertIn("at most 24 frames", capture_description)
+        self.assertIn("requested versus actual frames", capture_description)
         self.assertIn("camera lock", capture_description)
-        self.assertEqual(640, capture_properties["width"]["default"])
-        self.assertEqual(360, capture_properties["height"]["default"])
+        self.assertNotIn("default", capture_properties["width"])
+        self.assertNotIn("default", capture_properties["height"])
+        self.assertIn("frame", capture_properties)
+        self.assertIn("frames", capture_properties)
+        self.assertIn("frame_step", capture_properties)
+        self.assertIn("validation_paths", capture_properties)
+        self.assertEqual(24, capture_properties["frames"]["maxItems"])
         self.assertTrue(capture_properties["return_image"]["default"])
-        self.assertIn("spans over 240 frames", capture_properties["frame_range"]["description"])
+        self.assertIn("more than 24", capture_properties["frame_range"]["description"])
         self.assertTrue(capture_tool["annotations"]["readOnlyHint"])
 
         codex_response = adapter.handle_message(
@@ -621,7 +684,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         solaris = search("composed USD stage")["result"]
         self.assertEqual("solaris_usd_understanding", solaris["capabilities"][0]["domain"])
         self.assertEqual(
-            {"registered": 17, "catalogued": 17, "missing": [], "orphaned": []},
+            {"registered": 18, "catalogued": 18, "missing": [], "orphaned": []},
             solaris["catalog_health"],
         )
         self.assertIsNone(solaris["empty_reason"])
@@ -729,8 +792,8 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertEqual("CATALOG_INCOMPLETE", payload["result"]["empty_reason"])
         self.assertEqual(
             {
-                "registered": 17,
-                "catalogued": 17,
+                "registered": 18,
+                "catalogued": 18,
                 "missing": ["hia_uncatalogued"],
                 "orphaned": ["hia_context"],
             },

@@ -93,10 +93,12 @@ class HoudiniSkillContractTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.research)
 
-    def test_every_scene_write_gets_one_local_lookup_without_forcing_web(self) -> None:
+    def test_deterministic_writes_skip_lookup_while_uncertain_work_reuses_one_batch(
+        self,
+    ) -> None:
         canonical = (
-            "runs exactly one relevant batched `hia_local_help_search` before "
-            "the first scene write"
+            "run exactly one relevant batched `hia_local_help_search` before "
+            "the affected write"
         )
         combined = "\n".join(
             (
@@ -112,40 +114,67 @@ class HoudiniSkillContractTests(unittest.TestCase):
         )
         self.assertEqual(combined.count(canonical), 1)
         self.assertIn(
-            "single shared pre-write lookup for the request across all active "
-            "Houdini skills and the Direct, Focused, and Full routes",
+            "retrieval is not a gate for every scene write",
             self.knowledge_memory,
         )
-        for contract in (self.visual, self.procedural, self.material):
-            with self.subTest(contract=contract[:40]):
-                self.assertIn("single shared pre-write lookup", contract)
         self.assertIn(
-            "Do not issue another pre-write local-help search",
+            "Treat it as the single shared lookup across active Houdini skills",
+            self.knowledge_memory,
+        )
+        self.assertIn(
+            "Do not issue another local-help search",
             self.knowledge_memory,
         )
         self.assertIn(
             "do not issue another local-help search",
             self.research,
         )
+        for marker in (
+            "known parameter change",
+            "connection between known nodes",
+            "delete",
+            "rename",
+            "reposition",
+            "known color assignment",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.knowledge_memory)
         self.assertIn(
-            "Do not repeat the task's pre-write local search",
-            self.review,
+            "execute without knowledge retrieval",
+            self.procedural,
         )
-        self.assertIn("A simple deterministic edit may stop after local retrieval", self.research)
-        self.assertIn("A simple deterministic edit stops after this concise local lookup", self.visual)
-        self.assertIn("a read-only inspection requires neither", self.research)
-        self.assertIn("a read-only inspection needs no lookup", self.visual)
-
-    def test_pre_write_lookup_matches_repository_and_mcp_contract(self) -> None:
         self.assertIn(
-            "Before the first scene write for any creation, modification, or repair "
-            "request, run one relevant batched local-knowledge search and reuse its "
-            "results",
+            "execute without knowledge retrieval",
+            self.material,
+        )
+        for obsolete in (
+            "Every creation, modification, or repair that will write",
+            "Before the first scene write for any creation",
+            "Every Houdini request that will write the scene starts",
+        ):
+            with self.subTest(obsolete=obsolete):
+                self.assertNotIn(obsolete, combined)
+                self.assertNotIn(obsolete, self.repository_agents)
+        self.assertIn(
+            "A known deterministic edit and a read-only inspection require no research",
+            self.research,
+        )
+
+    def test_uncertainty_lookup_matches_repository_and_mcp_contract(self) -> None:
+        self.assertIn(
+            "Knowledge retrieval is not a mandatory gate for every scene write",
             self.repository_agents,
         )
         self.assertIn(
-            "runs exactly one relevant batched `hia_local_help_search` before the "
-            "first scene write",
+            "When node, parameter, version, complex material/FX/simulation/Solaris/render "
+            "workflow, historical project convention, or failure cause is uncertain, "
+            "run one relevant batched local-knowledge search before the affected write "
+            "and reuse its results",
+            self.repository_agents,
+        )
+        self.assertIn(
+            "run exactly one relevant batched `hia_local_help_search` before the "
+            "affected write",
             self.knowledge_memory,
         )
         self.assertIn('"hia_local_help_search"', self.hia_tools_schema)
@@ -157,6 +186,51 @@ class HoudiniSkillContractTests(unittest.TestCase):
         self.assertIn("does not gate hia_execute_hom", self.hia_tools_schema)
         self.assertIn("`queries` 批量形状", self.hia_mcp_doc)
 
+    def test_repository_and_visual_skill_share_risk_bounded_retrieval(self) -> None:
+        agents_direct = next(
+            line
+            for line in self.repository_agents.splitlines()
+            if "Knowledge retrieval is not a mandatory gate" in line
+        ).casefold()
+        agents_uncertain = next(
+            line
+            for line in self.repository_agents.splitlines()
+            if line.startswith("- When node, parameter, version")
+        ).casefold()
+        visual_route = next(
+            line
+            for line in self.visual.splitlines()
+            if line.startswith("1. Decide whether uncertainty")
+        ).casefold()
+
+        for marker in ("parameter", "connect", "delet", "renam", "position", "color"):
+            with self.subTest(direct_marker=marker):
+                self.assertIn(marker, agents_direct)
+                self.assertIn(marker, visual_route)
+        for marker in (
+            "node",
+            "parameter",
+            "version",
+            "material",
+            "simulation",
+            "solaris",
+            "historical project convention",
+            "failure cause",
+            "uncertain",
+        ):
+            with self.subTest(uncertainty_marker=marker):
+                self.assertIn(marker, agents_uncertain)
+                self.assertIn(marker, visual_route)
+
+        obsolete_gate = (
+            "Before the first scene write for any creation, modification, or repair "
+            "request"
+        )
+        self.assertNotIn(obsolete_gate, self.repository_agents)
+        self.assertNotIn(obsolete_gate, self.visual)
+        self.assertIn("validate the actual scene result", agents_direct)
+        self.assertIn("ends with targeted validation", visual_route)
+
     def test_source_ledger_has_complete_provenance_and_verification_columns(self) -> None:
         self.assertIn(
             "| Title/source | Author/owner | URL/path | Access date | "
@@ -167,10 +241,10 @@ class HoudiniSkillContractTests(unittest.TestCase):
 
     def test_complex_tasks_are_local_first_without_weakening_web_research(self) -> None:
         for marker in (
-            "exactly one relevant batched `hia_local_help_search`",
+            "run exactly one relevant batched `hia_local_help_search`",
             "Local retrieval never replaces deep external research",
             "continue multi-round web research",
-            "current SideFX documentation and original sources",
+            "SideFX documentation and original sources",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.knowledge_memory)
@@ -181,15 +255,13 @@ class HoudiniSkillContractTests(unittest.TestCase):
 
     def test_complex_tasks_retrieve_official_workflows_before_planning(self) -> None:
         self.assertIn(
-            "retrieve the relevant bundled SideFX workflow and H21/version "
+            "retrieve only the relevant bundled SideFX workflow and version "
             "evidence before planning",
             self.visual,
         )
         for marker in (
-            "before the Build Brief or implementation plan",
             "include the official task workflow",
             "retrieve only the domains the task needs",
-            "does not load the workflow corpus broadly",
             "planning summary, not proof of current node behavior",
         ):
             with self.subTest(marker=marker):
@@ -250,12 +322,13 @@ class HoudiniSkillContractTests(unittest.TestCase):
         self.assertNotIn("wpf", combined)
         self.assertIn("hia mcp or the stable hia cli surface", self.knowledge_memory.casefold())
 
-    def test_simple_writes_retrieve_once_but_never_write_memory_automatically(self) -> None:
+    def test_simple_writes_skip_retrieval_and_memory(self) -> None:
         for marker in (
-            "Every creation, modification, or repair that will write the Houdini scene "
-            "runs exactly one",
-            "A simple deterministic write performs only this concise lookup",
-            "Neither case writes project memory automatically",
+            "retrieval is not a gate for every scene write",
+            "Execute a known parameter change",
+            "directly and validate the live result",
+            "Neither a skipped lookup nor a performed lookup writes project memory "
+            "automatically",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.knowledge_memory)
@@ -358,8 +431,8 @@ class HoudiniSkillContractTests(unittest.TestCase):
 
     def test_complex_execution_orders_search_before_brief_stages_and_review(self) -> None:
         positions = [
-            self.visual.index("Satisfy the single shared pre-write lookup"),
-            self.visual.index("After the shared local lookup and before writing"),
+            self.visual.index("Decide whether uncertainty warrants the shared lookup"),
+            self.visual.index("Complete any uncertainty-triggered local lookup"),
             self.visual.index("create the compact Build Brief"),
             self.visual.index("Advance the applicable Build Brief stages"),
             self.visual.index("Give the preview plus relevant"),
@@ -437,8 +510,10 @@ class HoudiniSkillContractTests(unittest.TestCase):
             "**Direct:**",
             "**Focused:**",
             "**Full:**",
-            "execute a simple deterministic edit and perform one necessary targeted validation",
-            "Do not require a Build Brief, external research, capture, or artifact review",
+            "execute a known deterministic edit immediately and perform one necessary "
+            "targeted validation",
+            "Do not require local retrieval, a Build Brief, external research, capture, "
+            "or artifact review",
             "These are reasoning tiers, not a Gate, approval layer, state machine",
         ):
             with self.subTest(marker=marker):
@@ -449,7 +524,8 @@ class HoudiniSkillContractTests(unittest.TestCase):
             self.assertIn("Focused", contract)
             self.assertIn("Full", contract)
         self.assertIn(
-            "does not require external research, a Brief, capture, or artifact review",
+            "does not require retrieval, external research, a Brief, capture, or "
+            "artifact review",
             self.visual,
         )
         self.assertIn(
@@ -463,8 +539,8 @@ class HoudiniSkillContractTests(unittest.TestCase):
         self.assertNotIn("automatically capture a low-resolution preview", self.visual)
         self.assertIn("do not capture every edit", self.visual)
         self.assertIn(
-            "Simple deterministic writes use only the concise local lookup plus "
-            "targeted validation",
+            "Do not trigger research for a known deterministic parameter, connection, "
+            "delete, rename, position, or color edit unless uncertainty appears",
             self.visual,
         )
         self.assertIn(
@@ -472,12 +548,70 @@ class HoudiniSkillContractTests(unittest.TestCase):
             self.visual_metadata,
         )
         for marker in (
-            "**Direct:** after the same single shared pre-write lookup",
-            "**Focused:** reuse that same lookup",
-            "**Full:** reuse that same lookup",
+            "**Direct:** execute a known deterministic edit immediately",
+            "**Focused:** for a bounded multi-node edit",
+            "**Full:** use one shared batched local lookup when",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.build_review)
+
+    def test_scene_authoring_prefers_native_nodes_and_bounds_hom_writes(self) -> None:
+        for marker in (
+            "Prefer this authoring order",
+            "edit suitable existing nodes and parameters",
+            "add standard native Houdini nodes and networks",
+            "use a short cohesive HOM batch",
+            "create geometry directly or use an in-scene Python/script node only when",
+            "Record the reason for an exception",
+            "follow the `rollback.status` and `automatic_retry_safe` rule",
+            "do not assume either a complete rollback or a partial scene change",
+            "A successful Python return is not completion",
+            "verify the actual live-scene nodes or geometry",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.visual)
+
+        skill_contract = "\n".join(
+            read_contract(path)
+            for path in sorted(SKILLS_ROOT.glob("houdini-*/**/*.md"))
+        )
+        self.assertEqual(
+            1,
+            skill_contract.count(
+                "A successful Python return is not completion"
+            ),
+        )
+
+    def test_retry_and_runtime_identity_contracts_match_mcp_behavior(self) -> None:
+        for marker in (
+            "only verified `rolled_back` plus `automatic_retry_safe=true`",
+            "`unknown` or `partial` validation and `NO_OBSERVED_EFFECT` do not "
+            "trigger Undo",
+            "`not_proven`, timeout, or possible external side effects require a "
+            "targeted inspect/diff first",
+        ):
+            with self.subTest(recovery_marker=marker):
+                self.assertIn(marker, self.validation)
+        for marker in (
+            "`HOUDINI_SESSION_CHANGED`",
+            "`HOUDINI_RUNTIME_SOURCE_CHANGED`",
+            "`STALE_HOUDINI_RUNTIME`",
+            "use health or read-only inspection only as needed",
+            "do not hot-reload the executor or switch routes",
+        ):
+            with self.subTest(identity_marker=marker):
+                self.assertIn(marker, self.visual)
+        for marker in (
+            "`expected_outputs` 只隐式补目标存在性和节点错误检查",
+            "`unknown`、`partial` 与 `NO_OBSERVED_EFFECT`",
+            "`rollback.status`",
+            "`automatic_retry_safe=true`",
+            "运行时身份绑定 launcher session、Houdini PID",
+            "health 和只读工具仍可用于确认实际连接",
+        ):
+            with self.subTest(doc_marker=marker):
+                self.assertIn(marker, self.hia_mcp_doc)
+        self.assertNotIn("不会回滚", self.hia_mcp_doc)
 
     def test_retrieved_knowledge_becomes_explicit_semantic_expectations(self) -> None:
         for marker in (
@@ -628,6 +762,119 @@ class HoudiniSkillContractTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, "\n".join((self.validation, self.material, self.review)))
 
+    def test_dynamic_visual_evidence_is_temporal_but_bounded(self) -> None:
+        for marker in (
+            "one representative frame for a static claim",
+            "animation, simulation, or a time-varying material or effect",
+            "risk-proportionate short sequence or representative frame set",
+            "meaningful change, contacts or transitions, continuity",
+            "suspect or failed frame",
+            "Do not substitute one still for a dynamic completion claim",
+            "force a long flipbook merely for process",
+            "intended camera and aspect",
+            "actual returned frame or bounded sequence covers what was requested",
+            "original frame and view state were restored",
+            "low-resolution preview as bounded review evidence",
+            "frame coverage or restoration is unproven",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.validation)
+        self.assertIn(
+            "risk-appropriate static or temporal preview evidence",
+            self.procedural,
+        )
+        self.assertNotIn("low-resolution same-frame preview", self.procedural)
+
+    def test_subjective_effect_experiment_is_goal_scoped_and_direct_tasks_are_exempt(
+        self,
+    ) -> None:
+        for marker in (
+            "temporary, bounded EffectSpec experiment contract",
+            "current task context or existing Goal state",
+            "Direct deterministic work never enters this loop",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.visual)
+        for marker in (
+            "A simple deterministic edit does not enter the experiment loop",
+            "goal, target and mutable scope",
+            "a few visual or temporal objectives",
+            "only relevant metrics and controls",
+            "fixed frame and view samples",
+            "observable success conditions",
+            "do not automatically write them into Skill files or project memory",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.validation)
+
+    def test_effect_experiment_combines_preview_data_ranking_and_bounded_iteration(
+        self,
+    ) -> None:
+        for marker in (
+            "one low-cost baseline and two or three bounded candidates",
+            "actual previews for every specified frame and view together with the "
+            "relevant returned Houdini data",
+            "explicit ranking and best candidate",
+            "each candidate's main issue",
+            "single largest remaining issue",
+            "small set of controls allowed to change next",
+            "Without usable preview evidence and relevant Houdini data",
+            "Keep the best candidate as the next baseline",
+            "change only the few controls addressing that single largest issue",
+            "two or three rounds chosen by risk",
+            "two rounds show no improvement",
+            "further cost is disproportionate",
+            "final write-back of the evidence-supported best candidate",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.validation)
+
+    def test_effect_experiment_separates_codex_runtime_and_knowledge_responsibilities(
+        self,
+    ) -> None:
+        for marker in (
+            "`hia_run_effect_experiment` live tool contract",
+            "runtime executes candidates and returns observed previews and Houdini "
+            "facts only",
+            "it does not rank them or create the EffectSpec or Evaluation",
+            "Skill defines workflow and completion evidence only",
+            "does not execute candidates, clear caches, assemble contact sheets",
+            "copy the tool's input schema",
+            "knowledge may inform control direction, version evidence, failure causes, "
+            "and comparable cases",
+            "does not prewrite this task's scoring criteria",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.validation)
+        self.assertIn('"hia_run_effect_experiment"', self.hia_tools_schema)
+        self.assertIn(
+            "It never scores candidates, builds EffectSpec",
+            self.hia_tools_schema,
+        )
+
+        experiment = self.validation.split(
+            "## Bounded subjective effect experiments", 1
+        )[1].split("## Bounded recovery", 1)[0]
+        for copied_schema_marker in (
+            "```json",
+            '"type": "object"',
+            '"properties"',
+            '"required"',
+        ):
+            with self.subTest(copied_schema_marker=copied_schema_marker):
+                self.assertNotIn(copied_schema_marker, experiment)
+        self.assertNotIn("| --- |", experiment)
+        for domain_recipe in (
+            "Pyro",
+            "FLIP",
+            "viscosity",
+            "temperature",
+            "voxel size",
+            "roughness =",
+        ):
+            with self.subTest(domain_recipe=domain_recipe):
+                self.assertNotIn(domain_recipe, experiment)
+
     def test_all_creation_and_review_skills_route_to_build_contract(self) -> None:
         for contract in (
             self.visual,
@@ -653,7 +900,7 @@ class HoudiniSkillContractTests(unittest.TestCase):
 
     def test_karma_node_types_are_confirmed_without_version_name_lock_in(self) -> None:
         for marker in (
-            "required local-help lookup",
+            "uncertainty-triggered local-help result",
             "`hia_search_node_types`",
             "`hia_node_help`",
             "not permission to hard-code a versioned internal type name",

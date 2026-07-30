@@ -1925,7 +1925,10 @@ $preflightEmbedding = @(
             report_function,
         )
         check_only_call = launcher_source[
-            launcher_source.index("if ($CheckOnly -or $Json) {"):
+            launcher_source.index(
+                "if ($CheckOnly -or $Json) {",
+                launcher_source.index("$inputs ="),
+            ):
             launcher_source.index("$wpfUiPath =")
         ]
         self.assertIn(
@@ -2319,6 +2322,10 @@ $cacheState = Get-HiaEmbeddingRuntimeState `
         self.assertEqual(alternate, alternate_plan["profile_id"])
         self.assertNotEqual(default_plan["model_dir"], alternate_plan["model_dir"])
         for plan in (default_plan, alternate_plan):
+            self.assertEqual(
+                public["profiles"][plan["profile_id"]]["repository_size_gb"],
+                plan["repository_size_gb"],
+            )
             self.assertTrue(
                 Path(plan["model_dir"]).is_relative_to(REPOSITORY_ROOT / ".runtime")
             )
@@ -2378,10 +2385,19 @@ $cacheState = Get-HiaEmbeddingRuntimeState `
         self.assertNotIn("reranker", combined.lower())
         self.assertNotIn("quantization", combined.lower())
         helper_source = EMBEDDING_INSTALLER_HELPER_PATH.read_text(encoding="utf-8")
+        installer_source = EMBEDDING_INSTALLER_PATH.read_text(
+            encoding="utf-8-sig"
+        )
         self.assertGreater(
             helper_source.index("from huggingface_hub import snapshot_download"),
             helper_source.index("def download_selected_model"),
         )
+        for required in (
+            "Selected model source: https://huggingface.co/{0}",
+            "official model files are about {3} GB",
+            "Interrupted downloads reuse the project-local Hugging Face cache",
+        ):
+            self.assertIn(required, installer_source)
 
     def test_lifecycle_injects_only_complete_contract_embedding_installations(self) -> None:
         fake_root = self.sandbox / "embedding-lifecycle"
@@ -2511,6 +2527,99 @@ $environment = $data.contract.environment
             len(set(contract["environment"].values())),
             payload["cleared_environment_count"],
         )
+
+    def test_lifecycle_bootstrap_builds_only_installed_pending_knowledge(
+        self,
+    ) -> None:
+        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
+        call = source.index(
+            "Invoke-HiaKnowledgeBootstrapOnLaunch `",
+            source.index("$bridgePythonPath ="),
+        )
+        self.assertLess(source.index("$embeddingSelection ="), call)
+        self.assertLess(call, source.index("$bridgeToken =", call))
+        self.assertIn("'hia_mcp_runtime.knowledge_index_cli'", source)
+
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(LIFECYCLE_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'launch-houdini.ps1 did not parse' }}
+$definition = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Invoke-HiaKnowledgeBootstrapOnLaunch'
+}}, $true))
+if ($definition.Count -ne 1) {{ throw 'knowledge bootstrap helper is unavailable' }}
+. ([scriptblock]::Create($definition[0].Extent.Text))
+
+$script:responses = [System.Collections.Generic.Queue[object]]::new()
+$script:calls = [System.Collections.Generic.List[string]]::new()
+function Add-FakeResponse([string]$Action, [int]$Pending, [bool]$Installed) {{
+    $payload = [ordered]@{{
+        event = 'completed'
+        action = $Action
+        index = @{{ pending_chunks = $Pending }}
+        installation = @{{ installed = $Installed }}
+    }}
+    $script:responses.Enqueue([pscustomobject]@{{
+        timed_out = $false
+        exit_code = 0
+        stdout = ($payload | ConvertTo-Json -Depth 5 -Compress)
+    }})
+}}
+function Invoke-HiaProcess {{
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds,
+        [hashtable]$Environment,
+        [string[]]$RemoveEnvironmentVariables,
+        [string]$WorkingDirectory
+    )
+    $action = @($Arguments | Where-Object {{ $_ -in @('bootstrap', 'build') }})[-1]
+    $script:calls.Add($action)
+    return $script:responses.Dequeue()
+}}
+$common = @{{
+    Python = 'X:\\project\\.venv\\Scripts\\python.exe'
+    Root = 'X:\\project'
+    PythonPathEntries = @('X:\\project\\houdini_package\\python_libs', 'X:\\project\\src')
+    EmbeddingEnvironment = @{{ HIA_EMBEDDING_PROFILE = 'qwen3-embedding-0.6b' }}
+    EmbeddingEnvironmentNames = @('HIA_EMBEDDING_PROFILE')
+}}
+
+Add-FakeResponse bootstrap 2 $true
+Add-FakeResponse build 0 $true
+Invoke-HiaKnowledgeBootstrapOnLaunch @common
+$pending = ($script:calls -join ',')
+
+$script:calls.Clear()
+Add-FakeResponse bootstrap 0 $true
+Invoke-HiaKnowledgeBootstrapOnLaunch @common
+$complete = ($script:calls -join ',')
+
+$script:calls.Clear()
+Add-FakeResponse bootstrap 2 $false
+Invoke-HiaKnowledgeBootstrapOnLaunch @common
+$lexicalOnly = ($script:calls -join ',')
+
+[pscustomobject]@{{
+    pending = $pending
+    complete = $complete
+    lexical_only = $lexicalOnly
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual("bootstrap,build", payload["pending"])
+        self.assertEqual("bootstrap", payload["complete"])
+        self.assertEqual("bootstrap", payload["lexical_only"])
 
     def test_render_output_directory_defaults_validates_and_creates_writable_local_path(self) -> None:
         fake_root = self.sandbox / "render-output-project"
@@ -4792,6 +4901,31 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertEqual(2, completed.returncode, completed.stderr)
         self.assertEqual("red", json.loads(completed.stdout)["overall"])
 
+        login = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Mta",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(fake_root / "scripts" / "hia-launcher.ps1"),
+                "-PrintCodexLoginCommand",
+                "-Json",
+            ],
+            cwd=fake_root,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, login.returncode, login.stderr)
+        login_payload = json.loads(login.stdout)
+        self.assertEqual("hia-launcher-cli/1", login_payload["schema"])
+        self.assertEqual("codex-login-command", login_payload["action"])
+        self.assertIn("login --device-auth", login_payload["command"])
+
         launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
         main_guard = launcher_source.index(
             "if ($CheckOnly -or $Json) {", launcher_source.index("$inputs =")
@@ -4819,6 +4953,7 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertNotIn(r"E:\houdini-intelligence-agent", combined)
         self.assertIn("[switch]$CheckOnly", launcher_source)
         self.assertIn("[switch]$Json", launcher_source)
+        self.assertIn("[switch]$PrintCodexLoginCommand", launcher_source)
         self.assertIn("HiaLauncher.Wpf.ps1", launcher_source)
         self.assertIn("HiaLauncher.xaml", wpf_source)
         for control_name in (
@@ -5003,6 +5138,8 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertIn(".runtime\\hia-mcp-v2", hia_branch)
         self.assertIn("'HIA_MCP_V2_HOST' = '127.0.0.1'", hia_branch)
         self.assertIn("'HIA_MCP_V2_ROUTE' = '/hia-mcp-v2/v1/execute'", hia_branch)
+        self.assertIn("'HIA_MCP_V2_EXECUTOR_PATH' = $hiaMcpExecutorSource", hia_branch)
+        self.assertIn("'HIA_LAUNCHER_SESSION_ID' = $sessionId", hia_branch)
         self.assertIn("'HIA_MCP_V2_AUTOSTART'", hia_branch)
         self.assertNotIn("fxhoudinimcp", hia_branch.casefold())
         self.assertNotIn("FXHOUDINIMCP_", hia_branch)
@@ -5042,6 +5179,13 @@ Add-Type -TypeDefinition $source -Language CSharp
             ensure_running=lambda: self.fail("FX fallback started in the HIA branch")
         )
         runtime_directory = REPOSITORY_ROOT / ".runtime" / "hia-mcp-v2"
+        executor_path = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "executor.py"
+        )
         hia_environment = {
             "HIA_MCP_BACKEND": "hia_v2",
             "HIA_MCP_V2_AUTOSTART": "1",
@@ -5051,6 +5195,8 @@ Add-Type -TypeDefinition $source -Language CSharp
             "HIA_MCP_V2_ROUTE": "/hia-mcp-v2/v1/execute",
             "HIA_MCP_V2_PORT": "45123",
             "HIA_MCP_V2_TOKEN": "T" * 48,
+            "HIA_MCP_V2_EXECUTOR_PATH": str(executor_path),
+            "HIA_LAUNCHER_SESSION_ID": "1" * 32,
         }
         with (
             mock.patch.dict(os.environ, hia_environment, clear=True),
@@ -5063,6 +5209,11 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertEqual(1, len(hia_calls))
         self.assertEqual(45123, hia_calls[0]["port"])
         self.assertEqual("T" * 48, hia_calls[0]["token"])
+        self.assertEqual("1" * 32, hia_calls[0]["launcher_session_id"])
+        self.assertEqual(
+            executor_path.resolve(),
+            hia_calls[0]["expected_executor_path"],
+        )
         self.assertIn("_hia_mcp_v2_session", namespace)
 
         fx_calls: list[str] = []

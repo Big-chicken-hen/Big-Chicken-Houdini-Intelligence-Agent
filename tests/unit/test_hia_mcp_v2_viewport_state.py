@@ -59,6 +59,33 @@ class FakeCamera:
     path: str
 
 
+class FakeCookNode:
+    def __init__(self, path: str, hou_module: "FakeHou") -> None:
+        self.path = path
+        self.hou = hou_module
+        self._cook_count = 0
+        self.cook_frames: list[float] = []
+        self.cook_forces: list[bool] = []
+
+    def needsToCook(self) -> bool:  # noqa: N802
+        return True
+
+    def isTimeDependent(self, *, for_last_cook: bool = False) -> bool:  # noqa: N802
+        del for_last_cook
+        return True
+
+    def cookCount(self) -> int:  # noqa: N802
+        return self._cook_count
+
+    def lastCookTime(self) -> float:  # noqa: N802
+        return float(self._cook_count)
+
+    def cook(self, *, force: bool) -> None:
+        self.cook_frames.append(self.hou.frame())
+        self.cook_forces.append(force)
+        self._cook_count += 1
+
+
 @dataclass
 class FakeViewportCamera:
     state: str
@@ -247,8 +274,11 @@ class FakeFlipbookSettings:
     def outputToMPlay(self, value: bool) -> None:  # noqa: N802
         self.output_to_mplay = value
 
-    def cropOutMaskOverlay(self) -> bool:  # noqa: N802
-        return self.crop_mask
+    def cropOutMaskOverlay(self, value: object = _UNSET) -> bool | None:  # noqa: N802
+        if value is _UNSET:
+            return self.crop_mask
+        self.crop_mask = bool(value)
+        return None
 
     def overrideGamma(self, value: object = _UNSET) -> bool | None:  # noqa: N802
         if value is _UNSET:
@@ -310,6 +340,8 @@ class FakeSceneViewer:
         self.camera_at_flipbook: FakeCamera | None = None
         self.camera_lock_at_flipbook: bool | None = None
         self.flipbook_output_size: tuple[int, int] | None = None
+        self.frame_colors: dict[int, tuple[int, int, int]] = {}
+        self.missing_frames: set[int] = set()
         self.color_state_available = True
 
     def name(self) -> str:
@@ -362,12 +394,14 @@ class FakeSceneViewer:
         end = float(settings.frame_range[1])
         self.hou.setFrame(end)
         first = int(round(float(settings.frame_range[0])))
+        if first in self.missing_frames:
+            return
         output_path = settings.output_path.replace("$F4", f"{first:04d}")
         output_size = self.flipbook_output_size or settings.image_resolution
         Path(output_path).write_bytes(
             _png_bytes(
                 *output_size,
-                color=self.viewport._image_color,
+                color=self.frame_colors.get(first, self.viewport._image_color),
                 alternate_color=self.viewport._alternate_image_color,
             )
         )
@@ -953,6 +987,11 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         original_settings.gamma_value = 1.8
         original_settings.override_lut = True
         original_settings.lut_path = str(self.project_root / "display.cube")
+        hou_module.scene_viewer.frame_colors = {
+            3: (72, 104, 136),
+            4: (88, 118, 148),
+            5: (104, 132, 160),
+        }
 
         response = executor.dispatch(
             "hia_capture_viewport",
@@ -982,8 +1021,16 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         )
         self.assertFalse(hou_module.scene_viewer.open_dialog)
         self.assertEqual((640, 360), (response["result"]["width"], response["result"]["height"]))
+        self.assertTrue(response["ok"])
+        self.assertEqual("passed", response["result"]["sequence"]["status"])
+        self.assertEqual([3.0, 4.0, 5.0], response["result"]["requested_frames"])
+        self.assertEqual([3.0, 4.0, 5.0], response["result"]["actual_frames"])
+        self.assertEqual(3, response["result"]["sequence"]["captured_count"])
         self.assertEqual(12.0, hou_module.frame())
-        self.assertEqual([5.0, 12.0], hou_module.frame_history)
+        self.assertEqual(
+            [3.0, 3.0, 12.0, 4.0, 4.0, 12.0, 5.0, 5.0, 12.0, 12.0],
+            hou_module.frame_history,
+        )
         self.assertEqual(0, hou_module.scene_viewer.focus_calls)
         self.assertEqual(0, hou_module.scene_viewer.mplay_launches)
         self.assertTrue(original_settings.output_to_mplay)
@@ -1004,14 +1051,14 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertIsNone(viewport.camera())
         self.assertEqual([], viewport.camera_restore_calls)
 
-    def test_default_stage_flipbook_is_low_resolution_and_restores_viewer_state(self) -> None:
+    def test_default_stage_flipbook_derives_viewport_resolution_and_restores_viewer_state(self) -> None:
         original_camera = FakeCamera("/obj/original_camera")
         capture_camera = FakeCamera("/obj/capture_camera")
         viewport = FakeViewport(
             original_camera=original_camera,
             default_camera_state="original-camera-view",
             camera_locked=True,
-            image_size=(1, 1),
+            image_size=(960, 540),
         )
         hou_module, executor = self.make_executor(
             viewport,
@@ -1032,21 +1079,25 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertIsNotNone(used)
         assert used is not None
         self.assertEqual((12.0, 12.0), used.frame_range)
-        self.assertEqual((640, 360), used.image_resolution)
-        self.assertEqual((640, 360), (response["result"]["width"], response["result"]["height"]))
+        self.assertEqual((960, 540), used.image_resolution)
+        self.assertEqual((960, 540), (response["result"]["width"], response["result"]["height"]))
+        self.assertEqual("viewport", response["result"]["resolution_source"])
+        self.assertAlmostEqual(16 / 9, response["result"]["aspect_ratio"])
+        self.assertEqual(12.0, response["result"]["requested_frame"])
+        self.assertEqual(12.0, response["result"]["actual_frame"])
         self.assertIs(capture_camera, hou_module.scene_viewer.camera_at_flipbook)
         self.assertFalse(hou_module.scene_viewer.camera_lock_at_flipbook)
         self.assertIs(original_camera, viewport.camera())
         self.assertTrue(viewport.isCameraLockedToView())
         self.assertEqual("original-camera-view", viewport.defaultCamera().state)
-        self.assertEqual([12.0, 12.0], hou_module.frame_history)
+        self.assertEqual([12.0, 12.0, 12.0], hou_module.frame_history)
         self.assertEqual(0, hou_module.scene_viewer.focus_calls)
         self.assertEqual(0, hou_module.scene_viewer.mplay_launches)
 
     def test_flipbook_rejects_invalid_or_excessive_ranges_before_capture(self) -> None:
         cases = (
             ([5, 3], "end must not precede"),
-            ([1, float("nan")], "finite numbers"),
+            ([1, float("nan")], "finite frame numbers"),
             ([1, 241.01], "at most 240 frames"),
         )
         for frame_range, expected_message in cases:
@@ -1099,7 +1150,7 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
                 {
                     "mode": "flipbook",
                     "camera_path": capture_camera.path,
-                    "frame_range": [3, 5],
+                    "frame_range": [3, 3],
                     "return_image": False,
                 },
             )
@@ -1108,7 +1159,130 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertEqual("restore_camera", raised.exception.details["errors"][0]["operation"])
         self.assertTrue(viewport.isCameraLockedToView())
         self.assertEqual(12.0, hou_module.frame())
-        self.assertEqual([5.0, 12.0], hou_module.frame_history)
+        self.assertEqual([3.0, 3.0, 12.0], hou_module.frame_history)
+
+    def test_single_dimension_preserves_viewport_aspect(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(1280, 720),
+        )
+        hou_module, executor = self.make_executor(viewport)
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"width": 800, "return_image": False},
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual((800, 450), (
+            response["result"]["width"],
+            response["result"]["height"],
+        ))
+        self.assertEqual(
+            "requested_width_viewport_aspect",
+            response["result"]["resolution_source"],
+        )
+        self.assertEqual(12.0, hou_module.frame())
+
+    def test_sequence_reports_no_change_and_missing_frames_but_restores_frame(
+        self,
+    ) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+
+        unchanged = executor.dispatch(
+            "hia_capture_viewport",
+            {
+                "mode": "flipbook",
+                "frames": [1, 2, 3],
+                "return_image": False,
+            },
+        )
+        self.assertFalse(unchanged["ok"])
+        self.assertTrue(
+            unchanged["result"]["sequence"]["no_change_detected"]
+        )
+        self.assertEqual(
+            "not_proven",
+            unchanged["result"]["sequence"]["simulation_advancement"],
+        )
+        self.assertEqual(12.0, hou_module.frame())
+
+    def test_sequence_force_cooks_each_validation_target_at_the_locked_frame(
+        self,
+    ) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        target = FakeCookNode("/obj/OUT_SIM", hou_module)
+        hou_module._cameras[target.path] = target  # type: ignore[assignment]
+        hou_module.scene_viewer.frame_colors = {
+            1: (72, 104, 136),
+            2: (88, 118, 148),
+            3: (104, 132, 160),
+        }
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {
+                "mode": "flipbook",
+                "frames": [1, 2, 3],
+                "validation_paths": [target.path],
+                "return_image": False,
+            },
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual([1.0, 2.0, 3.0], target.cook_frames)
+        self.assertEqual([True, True, True], target.cook_forces)
+        self.assertEqual(
+            [1.0, 2.0, 3.0],
+            [
+                item["cook_frame"]
+                for item in response["result"]["sequence"]["frames"]
+            ],
+        )
+        self.assertEqual(12.0, hou_module.frame())
+
+    def test_sequence_reports_missing_frames_and_restores_frame(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.frame_colors = {
+            1: (72, 104, 136),
+            2: (88, 118, 148),
+            3: (104, 132, 160),
+        }
+        hou_module.scene_viewer.missing_frames = {2}
+        missing = executor.dispatch(
+            "hia_capture_viewport",
+            {
+                "mode": "flipbook",
+                "frames": [1, 2, 3],
+                "return_image": False,
+            },
+        )
+        self.assertFalse(missing["ok"])
+        self.assertEqual(
+            [2.0],
+            missing["result"]["sequence"]["missing_or_failed_frames"],
+        )
+        self.assertEqual(12.0, hou_module.frame())
 
 
 if __name__ == "__main__":

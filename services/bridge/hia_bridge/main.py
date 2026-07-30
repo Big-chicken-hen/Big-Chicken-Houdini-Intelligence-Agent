@@ -34,6 +34,9 @@ CACHE_RELATIVE_PATH = Path(".runtime/cache")
 FOCUS_STATE_RELATIVE_PATH = Path(".runtime/bridge/focus-mode.json")
 HIA_MCP_V2_SERVICE_RELATIVE_PATH = Path("services/hia_mcp_v2")
 HIA_MCP_V2_RUNTIME_RELATIVE_PATH = Path(".runtime/hia-mcp-v2")
+HIA_MCP_V2_EXECUTOR_RELATIVE_PATH = Path(
+    "houdini_package/python_libs/hia_mcp_runtime/executor.py"
+)
 FXHOUDINI_MCP_PYTHON_RELATIVE_PATH = Path(
     ".runtime/fxhoudinimcp/1.3.0/venv/Scripts/python.exe"
 )
@@ -63,12 +66,15 @@ HIA_MCP_V2_CHILD_ENVIRONMENT = (
     "HIA_MCP_V2_TOKEN",
     "HIA_MCP_V2_ROUTE",
     "HIA_MCP_V2_RUNTIME_DIR",
+    "HIA_MCP_V2_EXECUTOR_PATH",
+    "HIA_LAUNCHER_SESSION_ID",
 )
 _HIA_CHATGPT_HTTP_PROVIDER_ID = "hia_chatgpt_http"
 _HIA_CHATGPT_HTTP_PROVIDER_NAME = "HIA ChatGPT HTTP"
 _HIA_CHATGPT_HTTP_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _HIA_CHATGPT_HTTP_WIRE_API = "responses"
 _LAUNCH_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
+_LAUNCHER_SESSION_PATTERN = re.compile(r"^[0-9A-Fa-f]{32}$")
 _BRIDGE_URL_PATTERN = re.compile(
     r"^http://127\.0\.0\.1:([1-9][0-9]{0,4})$"
 )
@@ -226,12 +232,30 @@ def _required_hia_mcp_v2_environment(project_root: Path) -> dict[str, str]:
             "INVALID_LAUNCH_ENVIRONMENT",
             f"HIA MCP V2 runtime directory must be {expected_runtime_directory}",
         )
+    executor_path = os.environ.get("HIA_MCP_V2_EXECUTOR_PATH")
+    expected_executor_path = project_root / HIA_MCP_V2_EXECUTOR_RELATIVE_PATH
+    if not isinstance(executor_path, str) or not _same_windows_path(
+        Path(executor_path),
+        expected_executor_path,
+    ):
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            f"HIA MCP V2 executor path must be {expected_executor_path}",
+        )
+    launcher_session_id = os.environ.get("HIA_LAUNCHER_SESSION_ID", "")
+    if _LAUNCHER_SESSION_PATTERN.fullmatch(launcher_session_id) is None:
+        raise BridgeError(
+            "INVALID_LAUNCH_ENVIRONMENT",
+            "HIA launcher session ID is missing or invalid",
+        )
     return {
         "HIA_MCP_V2_HOST": host,
         "HIA_MCP_V2_PORT": str(port),
         "HIA_MCP_V2_TOKEN": token,
         "HIA_MCP_V2_ROUTE": route,
         "HIA_MCP_V2_RUNTIME_DIR": str(expected_runtime_directory),
+        "HIA_MCP_V2_EXECUTOR_PATH": str(expected_executor_path),
+        "HIA_LAUNCHER_SESSION_ID": launcher_session_id,
     }
 
 
@@ -490,6 +514,12 @@ def run(argv: Sequence[str] | None = None) -> int:
             hia_environment = _required_hia_mcp_v2_environment(project_root)
             houdini_mcp_token = hia_environment["HIA_MCP_V2_TOKEN"]
             houdini_mcp_port = int(hia_environment["HIA_MCP_V2_PORT"])
+            houdini_launcher_session_id = hia_environment[
+                "HIA_LAUNCHER_SESSION_ID"
+            ]
+            houdini_executor_path = Path(
+                hia_environment["HIA_MCP_V2_EXECUTOR_PATH"]
+            )
             sensitive_values.append(houdini_mcp_token)
             mcp_python = resolved_python
             path_entries = (resolved_python_path.parent,)
@@ -511,6 +541,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                 )
             houdini_mcp_token = _required_launch_secret("FXHOUDINIMCP_TOKEN")
             houdini_mcp_port = _required_houdini_mcp_port()
+            houdini_launcher_session_id = None
+            houdini_executor_path = None
             sensitive_values.append(houdini_mcp_token)
             mcp_python = str(fx_mcp_python)
             path_entries = (fx_mcp_python.parent, resolved_python_path.parent)
@@ -589,6 +621,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             houdini_mcp_port=houdini_mcp_port,
             houdini_mcp_token=houdini_mcp_token,
             houdini_mcp_backend=backend,
+            houdini_launcher_session_id=houdini_launcher_session_id,
+            houdini_executor_path=houdini_executor_path,
         )
         server = LoopbackHTTPServer(
             ("127.0.0.1", requested_bridge_port),

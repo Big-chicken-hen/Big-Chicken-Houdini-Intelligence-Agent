@@ -6,7 +6,7 @@
   "publisher": "Big-Chicken contributors",
   "card_license": "Apache-2.0",
   "verification": "community_unverified",
-  "accessed": "2026-07-28",
+  "accessed": "2026-07-30",
   "upstream_content_redistributed": false,
   "copyright_policy": "Only original short summaries, workflow guidance, risks, and verification expectations are stored. Linked tutorial text, transcripts, videos, course files, and code are not redistributed.",
   "sources": [
@@ -55,16 +55,16 @@
     {
       "id": "pyro-fields-cache-contract",
       "canonical_id": "pyro-fields-cache-contract",
-      "title": "Pyro field sourcing, bounds, and cache contracts",
+      "title": "Pyro flame experiments, field sourcing, and cache evidence",
       "path": "cards/pyro-fields-cache-contract.md",
       "url": "https://www.tokeru.com/cgwiki/HoudiniDops.html",
-      "author": "Matt Estela; Mark Spevick",
-      "houdini_version": "H17.5 and varied; verify current",
+      "author": "Matt Estela; Mark Spevick; Attila Torok; Tighe Rzankowski",
+      "houdini_version": "H16-H19.5 community sources; H22.0 labels compatibility-checked; verify active build",
       "topic": "Pyro",
-      "aliases": ["density temperature velocity", "sparse pyro", "VDB cache"],
-      "summary": "Audit source-to-field mappings, sparse bounds, resolution, and cached fields as one reproducible Pyro contract.",
+      "aliases": ["density temperature velocity", "sparse pyro", "VDB cache", "Pyro EffectSpec", "flame candidate lookdev", "fire failure diagnosis", "start frame preview cache", "source shape noise", "Attribute Noise Point Velocity", "disturbance shredding turbulence", "smooth pillar mushroom", "native Pyro nodes"],
+      "summary": "Turn a flame target into an EffectSpec, native source-shape/scalar/velocity noise and solver-shaping candidates, field diagnostics, and reproducible cache/render acceptance evidence.",
       "verification": "community_unverified",
-      "source_ids": ["src-07-cgwiki-dops", "src-08-pyro-fire-flames"]
+      "source_ids": ["src-07-cgwiki-dops", "src-08-pyro-fire-flames", "src-33-sexy-fires", "src-34-fire-hydrant"]
     },
     {
       "id": "flip-fluid-debug-cache",

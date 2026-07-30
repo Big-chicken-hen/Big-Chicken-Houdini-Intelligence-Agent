@@ -110,6 +110,40 @@ class PublicReleaseHygieneTests(unittest.TestCase):
         self.assertEqual([], CHECKER.inspect_release(archive))
         self.assertEqual(0, CHECKER.main([str(archive)]))
 
+    def test_release_rejects_the_active_checkout_path_without_echoing_it(
+        self,
+    ) -> None:
+        temporary = tempfile.TemporaryDirectory(dir=REPOSITORY_ROOT)
+        self.addCleanup(temporary.cleanup)
+        package = Path(temporary.name) / "package"
+        package.mkdir()
+        local_root = r"Z:\private-user\hia-checkout"
+        (package / "README.md").write_text(
+            f"development root: {local_root}\n",
+            encoding="utf-8",
+        )
+
+        violations = CHECKER.inspect_release(
+            package,
+            forbidden_text=[local_root],
+        )
+
+        self.assertEqual(
+            ["embedded local checkout path: README.md"],
+            violations,
+        )
+        self.assertNotIn(local_root, "\n".join(violations))
+        self.assertEqual(
+            1,
+            CHECKER.main(
+                [
+                    str(package),
+                    "--forbid-text",
+                    local_root,
+                ]
+            ),
+        )
+
     def test_knowledge_manifest_requires_every_declared_card(self) -> None:
         root = "Big-Chicken-Houdini-Intelligence-Agent-v0.1.0-preview"
         archive = self._write_zip(

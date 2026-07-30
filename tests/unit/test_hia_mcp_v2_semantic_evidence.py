@@ -416,6 +416,7 @@ class HiaMcpV2SemanticEvidenceTests(unittest.TestCase):
         result = self.executor.dispatch(
             "hia_validate",
             {
+                "cook": False,
                 "checks": ["semantic_expectations"],
                 "semantic_checks": [
                     {
@@ -617,9 +618,13 @@ class HiaMcpV2SemanticEvidenceTests(unittest.TestCase):
                 "checks": ["node_errors"],
             },
         )["result"]["cook_cache_evidence"]
-        self.assertEqual("recompute_not_proven", cache_hit["assessment"])
+        self.assertEqual("recompute_verified", cache_hit["assessment"])
         self.assertEqual(
-            "observed",
+            1,
+            cache_hit["targets"][0]["cook_count_delta"],
+        )
+        self.assertEqual(
+            "not_proven",
             cache_hit["targets"][0]["evidence"]["cache_hit"],
         )
 

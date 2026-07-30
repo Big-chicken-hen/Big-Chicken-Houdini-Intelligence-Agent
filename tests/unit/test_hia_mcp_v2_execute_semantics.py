@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -130,7 +131,12 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         self.assertEqual([], response["created_or_changed_paths"])
         self.assertEqual(["/obj/late-marker"], response["diff"]["unverified_paths"])
+        self.assertFalse(response["ok"])
+        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
         self.assertEqual("unknown", response["scene_change_status"])
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertFalse(response["rollback"]["requested"])
+        self.assertEqual(0, self.hou.undos.undo_calls)
         self.assertEqual(0, response["revision"])
 
     def test_no_change_marker_remains_unverified_without_revision_increment(self) -> None:
@@ -143,8 +149,33 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         self.assertEqual([], response["created_or_changed_paths"])
         self.assertEqual(["/obj/no-change"], response["diff"]["unverified_paths"])
+        self.assertFalse(response["ok"])
+        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
         self.assertEqual("unknown", response["scene_change_status"])
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertEqual(0, self.hou.undos.undo_calls)
         self.assertEqual(0, response["revision"])
+
+    def test_unproven_postcondition_rejects_task_without_undo(self) -> None:
+        self.executor._node_digest = mock.Mock(return_value="same")  # type: ignore[method-assign]
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "diff_paths": ["/obj/existing"],
+                "checks": ["changed_scope"],
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
+        self.assertEqual(
+            "not_proven",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertEqual(0, self.hou.undos.undo_calls)
 
     def test_digest_inspection_failure_is_unverified_not_a_scene_change(self) -> None:
         self.hou.node = mock.Mock(side_effect=RuntimeError("inspection failed"))  # type: ignore[method-assign]
@@ -156,7 +187,11 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         self.assertEqual([], response["created_or_changed_paths"])
         self.assertEqual(["/obj/unreadable"], response["diff"]["unverified_paths"])
+        self.assertFalse(response["ok"])
+        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
         self.assertEqual("unknown", response["scene_change_status"])
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertEqual(0, self.hou.undos.undo_calls)
         self.assertEqual(0, response["revision"])
 
     def test_only_an_explicit_diff_root_requests_a_full_snapshot(self) -> None:
@@ -197,7 +232,14 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         response = self.executor.dispatch(
             "hia_execute_hom",
-            {"script": "pass", "diff_root_path": "/obj/branch"},
+            {
+                "script": "pass",
+                "diff_root_path": "/obj/branch",
+                "expected_deletions": [
+                    "/obj/branch",
+                    "/obj/branch/child",
+                ],
+            },
         )
 
         self.assertTrue(response["ok"])
@@ -205,6 +247,11 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
             ["/obj/branch", "/obj/branch/child"],
             response["diff"]["deleted"],
         )
+        self.assertEqual(
+            ["/obj/branch", "/obj/branch/child"],
+            response["diff"]["expected_deletions"],
+        )
+        self.assertEqual([], response["diff"]["unexpected_deletions"])
         self.assertEqual(
             ["/obj/branch", "/obj/branch/child"],
             response["created_or_changed_paths"],
@@ -547,9 +594,261 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual("NO_CONFIRMED_SCENE_CHANGE", unchanged["checkpoint"]["skipped_reason"])
+        self.assertEqual("NO_OBSERVED_EFFECT", unchanged["checkpoint"]["skipped_reason"])
         self.assertEqual("HOM_EXECUTION_FAILED", failed["checkpoint"]["skipped_reason"])
         self.hou.hipFile.saveAsBackup.assert_not_called()
+
+    def test_mid_batch_failure_uses_only_its_own_undo_item(self) -> None:
+        self.hou.test_nodes = []
+        self.hou.undos.on_undo = self.hou.test_nodes.clear
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": (
+                    "hou.test_nodes.append('/obj/half-built')\n"
+                    "raise RuntimeError('stop halfway')"
+                ),
+                "capture_diff": False,
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual("HOM_EXECUTION_FAILED", response["errors"][0]["code"])
+        self.assertEqual([], self.hou.test_nodes)
+        self.assertEqual(1, self.hou.undos.undo_calls)
+        self.assertEqual("rolled_back", response["rollback"]["status"])
+        self.assertTrue(
+            response["rollback"]["houdini_scene_changes_rolled_back"]
+        )
+        self.assertFalse(
+            response["errors"][0]["partial_scene_changes_possible"]
+        )
+        self.assertTrue(response["errors"][0]["automatic_retry_safe"])
+
+    def test_rollback_is_not_verified_when_undo_leaves_clean_hip_dirty(
+        self,
+    ) -> None:
+        self.hou.test_nodes = []
+        self.hou.undos.on_undo = self.hou.test_nodes.clear
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": (
+                    "hou.test_nodes.append('/obj/temporary')\n"
+                    "hou.hipFile.dirty = True\n"
+                    "raise RuntimeError('stop after temporary edit')"
+                ),
+                "capture_diff": False,
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual([], self.hou.test_nodes)
+        self.assertEqual(1, self.hou.undos.undo_calls)
+        self.assertTrue(response["dirty"])
+        self.assertEqual("not_proven", response["rollback"]["status"])
+        self.assertFalse(
+            response["rollback"]["houdini_scene_changes_rolled_back"]
+        )
+        self.assertEqual(
+            "DIRTY_STATE_NOT_RESTORED",
+            response["rollback"]["error"]["code"],
+        )
+        self.assertEqual(
+            {
+                "dirty_before": False,
+                "dirty_after_undo": True,
+            },
+            response["rollback"]["error"]["details"],
+        )
+        self.assertTrue(
+            response["errors"][0]["partial_scene_changes_possible"]
+        )
+        self.assertFalse(response["errors"][0]["automatic_retry_safe"])
+        self.assertEqual("changed", response["scene_change_status"])
+
+    def test_rollback_is_not_verified_when_dirty_probe_is_unavailable(
+        self,
+    ) -> None:
+        self.hou.hipFile.hasUnsavedChanges = mock.Mock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("dirty probe unavailable")
+        )
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "raise RuntimeError('stop after edit attempt')",
+                "capture_diff": False,
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(1, self.hou.undos.undo_calls)
+        self.assertEqual("not_proven", response["rollback"]["status"])
+        self.assertEqual(
+            "DIRTY_STATE_UNAVAILABLE",
+            response["rollback"]["error"]["code"],
+        )
+        self.assertEqual(
+            {
+                "dirty_before_available": False,
+                "dirty_after_undo_available": False,
+            },
+            response["rollback"]["error"]["details"],
+        )
+        self.assertTrue(
+            response["errors"][0]["partial_scene_changes_possible"]
+        )
+        self.assertFalse(response["errors"][0]["automatic_retry_safe"])
+
+    def test_unverified_rollback_is_not_automatic_retry_safe(self) -> None:
+        @contextmanager
+        def interleaved_group(label: str) -> object:
+            try:
+                yield
+            finally:
+                self.hou.undos.labels.insert(0, label)
+                self.hou.undos.labels.insert(0, "User Edit")
+
+        self.hou.undos.group = interleaved_group  # type: ignore[method-assign]
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "raise RuntimeError('write failed')",
+                "capture_diff": False,
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual("HOM_EXECUTION_FAILED", response["errors"][0]["code"])
+        self.assertEqual("not_proven", response["rollback"]["status"])
+        self.assertEqual("UNDO_ITEM_NOT_FOUND", response["rollback"]["error"]["code"])
+        self.assertEqual(0, self.hou.undos.undo_calls)
+        self.assertTrue(
+            response["errors"][0]["partial_scene_changes_possible"]
+        )
+        self.assertFalse(response["errors"][0]["automatic_retry_safe"])
+
+    def test_syntax_and_undo_capability_are_preflighted_before_execution(
+        self,
+    ) -> None:
+        with self.assertRaises(HiaRuntimeError) as syntax_error:
+            self.executor.dispatch(
+                "hia_execute_hom",
+                {"script": "if :\n    pass"},
+            )
+        self.assertEqual("INVALID_HOM_SCRIPT", syntax_error.exception.code)
+        self.assertEqual([], self.hou.undos.labels)
+
+        self.hou.undos.areEnabled = lambda: False  # type: ignore[method-assign]
+        with self.assertRaises(HiaRuntimeError) as undo_error:
+            self.executor.dispatch(
+                "hia_execute_hom",
+                {"script": "hou.should_not_exist = True"},
+            )
+        self.assertEqual(
+            "UNDO_ROLLBACK_UNAVAILABLE",
+            undo_error.exception.code,
+        )
+        self.assertFalse(hasattr(self.hou, "should_not_exist"))
+
+    def test_unexpected_deletion_fails_and_expected_deletion_does_not(
+        self,
+    ) -> None:
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                ({"/obj": "root", "/obj/a": "a"}, False),
+                ({"/obj": "root"}, False),
+            ]
+        )
+        unexpected = self.executor.dispatch(
+            "hia_execute_hom",
+            {"script": "pass", "diff_root_path": "/obj"},
+        )
+        self.assertFalse(unexpected["ok"])
+        self.assertEqual(
+            "UNEXPECTED_DELETION",
+            unexpected["errors"][0]["code"],
+        )
+        self.assertEqual(["/obj/a"], unexpected["diff"]["unexpected_deletions"])
+
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                ({"/obj": "root", "/obj/a": "a"}, False),
+                ({"/obj": "root"}, False),
+            ]
+        )
+        expected = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "diff_root_path": "/obj",
+                "expected_deletions": ["/obj/a"],
+            },
+        )
+        self.assertTrue(expected["ok"])
+        self.assertEqual(["/obj/a"], expected["diff"]["expected_deletions"])
+        self.assertEqual([], expected["diff"]["unexpected_deletions"])
+
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                ({"/obj": "root", "/obj/a": "a"}, False),
+                ({"/obj": "root", "/obj/a": "a"}, False),
+            ]
+        )
+        missing = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "diff_root_path": "/obj",
+                "expected_deletions": ["/obj/a"],
+            },
+        )
+        self.assertFalse(missing["ok"])
+        self.assertEqual(
+            "EXPECTED_DELETION_NOT_OBSERVED",
+            missing["errors"][0]["code"],
+        )
+        self.assertEqual(
+            "failed",
+            missing["execution_evidence"]["postconditions"]["status"],
+        )
+
+    def test_scene_diff_classifies_expected_and_unexpected_deletions(
+        self,
+    ) -> None:
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                (
+                    {
+                        "/obj": "root",
+                        "/obj/expected": "a",
+                        "/obj/surprise": "b",
+                    },
+                    False,
+                ),
+                ({"/obj": "root"}, False),
+            ]
+        )
+        snapshot_id = self.executor.dispatch(
+            "hia_scene_diff",
+            {"action": "capture", "root_path": "/obj"},
+        )["result"]["snapshot_id"]
+
+        compared = self.executor.dispatch(
+            "hia_scene_diff",
+            {
+                "action": "compare",
+                "snapshot_id": snapshot_id,
+                "expected_deletions": ["/obj/expected"],
+            },
+        )["result"]["diff"]
+
+        self.assertEqual(["/obj/expected"], compared["expected_deletions"])
+        self.assertEqual(["/obj/surprise"], compared["unexpected_deletions"])
+        self.assertEqual([], compared["missing_expected_deletions"])
 
     def test_checkpoint_failure_is_nonfatal_and_must_not_trigger_write_retry(self) -> None:
         checkpoint_directory = self.checkpoint_directory()

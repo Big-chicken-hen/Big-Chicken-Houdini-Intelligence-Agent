@@ -67,12 +67,40 @@ Cloning the source is intended for development. From the project root, install t
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-runtime.ps1
 powershell -File .\scripts\hia-knowledge.ps1 environment-install
-$env:CODEX_HOME = (Join-Path (Get-Location) '.runtime\codex-home')
-& '.\.runtime\toolchains\codex\0.144.3\codex.exe' login --device-auth
+powershell -File .\scripts\hia-launcher.ps1 -PrintCodexLoginCommand
+# Run the printed official device-login command once; the launcher never handles the credential.
 powershell -NoProfile -Sta -ExecutionPolicy Bypass -File .\scripts\hia-launcher.ps1
 ```
 
 The bootstrap verifies the pinned archive SHA-256 and OpenAI Authenticode signatures and writes only below `.runtime`. Build commands later in this README are for source maintainers; they are not included in the Preview ZIP or required for normal use.
+
+Two cold-start paths use the same checks. With only Houdini installed, run the
+Codex bootstrap, complete the explicit device login, then install the base
+knowledge environment. If the pinned project-local Codex runtime is already
+verified and logged in, skip its bootstrap and continue with
+`hia-knowledge.ps1 environment-install`. A global/PATH Codex or Python is not
+silently adopted as a project default. Missing optional embedding still falls
+back to FTS5 and does not block Houdini.
+
+Advanced users can run the same launcher flow without WPF:
+
+```powershell
+powershell -File .\scripts\hia-launcher.ps1 -CheckOnly -Json
+powershell -File .\scripts\hia-launcher.ps1 -RepairSafeProject -CheckOnly -Json
+powershell -File .\scripts\hia-launcher.ps1 -PrintCodexLoginCommand -Json
+powershell -File .\scripts\launch-houdini.ps1 `
+  -HoudiniExe "<full-path-to-houdini.exe>" `
+  -BridgePython ".\.venv\Scripts\python.exe"
+```
+
+`-CheckOnly` performs discovery, diagnostics, preflight, and report generation;
+its JSON includes all Houdini candidates and the report paths. Exit `0` means
+green or non-blocking yellow, while exit `2` means launch-blocking red.
+After a passing check, advanced users start the same sole lifecycle entry used
+by WPF: `scripts\launch-houdini.ps1`. Its exit code is Houdini's confirmed exit
+code, or nonzero when startup/lifecycle validation fails. The full GUI/CLI
+mapping is in
+[Installation](docs/INSTALLATION.md#gui-and-command-line-parity).
 
 ## Basic use
 
@@ -151,7 +179,7 @@ See [Runtime diagnostics](docs/DIAGNOSTICS.md) for report contents and redaction
 
 ## Optional local retrieval and project memory
 
-HIA MCP V2 exposes 17 tools. Its capability catalog is generated from the same `TOOL_SPECS` registry used by `tools/list`, so tool names, domains, descriptions, parameters, and discovery aliases cannot drift into a second handwritten list. Existing `hia_local_help_search` calls remain compatible and default to hybrid retrieval: SQLite FTS5 remains the reliable baseline once the corpus is initialized, while an explicitly installed local Qwen encoder may add vector matches. A new project requires one explicit refresh or CLI index initialization; a strictly read-only search never creates the database. If the selected encoder cannot load, the request reports why and falls back to FTS5; searching never downloads a model or dependency.
+HIA MCP V2 exposes 18 tools. Its capability catalog is generated from the same `TOOL_SPECS` registry used by `tools/list`, so tool names, domains, descriptions, parameters, and discovery aliases cannot drift into a second handwritten list. The sole bounded comparison executor is `hia_run_effect_experiment`: it records temporary baseline/candidate evidence and contact sheets without scoring candidates or replacing Codex reasoning. Existing `hia_local_help_search` calls remain compatible and default to hybrid retrieval: SQLite FTS5 remains the reliable baseline once the corpus is initialized, while an explicitly installed local Qwen encoder may add vector matches. A new project requires one explicit refresh or CLI index initialization; a strictly read-only search never creates the database. If the selected encoder cannot load, the request reports why and falls back to FTS5; searching never downloads a model or dependency.
 
 `hia_local_help_search` defaults to compact output under a byte budget. A batch shares public retrieval/index state once instead of repeating it beside every query; each query has its own `next_offset`, and a top-level cursor is returned only when the unfinished query cursors agree. Full responses paginate by card: a byte-budget truncation can shorten the card tail but does not expose a within-card continuation cursor. Encoder runtime state and corpus-index state are separate, so an available model does not imply complete global semantic recall. While the corpus is partial, `ranking_scope=lexical_candidates` means vectors only rerank each query's lexical candidates; the single AND-to-OR relaxation helps long lexical queries but cannot provide zero-overlap global semantic recall. `refresh=false` makes the corpus index strictly read-only—no source scan, SQLite write, vector backlog fill, or vector-layer switch—but a first optional embedding-worker startup may still create its own project-local runtime cache. Use `refresh=true` for one explicit incremental refresh. Full vector completion remains a separate CLI operation.
 
@@ -246,6 +274,13 @@ powershell -File .\scripts\launcher\Install-HiaEmbedding.ps1 `
   -Device auto
 ```
 
+The model selector and install log show the official Hugging Face model ID,
+revision, target directory, and official file size (about 1.21 GB for 0.6B or
+15.2 GB for 8B). Hugging Face and uv caches stay under `.runtime`; retrying an
+interrupted install reuses those project-local caches. Python packages are
+installed only into the project-root `.venv`. No model is downloaded on import,
+search, or ordinary Houdini launch.
+
 Use `-Device cpu` on AMD, integrated-graphics, no-discrete-GPU, or deliberately
 CPU-only systems. The command prepares and uses only the project-managed Python
 and `.venv`. User site-packages are disabled. Houdini's embedded Python and the
@@ -311,15 +346,22 @@ Build the strict public Preview archive:
 $ReleaseVersion = '<approved-preview-version>'
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 `
   -Version $ReleaseVersion `
+  -PreflightOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 `
+  -Version $ReleaseVersion `
   -InstallLocalSdk
 ```
 
-The archive and `SHA256SUMS.txt` are written to `.runtime\release`. The build
+The archive and version-bound `SHA256SUMS-v<version>.txt` are written to
+`.runtime\release`. The build
 uses an explicit runtime allowlist, rebuilds the launcher, and runs
 `scripts\check-public-release.py` before publishing the checksum. It excludes
 project runtime state, credentials, tests, HIP files, renders, historical Gate
 reports, and unlicensed artwork. The project-owned launcher illustration is
-included explicitly.
+included explicitly. `-PreflightOnly` is read-only: it requires the canonical
+project `.venv`, rejects missing or untracked release/build inputs, and verifies
+the built-in knowledge manifests before the .NET build or archive staging
+begins. The final archive scan also rejects the current checkout's absolute path.
 
 ## Project status
 

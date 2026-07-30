@@ -27,6 +27,16 @@ HDA geometry/interface → state registration/template → enter/resume lifecycl
 
 Template owns registration; lifecycle owns transient resources; selector/ray logic owns mapping from screen to scene; event state machine owns gesture interpretation; HDA parameters own durable state; the node network owns geometry; undo owns one user action. Relevant event values include device reason, buttons/modifiers, ray origin/direction, hit primitive, hit position/normal, and bound parameter names.
 
+## Executable parameter and connection contract
+
+1. Keep a normal parameter-driven HDA as the data source. Define a unique state type name, label, `hou.sopNodeTypeCategory()` (or the actual context), and state factory. `createViewerStateTemplate` returns a `hou.ViewerStateTemplate`, calls `bindFactory`, then binds only the required selector/handle/menu entries.
+2. Registration performs no node edits. Register the template with the supported viewer-state mechanism and treat name/category conflicts as errors. The state constructor stores only the state name and `hou.SceneViewer`; node references are validated on entry and before every write.
+3. In `onEnter`, read the node and bound parameters, construct bounded guide geometry/drawables, and initialize `dragging = False`. In `onInterrupt`, treat an active drag like release/cancel and hide transient guides. `onResume` restores state, while actual cursor preview is shown from `onMouseEvent`.
+4. In `onMouseEvent`, branch on `ui_event.reason()` for start/active/changed behavior, inspect device buttons/modifiers, obtain the viewport ray, and intersect only approved geometry. Require valid primitive index, finite world position/normal, and any distance bound before updating a preview. Return `True` only when the event is intentionally consumed.
+5. Convert world hits to the HDA's local space before setting local parameters. Clamp the example distance/radius to the HDA hard range and leave parameters unchanged on a miss. Drawables that use world-space ray results must account for parent transforms.
+6. Open one Houdini undo group at gesture start and close it at release; cancel/revert it on Escape or invalidation. Mouse-move events update the same action and must not create one history entry each.
+7. Test click, drag, no-hit, Escape, interruption, node deletion, undo/redo, state reload, and exit/reactivation. A non-interactive parameter edit must still produce the same HDA geometry.
+
 ## Data flow, version, and performance
 
 Viewport events can fire frequently. Cache bounded display geometry, avoid full-network cooks on every mouse move when a preview parameter or deferred final cook works, and never run blocking external work in callbacks. APIs and callback signatures evolve, so local help/current samples must be checked. The public Gist provides ideas but no displayed reuse license; this card copies no code.
@@ -38,6 +48,18 @@ Viewport events can fire frequently. Cache bounded display geometry, avoid full-
 - **Undo floods history:** block begins/ends per event; move boundaries to gesture start/end.
 - **Drawable remains after exit:** cleanup path missing for interrupt/resume/delete.
 - **Laggy drag:** callback triggers expensive full cook; update lightweight preview and commit once.
+
+## Checkpoints and observable evidence
+
+- **S0 — registration:** the intended state appears for the correct node/context with no duplicate-name or module-load error.
+- **S1 — hit mapping:** a known screen pick records the expected primitive, finite world hit, converted local hit, and parameter value; an intentional miss produces zero writes.
+- **S2 — gesture/undo:** one completed click or drag creates exactly one undo entry; Escape restores pre-gesture values and redo reproduces the completed action.
+- **S3 — lifecycle:** interrupt, exit, state reload, and node deletion leave zero visible stale drawables and no invalid-object exception.
+- **S4 — performance/fallback:** sampled mouse-move latency remains within the interaction budget, and direct parameter editing yields the same final geometry without the state.
+
+## When not to use this workflow
+
+Do not build a viewer state for an operation adequately served by parameters and standard handles, or when the core result cannot be reproduced non-interactively. Never run long cooks, network access, file export, or topology-wide mutation directly on every mouse event.
 
 ## Provenance boundary
 

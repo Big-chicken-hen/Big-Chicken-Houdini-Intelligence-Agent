@@ -4,7 +4,7 @@
   "source_kind": "community_tutorial",
   "verification": "community_unverified",
   "card_count": 16,
-  "source_count": 32,
+  "source_count": 34,
   "domains": {
     "SOP/attributes/VEX": ["sop-attribute-vex-contracts", "vex-topology-spatial-queries"],
     "curve modeling": ["curve-procedural-modeling"],

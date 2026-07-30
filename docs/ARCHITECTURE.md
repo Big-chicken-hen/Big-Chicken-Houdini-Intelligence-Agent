@@ -17,7 +17,7 @@ The Panel sends text, local reference images, and optional selection context. Th
 
 Local HTTP services bind only to `127.0.0.1` and use a fresh random token for each launcher session.
 
-HIA MCP V2 exposes 17 tools. `hia_local_help_search` preserves its lexical call shape while adding optional `lexical`, `vector`, and default `hybrid` retrieval. `hia_project_memory` is the only durable memory tool: only explicit `record`, `supersede`, and `delete` actions mutate memory; `search` and `list` are read-only. Supported memory types are `decision`, `preference`, `asset`, `lesson`, and `workflow`. Chat history, compaction events, and diagnostics are never copied into memory automatically.
+HIA MCP V2 exposes 18 tools. `hia_run_effect_experiment` is the only bounded baseline/candidate comparison executor; it temporarily applies scalar parameter deltas, advances/captures a short sequence, and returns factual evidence without scoring or creating an EffectSpec. `hia_local_help_search` preserves its lexical call shape while adding optional `lexical`, `vector`, and default `hybrid` retrieval. `hia_project_memory` is the only durable memory tool: only explicit `record`, `supersede`, and `delete` actions mutate memory; `search` and `list` are read-only. Supported memory types are `decision`, `preference`, `asset`, `lesson`, and `workflow`. Chat history, compaction events, and diagnostics are never copied into memory automatically.
 
 The Panel's Knowledge and Memory page uses two separate, thin control paths:
 
@@ -276,6 +276,16 @@ or scripts/hia-launcher.ps1 directly
 ```
 
 The distributable launcher is a thin self-contained .NET 8 WPF WinExe host. It derives the project root from `AppContext.BaseDirectory`, verifies project markers, and starts the existing PowerShell/WPF launcher; it does not duplicate discovery, preflight, repair, settings, reporting, or lifecycle rules. Local-knowledge and cache controls call `scripts/hia-knowledge.ps1` and `scripts/hia-cache.ps1`, so users who omit WPF keep the same operations. The managed payload is single-file while native WPF components remain as five sidecars beside the EXE, avoiding extraction outside the project. The project-local SDK, CLI home, NuGet caches, build intermediates, and publish directory all live below ignored `.runtime`; no global SDK, PATH, registry, or AppData mutation is required. `scripts/hia-launcher.ps1` remains the direct debugging entry and `scripts/launch-houdini.ps1` remains the direct lifecycle entry.
+
+The command-line contract is intentionally the same composition rather than a
+parallel implementation. `hia-launcher.ps1 -CheckOnly -Json` exposes discovery,
+diagnostics, preflight and report paths; `launch-houdini.ps1` remains the single
+GUI and CLI lifecycle entry; and `-PrintCodexLoginCommand` calls the same Core
+helper used by the WPF clipboard action. Codex bootstrap, environment/model
+repair, knowledge/index operations, and cache cleanup are the same
+project-relative scripts invoked by WPF. Foreground index interruption is
+bounded to that CLI process and returns 130; there is no launcher-owned
+background stop service.
 
 The launcher uses the standard Windows window frame, not another Agent or service. Its module derives the project root from the launcher location, enumerates Houdini without a version allowlist, requires explicit selection when more than one installation exists, and binds port probes only to `127.0.0.1`. `hia_v2` is the default; `fxhoudini` is an explicit fallback. `scripts/launch-houdini.ps1` remains the only lifecycle entry and injects only the selected backend's paths and environment. HIA V2 uses its own random port/token, `HIA_MCP_V2_*`, `/hia-mcp-v2/v1/*`, and `.runtime/hia-mcp-v2`; fallback keeps the locked third-party runtime without sharing those names.
 

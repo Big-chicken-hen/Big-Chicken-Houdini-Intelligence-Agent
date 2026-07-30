@@ -20,8 +20,6 @@ Choose generators from component semantics. Do not disguise a pile of unrelated 
 - Use height fields for terrain-scale surfaces and VEX for scalable repeated geometry or attribute logic.
 - Use loops only where iteration is structurally required; do not use a solver for a static result.
 
-Use HOM to author the network. Keep the asset's modeling logic in inspectable Houdini nodes rather than hiding it inside one opaque Python node or script.
-
 ## Keep paths and sweeps stable
 
 Generate a genuinely continuous linear component from a continuous path and a stable profile. Keep path position and direction separate from profile shape; do not approximate a bend with intersecting straight pieces or conceal it with oversized connectors.

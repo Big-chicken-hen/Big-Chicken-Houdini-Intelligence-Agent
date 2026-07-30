@@ -20,6 +20,123 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 RUNTIME_PACKAGE_ROOT = REPOSITORY_ROOT / "houdini_package" / "python_libs"
 COMMUNITY_PACK = REPOSITORY_ROOT / "knowledge" / "community-tutorials"
 OFFICIAL_PACK = REPOSITORY_ROOT / "knowledge" / "sidefx-official"
+PYRO_TECHNICAL_QUERIES = (
+    "Pyro Source Volume Rasterize Attributes density temperature flame",
+    "sparse Pyro Solver Voxel Size CFL Condition Max Substeps collision SDF",
+    "Pyro Post-Process VDB 16-bit cache velocity motion blur",
+)
+PYRO_EXPERIMENT_QUERIES = (
+    "Pyro EffectSpec source solver material render candidate acceptance",
+    "detached flame candle smooth mushroom smoke black Karma render",
+    "Pyro Start Frame low resolution viewport stale cache checkpoint",
+)
+PYRO_NOISE_QUERIES = (
+    "Pyro smooth pillar mushroom source shape noise Attribute Noise SOP pscale density temperature flame",
+    "Pyro Point Velocity SOP Curl Noise Attribute Adjust Vector Direction Only Length Only",
+    "Pyro Solver Disturbance Block-Based Shredding Turbulence Swirl Size Pulse Length Control Field",
+    "HOM native Houdini Pyro nodes avoid Python SOP single variable multi-frame validation",
+)
+PYRO_RECALL_QUERIES = (
+    PYRO_TECHNICAL_QUERIES + PYRO_EXPERIMENT_QUERIES + PYRO_NOISE_QUERIES
+)
+EXECUTABLE_WORKFLOW_TERMS = {
+    "cache-debug-evidence": (
+        "File Cache SOP",
+        "Load from Disk",
+        "Missing Frame",
+        "Base Name",
+    ),
+    "copernicus-layer-workflow": (
+        "Layer COP",
+        "ROP Image Output COP",
+        "OCIO Transform COP",
+        "Pixel Scale",
+    ),
+    "curve-procedural-modeling": (
+        "Resample SOP",
+        "Orientation Along Curve SOP",
+        "Sweep SOP",
+        "curveu",
+    ),
+    "flip-fluid-debug-cache": (
+        "FLIP Container SOP",
+        "FLIP Solver SOP",
+        "Particle Separation",
+        "Particle Fluid Surface SOP",
+    ),
+    "hda-interface-contract": (
+        "Operator Type Properties",
+        "IN_*",
+        "OUT_*",
+        "Increase Minor Version",
+    ),
+    "kinefx-transform-rig": (
+        "Rig Doctor SOP",
+        "Rig Pose SOP",
+        "Joint Capture Biharmonic SOP",
+        "Bone Deform SOP",
+    ),
+    "materialx-karma-lookdev": (
+        "Material Library LOP",
+        "MtlX Standard Surface",
+        "Assign Material LOP",
+        "specular_roughness",
+    ),
+    "pdg-tops-work-items": (
+        "Range Generate TOP",
+        "Wedge TOP",
+        "Attribute Create TOP",
+        "ROP Geometry Output TOP",
+    ),
+    "performance-profiling": (
+        "Performance Monitor",
+        "Compile Begin/End SOP",
+        "File Cache SOP",
+        "cold and warm",
+    ),
+    "pyro-fields-cache-contract": (
+        "Pyro Source SOP",
+        "Volume Rasterize Attributes SOP",
+        "CFL Condition",
+        "Pyro Post-Process SOP",
+    ),
+    "rbd-constraint-networks": (
+        "RBD Configure SOP",
+        "RBD Constraint Properties SOP",
+        "RBD Bullet Solver SOP",
+        "Bullet Substeps",
+    ),
+    "solaris-usd-scene-assembly": (
+        "SOP Import LOP",
+        "Reference LOP",
+        "Material Library LOP",
+        "USD ROP",
+    ),
+    "sop-attribute-vex-contracts": (
+        "Attribute Wrangle SOP",
+        "Attribute Promote SOP",
+        "Copy to Points SOP",
+        "Run Over",
+    ),
+    "vellum-constraint-workflow": (
+        "Vellum Constraints SOP",
+        "Vellum Solver SOP",
+        "Thickness",
+        "Damping Ratio",
+    ),
+    "vex-topology-spatial-queries": (
+        "nearpoints",
+        "xyzdist",
+        "primuv",
+        "APPLY_TOPOLOGY_EDIT",
+    ),
+    "viewer-state-interaction": (
+        "ViewerStateTemplate",
+        "onMouseEvent",
+        "onInterrupt",
+        "undo",
+    ),
+}
 sys.path.insert(0, str(RUNTIME_PACKAGE_ROOT))
 
 from hia_mcp_runtime.hybrid_knowledge import (  # noqa: E402
@@ -171,8 +288,8 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
         self.assertIs(False, manifest["upstream_content_redistributed"])
         self.assertEqual(16, len(pack.entries))
         self.assertEqual(16, coverage["card_count"])
-        self.assertEqual(32, len(registry["sources"]))
-        self.assertEqual(32, coverage["source_count"])
+        self.assertEqual(34, len(registry["sources"]))
+        self.assertEqual(34, coverage["source_count"])
 
         source_ids: set[str] = set()
         source_urls: set[str] = set()
@@ -196,29 +313,42 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
             "## Use, prerequisites, and target",
             "## Semantic network stages",
             "## Ordered workflow",
+            "## Executable parameter and connection contract",
             "## Data flow",
             "## Common failures and repairs",
+            "## Checkpoints and observable evidence",
+            "## When not to use this workflow",
             "## Provenance boundary",
             "## Semantic expectations and verification checklist",
             "## Sources",
         )
         declared_paths: set[str] = set()
         for entry in manifest["sources"]:
-            self.assertEqual(2, len(entry["source_ids"]))
+            expected_source_count = (
+                4 if entry["id"] == "pyro-fields-cache-contract" else 2
+            )
+            self.assertEqual(expected_source_count, len(entry["source_ids"]))
             self.assertTrue(set(entry["source_ids"]).issubset(source_ids))
             self.assertEqual("community_unverified", entry["verification"])
             self.assertNotIn(entry["path"], declared_paths)
             declared_paths.add(entry["path"])
             body = (COMMUNITY_PACK / entry["path"]).read_text(encoding="utf-8")
-            self.assertGreaterEqual(len(body.split()), 500, entry["id"])
+            self.assertGreaterEqual(len(body.split()), 900, entry["id"])
             self.assertGreaterEqual(
                 len(re.findall(r"(?m)^\d+\. ", body)),
-                7,
+                12,
                 entry["id"],
             )
             for heading in required_headings:
                 self.assertIn(heading, body, entry["id"])
-            self.assertGreaterEqual(len(re.findall(r"`[^`\n]+`", body)), 4)
+            self.assertGreaterEqual(len(re.findall(r"`[^`\n]+`", body)), 12)
+            self.assertEqual(
+                5,
+                len(re.findall(r"(?m)^- \*\*[A-Z][0-9] ", body)),
+                entry["id"],
+            )
+            for term in EXECUTABLE_WORKFLOW_TERMS[entry["id"]]:
+                self.assertIn(term, body, f"{entry['id']}: {term}")
             self.assertGreaterEqual(
                 len(
                     re.findall(
@@ -232,6 +362,19 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
                 entry["id"],
             )
             self.assertNotIn("builtin_official_workflow", body)
+            if entry["id"] == "pyro-fields-cache-contract":
+                self.assertGreaterEqual(len(body.split()), 2500)
+                for marker in (
+                    "## EffectSpec and candidate decision contract",
+                    "## Visual target to control-region map",
+                    "Successful engineering evidence",
+                    "A failed case is still useful",
+                ):
+                    self.assertIn(marker, body)
+                for query in PYRO_EXPERIMENT_QUERIES:
+                    self.assertIn(query, body)
+                for query in PYRO_NOISE_QUERIES:
+                    self.assertIn(query, body)
 
     def test_refresh_fts_filter_compact_and_full_reconstruction(self) -> None:
         _copy_pack(COMMUNITY_PACK, self.project_root)
@@ -298,6 +441,10 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
             card_id="viewer-state-interaction",
         )[0]["matches"][0]
         self.assertGreater(len(compact["metadata"]["summary"]), 80)
+        self.assertRegex(
+            compact["metadata"]["summary"],
+            r"(?i)\b(?:keep|build|validate|inspect|connect|cache)\b",
+        )
         self.assertEqual("Mohamad Salame; minami110", compact["metadata"]["author"])
         self.assertEqual("community_unverified", compact["metadata"]["verification"])
 
@@ -310,6 +457,10 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
             "## Ordered workflow",
             "1. Define the interaction contract",
             "8. Register/reload in a test session",
+            "## Executable parameter and connection contract",
+            "7. Test click, drag, no-hit",
+            "## Checkpoints and observable evidence",
+            "## When not to use this workflow",
             "## Semantic expectations and verification checklist",
             "## Sources",
         )
@@ -327,6 +478,114 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
             [int(row[1]) for row in rows],
         )
         self.assertEqual({document_id}, {int(row[0]) for row in rows})
+
+    def test_pyro_queries_recall_in_lexical_partial_vector_and_hybrid(self) -> None:
+        _copy_pack(COMMUNITY_PACK, self.project_root)
+        index = LocalKnowledgeIndex(self.project_root)
+        _refresh(index, force=True)
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=FakeEmbedder(),
+        )
+
+        lexical_results = store.search_many(
+            PYRO_RECALL_QUERIES,
+            {"project"},
+            current_houdini_version="21.0",
+            offset=0,
+            limit=5,
+            mode="lexical",
+            source_kinds={COMMUNITY_TUTORIAL_SOURCE},
+        )
+        for query, result in zip(PYRO_RECALL_QUERIES, lexical_results):
+            pyro_matches = [
+                match
+                for match in result["matches"]
+                if match["metadata"]["card_id"] == "pyro-fields-cache-contract"
+            ]
+            self.assertTrue(pyro_matches, f"lexical: {query}")
+            self.assertEqual(
+                COMMUNITY_TUTORIAL_SOURCE,
+                pyro_matches[0]["source_kind"],
+            )
+            self.assertEqual(
+                "community_unverified",
+                pyro_matches[0]["metadata"]["verification"],
+            )
+            self.assertTrue(pyro_matches[0]["metadata"]["url"].startswith("https://"))
+            self.assertIn("Attila Torok", pyro_matches[0]["metadata"]["author"])
+
+        partial = store.search_many(
+            (PYRO_EXPERIMENT_QUERIES[0],),
+            {"project"},
+            current_houdini_version="21.0",
+            offset=0,
+            limit=10,
+            mode="hybrid",
+            allow_index_updates=True,
+            source_kinds={COMMUNITY_TUTORIAL_SOURCE},
+        )[0]
+        self.assertTrue(partial["retrieval"]["vector"]["index"]["partial"])
+        partial_pyro = [
+            match
+            for match in partial["matches"]
+            if match["metadata"]["card_id"] == "pyro-fields-cache-contract"
+        ]
+        self.assertTrue(partial_pyro)
+        self.assertEqual(
+            COMMUNITY_TUTORIAL_SOURCE,
+            partial_pyro[0]["provenance"]["source_kind"],
+        )
+        self.assertEqual(
+            "community_unverified",
+            partial_pyro[0]["provenance"]["verification"],
+        )
+        self.assertIn("Attila Torok", partial_pyro[0]["provenance"]["author"])
+
+        self.assertTrue(_build_all_vectors(store)["complete"])
+        vector_results = store.search_many(
+            PYRO_RECALL_QUERIES,
+            {"project"},
+            current_houdini_version="21.0",
+            offset=0,
+            limit=16,
+            mode="vector",
+            source_kinds={COMMUNITY_TUTORIAL_SOURCE},
+        )
+        hybrid_results = store.search_many(
+            PYRO_RECALL_QUERIES,
+            {"project"},
+            current_houdini_version="21.0",
+            offset=0,
+            limit=5,
+            mode="hybrid",
+            source_kinds={COMMUNITY_TUTORIAL_SOURCE},
+        )
+        for mode, results in (
+            ("vector", vector_results),
+            ("hybrid", hybrid_results),
+        ):
+            for query, result in zip(PYRO_RECALL_QUERIES, results):
+                pyro_matches = [
+                    match
+                    for match in result["matches"]
+                    if match["metadata"]["card_id"] == "pyro-fields-cache-contract"
+                ]
+                self.assertTrue(pyro_matches, f"{mode}: {query}")
+                provenance = pyro_matches[0].get(
+                    "provenance",
+                    pyro_matches[0]["metadata"],
+                )
+                self.assertEqual(
+                    COMMUNITY_TUTORIAL_SOURCE,
+                    pyro_matches[0]["source_kind"],
+                )
+                self.assertEqual(
+                    "community_unverified",
+                    provenance["verification"],
+                )
+                self.assertTrue(provenance["url"].startswith("https://"))
 
     def test_fake_vector_partial_full_and_provenance_filters(self) -> None:
         _copy_pack(COMMUNITY_PACK, self.project_root)

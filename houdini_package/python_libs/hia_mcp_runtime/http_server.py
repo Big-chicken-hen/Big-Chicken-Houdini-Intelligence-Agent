@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import secrets
 import sys
 import threading
@@ -21,8 +22,18 @@ WIRE_PROTOCOL = "hia-mcp-v2/1"
 LOOPBACK_HOST = "127.0.0.1"
 EXECUTE_ROUTE = "/hia-mcp-v2/v1/execute"
 HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
+RUNTIME_IDENTITY_VERSION = 1
 MAX_REQUEST_BYTES = 1_048_576
 MAX_RESPONSE_BYTES = 4_194_304
+_RUNTIME_BINDING_FIELDS = (
+    "identity_version",
+    "launcher_session_id",
+    "houdini_pid",
+    "executor_module_path",
+)
+_SCENE_WRITE_TOOLS = frozenset(
+    {"hia_execute_hom", "hia_run_effect_experiment"}
+)
 
 
 class _RuntimeHTTPServer(ThreadingHTTPServer):
@@ -35,6 +46,8 @@ class _RuntimeHTTPServer(ThreadingHTTPServer):
         *,
         executor: HoudiniExecutor,
         token: str,
+        launcher_session_id: str,
+        executor_module_path: str,
     ) -> None:
         host, port = address
         if host != LOOPBACK_HOST:
@@ -43,7 +56,32 @@ class _RuntimeHTTPServer(ThreadingHTTPServer):
             raise ValueError("HIA MCP V2 runtime token is missing or invalid")
         self.executor = executor
         self.expected_authorization = f"Bearer {token}"
+        self.launcher_session_id = launcher_session_id
+        self.executor_module_path = executor_module_path
+        self.executor_loaded_mtime_ns = _file_mtime_ns(executor_module_path)
+        if self.executor_loaded_mtime_ns is None:
+            raise ValueError("The loaded HIA executor source is unavailable")
         super().__init__((host, port), _RuntimeRequestHandler)
+
+    def runtime_identity(self) -> dict[str, Any]:
+        hip_path, hip_state = _current_hip(self.executor)
+        disk_mtime_ns = _file_mtime_ns(self.executor_module_path)
+        return {
+            "identity_version": RUNTIME_IDENTITY_VERSION,
+            "launcher_session_id": self.launcher_session_id,
+            "houdini_pid": os.getpid(),
+            "hip_path": hip_path,
+            "hip_state": hip_state,
+            "scene_revision": self.executor.scene_revision,
+            "executor_module_path": self.executor_module_path,
+            "executor_loaded_mtime_ns": self.executor_loaded_mtime_ns,
+            "executor_disk_mtime_ns": disk_mtime_ns,
+            "executor_source_status": (
+                "current"
+                if disk_mtime_ns == self.executor_loaded_mtime_ns
+                else "stale"
+            ),
+        }
 
 
 class _RuntimeRequestHandler(BaseHTTPRequestHandler):
@@ -89,7 +127,11 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
                 {
                     "protocol": WIRE_PROTOCOL,
                     "ok": True,
-                    "result": {"server_id": "hia_mcp_v2", "scene_revision": self.server.executor.scene_revision},
+                    "result": {
+                        "server_id": "hia_mcp_v2",
+                        "scene_revision": self.server.executor.scene_revision,
+                        "runtime_identity": self.server.runtime_identity(),
+                    },
                 },
             )
             return
@@ -99,8 +141,60 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_request()
             tool_name = payload["tool"]
+            scene_write = tool_name in _SCENE_WRITE_TOOLS
+            current_identity = self.server.runtime_identity()
+            source_current = (
+                current_identity["executor_source_status"] == "current"
+            )
+            binding_matches = _same_runtime_binding(
+                payload["expected_runtime"],
+                current_identity,
+            )
+            if scene_write and not source_current:
+                raise HiaRuntimeError(
+                    "STALE_HOUDINI_RUNTIME",
+                    "The executor source changed after Houdini loaded it; restart the launcher",
+                    {
+                        "runtime_identity": current_identity,
+                        "restart_required": True,
+                        "request_submitted": False,
+                    },
+                )
+            if scene_write and not binding_matches:
+                raise HiaRuntimeError(
+                    "HOUDINI_SESSION_CHANGED",
+                    "The live Houdini process or executor module changed; reconnect before executing",
+                    {
+                        "expected": _runtime_binding(payload["expected_runtime"]),
+                        "actual": _runtime_binding(current_identity),
+                        "runtime_identity": current_identity,
+                        "restart_required": True,
+                        "request_submitted": False,
+                    },
+                )
             arguments = payload["arguments"]
-            result = self.server.executor.dispatch(tool_name, arguments)
+            result = dict(self.server.executor.dispatch(tool_name, arguments))
+            result_identity = self.server.runtime_identity()
+            result["runtime_identity"] = result_identity
+            warning_code = (
+                "STALE_HOUDINI_RUNTIME"
+                if result_identity["executor_source_status"] != "current"
+                else "HOUDINI_SESSION_CHANGED"
+                if not _same_runtime_binding(
+                    payload["expected_runtime"],
+                    result_identity,
+                )
+                else None
+            )
+            if warning_code is not None:
+                result["restart_required"] = True
+                result["identity_warning"] = {
+                    "code": warning_code,
+                    "message": (
+                        "The read completed against the observed Houdini runtime; "
+                        "reconnect before any scene write"
+                    ),
+                }
             self._send_json(
                 HTTPStatus.OK,
                 {"protocol": WIRE_PROTOCOL, "ok": True, "id": payload["id"], "result": result},
@@ -133,7 +227,13 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
             value = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HiaRuntimeError("INVALID_REQUEST", "The request is not valid UTF-8 JSON") from exc
-        if not isinstance(value, dict) or set(value) != {"protocol", "id", "tool", "arguments"}:
+        if not isinstance(value, dict) or set(value) != {
+            "protocol",
+            "id",
+            "tool",
+            "arguments",
+            "expected_runtime",
+        }:
             raise HiaRuntimeError("INVALID_REQUEST", "The runtime request envelope is invalid")
         if value.get("protocol") != WIRE_PROTOCOL:
             raise HiaRuntimeError("INVALID_PROTOCOL", "The runtime request protocol is unsupported")
@@ -142,6 +242,16 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
         request_id = value.get("id")
         if not ((isinstance(request_id, int) and not isinstance(request_id, bool)) or (isinstance(request_id, str) and request_id)):
             raise HiaRuntimeError("INVALID_REQUEST", "The runtime request id is invalid")
+        expected_runtime = value.get("expected_runtime")
+        if (
+            not isinstance(expected_runtime, Mapping)
+            or set(expected_runtime) != set(_RUNTIME_BINDING_FIELDS)
+            or _runtime_binding(expected_runtime) is None
+        ):
+            raise HiaRuntimeError(
+                "INVALID_REQUEST",
+                "The expected Houdini runtime identity is invalid",
+            )
         return value
 
     def _send_error(
@@ -203,6 +313,8 @@ class RuntimeSession:
     thread: threading.Thread
     _token: str
     runtime_directory: Path
+    launcher_session_id: str
+    executor_module_path: str
 
     @property
     def host(self) -> str:
@@ -225,7 +337,12 @@ class RuntimeSession:
             "HIA_MCP_V2_TOKEN": self._token,
             "HIA_MCP_V2_ROUTE": EXECUTE_ROUTE,
             "HIA_MCP_V2_RUNTIME_DIR": str(self.runtime_directory),
+            "HIA_MCP_V2_EXECUTOR_PATH": self.executor_module_path,
+            "HIA_LAUNCHER_SESSION_ID": self.launcher_session_id,
         }
+
+    def identity(self) -> dict[str, Any]:
+        return self.server.runtime_identity()
 
     def stop(self) -> None:
         self.server.shutdown()
@@ -242,6 +359,8 @@ def start_runtime_server(
     project_root: str | Path | None = None,
     token: str | None = None,
     port: int = 0,
+    launcher_session_id: str | None = None,
+    expected_executor_path: str | Path | None = None,
 ) -> RuntimeSession:
     """Start one random-port, random-token loopback runtime for this session."""
 
@@ -257,11 +376,32 @@ def start_runtime_server(
     resolved_token = token or secrets.token_urlsafe(48)
     if not _valid_token(resolved_token):
         raise ValueError("HIA MCP V2 runtime token is missing or invalid")
+    resolved_launcher_session_id = (
+        launcher_session_id or os.environ.get("HIA_LAUNCHER_SESSION_ID", "")
+    )
+    if not _valid_launcher_session_id(resolved_launcher_session_id):
+        raise ValueError("HIA launcher session ID is missing or invalid")
     selected_executor = executor or HoudiniExecutor(project_root=resolved_root)
+    executor_module_path = _executor_module_path(selected_executor)
+    configured_executor_path = expected_executor_path or os.environ.get(
+        "HIA_MCP_V2_EXECUTOR_PATH",
+        "",
+    )
+    if not configured_executor_path:
+        raise ValueError("Expected HIA executor module path is missing")
+    resolved_executor_path = str(Path(configured_executor_path).resolve())
+    if os.path.normcase(resolved_executor_path) != os.path.normcase(
+        executor_module_path
+    ):
+        raise ValueError(
+            "The loaded HIA executor module does not match the launcher source"
+        )
     server = _RuntimeHTTPServer(
         (LOOPBACK_HOST, port),
         executor=selected_executor,
         token=resolved_token,
+        launcher_session_id=resolved_launcher_session_id,
+        executor_module_path=executor_module_path,
     )
     thread = threading.Thread(
         target=server.serve_forever,
@@ -270,7 +410,14 @@ def start_runtime_server(
         daemon=True,
     )
     thread.start()
-    return RuntimeSession(server=server, thread=thread, _token=resolved_token, runtime_directory=runtime_directory)
+    return RuntimeSession(
+        server=server,
+        thread=thread,
+        _token=resolved_token,
+        runtime_directory=runtime_directory,
+        launcher_session_id=resolved_launcher_session_id,
+        executor_module_path=executor_module_path,
+    )
 
 
 def _valid_token(value: str) -> bool:
@@ -281,6 +428,82 @@ def _valid_token(value: str) -> bool:
         and "\n" not in value
         and all(32 < ord(character) < 127 for character in value)
     )
+
+
+def _valid_launcher_session_id(value: str) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 32
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
+
+
+def _executor_module_path(executor: Any) -> str:
+    module = sys.modules.get(type(executor).__module__)
+    raw_path = getattr(module, "__file__", None)
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ValueError("The loaded HIA executor module path is unavailable")
+    return str(Path(raw_path).resolve())
+
+
+def _file_mtime_ns(path: str) -> int | None:
+    try:
+        value = Path(path).stat().st_mtime_ns
+    except OSError:
+        return None
+    return value if isinstance(value, int) and value >= 0 else None
+
+
+def _current_hip(executor: Any) -> tuple[str | None, str]:
+    def read() -> tuple[str | None, str]:
+        hou_module = getattr(executor, "_hou", None)
+        hip_file = getattr(hou_module, "hipFile", None)
+        if hip_file is None:
+            return None, "unavailable"
+        is_new = bool(hip_file.isNewFile())
+        raw_path = str(hip_file.path() or "")
+        if is_new or not raw_path:
+            return None, "unsaved"
+        return _bounded_text(_redact_text(raw_path), 32_767), "saved"
+
+    runner = getattr(executor, "_run_on_main_thread", None)
+    try:
+        value = runner(read) if callable(runner) else read()
+    except Exception:
+        return None, "unavailable"
+    return value if isinstance(value, tuple) and len(value) == 2 else (None, "unavailable")
+
+
+def _runtime_binding(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    identity_version = value.get("identity_version")
+    launcher_session_id = value.get("launcher_session_id")
+    houdini_pid = value.get("houdini_pid")
+    executor_module_path = value.get("executor_module_path")
+    if (
+        identity_version != RUNTIME_IDENTITY_VERSION
+        or not _valid_launcher_session_id(launcher_session_id)
+        or isinstance(houdini_pid, bool)
+        or not isinstance(houdini_pid, int)
+        or houdini_pid <= 0
+        or not isinstance(executor_module_path, str)
+        or not executor_module_path
+        or "\x00" in executor_module_path
+    ):
+        return None
+    return {
+        "identity_version": identity_version,
+        "launcher_session_id": launcher_session_id,
+        "houdini_pid": houdini_pid,
+        "executor_module_path": executor_module_path,
+    }
+
+
+def _same_runtime_binding(expected: Any, actual: Any) -> bool:
+    expected_binding = _runtime_binding(expected)
+    actual_binding = _runtime_binding(actual)
+    return expected_binding is not None and expected_binding == actual_binding
 
 
 def _redacted_details(details: Mapping[str, Any] | None) -> dict[str, Any]:

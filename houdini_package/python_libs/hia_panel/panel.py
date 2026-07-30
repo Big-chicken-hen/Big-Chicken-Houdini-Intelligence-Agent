@@ -100,6 +100,9 @@ _GOAL_OBJECTIVE_MAX_LENGTH = 4_000
 _GOAL_CONTINUE_INSTRUCTION = (
     "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。"
 )
+_GOAL_STAGE_UNKNOWN = "尚未收到公开阶段"
+_GOAL_SCOPE_UNKNOWN = "未公开；执行前应确认准备修改的节点范围"
+_GOAL_ACCEPTANCE_PENDING = "待依据实际场景证据验收"
 _GOAL_STATUS_LABELS = {
     "active": "正在跟进",
     "complete": "已完成",
@@ -113,9 +116,6 @@ _GOAL_RUNNING_WITH_TEXT = "当前跟进：Codex 正在推进 Goal"
 _TEAM_RECORD_LIMIT = 32
 _TEAM_EVENT_LIMIT = 24
 _TEAM_TEXT_LIMIT = 65_536
-_CENTER_TARGET_MIN_WIDTH = 520
-_RESPONSIVE_HIDE_RIGHT_WIDTH = _CENTER_TARGET_MIN_WIDTH + 560
-_RESPONSIVE_HIDE_BOTH_WIDTH = _CENTER_TARGET_MIN_WIDTH + 260
 _RUNTIME_MODEL_MIN_WIDTH = 120
 _RUNTIME_SELECTOR_MIN_WIDTH = 96
 _STAGE_STATUS_LABELS = {
@@ -235,15 +235,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._goal_auto_turn_token: TurnStateToken | None = None
         self._goal_auto_turn_has_progress = False
         self._goal_continue_after_open_thread_id: str | None = None
+        self._goal_stage_snapshot = self._new_goal_stage_snapshot()
+        self._goal_houdini_inflight: dict[str, dict[str, str]] = {}
+        self._goal_codex_stopped = False
         self._build_brief: dict[str, Any] | None = None
         self._build_brief_thread_id: str | None = None
         self._context_pack_summary: dict[str, Any] | None = None
         self._stage_items: list[dict[str, str]] = []
         self._review_records: list[dict[str, str]] = []
         self._team_records: dict[str, dict[str, Any]] = {}
-        self._responsive_layout_mode: str | None = None
-        self._responsive_left_auto_hidden = False
-        self._responsive_right_auto_hidden = False
+        self._runtime_settings_expanded = False
         self._turn_performance_token: TurnStateToken | None = None
         self._turn_performance_marks: dict[str, float] = {}
         self._reconnect_attempt = 0
@@ -420,6 +421,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         root.addLayout(session_row)
 
         self.runtime_settings_group = QtWidgets.QGroupBox("运行设置（下一轮）")
+        self.runtime_settings_group.setCheckable(True)
+        self.runtime_settings_group.setChecked(False)
         self.runtime_settings_group.setMinimumWidth(0)
         self.runtime_settings_group.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
@@ -481,14 +484,21 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.service_tier_label.setVisible(False)
         self.service_tier_combo.setVisible(False)
         root.addWidget(self.runtime_settings_group)
+        self._toggle_runtime_settings(False)
 
         self.main_splitter = QtWidgets.QSplitter(
             QtCore.Qt.Orientation.Horizontal, self
         )
         self.main_splitter.setObjectName("mainThreeColumnSplitter")
-        self.main_splitter.setChildrenCollapsible(True)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setOpaqueResize(False)
+        self.main_splitter.setHandleWidth(5)
         self.left_column = QtWidgets.QWidget(self.main_splitter)
-        self.left_column.setMinimumWidth(0)
+        self.left_column.setMinimumWidth(160)
+        self.left_column.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         left_layout = QtWidgets.QVBoxLayout(self.left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(QtWidgets.QLabel("历史任务"))
@@ -530,18 +540,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         left_layout.addStretch(1)
 
         self.center_column = QtWidgets.QWidget(self.main_splitter)
-        self.center_column.setMinimumWidth(0)
+        self.center_column.setMinimumWidth(360)
         self.center_column.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         center_layout = QtWidgets.QVBoxLayout(self.center_column)
         center_layout.setContentsMargins(0, 0, 0, 0)
 
         self.right_column = QtWidgets.QWidget(self.main_splitter)
-        self.right_column.setMinimumWidth(0)
+        self.right_column.setMinimumWidth(240)
         self.right_column.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         right_layout = QtWidgets.QVBoxLayout(self.right_column)
@@ -582,6 +592,43 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._welcome_buttons.append(button)
         welcome_layout.addLayout(prompt_grid)
         center_layout.addWidget(self.welcome_group)
+
+        self.goal_stage_summary_group = QtWidgets.QGroupBox("当前任务")
+        self.goal_stage_summary_group.setMinimumWidth(0)
+        self.goal_stage_summary_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        goal_stage_summary_layout = QtWidgets.QVBoxLayout(
+            self.goal_stage_summary_group
+        )
+        goal_stage_summary_layout.setContentsMargins(8, 5, 8, 5)
+        goal_stage_summary_layout.setSpacing(2)
+        for name, text, detail in (
+            ("goal_mode_label", "模式：普通对话 · 适合明确的小任务", False),
+            ("goal_task_label", "当前任务：等待输入", False),
+            ("goal_stage_label", f"当前阶段：{_GOAL_STAGE_UNKNOWN}", True),
+            ("goal_scope_label", f"节点范围：{_GOAL_SCOPE_UNKNOWN}", True),
+            ("goal_execution_label", "执行结果：尚未执行", True),
+            (
+                "goal_acceptance_label",
+                f"验收结果：{_GOAL_ACCEPTANCE_PENDING}",
+                True,
+            ),
+            ("goal_next_stage_label", "下一阶段：待当前阶段验收", True),
+            ("goal_runtime_label", "运行状态：Codex 空闲 · Houdini 空闲", False),
+        ):
+            label = QtWidgets.QLabel(text)
+            setattr(self, name, label)
+            label.setMinimumWidth(0)
+            label.setWordWrap(True)
+            label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Ignored,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
+            label.setVisible(not detail)
+            goal_stage_summary_layout.addWidget(label)
+        center_layout.addWidget(self.goal_stage_summary_group)
 
         self.conversation = ConversationView(self)
         self.conversation.setMinimumHeight(0)
@@ -654,21 +701,36 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.copy_report_path_button.setVisible(False)
         self.send_button = QtWidgets.QPushButton("发送")
         self.stop_button = QtWidgets.QPushButton("停止")
+        self.goal_continue_button = QtWidgets.QPushButton("继续 Goal")
+        self.goal_continue_button.setVisible(False)
         action_row.addWidget(self.add_image_button)
-        action_row.addWidget(self.report_issue_button)
-        action_row.addWidget(self.copy_report_path_button)
+        self.secondary_actions_button = QtWidgets.QPushButton("更多 ▸")
+        self.secondary_actions_button.setCheckable(True)
+        self.secondary_actions_button.setChecked(False)
+        action_row.addWidget(self.secondary_actions_button)
         action_row.addStretch(1)
+        action_row.addWidget(self.goal_continue_button)
         action_row.addWidget(self.send_button)
         action_row.addWidget(self.stop_button)
         center_layout.addLayout(action_row)
+        self.secondary_actions_panel = QtWidgets.QWidget()
+        secondary_actions_layout = QtWidgets.QHBoxLayout(
+            self.secondary_actions_panel
+        )
+        secondary_actions_layout.setContentsMargins(0, 0, 0, 0)
+        secondary_actions_layout.addWidget(self.report_issue_button)
+        secondary_actions_layout.addWidget(self.copy_report_path_button)
+        secondary_actions_layout.addStretch(1)
+        self.secondary_actions_panel.setVisible(False)
+        center_layout.addWidget(self.secondary_actions_panel)
 
         self.task_tabs = QtWidgets.QTabWidget()
         self.task_tabs.setObjectName("hiaTaskInspectorTabs")
         self.task_tabs.setDocumentMode(True)
-        self.task_tabs.setMinimumWidth(0)
+        self.task_tabs.setMinimumWidth(220)
         self.task_tabs.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self.task_tabs.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
 
@@ -868,7 +930,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         knowledge_layout.setContentsMargins(6, 6, 6, 6)
         knowledge_layout.setSpacing(5)
         knowledge_help = QtWidgets.QLabel(
-            "资料副本保存在项目内；删除托管副本不会删除原文件。"
+            "资料来源：内置知识卡与您显式导入的项目内托管副本；"
+            "删除托管副本不会删除原文件。"
         )
         knowledge_help.setWordWrap(True)
         knowledge_layout.addWidget(knowledge_help)
@@ -877,7 +940,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.knowledge_state_label.setWordWrap(True)
         knowledge_layout.addWidget(self.knowledge_state_label)
         self.knowledge_metrics_label = QtWidgets.QLabel(
-            "文档：— · 内置卡片：— · 向量：尚未检查 · 最近更新：—"
+            "文档：— · 内置卡片：— · 词法：尚未检查 · "
+            "向量：尚未检查 · 最近更新：—"
         )
         self.knowledge_metrics_label.setWordWrap(True)
         knowledge_layout.addWidget(self.knowledge_metrics_label)
@@ -908,13 +972,29 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.knowledge_progress_bar.setVisible(False)
         knowledge_layout.addWidget(self.knowledge_progress_bar)
 
-        self.knowledge_maintenance_panel = QtWidgets.QWidget()
-        self.knowledge_maintenance_panel.setMinimumWidth(0)
-        knowledge_maintenance_layout = QtWidgets.QVBoxLayout(
-            self.knowledge_maintenance_panel
+        self.knowledge_source_splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Vertical
         )
-        knowledge_maintenance_layout.setContentsMargins(0, 4, 0, 0)
-        knowledge_maintenance_layout.setSpacing(5)
+        self.knowledge_source_splitter.setObjectName(
+            "knowledgeSourceDetailsSplitter"
+        )
+        self.knowledge_source_splitter.setChildrenCollapsible(False)
+        self.knowledge_source_splitter.setOpaqueResize(False)
+        self.knowledge_source_splitter.setMinimumHeight(150)
+        self.knowledge_source_splitter.setMaximumHeight(210)
+        self.knowledge_source_splitter.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        knowledge_source_selector = QtWidgets.QWidget()
+        knowledge_source_selector.setMinimumHeight(48)
+        knowledge_source_selector_layout = QtWidgets.QVBoxLayout(
+            knowledge_source_selector
+        )
+        knowledge_source_selector_layout.setContentsMargins(0, 0, 0, 0)
+        knowledge_source_selector_layout.setSpacing(3)
+        knowledge_source_label = QtWidgets.QLabel("已托管资料")
+        knowledge_source_selector_layout.addWidget(knowledge_source_label)
         self.knowledge_source_combo = QtWidgets.QComboBox()
         self.knowledge_source_combo.addItem("尚未加载用户资料", None)
         self.knowledge_source_combo.setSizeAdjustPolicy(
@@ -926,44 +1006,107 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        knowledge_maintenance_layout.addWidget(self.knowledge_source_combo)
+        knowledge_source_selector_layout.addWidget(self.knowledge_source_combo)
+        self.knowledge_source_splitter.addWidget(knowledge_source_selector)
         self.knowledge_source_details_text = QtWidgets.QPlainTextEdit()
         self.knowledge_source_details_text.setReadOnly(True)
         self.knowledge_source_details_text.setLineWrapMode(
             QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
         )
+        self.knowledge_source_details_text.setMinimumHeight(72)
         self.knowledge_source_details_text.setMaximumHeight(120)
         self.knowledge_source_details_text.setPlaceholderText(
             "选择资料后显示原始路径、托管副本、索引状态和 stable ID。"
         )
-        knowledge_maintenance_layout.addWidget(
+        self.knowledge_source_splitter.addWidget(
             self.knowledge_source_details_text
         )
+        self.knowledge_source_splitter.setCollapsible(0, False)
+        self.knowledge_source_splitter.setCollapsible(1, False)
+        self.knowledge_source_splitter.setStretchFactor(0, 0)
+        self.knowledge_source_splitter.setStretchFactor(1, 1)
+        self.knowledge_source_splitter.setSizes([52, 96])
+        knowledge_layout.addWidget(self.knowledge_source_splitter)
 
-        knowledge_actions = QtWidgets.QGridLayout()
-        self.knowledge_repair_button = QtWidgets.QPushButton("修复知识环境")
+        knowledge_primary_row = QtWidgets.QHBoxLayout()
         self.knowledge_import_files_button = QtWidgets.QPushButton("导入文件")
         self.knowledge_import_folder_button = QtWidgets.QPushButton("导入文件夹")
+        for button in (
+            self.knowledge_import_files_button,
+            self.knowledge_import_folder_button,
+        ):
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            knowledge_primary_row.addWidget(button)
+        knowledge_primary_row.addStretch(1)
+        knowledge_layout.addLayout(knowledge_primary_row)
+
+        knowledge_thread_row = QtWidgets.QHBoxLayout()
         self.knowledge_import_thread_button = QtWidgets.QPushButton(
             "索引当前任务原文"
         )
+        self.knowledge_import_thread_button.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        knowledge_thread_row.addWidget(self.knowledge_import_thread_button)
+        knowledge_thread_row.addStretch(1)
+        knowledge_layout.addLayout(knowledge_thread_row)
+
+        self.knowledge_maintenance_panel = QtWidgets.QWidget()
+        self.knowledge_maintenance_panel.setMinimumWidth(0)
+        knowledge_maintenance_layout = QtWidgets.QVBoxLayout(
+            self.knowledge_maintenance_panel
+        )
+        knowledge_maintenance_layout.setContentsMargins(0, 4, 0, 0)
+        knowledge_maintenance_layout.setSpacing(5)
+        knowledge_maintenance_help = QtWidgets.QLabel(
+            "仅在环境异常或需要移除数据时使用；这些操作不会自动运行。"
+        )
+        knowledge_maintenance_help.setWordWrap(True)
+        knowledge_maintenance_layout.addWidget(knowledge_maintenance_help)
+
+        self.knowledge_repair_button = QtWidgets.QPushButton("修复知识环境")
         self.knowledge_remove_thread_button = QtWidgets.QPushButton(
             "移除当前任务索引"
         )
         self.knowledge_rebuild_button = QtWidgets.QPushButton("重建索引")
         self.knowledge_cancel_button = QtWidgets.QPushButton("取消当前任务")
         self.knowledge_delete_button = QtWidgets.QPushButton("删除托管副本")
-        knowledge_actions.addWidget(self.knowledge_repair_button, 0, 0, 1, 2)
-        knowledge_actions.addWidget(self.knowledge_import_files_button, 1, 0)
-        knowledge_actions.addWidget(self.knowledge_import_folder_button, 1, 1)
-        knowledge_actions.addWidget(self.knowledge_import_thread_button, 2, 0)
-        knowledge_actions.addWidget(self.knowledge_remove_thread_button, 2, 1)
-        knowledge_actions.addWidget(self.knowledge_rebuild_button, 3, 0)
-        knowledge_actions.addWidget(self.knowledge_cancel_button, 3, 1)
-        knowledge_actions.addWidget(self.knowledge_delete_button, 4, 0, 1, 2)
-        knowledge_actions.setColumnStretch(0, 1)
-        knowledge_actions.setColumnStretch(1, 1)
-        knowledge_maintenance_layout.addLayout(knowledge_actions)
+        knowledge_maintenance_actions = QtWidgets.QHBoxLayout()
+        for button in (
+            self.knowledge_repair_button,
+            self.knowledge_rebuild_button,
+        ):
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            knowledge_maintenance_actions.addWidget(button)
+        knowledge_maintenance_actions.addStretch(1)
+        knowledge_maintenance_layout.addLayout(knowledge_maintenance_actions)
+        knowledge_remove_actions = QtWidgets.QHBoxLayout()
+        for button in (
+            self.knowledge_cancel_button,
+            self.knowledge_remove_thread_button,
+        ):
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            knowledge_remove_actions.addWidget(button)
+        knowledge_remove_actions.addStretch(1)
+        knowledge_maintenance_layout.addLayout(knowledge_remove_actions)
+        knowledge_delete_actions = QtWidgets.QHBoxLayout()
+        self.knowledge_delete_button.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        knowledge_delete_actions.addWidget(self.knowledge_delete_button)
+        knowledge_delete_actions.addStretch(1)
+        knowledge_maintenance_layout.addLayout(knowledge_delete_actions)
         self.knowledge_media_help_label = QtWidgets.QLabel(
             "音视频仅托管并索引已有的 SRT/VTT/TXT 字幕；"
             "视频本体不会复制。当前任务原文只在你点击时索引，"
@@ -990,8 +1133,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         memory_layout.setSpacing(6)
 
         project_memory_help = QtWidgets.QLabel(
-            "只有用户或 Codex 显式记录，内容才会成为项目记忆；"
-            "聊天不会自动转成项目记忆。"
+            "记忆来源：只有您或 Codex 的显式记录操作；"
+            "本地资料、聊天和索引内容都不会自动成为项目记忆。"
         )
         project_memory_help.setWordWrap(True)
         memory_layout.addWidget(project_memory_help)
@@ -1016,6 +1159,29 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         project_memory_search_row.addWidget(self.project_memory_refresh_button)
         memory_layout.addLayout(project_memory_search_row)
 
+        self.project_memory_browser_splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Vertical
+        )
+        self.project_memory_browser_splitter.setObjectName(
+            "projectMemoryDetailsSplitter"
+        )
+        self.project_memory_browser_splitter.setChildrenCollapsible(False)
+        self.project_memory_browser_splitter.setOpaqueResize(False)
+        self.project_memory_browser_splitter.setMinimumHeight(165)
+        self.project_memory_browser_splitter.setMaximumHeight(230)
+        self.project_memory_browser_splitter.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        project_memory_selector = QtWidgets.QWidget()
+        project_memory_selector.setMinimumHeight(48)
+        project_memory_selector_layout = QtWidgets.QVBoxLayout(
+            project_memory_selector
+        )
+        project_memory_selector_layout.setContentsMargins(0, 0, 0, 0)
+        project_memory_selector_layout.setSpacing(3)
+        project_memory_selector_label = QtWidgets.QLabel("已记录的项目记忆")
+        project_memory_selector_layout.addWidget(project_memory_selector_label)
         self.project_memory_combo = QtWidgets.QComboBox()
         self.project_memory_combo.addItem("尚未加载项目记忆", None)
         self.project_memory_combo.setSizeAdjustPolicy(
@@ -1027,18 +1193,28 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        memory_layout.addWidget(self.project_memory_combo)
+        project_memory_selector_layout.addWidget(self.project_memory_combo)
+        self.project_memory_browser_splitter.addWidget(project_memory_selector)
 
         self.project_memory_details_text = QtWidgets.QPlainTextEdit()
         self.project_memory_details_text.setReadOnly(True)
         self.project_memory_details_text.setLineWrapMode(
             QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
         )
+        self.project_memory_details_text.setMinimumHeight(84)
         self.project_memory_details_text.setMaximumHeight(150)
         self.project_memory_details_text.setPlaceholderText(
             "选择一条记忆后显示来源、时间、关联 Thread/Turn、状态和 stable ID。"
         )
-        memory_layout.addWidget(self.project_memory_details_text)
+        self.project_memory_browser_splitter.addWidget(
+            self.project_memory_details_text
+        )
+        self.project_memory_browser_splitter.setCollapsible(0, False)
+        self.project_memory_browser_splitter.setCollapsible(1, False)
+        self.project_memory_browser_splitter.setStretchFactor(0, 0)
+        self.project_memory_browser_splitter.setStretchFactor(1, 1)
+        self.project_memory_browser_splitter.setSizes([52, 104])
+        memory_layout.addWidget(self.project_memory_browser_splitter)
 
         self.project_memory_editor_button = QtWidgets.QPushButton(
             "编辑记忆 ▸"
@@ -1143,13 +1319,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.main_splitter.addWidget(self.left_column)
         self.main_splitter.addWidget(self.center_column)
         self.main_splitter.addWidget(self.right_column)
-        self.main_splitter.setCollapsible(0, True)
+        self.main_splitter.setCollapsible(0, False)
         self.main_splitter.setCollapsible(1, False)
-        self.main_splitter.setCollapsible(2, True)
-        self.main_splitter.setStretchFactor(0, 0)
-        self.main_splitter.setStretchFactor(1, 5)
-        self.main_splitter.setStretchFactor(2, 0)
-        self.main_splitter.setSizes([220, 760, 320])
+        self.main_splitter.setCollapsible(2, False)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 4)
+        self.main_splitter.setStretchFactor(2, 2)
+        self.main_splitter.setSizes([210, 720, 300])
         root.addWidget(self.main_splitter, 1)
 
         self.new_thread_button.clicked.connect(self._new_thread)
@@ -1161,6 +1337,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.input_edit.imagePasted.connect(self._add_clipboard_image)
         self.send_button.clicked.connect(self._send)
         self.stop_button.clicked.connect(self._stop)
+        self.goal_continue_button.clicked.connect(self._continue_goal)
+        self.secondary_actions_button.toggled.connect(
+            self._toggle_secondary_actions
+        )
+        self.runtime_settings_group.toggled.connect(
+            self._toggle_runtime_settings
+        )
         self.approval_details_button.toggled.connect(self._toggle_approval_details)
         self.persistent_allow_button.clicked.connect(
             lambda: self._resolve_approval("allow_rule")
@@ -1247,19 +1430,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self,
         side: str,
         visible: bool,
-        *,
-        automatic: bool,
     ) -> None:
         if side == "left":
             column = getattr(self, "left_column", None)
             button = getattr(self, "history_sidebar_button", None)
-            if not automatic:
-                self._responsive_left_auto_hidden = False
         else:
             column = getattr(self, "right_column", None)
             button = getattr(self, "task_sidebar_button", None)
-            if not automatic:
-                self._responsive_right_auto_hidden = False
         if column is not None:
             column.setVisible(bool(visible))
         if button is not None:
@@ -1268,10 +1445,34 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             button.blockSignals(False)
 
     def _toggle_history_sidebar(self, visible: bool) -> None:
-        self._set_sidebar_visible("left", visible, automatic=False)
+        self._set_sidebar_visible("left", visible)
 
     def _toggle_task_sidebar(self, visible: bool) -> None:
-        self._set_sidebar_visible("right", visible, automatic=False)
+        self._set_sidebar_visible("right", visible)
+
+    def _toggle_runtime_settings(self, expanded: bool) -> None:
+        self._runtime_settings_expanded = bool(expanded)
+        for name in ("model_label", "model_combo", "effort_label", "effort_combo"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setVisible(bool(expanded))
+        tiers_available = bool(
+            expanded
+            and getattr(self, "service_tier_combo", None) is not None
+            and self.service_tier_combo.count() > 1
+        )
+        for name in ("service_tier_label", "service_tier_combo"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setVisible(tiers_available)
+
+    def _toggle_secondary_actions(self, expanded: bool) -> None:
+        panel = getattr(self, "secondary_actions_panel", None)
+        button = getattr(self, "secondary_actions_button", None)
+        if panel is not None:
+            panel.setVisible(bool(expanded))
+        if button is not None:
+            button.setText("更多 ▾" if expanded else "更多 ▸")
 
     def _on_task_tab_changed(self, index: int) -> None:
         tabs = getattr(self, "task_tabs", None)
@@ -1506,11 +1707,20 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         chunks = index.get("chunk_count")
         vectors = index.get("vector_count")
         pending = index.get("vector_pending")
+        index_available = index.get("available")
+        if index_available is True and complete is True:
+            lexical_text = "已完成"
+        elif index_available is True:
+            lexical_text = "可用（待补全）"
+        elif index_available is False:
+            lexical_text = "不可用"
+        else:
+            lexical_text = "状态未报告"
         embedding_mode = str(
             self._knowledge_environment.get("embedding_mode") or ""
         )
         if embedding_mode == "fts5":
-            vector_text = "FTS5 可用（向量未启用）"
+            vector_text = "未启用（词法模式）"
         elif complete is True and isinstance(vectors, int):
             vector_text = f"已完成（{vectors}）"
         elif isinstance(vectors, int) and isinstance(pending, int):
@@ -1530,13 +1740,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             f"{documents if isinstance(documents, int) else '—'}"
             " · 内置卡片："
             f"{card_count if isinstance(card_count, int) else '—'}"
+            f" · 词法：{lexical_text}"
             f" · 向量：{vector_text}"
             f" · 最近更新：{latest_update_text}"
         )
         self.knowledge_metrics_label.setToolTip(
             f"官方知识包：{official}\n"
             f"托管资料：{source_text}\n"
-            f"索引：{complete_text} · {count_text}"
+            f"词法索引：{lexical_text}\n"
+            f"索引内容：{complete_text} · {count_text}"
         )
 
         if self._knowledge_job_running():
@@ -2212,38 +2424,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.project_memory_tags_edit.clear()
         self.project_memory_scope_edit.setText("project")
 
-    def _apply_responsive_layout(self, width: int) -> None:
-        if width < _RESPONSIVE_HIDE_BOTH_WIDTH:
-            mode = "compact"
-        elif width < _RESPONSIVE_HIDE_RIGHT_WIDTH:
-            mode = "medium"
-        else:
-            mode = "wide"
-        if mode == self._responsive_layout_mode:
-            return
-        self._responsive_layout_mode = mode
-
-        left = getattr(self, "left_column", None)
-        right = getattr(self, "right_column", None)
-        if mode == "compact":
-            if left is not None and left.isVisible():
-                self._responsive_left_auto_hidden = True
-                self._set_sidebar_visible("left", False, automatic=True)
-            if right is not None and right.isVisible():
-                self._responsive_right_auto_hidden = True
-                self._set_sidebar_visible("right", False, automatic=True)
-            return
-        if self._responsive_left_auto_hidden:
-            self._responsive_left_auto_hidden = False
-            self._set_sidebar_visible("left", True, automatic=True)
-        if mode == "medium":
-            if right is not None and right.isVisible():
-                self._responsive_right_auto_hidden = True
-                self._set_sidebar_visible("right", False, automatic=True)
-            return
-        if self._responsive_right_auto_hidden:
-            self._responsive_right_auto_hidden = False
-            self._set_sidebar_visible("right", True, automatic=True)
+    def _apply_responsive_layout(self, _width: int) -> None:
+        """Keep user-selected sidebar visibility unchanged while resizing."""
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
@@ -2274,7 +2456,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return value
         return None
 
-    def _set_mcp_status(self, backend: Any, available: bool) -> None:
+    def _set_mcp_status(
+        self,
+        backend: Any,
+        available: bool,
+        *,
+        restart_required: bool = False,
+    ) -> None:
         normalized_backend = (
             backend
             if isinstance(backend, str) and backend in _MCP_BACKEND_PRESENTATION
@@ -2292,8 +2480,26 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             value = (
                 "回退"
                 if is_available and normalized_backend == "fxhoudini"
-                else ("可用" if is_available else "不可用")
+                else (
+                    "可用"
+                    if is_available
+                    else (
+                        "需重启"
+                        if normalized_backend == "hia_v2"
+                        and restart_required is True
+                        else "不可用"
+                    )
+                )
             )
+            if (
+                normalized_backend == "hia_v2"
+                and not is_available
+                and restart_required is True
+            ):
+                tooltip = (
+                    "Houdini 仍可只读检查；场景写入需重启 launcher "
+                    "以加载当前 HIA runtime"
+                )
         label = getattr(self, "houdini_mcp_label", None)
         if label is not None:
             self._set_status_indicator(
@@ -2405,6 +2611,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             houdini_scene_label.setText(
                 f"场景版本：{revision_text}  ·  未保存：{dirty_text}"
             )
+        self._observe_goal_scene_evidence(revision, dirty)
 
     def _fail_closed_houdini_status(self, _status: str) -> None:
         """Invalidate the UI-visible live capability until a fresh Bridge ACK."""
@@ -2714,8 +2921,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             session_enabled
             and self._goal_action_context is None
             and not self._turn_steer_request_pending
+            and not self._goal_houdini_busy()
         )
         request_ready = session_enabled and not self._turn_steer_request_pending
+        request_submission_ready = (
+            request_ready and not self._goal_houdini_busy()
+        )
         stopping = self._is_stopping_turn()
         steer_available = controls.stop and not stopping
         history_record = self._selected_history_record()
@@ -2820,7 +3031,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             knowledge_idle and selected_source is not None
         )
         self.send_button.setEnabled(
-            (controls.send or steer_available) and request_ready
+            (controls.send or steer_available) and request_submission_ready
         )
         self.stop_button.setEnabled(
             controls.stop and not stopping and not self._interrupt_pending
@@ -2885,6 +3096,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and not self._session_action_pending
             and not self._turn_state.busy
             and not self._turn_steer_request_pending
+            and not self._goal_houdini_busy()
         )
         for name in (
             "goal_objective_edit",
@@ -2903,7 +3115,27 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 and isinstance(self._selected_thread_id, str)
                 and self._goal_action_context is None
                 and not self._session_action_pending
+                and not self._goal_houdini_busy()
             )
+        continue_button = getattr(self, "goal_continue_button", None)
+        if continue_button is not None:
+            goal = self._current_goal
+            goal_status = (
+                goal.get("status") if isinstance(goal, dict) else None
+            )
+            continue_button.setEnabled(
+                self._connected
+                and isinstance(self._selected_thread_id, str)
+                and goal_status in {"active", "blocked", "complete"}
+                and not self._turn_state.busy
+                and not self._goal_houdini_busy()
+                and self._goal_action_context is None
+                and not self._session_action_pending
+                and not self._turn_start_request_pending
+                and not self._turn_steer_request_pending
+                and not self._reconciliation_tokens
+            )
+        self._refresh_goal_stage_summary()
 
     @QtCore.Slot(dict)
     def _on_health(self, payload: dict[str, Any]) -> None:
@@ -2920,7 +3152,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         mcp_available = (
             isinstance(houdini_mcp, dict) and houdini_mcp.get("available") is True
         )
-        self._set_mcp_status(mcp_backend, mcp_available)
+        self._set_mcp_status(
+            mcp_backend,
+            mcp_available,
+            restart_required=bool(
+                isinstance(houdini_mcp, dict)
+                and houdini_mcp.get("restart_required") is True
+            ),
+        )
         self._apply_houdini_status(houdini_mcp)
         session = payload.get("session", {})
         self._apply_session(
@@ -3019,7 +3258,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._stop_recovery_state = "recovering"
         elif session.get("connected") is True:
             self._stop_recovery_state = None
-        session_is_selected = (
+        adopting_active_session = (
+            self._selected_thread_id is None
+            and turn_active is True
+            and isinstance(thread_id, str)
+            and bool(thread_id)
+        )
+        session_is_selected = adopting_active_session or (
             isinstance(thread_id, str)
             and bool(thread_id)
             and thread_id == self._selected_thread_id
@@ -3256,6 +3501,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
         if previous_recovery_state != self._stop_recovery_state:
             self.goal_activity_label.setText(self._goal_waiting_activity_text())
+        self._reconcile_goal_houdini_from_session(session)
+        self._refresh_goal_stage_summary()
         self._refresh_controls()
         return state_applied
 
@@ -3686,8 +3933,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         thread_id: str | None,
         user_goal: str,
         attachment_paths: tuple[str, ...],
+        runtime_settings: dict[str, str | None] | None = None,
     ) -> dict[str, Any]:
         scene = self._diagnostic_scene_fields()
+        settings = runtime_settings or self._capture_turn_runtime_settings()
         return {
             **scene,
             "_initial_scene_revision": scene.get("scene_revision"),
@@ -3695,8 +3944,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "status": "进行中",
             "thread_id": thread_id or "不可用",
             "turn_id": "尚未确认",
-            "model": self._selected_model_id() or "Codex 默认",
-            "effort": self._selected_effort() or "Codex 默认",
+            "model": settings.get("model") or "Codex 默认",
+            "effort": settings.get("effort") or "Codex 默认",
+            "service_tier": settings.get("service_tier") or "default",
             "user_goal": self._bounded_goal_summary(user_goal) or "未提供",
             "expected": "按自然语言请求在当前 Houdini 场景中完成可编辑结果",
             "actual": "等待执行结果",
@@ -3726,6 +3976,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         token: TurnStateToken,
         text: str,
         attachment_paths: tuple[str, ...],
+        runtime_settings: dict[str, str | None],
     ) -> None:
         key = self._diagnostic_draft_key or f"{thread_id}:{token.generation}"
         self._diagnostic_draft_key = None
@@ -3734,6 +3985,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             thread_id=thread_id,
             user_goal=text,
             attachment_paths=attachment_paths,
+            runtime_settings=runtime_settings,
         )
         self._diagnostic_tool_states = {}
         self._diagnostic_event_errors = []
@@ -4677,6 +4929,780 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._refresh_controls()
         self._client.get_goal(thread_id)
 
+    @staticmethod
+    def _new_goal_stage_snapshot() -> dict[str, Any]:
+        return {
+            "thread_id": None,
+            "stage_index": None,
+            "title": "",
+            "scope": (),
+            "execution": "尚未执行",
+            "execution_status": "idle",
+            "acceptance": _GOAL_ACCEPTANCE_PENDING,
+            "acceptance_status": "pending",
+            "next_stage": "待当前阶段验收",
+            "scene_revision": None,
+            "recovered": False,
+        }
+
+    def _goal_houdini_busy(self) -> bool:
+        return bool(self._goal_houdini_inflight)
+
+    def _current_scene_revision(self) -> int | None:
+        report = self._last_houdini_report
+        revision = report.get("scene_revision") if isinstance(report, dict) else None
+        return (
+            revision
+            if isinstance(revision, int)
+            and not isinstance(revision, bool)
+            and revision >= 0
+            else None
+        )
+
+    def _goal_completion_is_evidenced(self) -> bool:
+        final_stage_index = len(self._stage_items) - 1
+        return bool(
+            self._stage_items
+            and all(
+                stage.get("status") == "completed"
+                for stage in self._stage_items
+            )
+            and self._goal_stage_snapshot.get("stage_index")
+            == final_stage_index
+            and self._goal_stage_snapshot.get("title")
+            == self._stage_items[final_stage_index].get("title")
+            and self._goal_stage_snapshot.get("acceptance_status") == "passed"
+            and not self._goal_houdini_busy()
+        )
+
+    @staticmethod
+    def _scope_text(paths: Any) -> str:
+        if not isinstance(paths, (list, tuple)) or not paths:
+            return _GOAL_SCOPE_UNKNOWN
+        safe_paths = [
+            bounded_public_text(path, 180)
+            for path in paths[:8]
+            if bounded_public_text(path, 180)
+        ]
+        return "、".join(safe_paths) if safe_paths else _GOAL_SCOPE_UNKNOWN
+
+    def _refresh_goal_stage_summary(self) -> None:
+        goal = self._current_goal if isinstance(self._current_goal, dict) else None
+        brief = self._build_brief if isinstance(self._build_brief, dict) else {}
+        task = (
+            bounded_public_text(goal.get("objective"), 320)
+            if goal is not None
+            else (
+                bounded_public_text(brief.get("title"), 240)
+                or bounded_public_text(brief.get("summary"), 240)
+                or "等待输入"
+            )
+        )
+        if label := getattr(self, "goal_mode_label", None):
+            label.setText(
+                "模式：Goal · 多阶段执行与反复验收"
+                if goal is not None
+                else "模式：普通对话 · 适合明确的小任务"
+            )
+        if label := getattr(self, "goal_task_label", None):
+            label.setText("当前任务：" + task)
+
+        snapshot = self._goal_stage_snapshot
+        labels = {
+            "goal_stage_label": "当前阶段："
+            + (snapshot.get("title") or _GOAL_STAGE_UNKNOWN),
+            "goal_scope_label": "节点范围："
+            + self._scope_text(snapshot.get("scope")),
+            "goal_execution_label": "执行结果："
+            + (bounded_public_text(snapshot.get("execution"), 360) or "尚未执行"),
+            "goal_acceptance_label": "验收结果："
+            + (
+                bounded_public_text(snapshot.get("acceptance"), 360)
+                or _GOAL_ACCEPTANCE_PENDING
+            ),
+            "goal_next_stage_label": "下一阶段："
+            + (
+                bounded_public_text(snapshot.get("next_stage"), 260)
+                or "待当前阶段验收"
+            ),
+        }
+        for name, text in labels.items():
+            label = getattr(self, name, None)
+            if label is not None:
+                label.setText(text)
+                label.setVisible(goal is not None)
+
+        runtime_label = getattr(self, "goal_runtime_label", None)
+        if runtime_label is not None:
+            codex_state = (
+                "已停止"
+                if self._goal_codex_stopped
+                else ("运行中" if self._turn_state.busy else "空闲")
+            )
+            tools = tuple(
+                dict.fromkeys(
+                    record.get("tool") or "Houdini"
+                    for record in self._goal_houdini_inflight.values()
+                )
+            )
+            houdini_state = (
+                "执行中：" + "、".join(tools[:3]) if tools else "空闲"
+            )
+            runtime_label.setText(
+                f"运行状态：Codex {codex_state} · Houdini {houdini_state}"
+            )
+
+        continue_button = getattr(self, "goal_continue_button", None)
+        if continue_button is not None:
+            status = goal.get("status") if goal is not None else None
+            continue_button.setVisible(
+                status in {"active", "blocked"}
+                or status == "complete"
+                and not self._goal_completion_is_evidenced()
+            )
+
+    @staticmethod
+    def _stage_plan_index(stages: list[dict[str, str]]) -> int | None:
+        for statuses in (
+            {"failed", "blocked"},
+            {"inProgress", "in_progress", "active"},
+            {"pending"},
+        ):
+            for index, stage in enumerate(stages):
+                if stage.get("status") in statuses:
+                    return index
+        return 0 if stages else None
+
+    def _update_goal_stage_from_plan(self) -> None:
+        index = self._stage_plan_index(self._stage_items)
+        if index is None:
+            self._refresh_goal_stage_summary()
+            return
+        previous = self._goal_stage_snapshot
+        previous_index = previous.get("stage_index")
+        previous_is_current = bool(
+            previous.get("thread_id") == self._selected_thread_id
+            and isinstance(previous_index, int)
+            and not isinstance(previous_index, bool)
+            and 0 <= previous_index < len(self._stage_items)
+            and previous.get("title")
+            == self._stage_items[previous_index].get("title")
+        )
+        if previous_is_current:
+            all_completed = all(
+                item.get("status") == "completed"
+                for item in self._stage_items
+            )
+            previous_passed = previous.get("acceptance_status") == "passed"
+            if all_completed:
+                index = (
+                    previous_index + 1
+                    if previous_passed
+                    and previous_index < len(self._stage_items) - 1
+                    else previous_index
+                )
+            elif index > previous_index:
+                index = (
+                    min(index, previous_index + 1)
+                    if previous_passed
+                    else previous_index
+                )
+        else:
+            # A newly observed plan starts at its first stage, even if Codex
+            # already labelled later stages in progress or completed.  The
+            # Panel must not infer acceptance for skipped historical stages.
+            index = 0
+
+        stage = self._stage_items[index]
+        title = bounded_public_text(stage.get("title"), 260) or _GOAL_STAGE_UNKNOWN
+        status = stage.get("status") or "unknown"
+        same_stage = (
+            previous_is_current
+            and previous_index == index
+            and previous.get("title") == title
+        )
+        snapshot = dict(previous) if same_stage else self._new_goal_stage_snapshot()
+        snapshot.update(
+            {
+                "thread_id": self._selected_thread_id,
+                "stage_index": index,
+                "title": title,
+                "recovered": False,
+            }
+        )
+        if not same_stage:
+            snapshot["scope"] = tuple(self._selected_node_paths[:8])
+            snapshot["scene_revision"] = self._current_scene_revision()
+        failed = status in {"failed", "blocked"}
+        if failed:
+            snapshot.update(
+                execution_status="failed",
+                execution="公开阶段失败或受阻，停留本阶段",
+                acceptance_status="failed",
+                acceptance="未通过；禁止进入后续阶段",
+                next_stage="修复并重新验收当前阶段",
+            )
+        else:
+            if status in {"inProgress", "in_progress", "active"} and (
+                snapshot.get("execution_status") == "idle"
+            ):
+                snapshot.update(
+                    execution_status="in_progress",
+                    execution="当前阶段正在推进，尚无完成证据",
+                )
+            elif status == "completed" and snapshot.get(
+                "acceptance_status"
+            ) != "passed":
+                if snapshot.get("execution_status") != "completed":
+                    snapshot.update(
+                        acceptance_status="pending",
+                        acceptance=_GOAL_ACCEPTANCE_PENDING,
+                    )
+                    snapshot["execution"] = (
+                        "计划完成仅是执行证据，仍需结构化实时验收"
+                    )
+            next_stage = next(
+                (
+                    bounded_public_text(candidate.get("title"), 260)
+                    for candidate in self._stage_items[index + 1 :]
+                    if candidate.get("status") != "completed"
+                    and bounded_public_text(candidate.get("title"), 260)
+                ),
+                "",
+            )
+            snapshot["next_stage"] = next_stage or (
+                "无；等待整体目标与场景证据验收"
+                if status == "completed"
+                else "待当前阶段验收"
+            )
+        self._goal_stage_snapshot = snapshot
+        self._refresh_goal_stage_summary()
+
+    @staticmethod
+    def _node_paths_from_public_value(value: Any) -> tuple[str, ...]:
+        if not isinstance(value, dict):
+            return ()
+        candidates: list[Any] = []
+        for name in (
+            "path",
+            "root_path",
+            "mutable_root",
+            "paths",
+            "diff_paths",
+            "expected_outputs",
+            "protected_paths",
+        ):
+            raw = value.get(name)
+            candidates.extend(raw if isinstance(raw, list) else [raw])
+        return tuple(
+            dict.fromkeys(
+                path
+                for path in candidates
+                if isinstance(path, str) and path.startswith("/")
+            )
+        )[:8]
+
+    @staticmethod
+    def _is_houdini_mcp_item(item: Any) -> bool:
+        if not isinstance(item, dict) or item.get("type") != "mcpToolCall":
+            return False
+        identity = (
+            f"{item.get('server') or ''}/{item.get('tool') or ''}".lower()
+        )
+        tool = str(item.get("tool") or "").lower()
+        return bool(
+            "houdini" in identity
+            or "fxhoudini" in identity
+            or tool.startswith("hia_")
+        )
+
+    def _goal_event_can_own_houdini_work(
+        self,
+        thread_id: Any,
+        turn_id: Any,
+    ) -> bool:
+        if (
+            not isinstance(self._current_goal, dict)
+            or self._current_goal.get("status") != "active"
+            or thread_id != self._selected_thread_id
+            or not isinstance(turn_id, str)
+        ):
+            return False
+        if turn_id == self._goal_turn_id:
+            return True
+        return bool(
+            self._focus_mode
+            and self._stream_thread_id == thread_id
+            and self._stream_turn_id == turn_id
+        )
+
+    @staticmethod
+    def _structured_mcp_result(item: dict[str, Any]) -> dict[str, Any] | None:
+        result = item.get("result")
+        structured = (
+            result.get("structuredContent")
+            if isinstance(result, dict)
+            else None
+        )
+        return structured if isinstance(structured, dict) else None
+
+    @staticmethod
+    def _check_results_outcome(
+        value: Any,
+        *,
+        requested: tuple[str, ...] = (),
+    ) -> str:
+        if not isinstance(value, list):
+            return "pending"
+        checks = {
+            item.get("check"): item.get("status")
+            for item in value
+            if isinstance(item, dict) and isinstance(item.get("check"), str)
+        }
+        if any(status == "fail" for status in checks.values()):
+            return "failed"
+        if (
+            not checks
+            or requested
+            and not set(requested).issubset(checks)
+            or any(status != "pass" for status in checks.values())
+        ):
+            return "pending"
+        return "passed"
+
+    def _structured_houdini_acceptance(
+        self,
+        item: dict[str, Any],
+    ) -> tuple[str, str]:
+        tool = str(item.get("tool") or "")
+        if item.get("status") == "failed" or item.get("error") is not None:
+            return "failed", f"{tool or 'Houdini'} 调用失败"
+        if tool not in {"hia_execute_hom", "hia_validate"}:
+            return "pending", "该工具结果不是阶段验收契约"
+        payload = self._structured_mcp_result(item)
+        if payload is None:
+            return "pending", "缺少可见 structuredContent，不能猜测验收"
+        structured_error = payload.get("structured_error")
+        structured_error_code = (
+            structured_error.get("code")
+            if isinstance(structured_error, dict)
+            else None
+        )
+        nonproof_error = structured_error_code in {
+            "POSTCONDITION_NOT_PROVEN",
+            "FRESH_OUTPUT_NOT_PROVEN",
+        }
+        payload_failed = (
+            payload.get("ok") is False
+            or structured_error is not None
+            or bool(payload.get("errors"))
+        )
+
+        if tool == "hia_validate":
+            result = payload.get("result")
+            arguments = item.get("arguments")
+            requested = (
+                tuple(arguments.get("checks") or ())
+                if isinstance(arguments, dict)
+                else ()
+            )
+            if not isinstance(result, dict):
+                return "pending", "hia_validate 缺少结构化 result"
+            check_outcome = self._check_results_outcome(
+                result.get("check_results"),
+                requested=requested,
+            )
+            if check_outcome == "failed" or result.get("valid") is False:
+                return "failed", "hia_validate 存在明确失败的检查"
+            if (
+                payload_failed
+            ):
+                return "failed", "hia_validate 返回执行错误"
+            if (
+                payload.get("ok") is not True
+                or result.get("valid") is not True
+                or result.get("complete") is not True
+                or check_outcome != "passed"
+            ):
+                return (
+                    "pending",
+                    "hia_validate 存在 unknown、partial、not proven 或缺失检查",
+                )
+            return "passed", "hia_validate 实时检查完整通过"
+
+        evidence = payload.get("execution_evidence")
+        postconditions = (
+            evidence.get("postconditions")
+            if isinstance(evidence, dict)
+            else None
+        )
+        validation = (
+            evidence.get("validation")
+            if isinstance(evidence, dict)
+            else None
+        )
+        if not isinstance(postconditions, dict) or not isinstance(validation, dict):
+            if payload_failed and not nonproof_error:
+                return "failed", "hia_execute_hom 返回执行错误"
+            return "pending", "hia_execute_hom 缺少完整 execution_evidence"
+        check_outcome = self._check_results_outcome(
+            validation.get("check_results")
+        )
+        postcondition_status = postconditions.get("status")
+        if (
+            check_outcome == "failed"
+            or validation.get("valid") is False
+            or postconditions.get("node_errors") not in {0, None}
+            or postcondition_status == "failed"
+            and not nonproof_error
+        ):
+            return "failed", "hia_execute_hom 的结构化检查明确失败"
+        if payload_failed and not nonproof_error:
+            return "failed", "hia_execute_hom 返回执行错误"
+        if (
+            nonproof_error
+            or postcondition_status
+            in {"not_requested", "not_proven", "partial", "unknown"}
+            or validation.get("complete") is not True
+            or validation.get("valid") is not True
+            or check_outcome != "passed"
+        ):
+            return (
+                "pending",
+                "hia_execute_hom 的验收仍为 not requested、not proven、partial 或 unknown",
+            )
+        if payload.get("ok") is not True:
+            return "pending", "hia_execute_hom 尚未明确报告执行成功"
+        if postcondition_status != "passed":
+            return "pending", "hia_execute_hom 的 postconditions 尚未证明通过"
+        visual_status = (
+            postconditions.get("visual_or_render_evidence", {}).get("status")
+            if isinstance(
+                postconditions.get("visual_or_render_evidence"), dict
+            )
+            else None
+        )
+        if visual_status == "failed":
+            return "failed", "视觉或渲染证据明确失败"
+        if visual_status in {"required", "not_proven", "partial", "unknown"}:
+            return "pending", "该阶段仍需视觉或渲染证据"
+        warnings = postconditions.get("node_warnings")
+        if not isinstance(warnings, int) or isinstance(warnings, bool):
+            return "pending", "postconditions 未明确报告节点 warning 数量"
+        if warnings:
+            return (
+                "passed",
+                f"结构化 postconditions 完整通过；已检查 {warnings} 条节点 warning",
+            )
+        return "passed", "hia_execute_hom 的结构化 postconditions 完整通过"
+
+    def _observe_goal_scene_evidence(
+        self,
+        revision: Any,
+        _dirty: Any,
+    ) -> None:
+        snapshot = self._goal_stage_snapshot
+        if not snapshot.get("title"):
+            return
+        if isinstance(revision, int) and not isinstance(revision, bool):
+            snapshot["scene_revision"] = revision
+        self._refresh_goal_stage_summary()
+
+    def _observe_goal_houdini_item(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        item = params.get("item")
+        if not self._is_houdini_mcp_item(item):
+            return
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            return
+        thread_id = params.get("threadId")
+        turn_id = params.get("turnId")
+        tracked = self._goal_houdini_inflight.get(item_id)
+        if method == "item/started":
+            if not self._goal_event_can_own_houdini_work(thread_id, turn_id):
+                return
+            tool = bounded_public_text(item.get("tool"), 160) or "Houdini"
+            self._goal_houdini_inflight[item_id] = {
+                "thread_id": str(thread_id),
+                "turn_id": str(turn_id),
+                "tool": tool,
+            }
+            snapshot = self._goal_stage_snapshot
+            if not snapshot.get("title"):
+                snapshot.update(
+                    {
+                        "thread_id": thread_id,
+                        "title": _GOAL_STAGE_UNKNOWN,
+                    }
+                )
+            paths = self._node_paths_from_public_value(item.get("arguments"))
+            if paths:
+                snapshot["scope"] = paths
+            elif not snapshot.get("scope"):
+                snapshot["scope"] = tuple(self._selected_node_paths[:8])
+            snapshot["scene_revision"] = self._current_scene_revision()
+            snapshot["execution_status"] = "in_progress"
+            snapshot["execution"] = f"Houdini 操作执行中：{tool}"
+            snapshot["acceptance_status"] = "pending"
+            snapshot["acceptance"] = "操作尚未结束，不能进入下一阶段"
+            self._goal_codex_stopped = False
+        else:
+            if tracked is None and not self._goal_event_can_own_houdini_work(
+                thread_id, turn_id
+            ):
+                return
+            self._goal_houdini_inflight.pop(item_id, None)
+            snapshot = self._goal_stage_snapshot
+            tool = (
+                tracked.get("tool")
+                if isinstance(tracked, dict)
+                else bounded_public_text(item.get("tool"), 160)
+            ) or "Houdini"
+            snapshot["scene_revision"] = self._current_scene_revision()
+            outcome, evidence_text = self._structured_houdini_acceptance(item)
+            if outcome == "failed":
+                error_text = self._notice_text(item.get("error"))
+                snapshot["execution_status"] = "failed"
+                snapshot["execution"] = (
+                    f"Houdini 操作失败：{tool}"
+                    + (
+                        " · " + self._bounded_goal_summary(error_text, 180)
+                        if error_text
+                        else ""
+                    )
+                )
+                snapshot["acceptance_status"] = "failed"
+                snapshot["acceptance"] = (
+                    "未通过：" + self._bounded_goal_summary(evidence_text, 240)
+                )
+                snapshot["next_stage"] = "修复并重新验收当前阶段"
+            elif outcome == "passed":
+                snapshot["execution_status"] = "completed"
+                snapshot["execution"] = f"Houdini 操作已结束：{tool}"
+                snapshot["acceptance_status"] = "passed"
+                snapshot["acceptance"] = (
+                    "通过：" + self._bounded_goal_summary(evidence_text, 240)
+                )
+            else:
+                snapshot["execution_status"] = "completed"
+                snapshot["execution"] = f"Houdini 操作已结束：{tool}"
+                snapshot["acceptance_status"] = "pending"
+                snapshot["acceptance"] = self._bounded_goal_summary(
+                    evidence_text, 260
+                )
+        if method == "item/completed" and outcome == "passed":
+            self._update_goal_stage_from_plan()
+        else:
+            self._refresh_goal_stage_summary()
+        self._refresh_controls()
+        if method == "item/completed" and not self._goal_houdini_busy():
+            self._maybe_start_goal_continuation()
+
+    def _apply_goal_review_acceptance(
+        self,
+        reviews: list[dict[str, str]],
+    ) -> None:
+        if not reviews or not self._goal_stage_snapshot.get("title"):
+            return
+        failures = [
+            record
+            for record in reviews
+            if str(record.get("severity") or "").strip().lower()
+            in {"critical", "error", "failed", "failure", "blocking", "blocker"}
+        ]
+        snapshot = self._goal_stage_snapshot
+        if failures:
+            evidence = bounded_public_text(failures[0].get("evidence"), 220)
+            snapshot["acceptance_status"] = "failed"
+            snapshot["acceptance"] = (
+                "未通过"
+                + (f"：{evidence}" if evidence else "；审阅报告阻断问题")
+            )
+            snapshot["next_stage"] = "修复并重新验收当前阶段"
+        self._refresh_goal_stage_summary()
+
+    def _goal_continuation_instruction(self) -> str:
+        snapshot = self._goal_stage_snapshot
+        objective = (
+            bounded_public_text(self._current_goal.get("objective"), 500)
+            if isinstance(self._current_goal, dict)
+            else ""
+        )
+        lines = [
+            _GOAL_CONTINUE_INSTRUCTION,
+            "先读取已记录阶段和当前 Houdini 场景证据；"
+            "已经完成的内容不得重复创建。",
+        ]
+        if objective:
+            lines.append(f"用户目标：{objective}")
+        if snapshot.get("title"):
+            lines.append(
+                "当前阶段："
+                + bounded_public_text(snapshot.get("title"), 260)
+            )
+            lines.append(
+                "准备修改的节点范围："
+                + self._scope_text(snapshot.get("scope"))
+            )
+            lines.append(
+                "已记录执行结果："
+                + (
+                    bounded_public_text(snapshot.get("execution"), 360)
+                    or "尚未执行"
+                )
+            )
+            lines.append(
+                "已记录验收结果："
+                + (
+                    bounded_public_text(snapshot.get("acceptance"), 360)
+                    or _GOAL_ACCEPTANCE_PENDING
+                )
+            )
+            revision = snapshot.get("scene_revision")
+            if isinstance(revision, int):
+                lines.append(f"当前场景证据：scene revision {revision}")
+            if snapshot.get("acceptance_status") == "failed":
+                lines.append(
+                    "验收未通过：必须停留并优先修复当前阶段，"
+                    "不得开始后续阶段。"
+                )
+            elif snapshot.get("acceptance_status") != "passed":
+                lines.append(
+                    "当前阶段尚未验收：先核验或修复当前阶段，"
+                    "有真实场景证据后才能前进。"
+                )
+            else:
+                lines.append(
+                    "当前阶段已有验收证据；仅在证据仍与实际场景一致时"
+                    "进入下一阶段。"
+                )
+            lines.append(
+                "下一阶段："
+                + (
+                    bounded_public_text(snapshot.get("next_stage"), 260)
+                    or "待当前阶段验收"
+                )
+            )
+        else:
+            lines.append(
+                "当前没有公开阶段计划：先公开当前阶段目标和准备修改的节点范围，"
+                "并只读检查真实场景；不得直接重复创建或宣告完成。"
+            )
+        lines.append(
+            "Goal 完成必须同时满足用户目标和实际场景证据，"
+            "不能因为计划步骤耗尽而宣告完成。"
+        )
+        return "\n".join(lines)
+
+    def _continue_goal(self) -> None:
+        if self._goal_houdini_busy():
+            self._append_system(
+                "Houdini 操作仍在执行；当前 Goal 暂不能继续提交修改。"
+            )
+            return
+        goal = self._current_goal
+        if not isinstance(goal, dict):
+            return
+        if self._goal_stage_snapshot.get("acceptance_status") == "failed":
+            self._goal_stage_snapshot["acceptance_status"] = "pending"
+            self._goal_stage_snapshot["acceptance"] = (
+                "用户已要求修复当前阶段；修复后必须重新实时验收"
+            )
+            self._goal_stage_snapshot["next_stage"] = "修复并重新验收当前阶段"
+        if goal.get("status") == "active" and self._focus_mode:
+            if not self._maybe_start_goal_continuation(
+                explicit_source="panel_continue"
+            ):
+                self.goal_activity_label.setText(
+                    "当前跟进：等待当前状态同步后继续"
+                )
+            return
+        self._save_goal()
+
+    def _restore_goal_stage_from_thread(self, turns: list[Any]) -> None:
+        latest: tuple[str | None, dict[str, Any]] | None = None
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            turn_id = turn.get("id")
+            items = turn.get("items")
+            for item in items if isinstance(items, list) else ():
+                if self._is_houdini_mcp_item(item):
+                    latest = (
+                        turn_id if isinstance(turn_id, str) else None,
+                        item,
+                    )
+        snapshot = self._new_goal_stage_snapshot()
+        snapshot.update(
+            {
+                "thread_id": self._selected_thread_id,
+                "title": "恢复后核对当前阶段",
+                "execution": "未找到持久化的 Houdini 执行记录",
+                "acceptance": (
+                    "恢复后必须先核对当前场景，禁止重复创建已完成内容"
+                ),
+                "next_stage": "场景证据与 Goal 对齐后再决定",
+                "scene_revision": self._current_scene_revision(),
+                "recovered": True,
+            }
+        )
+        if latest is not None:
+            turn_id, item = latest
+            status = str(item.get("status") or "unknown")
+            tool = bounded_public_text(item.get("tool"), 160) or "Houdini"
+            paths = self._node_paths_from_public_value(item.get("arguments"))
+            snapshot.update(
+                {
+                    "scope": paths,
+                    "execution_status": (
+                        "failed"
+                        if status == "failed"
+                        else ("completed" if status == "completed" else "unknown")
+                    ),
+                    "execution": f"恢复记录：{tool} · {status}",
+                }
+            )
+            if status == "failed":
+                snapshot["acceptance_status"] = "failed"
+                snapshot["acceptance"] = "上次 Houdini 操作失败，先修复当前阶段"
+                snapshot["next_stage"] = "修复并重新验收当前阶段"
+        self._goal_stage_snapshot = snapshot
+        self._refresh_goal_stage_summary()
+
+    def _reconcile_goal_houdini_from_session(
+        self,
+        session: dict[str, Any],
+    ) -> None:
+        if not self._goal_houdini_busy() or session.get("turn_active") is not False:
+            return
+        status = session.get("last_tool_status")
+        tool = session.get("last_tool_name")
+        if status not in {"completed", "failed"} or not isinstance(tool, str):
+            return
+        if tool not in {
+            record.get("tool") for record in self._goal_houdini_inflight.values()
+        }:
+            return
+        self._goal_houdini_inflight.clear()
+        snapshot = self._goal_stage_snapshot
+        snapshot["execution_status"] = status
+        snapshot["execution"] = f"Houdini 操作已由会话状态确认：{tool} · {status}"
+        if status == "failed":
+            snapshot["acceptance_status"] = "failed"
+            snapshot["acceptance"] = "未通过；停留当前阶段并优先修复"
+            snapshot["next_stage"] = "修复并重新验收当前阶段"
+        else:
+            snapshot["scene_revision"] = self._current_scene_revision()
+            snapshot["acceptance_status"] = "pending"
+            snapshot["acceptance"] = (
+                "会话只确认工具结束；缺少结构化实时验收结果"
+            )
+        self._refresh_goal_stage_summary()
+
     def _clear_goal_display(self, text: str = "尚未读取 Goal") -> None:
         self._current_goal = None
         self._goal_turn_id = None
@@ -4686,6 +5712,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._goal_auto_turn_token = None
         self._goal_auto_turn_has_progress = False
         self._goal_continue_after_open_thread_id = None
+        self._goal_stage_snapshot = self._new_goal_stage_snapshot()
+        self._goal_houdini_inflight.clear()
+        self._goal_codex_stopped = False
         objective = getattr(self, "goal_objective_edit", None)
         if objective is not None:
             objective.setPlainText("")
@@ -4704,6 +5733,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         save_button = getattr(self, "goal_save_button", None)
         if save_button is not None:
             save_button.setText("保存（继续跟进）")
+        self._refresh_goal_stage_summary()
 
     def _apply_focus_mode(self, thread_id: Any, enabled: Any) -> bool:
         if thread_id != self._selected_thread_id or not isinstance(enabled, bool):
@@ -4839,6 +5869,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and not self._pending_approvals
             and not self._scene_capability_pending
             and not self._scene_work_pending
+            and not self._goal_houdini_busy()
+            and self._goal_stage_snapshot.get("acceptance_status") != "failed"
         )
 
     def _maybe_start_goal_continuation(
@@ -4860,11 +5892,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             or not self._goal_continuation_is_safe()
         ):
             return False
+        instruction = self._goal_continuation_instruction()
         if not self._start_new_turn(
-            _GOAL_CONTINUE_INSTRUCTION,
+            instruction,
             (),
             boundary[0],
-            request_text=_GOAL_CONTINUE_INSTRUCTION,
+            request_text=instruction,
             goal_auto_continue=True,
         ):
             return False
@@ -4877,6 +5910,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._client is None
             or self._session_action_pending
             or self._goal_action_context is not None
+            or self._goal_houdini_busy()
             or not isinstance(thread_id, str)
         ):
             return
@@ -4902,6 +5936,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._client is None
             or self._session_action_pending
             or self._goal_action_context is not None
+            or self._goal_houdini_busy()
             or not isinstance(thread_id, str)
         ):
             return
@@ -4941,6 +5976,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._client is None
             or self._session_action_pending
             or self._goal_action_context is not None
+            or self._goal_houdini_busy()
             or not isinstance(thread_id, str)
         ):
             return
@@ -4985,6 +6021,17 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         previous_goal = self._current_goal
         self.goal_objective_edit.setPlainText(objective)
         self._current_goal = dict(raw_goal)
+        if (
+            (
+                not isinstance(previous_goal, dict)
+                or previous_goal.get("objective") != objective
+            )
+            and not (
+                self._goal_stage_snapshot.get("recovered") is True
+                and self._goal_stage_snapshot.get("thread_id") == thread_id
+            )
+        ):
+            self._goal_stage_snapshot = self._new_goal_stage_snapshot()
         raw_goal_turn_id = raw_goal.get("turnId")
         completed_goal_boundary = (
             self._goal_continuation_boundary == (thread_id, raw_goal_turn_id)
@@ -5010,7 +6057,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._stream_turn_id = None
             self._goal_turn_id = None
             self._goal_turn_has_text = False
-        status_text = f"状态：{status_label}"
+        completion_pending = bool(
+            status == "complete" and not self._goal_completion_is_evidenced()
+        )
+        status_text = (
+            "状态：Codex 已报告完成 · 等待实际场景验收"
+            if completion_pending
+            else f"状态：{status_label}"
+        )
         if status in {"blocked", "paused", "usageLimited", "budgetLimited"}:
             reason = self._notice_text(raw_goal)
             if not reason:
@@ -5030,7 +6084,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             or previous_goal.get("status") != status
         ):
             if status == "complete":
-                activity_text = "当前跟进：Goal 已完成"
+                activity_text = (
+                    "当前跟进：Codex 已停止推进；等待实际场景验收"
+                    if completion_pending
+                    else (
+                        "当前跟进：Goal 已完成（场景证据已验收）"
+                        if self._goal_stage_snapshot.get("title")
+                        else "当前跟进：Goal 已完成"
+                    )
+                )
             elif status == "blocked":
                 activity_text = (
                     "当前跟进：等待你完成上轮要求，完成后点继续跟进"
@@ -5059,6 +6121,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._goal_auto_turn_token = None
             self._goal_auto_turn_has_progress = False
             self._apply_focus_mode(thread_id, False)
+        self._refresh_goal_stage_summary()
         return True
 
     def _goal_turn_matches(self, thread_id: Any, turn_id: Any) -> bool:
@@ -5103,7 +6166,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if status == "blocked":
             return "当前跟进：等待你完成上轮要求，完成后点继续跟进"
         if status == "complete":
-            return "当前跟进：Goal 已完成"
+            return (
+                (
+                    "当前跟进：Goal 已完成（场景证据已验收）"
+                    if self._goal_stage_snapshot.get("title")
+                    else "当前跟进：Goal 已完成"
+                )
+                if self._goal_completion_is_evidenced()
+                else "当前跟进：Codex 已报告完成；等待实际场景验收"
+            )
         if (
             isinstance(self._goal_turn_id, str)
             or self._goal_action_context == _GOAL_SET_CONTEXT
@@ -5125,9 +6196,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._context_pack_summary = None
         self._stage_items = []
         self._review_records = []
+        self._goal_stage_snapshot = self._new_goal_stage_snapshot()
         self._refresh_build_brief()
         self._refresh_stage_progress()
         self._refresh_review_cards()
+        self._refresh_goal_stage_summary()
 
     def _capture_initial_task_brief(
         self,
@@ -5150,6 +6223,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "ready": False,
         }
         self._refresh_build_brief()
+        self._refresh_goal_stage_summary()
 
     def _refresh_build_brief(self) -> None:
         editor = getattr(self, "build_brief_text", None)
@@ -5215,6 +6289,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _apply_stage_plan(self, value: Any) -> None:
         self._stage_items = normalize_stage_plan(value)
         self._refresh_stage_progress()
+        self._update_goal_stage_from_plan()
 
     def _refresh_stage_progress(self) -> None:
         editor = getattr(self, "stage_details_text", None)
@@ -5362,9 +6437,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     existing.add(signature)
             self._review_records = self._review_records[-24:]
             changed = True
+            if root_source:
+                self._apply_goal_review_acceptance(review_candidates)
         if changed:
             self._refresh_build_brief()
             self._refresh_review_cards()
+            self._refresh_goal_stage_summary()
         return changed
 
     @staticmethod
@@ -5662,6 +6740,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         turns = thread.get("turns")
         if not isinstance(turns, list):
             return False
+        self._restore_goal_stage_from_thread(turns)
 
         restored: list[tuple[str, Any]] = []
         for turn in turns:
@@ -5691,7 +6770,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     if (
                         not attachments
                         and (
-                            restored_text == _GOAL_CONTINUE_INSTRUCTION
+                            restored_text.startswith(_GOAL_CONTINUE_INSTRUCTION)
                             or (
                                 isinstance(hidden_user_prefix, str)
                                 and restored_text.startswith(hidden_user_prefix)
@@ -5732,6 +6811,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if (
             self._client is not None
             and not self._turn_state.busy
+            and not self._goal_houdini_busy()
             and self._goal_action_context is None
             and not self._session_action_pending
             and not self._turn_start_request_pending
@@ -5745,6 +6825,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
 
     def _resume_thread(self) -> None:
+        if self._goal_houdini_busy():
+            self._append_system(
+                "Houdini 操作仍在执行；结束前不能切换当前 Goal 的 Thread。"
+            )
+            return
         record = self._selected_history_record()
         thread_id = record.get("thread_id") if record is not None else None
         if not isinstance(thread_id, str) or not thread_id:
@@ -5756,6 +6841,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         text = self.input_edit.toPlainText()
         attachment_paths = self._attachment_paths()
         if not text.strip() and not attachment_paths:
+            return
+        if self._goal_houdini_busy():
+            self._append_system(
+                "Houdini 操作仍在执行；当前 Goal 暂不能继续提交修改。"
+            )
+            self._refresh_controls()
             return
         if not self._connected or not self._authenticated:
             return
@@ -5807,8 +6898,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         steer_source_turn_id: str | None = None,
         goal_auto_continue: bool = False,
     ) -> bool:
-        if self._client is None or not self._turn_state.begin_start(thread_id):
+        if (
+            self._client is None
+            or self._goal_houdini_busy()
+            or not self._turn_state.begin_start(thread_id)
+        ):
             return False
+        runtime_settings = self._capture_turn_runtime_settings()
         submitted_text = (
             request_text
             if isinstance(request_text, str)
@@ -5837,6 +6933,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "steer_source_thread_id": steer_source_thread_id,
             "steer_source_turn_id": steer_source_turn_id,
             "goal_auto_continue": goal_auto_continue,
+            "runtime_settings": runtime_settings,
         }
         if goal_auto_continue:
             self._goal_auto_turn_token = token
@@ -5849,15 +6946,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             token,
             text,
             attachment_paths,
+            runtime_settings,
         )
         self._active_turn_start_context = context
         self._turn_start_request_pending = True
         self._refresh_controls()
         self._client.start_turn(
             submitted_text,
-            model=self._selected_model_id(),
-            effort=self._selected_effort(),
-            service_tier=self._selected_service_tier(),
+            model=runtime_settings["model"],
+            effort=runtime_settings["effort"],
+            service_tier=runtime_settings["service_tier"],
             local_image_paths=list(attachment_paths),
             context=context,
         )
@@ -6205,14 +7303,25 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._turn_start_request_pending = False
             self._active_turn_start_context = None
             self._stopping_turn_token = None
+            self._goal_codex_stopped = True
             self.turn_status_label.setText("Turn：已停止")
             self.turn_status_label.setToolTip(
-                "Codex 已停止接收该 Turn 的后续输出；已发出的 Houdini 操作可能仍在收尾"
+                (
+                    "Codex 已停止；Houdini 操作仍在执行，结束前禁止继续提交修改"
+                    if self._goal_houdini_busy()
+                    else "Codex 已停止；当前没有已知的 in-flight Houdini 操作"
+                )
             )
             self._append_system(
-                "Codex 已停止；已发出的 Houdini 操作可能仍在收尾。"
+                (
+                    "Codex 已停止；Houdini 操作仍在执行。"
+                    "操作结束前不能继续提交当前 Goal 的修改。"
+                    if self._goal_houdini_busy()
+                    else "Codex 已停止；当前没有已知的 in-flight Houdini 操作。"
+                )
             )
             self.goal_activity_label.setText(self._goal_waiting_activity_text())
+            self._refresh_goal_stage_summary()
             self._refresh_controls()
             if not self._houdini_status_pending:
                 request_id = self._client.get_houdini_status()
@@ -6236,6 +7345,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._set_mcp_status(
                     houdini_mcp.get("backend"),
                     houdini_mcp.get("available") is True,
+                    restart_required=houdini_mcp.get("restart_required") is True,
                 )
             self._apply_houdini_status(houdini_mcp)
             session = payload.get("session")
@@ -6829,6 +7939,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return
         message = self._notice_text(params)
         code = params.get("code")
+        if method == "error" and self._is_model_capacity_error(params, message):
+            self._show_model_capacity_error()
+            return
         if "request_user_input" in message.casefold() or "requestuserinput" in message.casefold():
             self._append_system(
                 "Codex 的额外提问在当前 Panel 中不可用；已继续采用合理默认值。"
@@ -6838,6 +7951,79 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._append_system(
             f"{prefix}：{message}" if message else f"{prefix}：未提供详细信息"
         )
+
+    @classmethod
+    def _is_model_capacity_error(
+        cls,
+        params: dict[str, Any],
+        message: str = "",
+    ) -> bool:
+        signature = " ".join(
+            (
+                message,
+                cls._diagnostic_error_text(params),
+                str(params.get("code") or ""),
+            )
+        ).casefold()
+        return (
+            "selected model is at capacity" in signature
+            or "model_at_capacity" in signature
+            or "model capacity" in signature
+        )
+
+    def _show_model_capacity_error(self) -> None:
+        snapshot = self._diagnostic_snapshot
+        model = str(snapshot.get("model") or "Codex 默认")
+        effort = str(snapshot.get("effort") or "Codex 默认")
+        tier = str(snapshot.get("service_tier") or "default")
+
+        group = getattr(self, "runtime_settings_group", None)
+        if group is not None:
+            previous = group.blockSignals(True)
+            group.setChecked(True)
+            group.blockSignals(previous)
+        self._toggle_runtime_settings(True)
+        self.service_tier_combo.blockSignals(True)
+        self.service_tier_combo.setCurrentIndex(0)
+        self.service_tier_combo.blockSignals(False)
+        self._on_service_tier_changed(0)
+
+        catalog = tuple(
+            dict.fromkeys(
+                record.get("model")
+                for index in range(self.model_combo.count())
+                for record in (self.model_combo.itemData(index),)
+                if isinstance(record, dict)
+                and isinstance(record.get("model"), str)
+                and record.get("model")
+            )
+        )
+        alternatives = tuple(item for item in catalog if item != model)
+        if alternatives:
+            guidance = (
+                "当前目录有其他 model ID："
+                + "、".join(alternatives[:7])
+                + f"。请选择不同于 {model} 的模型后手动重试；"
+                "修改推理强度不是切换模型。"
+            )
+        else:
+            guidance = (
+                "当前目录没有其他 model ID；修改推理强度不是切换模型。"
+                "可以稍后手动重试同一模型。"
+            )
+        self._append_system(
+            "模型容量不足，本轮不会自动重试。"
+            f"实际请求：model={model}，effort={effort}，service tier={tier}。"
+            + guidance
+        )
+
+        if snapshot.get("_capacity_catalog_refreshed") is not True:
+            snapshot["_capacity_catalog_refreshed"] = True
+            if self._client is not None:
+                self._models_requested = True
+                self._models_resolved = False
+                self._client.get_models()
+        self._refresh_controls()
 
     def _show_protocol_notice(self, event: dict[str, Any]) -> None:
         if not isinstance(self._selected_thread_id, str):
@@ -6914,6 +8100,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._apply_deleted_thread(thread_id)
                 return
             if method in {"item/started", "item/completed"}:
+                self._observe_goal_houdini_item(method, params)
                 self._apply_explicit_task_insights(method, params)
                 if self._update_team_item(method, params):
                     if self._event_matches_active_stream(params):
@@ -7078,6 +8265,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 if isinstance(thread_id, str) and isinstance(turn_id, str):
                     if self._event_is_stale_source_turn(thread_id, turn_id):
                         return
+                    self._goal_codex_stopped = False
+                    self._refresh_goal_stage_summary()
                     if self._can_bind_goal_turn(thread_id, turn_id):
                         if turn_id != self._goal_turn_id:
                             self._goal_turn_has_text = False
@@ -7879,6 +9068,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         tier_id = record.get("id") if isinstance(record, dict) else None
         return tier_id if isinstance(tier_id, str) and tier_id else None
 
+    def _capture_turn_runtime_settings(self) -> dict[str, str | None]:
+        return {
+            "model": self._selected_model_id(),
+            "effort": self._selected_effort(),
+            "service_tier": self._selected_service_tier(),
+        }
+
     def _update_service_tiers(self) -> None:
         previous_tier = self._selected_service_tier()
         record = self._selected_model_record()
@@ -7916,8 +9112,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.service_tier_combo.setCurrentIndex(selected_index)
         self.service_tier_combo.blockSignals(False)
         available = self.service_tier_combo.count() > 1
-        self.service_tier_label.setVisible(available)
-        self.service_tier_combo.setVisible(available)
+        visible = available and self._runtime_settings_expanded
+        self.service_tier_label.setVisible(visible)
+        self.service_tier_combo.setVisible(visible)
         self._on_service_tier_changed(selected_index)
 
     def _update_reasoning_efforts(self) -> None:

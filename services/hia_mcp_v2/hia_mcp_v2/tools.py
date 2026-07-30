@@ -115,6 +115,30 @@ SEMANTIC_CHECKS = {
     ),
 }
 
+EXPERIMENT_PARAMETERS = {
+    "type": "object",
+    "additionalProperties": True,
+    "description": (
+        "Expanded absolute hou.Parm paths mapped to temporary scalar values. "
+        "baseline.parameters may be empty to use the current scene; candidate "
+        "maps are deltas and may introduce paths not repeated in baseline."
+    ),
+}
+EXPERIMENT_BASELINE = _object(
+    {
+        "name": {"type": "string", "minLength": 1, "maxLength": 64},
+        "parameters": EXPERIMENT_PARAMETERS,
+    },
+    required=("parameters",),
+)
+EXPERIMENT_CANDIDATE = _object(
+    {
+        "name": {"type": "string", "minLength": 1, "maxLength": 64},
+        "parameters": EXPERIMENT_PARAMETERS,
+    },
+    required=("name", "parameters"),
+)
+
 NODE_HELP_PROPERTIES = {
     "node_path": PATH,
     "category": STRING,
@@ -268,7 +292,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_context",
         "scene_perception",
-        "Read the live Houdini build, HIP, frame/FPS, take, dirty state, current network/node, selection, scene revision, Goal focus recovery mode, installed contexts, and an optional bounded graph overview. include_runtime_capabilities adds a versioned, non-mutating probe of the small HOM surface HIA actually depends on, distinguishing documented, callable, safely observed, and unavailable capabilities. For a concrete task, request a compact Context Pack: it combines only selected/change-scope entities, batched cached local-knowledge summaries, and recent execution/validation evidence under a strict byte budget with provenance.",
+        "Read the live Houdini build, HIP, frame/FPS, take, dirty state, current network/node, selection, scene revision, Goal focus recovery mode, installed contexts, and an optional bounded graph overview. include_runtime_capabilities adds a versioned, non-mutating probe of the small HOM surface HIA actually depends on, distinguishing documented, callable, safely observed, and unavailable capabilities. For a concrete task, request a compact Context Pack: it combines only selected/change-scope entities, batched cached local-knowledge summaries, and recent execution/validation evidence under a strict byte budget with provenance. Explicit include_context_pack=false suppresses Context Pack construction and knowledge retrieval even when task, change_scope, or knowledge_queries are supplied.",
         _object(
             {
                 "include_graph": {"type": "boolean", "default": False},
@@ -277,7 +301,7 @@ TOOL_SPECS = (
                     "default": False,
                 },
                 "graph_depth": {"type": "integer", "minimum": 0, "maximum": 3, "default": 1},
-                "include_context_pack": {"type": "boolean", "default": False},
+                "include_context_pack": {"type": "boolean"},
                 "task": {"type": "string", "maxLength": 1024},
                 "change_scope": {
                     "type": "array",
@@ -303,7 +327,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_inspect",
         "scene_perception",
-        "Inspect paths or the current selection in one bounded call: types, parameters, inputs/outputs, flags, errors, geometry hints, and a finite child graph. Use filters instead of dumping the scene.",
+        "Inspect paths or the current selection in one bounded call: types, parameters, inputs/outputs, flags, errors, geometry hints, and a finite child graph. The evidence view adds compact upstream, public-control/reference, material-entry, cook/message, and high-confidence network-quality facts; its notices are evidence for Codex review, not proof of subjective quality. Use filters instead of dumping the scene.",
         _object(
             {
                 "paths": PATHS,
@@ -313,7 +337,7 @@ TOOL_SPECS = (
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": ["parameters", "connections", "flags", "errors", "geometry", "children"],
+                        "enum": ["parameters", "connections", "flags", "errors", "geometry", "children", "evidence"],
                     },
                     "maxItems": 6,
                 },
@@ -356,7 +380,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_node_help",
         "dynamic_node_knowledge",
-        "Resolve installed Houdini help. Use requests to batch several targets, or the compatible single-target form with node_path, category plus a bare node_type, or node_type=\"Category/name\". Returns the real versioned name, context, input rules, parameter templates, definition/source hints, and installed help metadata.",
+        "Resolve installed Houdini help. Use requests to batch several targets, or the compatible single-target form with node_path, category plus a bare node_type, or node_type=\"Category/name\". A node_path returns expanded runtime parameter names, including instantiated multiparms; a type-only query returns template patterns such as names containing # because no live instance exists. Also returns the real versioned type, context, input rules, definition/source hints, and installed help metadata.",
         _object(
             {
                 **NODE_HELP_PROPERTIES,
@@ -426,12 +450,15 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_validate",
         "debug_validation",
-        "Run bounded, structured domain checks over target paths or a network. Checks cover node/cook errors, empty outputs, critical paths, geometry summaries, changed-scope evidence, and optional explicit semantic expectations for attribute/field presence, finite or nonzero samples, magnitude ranges, and source-to-target mappings. Results separate observed failures, unsupported node categories, unknown/unobservable states, and caller declarations. Cooking is opt-in; cook/cache evidence never treats a clean error state as proof of recomputation. Spatial intersection is an extension boundary, not a hidden heavy scan.",
+        "Run bounded, structured domain checks over explicit target paths, a network, or the current selection. Checks cover node/cook errors, empty outputs, critical paths, geometry summaries, changed-scope evidence, and optional explicit semantic expectations for attribute/field presence, finite or nonzero samples, magnitude ranges, and source-to-target mappings. Results separate observed failures, unsupported node categories, unknown/unobservable states, and caller declarations. Output-data checks request a forced fresh cook by default; pass cook=false for a strictly read-only stale-risk inspection. Cook/cache evidence never treats a clean error state as proof of recomputation. Spatial intersection is an extension boundary, not a hidden heavy scan.",
         _object(
             {
                 "paths": PATHS,
                 "root_path": PATH,
-                "cook": {"type": "boolean", "default": False},
+                "cook": {
+                    "type": "boolean",
+                    "description": "Force a fresh cook before validation. When omitted, output-data and semantic checks cook; structural checks do not.",
+                },
                 "expected_paths": PATHS,
                 "checks": VALIDATION_CHECKS,
                 "changed_paths": PATHS,
@@ -446,7 +473,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_execute_hom",
         "hom_execution",
-        "Execute one Codex-generated Python/HOM batch in the current Houdini UI main thread. Raw script remains the primary write interface; optional task/mutable_root/protected_paths/expected_outputs/checks form a lightweight evidence envelope, not an IR or security sandbox. Default diffing is targeted: predeclare exact diff_paths or call hia_mark_changed(path) before the first edit; only an explicit diff_root_path expands to a bounded network scan. Results include pre/post evidence, validation, and a machine-fact execution trace under .runtime. timeout_seconds is a client wait budget, not a HOM kill deadline; a timeout after network I/O begins may have unknown execution state and must not be retried automatically. An optional checkpoint_label saves one Houdini backup only after a confirmed successful change, preferring the safely saved HIP's .hia/checkpoints directory and otherwise using the launcher-session fallback.",
+        "Execute one Codex-generated Python/HOM batch in the current Houdini UI main thread. Prefer modifying suitable existing nodes, then installed native Houdini nodes and parameter networks, using short HOM batches to orchestrate them; use Python SOP/script or direct code-built geometry only when no reasonable native node solution exists, explaining that exception in task. Raw script remains the primary write interface; optional task/mutable_root/protected_paths/expected_outputs/checks form a lightweight evidence envelope, not an IR or security sandbox. The batch is precompiled and runs inside one Houdini undo group. The runtime requests Undo only for a HOM exception or an observed requested validation, scope, or deletion failure, and only undoes when it can prove the batch's own undo item; unknown or partial evidence and NO_OBSERVED_EFFECT do not trigger Undo. Read rollback.status and the failure's automatic_retry_safe flag: only a verified rolled-back batch permits one corrected bounded retry without first inspecting the scene. Verification requires both the Undo stack and the HIP dirty state to match their pre-batch values. Timeouts, unverified rollback, and external file/render side effects are not automatic-retry safe. expected_outputs adds only critical-path existence and node-error checks; empty-output, geometry-summary, semantic, and fresh-cook validation run only when explicitly requested. Default diffing is targeted: predeclare exact diff_paths or call hia_mark_changed(path) before the first edit; only an explicit diff_root_path expands to a bounded network scan. Results include compact before/after local-network facts, target/connection/control/material/cook/message/scope postconditions, requested fresh output validation, rollback evidence, and a machine-fact execution trace under .runtime. postconditions.status is passed only for explicitly requested, fully observed structural assertions; a bare successful script is not result validation, and visual/render requirements remain unproven until separately observed. Visual or render proof is never fabricated or captured automatically; use the existing capture/render inspection tools when the original request needs it. Scene writes are bound to the launcher session, Houdini process, and loaded executor source; a changed or stale runtime rejects the write before submission with restart_required while read-only tools remain available. Local knowledge remains an optional single batched lookup and is not an execution gate. timeout_seconds is a client wait budget, not a HOM kill deadline; a timeout after network I/O begins may have unknown execution state and must not be retried automatically. An optional checkpoint_label saves one Houdini backup only after a confirmed successful change, preferring the safely saved HIP's .hia/checkpoints directory and otherwise using the launcher-session fallback.",
         _object(
             {
                 "script": {"type": "string", "minLength": 1, "maxLength": 524_288},
@@ -454,8 +481,14 @@ TOOL_SPECS = (
                 "mutable_root": PATH,
                 "protected_paths": PATHS,
                 "expected_outputs": PATHS,
+                "expected_deletions": PATHS,
                 "checks": VALIDATION_CHECKS,
                 "semantic_checks": SEMANTIC_CHECKS,
+                "fresh_validation": {"type": "boolean", "default": True},
+                "require_scene_change": {
+                    "type": "boolean",
+                    "description": "Require an observed scene change. Defaults on when diff paths, expected outputs, checkpoints, or declared touched paths make a write effect explicit.",
+                },
                 "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300, "default": 60},
                 "capture_diff": {"type": "boolean", "default": True},
                 "diff_paths": PATHS,
@@ -468,14 +501,124 @@ TOOL_SPECS = (
         aliases=("checkpoint", "检查点", "备份"),
     ),
     ToolSpec(
+        "hia_run_effect_experiment",
+        "effect_experiment",
+        "Run one bounded, temporary, domain-neutral effect comparison in the current Houdini UI session. Preflight a target network and every expanded scalar parameter path before any write, then evaluate one baseline plus two or three named candidates from the same baseline over an inclusive frame range. Explicit cache-reset button parameters are the only cache-clear evidence; force cooking alone is never reported as a reset. Each candidate advances frames sequentially, captures every requested sample with one locked camera/display/framing signature and one derived or requested preview resolution, and returns actual parameter readback, per-frame cook/messages/metrics, embedded-PNG contact-sheet evidence, expected-versus-unexpected deletions, and explicit restoration proof. It never scores candidates, builds EffectSpec, uses PDG/Wedge, or performs knowledge search.",
+        _object(
+            {
+                "target_network": PATH,
+                "baseline": EXPERIMENT_BASELINE,
+                "candidates": {
+                    "type": "array",
+                    "items": EXPERIMENT_CANDIDATE,
+                    "minItems": 2,
+                    "maxItems": 3,
+                },
+                "frame_range": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                },
+                "sample_frames": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 1,
+                    "maxItems": 6,
+                },
+                "preview": _object(
+                    {
+                        "width": {
+                            "type": "integer",
+                            "minimum": 64,
+                            "maximum": 1920,
+                        },
+                        "height": {
+                            "type": "integer",
+                            "minimum": 64,
+                            "maximum": 1920,
+                        },
+                        "quality_scale": {
+                            "type": "number",
+                            "minimum": 0.1,
+                            "maximum": 1.0,
+                            "default": 1.0,
+                        },
+                    }
+                ),
+                "camera_path": PATH,
+                "display_mode": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": (
+                        "Optional exact assertion for the currently observed "
+                        "viewport shading mode; the experiment does not mutate it."
+                    ),
+                },
+                "framing": {
+                    "type": "string",
+                    "enum": ["current_view", "camera"],
+                },
+                "capture_mode": {
+                    "type": "string",
+                    "enum": ["contact_sheet"],
+                    "default": "contact_sheet",
+                },
+                "cache_reset_parms": {
+                    "type": "array",
+                    "items": PATH,
+                    "maxItems": 8,
+                },
+                "cook_targets": {
+                    "type": "array",
+                    "items": PATH,
+                    "maxItems": 8,
+                },
+                "metric_targets": {
+                    "type": "array",
+                    "items": PATH,
+                    "maxItems": 4,
+                },
+                "metrics": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "cook_evidence",
+                            "node_messages",
+                            "geometry_summary",
+                            "image_quality",
+                        ],
+                    },
+                    "maxItems": 4,
+                },
+                "expected_deletions": {
+                    "type": "array",
+                    "items": PATH,
+                    "maxItems": 16,
+                },
+            },
+            required=(
+                "target_network",
+                "baseline",
+                "candidates",
+                "frame_range",
+                "sample_frames",
+            ),
+        ),
+        read_only=False,
+    ),
+    ToolSpec(
         "hia_scene_diff",
         "debug_validation",
-        "Capture, compare, list, or forget bounded scene snapshots to verify execution effects. Snapshots contain structural fingerprints, not HIP copies.",
+        "Capture, compare, list, or forget bounded scene snapshots to verify execution effects. Compare can classify expected deletions separately from unexpected deletions. Snapshots contain structural fingerprints, not HIP copies.",
         _object(
             {
                 "action": {"type": "string", "enum": ["capture", "compare", "list", "forget"]},
                 "snapshot_id": {"type": "string", "maxLength": 128},
                 "root_path": PATH,
+                "expected_deletions": PATHS,
                 "limit": LIMIT,
             },
             required=("action",),
@@ -484,20 +627,38 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_capture_viewport",
         "visual_feedback",
-        "Capture the current visible viewport through Houdini's documented flipbook path, or a bounded flipbook, only when visual verification is needed. Low-resolution captures default to 640 x 360. Use a same-frame flipbook for stage previews and selected key frames for animation or simulation; a flipbook range may span at most 240 frames. Restores the original camera/view, camera lock, and frame state, does not open MPlay or take focus, and reports the observed camera, viewport, display, OCIO, resolution, capture quality, and unverified OS HDR/display boundary. A safely saved current HIP uses its sibling .hia/screenshots directory; otherwise the image falls back to HIA_CACHE_DIR/screenshots.",
+        "Capture the current visible viewport through Houdini's documented flipbook path only when visual verification is needed. Omitted dimensions derive from the live viewport; one supplied dimension preserves its aspect, and two supplied dimensions are honored exactly. A single frame remains the static default. For animation or simulation, use an explicit frames list or frame_range plus frame_step (at most 24 frames); the runtime locks, evaluates, and captures each requested frame, detects missing/failed/unchanged sequences, and records requested versus actual frames with bounded evidence. validation_paths optionally force-cook critical nodes per frame. Restores the original camera/view, camera lock, and frame state, does not open MPlay or take focus, and reports actual dimensions/aspect, capture quality, and the unverified OS HDR/display boundary. A safely saved current HIP uses its sibling .hia/screenshots directory; otherwise images fall back to HIA_CACHE_DIR/screenshots.",
         _object(
             {
                 "mode": {"type": "string", "enum": ["viewport", "flipbook"], "default": "viewport"},
                 "camera_path": PATH,
+                "frame": {"type": "number"},
+                "frames": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 1,
+                    "maxItems": 24,
+                },
                 "frame_range": {
                     "type": "array",
                     "items": {"type": "number"},
                     "minItems": 2,
                     "maxItems": 2,
-                    "description": "Start and end frames for flipbook capture. The runtime rejects reversed ranges and spans over 240 frames; prefer same-frame milestone previews or selected key frames.",
+                    "description": "Inclusive start and end frames. Use frame_step to keep a short representative sequence; the runtime rejects reversed ranges, spans over 240 frames, or more than 24 captures.",
                 },
-                "width": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 640},
-                "height": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 360},
+                "frame_step": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 240,
+                    "default": 1,
+                },
+                "validation_paths": PATHS,
+                "expect_change": {
+                    "type": "boolean",
+                    "description": "For a multi-frame sequence, treat identical captured frames as a failed temporal validation. Defaults true for sequences.",
+                },
+                "width": {"type": "integer", "minimum": 64, "maximum": 4096},
+                "height": {"type": "integer", "minimum": 64, "maximum": 4096},
                 "return_image": {"type": "boolean", "default": True},
             }
         ),

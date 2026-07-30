@@ -145,12 +145,35 @@ def _path_violations(name: str) -> list[str]:
     return violations
 
 
-def _content_violations(name: str, data: bytes) -> list[str]:
+def _content_violations(
+    name: str,
+    data: bytes,
+    forbidden_text: Iterable[str] = (),
+) -> list[str]:
     if len(data) > _MAX_TEXT_SCAN_BYTES or b"\x00" in data:
         return []
     for pattern in _SECRET_PATTERNS:
         if pattern.search(data):
             return [f"possible credential content: {_normalize_entry(name).as_posix()}"]
+    lowered = data.lower()
+    for value in forbidden_text:
+        normalized = str(value).strip()
+        if not normalized:
+            continue
+        variants = {
+            normalized,
+            normalized.replace("\\", "/"),
+            normalized.replace("/", "\\"),
+        }
+        if any(
+            variant.encode("utf-8", errors="ignore").lower() in lowered
+            for variant in variants
+            if variant
+        ):
+            return [
+                "embedded local checkout path: "
+                f"{_normalize_entry(name).as_posix()}"
+            ]
     return []
 
 
@@ -434,7 +457,11 @@ def inspect_git_knowledge_source(source_root: Path) -> list[str]:
     )
 
 
-def inspect_release(package: Path) -> list[str]:
+def inspect_release(
+    package: Path,
+    *,
+    forbidden_text: Iterable[str] = (),
+) -> list[str]:
     if package.is_dir():
         entries: Iterable[tuple[str, bytes]] = _directory_entries(package)
         knowledge_violations: list[str] = []
@@ -447,7 +474,7 @@ def inspect_release(package: Path) -> list[str]:
     violations: list[str] = []
     for name, data in entries:
         violations.extend(_path_violations(name))
-        violations.extend(_content_violations(name, data))
+        violations.extend(_content_violations(name, data, forbidden_text))
     violations.extend(knowledge_violations)
     return sorted(set(violations))
 
@@ -467,6 +494,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Validate the built-in knowledge pack against real git ls-files",
     )
+    parser.add_argument(
+        "--forbid-text",
+        action="append",
+        default=[],
+        help="Reject an exact local path or text value from release contents",
+    )
     args = parser.parse_args(argv)
     if (args.package is None) == (args.source_tree is None):
         parser.error("provide exactly one package or --source-tree")
@@ -475,7 +508,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.source_tree is not None:
             violations = inspect_git_knowledge_source(args.source_tree.resolve())
         else:
-            violations = inspect_release(args.package.resolve())
+            violations = inspect_release(
+                args.package.resolve(),
+                forbidden_text=args.forbid_text,
+            )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f"release hygiene check failed: {exc}", file=sys.stderr)
         return 2

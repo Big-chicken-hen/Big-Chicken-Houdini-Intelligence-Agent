@@ -1057,6 +1057,7 @@ function Invoke-HiaEmbeddingChildProcess {
             }
             profile_id = 'flow-profile'
             model_id = 'Qwen/Flow-Model'
+            repository_size_gb = 1.21
             model_dir = Join-Path $models 'flow-profile'
             dimension = 1024
             revision = 'main'

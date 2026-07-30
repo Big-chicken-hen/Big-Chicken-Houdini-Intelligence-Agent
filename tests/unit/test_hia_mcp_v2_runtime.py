@@ -6,6 +6,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -65,6 +66,60 @@ class FakeHelpNodeType:
         return ("", "wrangle", "", "")
 
 
+class FakeParmTemplate:
+    def __init__(self, name: str, label: str) -> None:
+        self._name = name
+        self._label = label
+
+    def name(self) -> str:
+        return self._name
+
+    def label(self) -> str:
+        return self._label
+
+
+class FakeParm:
+    def __init__(
+        self,
+        runtime_name: str,
+        template_name: str,
+        *,
+        multiparm_indices: tuple[int, ...] = (),
+    ) -> None:
+        self._runtime_name = runtime_name
+        self._template = FakeParmTemplate(template_name, "Layer name")
+        self._indices = multiparm_indices
+
+    def name(self) -> str:
+        return self._runtime_name
+
+    def parmTemplate(self) -> FakeParmTemplate:  # noqa: N802
+        return self._template
+
+    def isMultiParmInstance(self) -> bool:  # noqa: N802
+        return bool(self._indices)
+
+    def multiParmInstanceIndices(self) -> tuple[int, ...]:  # noqa: N802
+        return self._indices
+
+
+class FakeHelpNode:
+    def __init__(self) -> None:
+        self._type = FakeHelpNodeType()
+
+    def type(self) -> FakeHelpNodeType:
+        return self._type
+
+    def parms(self) -> tuple[FakeParm, ...]:
+        return (
+            FakeParm(
+                "layer1name",
+                "layer#name",
+                multiparm_indices=(0,),
+            ),
+        )
+
+
 class FakeNodeTypeCategory:
     def __init__(self, node_type: FakeHelpNodeType) -> None:
         self._node_type = node_type
@@ -111,6 +166,9 @@ class FakeRoot:
 
 
 class FakeViewport:
+    def size(self) -> tuple[int, int, int, int]:
+        return (0, 0, 640, 360)
+
     def saveViewToImage(self, path: str) -> None:  # noqa: N802
         Path(path).write_bytes(fake_png())
 
@@ -143,12 +201,41 @@ class FakePaneTabType:
     SceneViewer = object()
 
 
+class FakeUndos:
+    def __init__(self) -> None:
+        self.labels: list[str] = []
+        self.undo_calls = 0
+        self.on_undo: Any = None
+
+    def areEnabled(self) -> bool:  # noqa: N802
+        return True
+
+    @contextmanager
+    def group(self, label: str) -> Any:
+        try:
+            yield
+        finally:
+            self.labels.insert(0, label)
+
+    def undoLabels(self) -> tuple[str, ...]:  # noqa: N802
+        return tuple(self.labels)
+
+    def performUndo(self) -> None:  # noqa: N802
+        self.undo_calls += 1
+        if self.labels:
+            self.labels.pop(0)
+        if callable(self.on_undo):
+            self.on_undo()
+
+
 class FakeHou:
     def __init__(self) -> None:
         self.hipFile = FakeHipFile()
         self.root = FakeRoot()
         self.ui = FakeUi()
         self.paneTabType = FakePaneTabType()
+        self.undos = FakeUndos()
+        self._frame = 12.0
 
     def node(self, path: str) -> FakeRoot | None:
         return self.root if path == "/" else None
@@ -160,7 +247,10 @@ class FakeHou:
         return "21.0.440"
 
     def frame(self) -> float:
-        return 12.0
+        return self._frame
+
+    def setFrame(self, frame: float) -> None:  # noqa: N802
+        self._frame = float(frame)
 
     def fps(self) -> float:
         return 24.0
@@ -208,13 +298,16 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
                 "capture_diff": True,
             },
         )
-        self.assertTrue(response["ok"])
+        self.assertFalse(response["ok"])
         self.assertEqual({"frame": 12.0}, response["result"])
         self.assertEqual("hello\n", response["stdout"])
         self.assertEqual([], response["created_or_changed_paths"])
         self.assertEqual(["/obj/test"], response["diff"]["unverified_paths"])
         self.assertEqual("unknown", response["scene_change_status"])
         self.assertEqual(0, response["revision"])
+        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertEqual(0, self.hou.undos.undo_calls)
         self.assertIn("interruptible_after_main_thread_entry", response["execution_limit"])
         self.assertFalse(response["execution_limit"]["interruptible_after_main_thread_entry"])
 
@@ -342,6 +435,28 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
             ) as captured:
                 self.executor.dispatch("hia_node_help", arguments)
             self.assertEqual("INVALID_ARGUMENTS", captured.exception.code)
+
+    def test_node_help_expands_live_multiparm_instance_names(self) -> None:
+        node = FakeHelpNode()
+        original_node = self.hou.node
+        self.hou.node = lambda path: (  # type: ignore[method-assign]
+            node if path == "/obj/help" else original_node(path)
+        )
+
+        result = self.executor.dispatch(
+            "hia_node_help",
+            {"node_path": "/obj/help", "parameter_query": "layer"},
+        )["result"]
+
+        self.assertEqual("runtime_instances", result["parameter_name_mode"])
+        self.assertEqual("/obj/help", result["node_path"])
+        self.assertEqual(1, result["parameter_total"])
+        parm = result["parameters"][0]
+        self.assertEqual("layer1name", parm["name"])
+        self.assertEqual("layer1name", parm["runtime_name"])
+        self.assertEqual("layer#name", parm["template_name"])
+        self.assertTrue(parm["multiparm_instance"])
+        self.assertEqual([0], parm["multiparm_indices"])
 
     def test_viewport_defaults_to_portable_timestamped_screenshot_cache(self) -> None:
         with tempfile.TemporaryDirectory(dir=REPOSITORY_ROOT / "tests") as temporary:

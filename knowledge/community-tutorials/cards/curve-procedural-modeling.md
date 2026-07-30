@@ -37,6 +37,16 @@ The curve trunk runs vertically. Feed the profile from the left into the sweep's
 - `width`, `pscale`, or a named scale field: profile size; document which consumer reads it.
 - Curve construction owns primitive order; Resample owns density; Polyframe owns frames; Sweep owns generated surface topology.
 
+## Executable parameter and connection contract
+
+1. Connect `Curve SOP`/imported curves to `Convert SOP` only when a downstream node needs a different primitive type, then to `Resample SOP`. Use `Method = Even Length Segments` with positive `Maximum Segment Length` when geometric spacing matters; use a fixed maximum segment count when one-to-one topology matters. Enable `Curve U Attribute` and name it `curveu`.
+2. Verify each primitive's `curveu` is monotonic and approximately `0..1`. If multiple curves exist, compute the range per primitive. Never use global point number divided by total points as a substitute because it crosses primitive boundaries and changes after resampling.
+3. Connect resampled curves to `Orientation Along Curve SOP` for the most direct sweep-compatible frame, or to `Polyframe SOP` when custom tangent/normal fields are required. On Orientation Along Curve, choose point output when downstream point attributes are expected, keep `Normalize Scales` on for a frame-only baseline, and enable `Stretch Around Turns` only for a cross-section that must avoid corner squashing. Cap `Max Stretch` rather than allowing a near reversal to create unbounded scale.
+4. When building frames manually, normalize tangent and ensure the chosen `up` is not parallel: require `abs(dot(tangent, up)) < 0.999` before constructing `orient`. Store a finite point quaternion `p@orient`; on closed curves compare first/last frames and distribute residual roll across `curveu`.
+5. Build the profile around the origin in the XY plane and connect the backbone to input 1 and the profile to input 2 of `Sweep SOP`. Enable `Transform Using Curve Point Attributes` when `orient`, `pscale`, `scale`, or width controls should drive sections. For an automatic profile choose `Surface Shape` explicitly; for a modeled closed profile inspect winding and choose an intentional `End Cap Type`.
+6. Define one size contract. If the graph uses `pscale`, require `pscale > 0`; if it uses `width`, bind/convert it explicitly rather than keeping both ambiguous. A useful diagnostic ramp is `0.25 -> 1 -> 0.25` over `curveu`, multiplied by a scene-unit master radius.
+7. Put `Normal SOP` and UV construction after final sweep topology. Longitudinal UV comes from `curveu`; the transverse coordinate comes from profile order. Cache the curve before sweep only if reload preserves primitive order, `curveu`, frame, and size fields.
+
 ## Data flow, cache, version, and performance
 
 Changing resample density changes point numbers, so downstream correspondence should use `curveu`, primitive identity, or stable `id`, not point number. Cache after expensive deformation and before heavy sweep only if the cached curve retains frame/width fields. More samples improve bends but increase sweep polygons and downstream cost. Prefer adaptive/length-based density and profile simplicity. The node sequence reflects general Houdini practice synthesized from creator examples; current defaults are unverified.
@@ -48,6 +58,18 @@ Changing resample density changes point numbers, so downstream correspondence sh
 - **Open gaps/duplicate points:** confirm primitive closure and endpoint sharing rather than blindly increasing Fuse tolerance.
 - **UV stretches:** derive longitudinal UV from measured arc-length parameter, not point number.
 - **Interactive graph is slow:** reduce profile resolution during authoring and switch to final density at the output/cache stage.
+
+## Checkpoints and observable evidence
+
+- **C0 — curve input:** primitive count, open/closed state, length, and endpoint sharing are recorded; every curve has at least two distinct positions.
+- **C1 — sampling:** segment lengths fall within the chosen tolerance, `curveu` is finite/monotonic per primitive, and changing curve length changes samples according to the selected policy.
+- **C2 — frame:** tangent length is near one, frame vectors are orthogonal within tolerance, quaternion values are finite, and the invalid tangent/up group is empty. Closed seams show no abrupt roll.
+- **C3 — sweep:** backbone is input 1 and profile input 2; output section/primitive counts agree with backbone samples and profile resolution. Bounds and width remain positive with no degenerate polygons.
+- **C4 — reload/visual:** the disk-loaded curve reproduces the same axis markers and swept silhouette; UV checker size changes continuously without a seam jump.
+
+## When not to use this workflow
+
+Do not use a sweep for a surface that needs independently art-directed cross-sections at arbitrary locations unless that multi-profile construction is explicitly designed. Avoid resampling when original CV/vertex identity must be preserved exactly, and avoid curve frames for a copy operation that only needs point positions with no roll or scale control.
 
 ## Provenance boundary
 

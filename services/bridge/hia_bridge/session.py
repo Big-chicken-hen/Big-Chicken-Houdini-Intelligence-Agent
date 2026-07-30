@@ -654,15 +654,20 @@ class BridgeSession:
     def _developer_instructions(self) -> str:
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             backend_instructions = (
-                "场景默认用 HIA MCP V2 与 HOM；hia_execute_hom 批量执行。"
-                "hia_context/hia_inspect 读取，hia_scene_diff/hia_validate 验证；"
-                "复杂视觉里程碑（结构、材质/灯光、交付前）自动 hia_capture_viewport 640x360同帧预览，"
-                "动画/模拟抽关键帧；简单任务不截图。只读 artifact-review 审阅；"
-                "主任务每轮只修最大偏差，有限迭代、达标即停。"
-                "仅主任务串行调用 hia_*/HOM 并写 HIP；hia_execute_hom 等场景写入始终由主代理执行；"
-                "子任务只研究、草拟、只读审阅；MCP 无 caller lineage，非代码级隔离；"
-                "同类读取不并发扇出；多个关键词先合并为一次批量查询并复用结果；"
-                "遇到 QUEUE_FULL 不立即重试。"
+                "场景默认用 HIA MCP V2 与 HOM。明确小改只读目标值后直接执行；"
+                "修改既有网络先用 hia_context/hia_inspect 读取目标、输入输出、两层上游、"
+                "公共控制、材质入口、引用和允许 scope。优先现有节点和标准原生节点网络；"
+                "HOM 只做短批量编排，场景内 Python SOP 或直接几何须说明必要性。"
+                "同一 scope 内一次 hia_execute_hom，随后 fresh cook、hia_scene_diff/hia_validate；"
+                "Goal 阶段只按完整结构化场景证据验收，plan/revision/tool completed 不算通过。"
+                "视觉任务只在里程碑用 hia_capture_viewport，不固定尺寸；"
+                "静态一帧，动画/模拟用代表帧或短序列；材质验收读取绑定、MaterialX 连接和正确输入。"
+                "Stop 后已发 HOM 仍可能收尾；失败读 rollback.status/automatic_retry_safe，"
+                "仅 rolled_back+true 可修正重试一次；unknown/partial/NO_OBSERVED_EFFECT "
+                "不 Undo 也不算完成；session/source drift 停写并正常重启，不热加载。"
+                "仅主任务串行调用 hia_*/HOM 并写 HIP；子任务只研究、草拟、只读审阅；"
+                "MCP 无 caller lineage，非代码级隔离；同类读取不并发扇出，"
+                "多个关键词合并为一次批量查询；QUEUE_FULL 不立即重试。"
                 "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label；"
                 "聊天、关闭专注和逐参数操作不设。"
             )
@@ -676,10 +681,11 @@ class BridgeSession:
                 "FX fallback 同样非代码级隔离。"
             )
         common_instructions = (
-            "任何创建、修改或修复在首次场景写入前必须先做一次相关本地知识批量检索并复用结果；"
+            "复杂创建、修改或修复在首次场景写入前先做一次相关本地知识批量检索并复用结果；"
             "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务还必须先用原生 web/search "
             "查当前 SideFX 官方与原始来源；没有网页工具时才批量只读抓取公开页。"
-            "本地检索不可用时明确说明，禁止静默跳过；简单确定性修改不扩展为多轮网页研究。"
+            "本地检索不可用时明确说明，禁止静默跳过；"
+            "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
             "只有用户明确要求离线、独立 HIP、批处理或后台渲染时才用 PATH 中的 hython.exe。"
             "普通场景请求不先搜索项目源码/文档；仅诊断或修改 Panel、Bridge、MCP/项目代码时读取。"
@@ -696,17 +702,18 @@ class BridgeSession:
         )
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             common_instructions = (
-                "任何创建、修改或修复在首次场景写入前必须先用 hia_local_help_search 做一次相关批量检索并复用结果；"
+                "复杂创建、修改或修复在首次场景写入前先用 hia_local_help_search 做一次相关批量检索并复用结果；"
                 "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务必须先用原生 web/search "
                 "查当前 SideFX 官方与原始来源；"
-                "检索不可用时明确说明，禁止静默跳过；简单确定性修改不扩展为多轮网页研究。"
+                "检索不可用时明确说明，禁止静默跳过；"
+                "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
                 "MCP 不可用就说明，不转离线 HIP；hython 仅用于用户明确的离线/独立 HIP/批处理/后台渲染。"
                 "普通场景不查项目源码。"
                 "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，不塞入主上下文；主任务公开采纳。"
                 "禁止 hou.hipFile.clear/load/save 和替换当前场景；新资产置于唯一新根。"
                 "不调用 request_user_input；信息不足用默认，无法执行才报告。"
                 "安全已存 HIP 截图写同级 .hia/screenshots，否则用 HIA_CACHE_DIR/screenshots；"
-                "预览写 previews，中间图写 tmp，附件/知识/模型/索引留 .runtime；名用时间戳+短随机后缀。"
+                "预览写 previews，中间图写 tmp，附件/知识/模型/索引留 .runtime。"
                 "用户指定的最终渲染/EXR/视频/USD/模拟缓存/导出可写所选普通项目外目录；"
                 "否则用 HIA_RENDER_OUTPUT_DIR；始终报告最终路径。禁止屏幕接管。"
             )
@@ -1728,7 +1735,10 @@ class BridgeSession:
                 grace_seconds=STOP_RESTART_GRACE_SECONDS,
                 deadline=deadline,
             )
-            remaining = deadline - time.monotonic()
+            remaining = min(
+                STOP_RECOVERY_TOTAL_SECONDS,
+                deadline - time.monotonic(),
+            )
             if remaining <= 0:
                 raise BridgeError(
                     "CODEX_STOP_RECOVERY_TIMEOUT",
@@ -1738,7 +1748,10 @@ class BridgeSession:
             initialize_result = initialize_with_timeout(
                 min(STOP_REINITIALIZE_MAX_SECONDS, remaining)
             )
-            remaining = deadline - time.monotonic()
+            remaining = min(
+                STOP_RECOVERY_TOTAL_SECONDS,
+                deadline - time.monotonic(),
+            )
             if remaining <= 0:
                 raise BridgeError(
                     "CODEX_STOP_RECOVERY_TIMEOUT",
