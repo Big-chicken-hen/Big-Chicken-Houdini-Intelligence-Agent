@@ -2177,10 +2177,27 @@ try {
 if (
     $null -eq $plan.child_environment -or
     $null -eq $plan.layout -or
-    [string]::IsNullOrWhiteSpace([string]$plan.profile_id)
+    [string]::IsNullOrWhiteSpace([string]$plan.profile_id) -or
+    [double]$plan.repository_size_gb -le 0
 ) {
     throw 'Embedding contract probe returned an incomplete plan.'
 }
+$repositorySize = ([double]$plan.repository_size_gb).ToString(
+    '0.##',
+    [System.Globalization.CultureInfo]::InvariantCulture
+)
+Write-HiaEmbeddingInstallLog `
+    -Level 'INFO' `
+    -Message (
+        'Selected model source: https://huggingface.co/{0} revision {1}; ' +
+        'target: {2}; official model files are about {3} GB. ' +
+        'Interrupted downloads reuse the project-local Hugging Face cache ' +
+        'when the repair action is retried.' -f
+            [string]$plan.model_id,
+            [string]$plan.revision,
+            [string]$plan.model_dir,
+            $repositorySize
+    )
 
 $childEnvironment = ConvertTo-HiaEmbeddingHashtable `
     -Value $plan.child_environment

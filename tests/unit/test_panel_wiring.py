@@ -528,6 +528,7 @@ class _BridgeClientShim:
         self.houdini_status_requests = 0
         self.interrupt_contexts: list[str] = []
         self.session_contexts: list[str] = []
+        self.event_polls: list[int] = []
         self.model_requests = 0
         self.dispose_calls = 0
         self.capability_reports: list[dict[str, Any]] = []
@@ -652,6 +653,9 @@ class _BridgeClientShim:
 
     def get_session(self, *, context: str = "session") -> None:
         self.session_contexts.append(context)
+
+    def poll_events(self, after: int) -> None:
+        self.event_polls.append(after)
 
     def dispose(self) -> None:
         self.dispose_calls += 1
@@ -847,15 +851,16 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._goal_auto_turn_token = None
     panel._goal_auto_turn_has_progress = False
     panel._goal_continue_after_open_thread_id = None
+    panel._goal_stage_snapshot = panel._new_goal_stage_snapshot()
+    panel._goal_houdini_inflight = {}
+    panel._goal_codex_stopped = False
     panel._build_brief = None
     panel._build_brief_thread_id = None
     panel._context_pack_summary = None
     panel._stage_items = []
     panel._review_records = []
     panel._team_records = {}
-    panel._responsive_layout_mode = None
-    panel._responsive_left_auto_hidden = False
-    panel._responsive_right_auto_hidden = False
+    panel._runtime_settings_expanded = False
     panel._turn_performance_token = None
     panel._turn_performance_marks = {}
     panel._reconnect_attempt = 0
@@ -983,6 +988,8 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.resume_thread_button = _Widget()
     panel.send_button = _Widget()
     panel.stop_button = _Widget()
+    panel.goal_continue_button = _Widget("继续 Goal")
+    panel.goal_continue_button.setVisible(False)
     panel.runtime_settings_group = _Widget("运行设置（下一轮）")
     panel.model_label = _Widget("模型")
     panel.effort_label = _Widget("推理")
@@ -1033,6 +1040,14 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.goal_refresh_button = _Widget()
     panel.goal_save_button = _Widget("保存（继续跟进）")
     panel.goal_clear_button = _Widget()
+    panel.goal_mode_label = _Widget("模式：普通对话 · 适合明确的小任务")
+    panel.goal_task_label = _Widget("当前任务：等待输入")
+    panel.goal_stage_label = _Widget()
+    panel.goal_scope_label = _Widget()
+    panel.goal_execution_label = _Widget()
+    panel.goal_acceptance_label = _Widget()
+    panel.goal_next_stage_label = _Widget()
+    panel.goal_runtime_label = _Widget()
     panel.build_brief_text = _Widget()
     panel.stage_details_text = _Widget()
     panel.review_empty_label = _Widget()
@@ -1070,6 +1085,98 @@ def _completed_notification(turn_id: str, *, sequence: int = 1) -> dict[str, Any
         "params": {
             "threadId": "thread-1",
             "turn": {"id": turn_id, "status": "completed"},
+        },
+    }
+
+
+def _capacity_notification(turn_id: str, *, sequence: int = 1) -> dict[str, Any]:
+    return {
+        "seq": sequence,
+        "type": "codex_notification",
+        "method": "error",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": turn_id,
+            "error": {
+                "message": (
+                    "Selected model is at capacity. Please try a different model."
+                )
+            },
+            "willRetry": False,
+        },
+    }
+
+
+def _public_model_catalog() -> list[dict[str, Any]]:
+    model_ids = (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.2",
+    )
+    return [
+        {
+            "model": model_id,
+            "displayName": model_id,
+            "isDefault": index == 0,
+            "inputModalities": ["text", "image"],
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "low", "description": "Low"},
+                {"reasoningEffort": "medium", "description": "Medium"},
+            ],
+            "defaultReasoningEffort": "medium",
+            "serviceTiers": [],
+            "defaultServiceTier": None,
+        }
+        for index, model_id in enumerate(model_ids)
+    ]
+
+
+def _select_model(panel: Any, model_id: str) -> None:
+    for index in range(panel.model_combo.count()):
+        record = panel.model_combo.itemData(index)
+        if isinstance(record, dict) and record.get("model") == model_id:
+            panel.model_combo.setCurrentIndex(index)
+            panel._on_model_changed(index)
+            return
+    raise AssertionError(f"model not found: {model_id}")
+
+
+def _houdini_item_notification(
+    method: str,
+    turn_id: str,
+    *,
+    item_id: str,
+    tool: str,
+    status: str,
+    arguments: dict[str, Any] | None = None,
+    structured: dict[str, Any] | None = None,
+    sequence: int = 1,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": item_id,
+        "type": "mcpToolCall",
+        "server": "houdini_intelligence",
+        "tool": tool,
+        "status": status,
+        "arguments": arguments or {},
+    }
+    if structured is not None:
+        item["result"] = {
+            "content": [],
+            "structuredContent": structured,
+        }
+    return {
+        "seq": sequence,
+        "type": "codex_notification",
+        "method": method,
+        "params": {
+            "threadId": "thread-1",
+            "turnId": turn_id,
+            "item": item,
         },
     }
 
@@ -1290,6 +1397,31 @@ class PanelWiringTests(unittest.TestCase):
                 self.assertEqual(tooltip, panel.houdini_mcp_label.toolTip())
                 self.assertEqual(backend, panel._mcp_backend)
 
+    def test_stale_hia_runtime_status_says_restart_without_hiding_read_access(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._on_health(
+            {
+                "houdini_mcp": {
+                    "backend": "hia_v2",
+                    "available": False,
+                    "restart_required": True,
+                    "identity_status": "stale_or_changed",
+                },
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_active": False,
+                },
+            }
+        )
+
+        self.assertEqual("● HIA MCP V2：需重启", panel.houdini_mcp_label.text())
+        self.assertIn("仍可只读检查", panel.houdini_mcp_label.toolTip())
+        self.assertIn("重启 launcher", panel.houdini_mcp_label.toolTip())
+
     def test_unknown_health_backend_fails_closed_without_echoing_payload(self) -> None:
         for backend in ("Bearer attacker-secret", ["hia_v2"], None):
             with self.subTest(backend=backend):
@@ -1371,29 +1503,37 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("未保存表示当前 HIP 是否有尚未保存的修改", panel_source)
         self.assertNotIn("Revision：不可用  ·  Dirty：不可用", panel_source)
 
-    def test_three_columns_can_collapse_and_goal_uses_qtextedit(self) -> None:
+    def test_three_columns_resist_accidental_collapse_and_goal_uses_qtextedit(
+        self,
+    ) -> None:
         panel_source = (
             PANEL_LIB_ROOT / "hia_panel" / "panel.py"
         ).read_text(encoding="utf-8")
 
         self.assertNotIn("self.history_combo.setMinimumWidth(210)", panel_source)
         self.assertNotIn("right_column.setMinimumWidth(260)", panel_source)
-        for column in ("left_column", "center_column", "right_column"):
-            self.assertIn(f"self.{column}.setMinimumWidth(0)", panel_source)
-        self.assertIn("self.main_splitter.setChildrenCollapsible(True)", panel_source)
+        self.assertIn("self.left_column.setMinimumWidth(160)", panel_source)
+        self.assertIn("self.center_column.setMinimumWidth(360)", panel_source)
+        self.assertIn("self.right_column.setMinimumWidth(240)", panel_source)
+        self.assertIn("self.task_tabs.setMinimumWidth(220)", panel_source)
         self.assertIn(
-            "_RESPONSIVE_HIDE_RIGHT_WIDTH = _CENTER_TARGET_MIN_WIDTH + 560",
+            "self.main_splitter.setChildrenCollapsible(False)",
             panel_source,
         )
+        self.assertIn("self.main_splitter.setOpaqueResize(False)", panel_source)
+        self.assertNotIn("_RESPONSIVE_HIDE_RIGHT_WIDTH", panel_source)
+        self.assertNotIn("_RESPONSIVE_HIDE_BOTH_WIDTH", panel_source)
+        self.assertNotIn("_responsive_left_auto_hidden", panel_source)
+        self.assertNotIn("_responsive_right_auto_hidden", panel_source)
         self.assertIn(
             "self.center_column.setSizePolicy(\n"
-            "            QtWidgets.QSizePolicy.Policy.Ignored,",
+            "            QtWidgets.QSizePolicy.Policy.Expanding,",
             panel_source,
         )
-        self.assertIn("self.main_splitter.setCollapsible(0, True)", panel_source)
+        self.assertIn("self.main_splitter.setCollapsible(0, False)", panel_source)
         self.assertIn("self.main_splitter.setCollapsible(1, False)", panel_source)
-        self.assertIn("self.main_splitter.setCollapsible(2, True)", panel_source)
-        self.assertIn("self.main_splitter.setStretchFactor(1, 5)", panel_source)
+        self.assertIn("self.main_splitter.setCollapsible(2, False)", panel_source)
+        self.assertIn("self.main_splitter.setStretchFactor(1, 4)", panel_source)
         self.assertEqual(5, panel_source.count("self.task_tabs.addTab("))
         for label in ("任务蓝图", "阶段进度", "审阅", "团队", "知识与记忆"):
             self.assertIn(f'"{label}"', panel_source)
@@ -1509,9 +1649,14 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn('"资料库维护 ▸"', page_source)
         self.assertIn('"编辑记忆 ▸"', page_source)
         self.assertIn(
-            "聊天不会自动转成项目记忆",
+            "资料来源：内置知识卡与您显式导入的项目内托管副本",
             page_source,
         )
+        self.assertIn(
+            "本地资料、聊天和索引内容都不会自动成为项目记忆",
+            page_source,
+        )
+        self.assertIn("词法：尚未检查", page_source)
         self.assertIn('"索引当前任务原文"', page_source)
         self.assertIn('"移除当前任务索引"', page_source)
         self.assertIn("视频本体不会复制", page_source)
@@ -1533,13 +1678,72 @@ class PanelWiringTests(unittest.TestCase):
             self.assertIn(suffix, panel_source)
         self.assertNotIn("聊天会自动", page_source)
         self.assertIn(
+            "self.knowledge_source_splitter = QtWidgets.QSplitter(",
+            page_source,
+        )
+        self.assertIn(
+            "self.project_memory_browser_splitter = QtWidgets.QSplitter(",
+            page_source,
+        )
+        for splitter in (
+            "knowledge_source_splitter",
+            "project_memory_browser_splitter",
+        ):
+            self.assertIn(
+                f"self.{splitter}.setChildrenCollapsible(False)",
+                page_source,
+            )
+            self.assertIn(
+                f"self.{splitter}.setCollapsible(0, False)",
+                page_source,
+            )
+            self.assertIn(
+                f"self.{splitter}.setCollapsible(1, False)",
+                page_source,
+            )
+        self.assertIn(
+            "self.knowledge_source_details_text.setMinimumHeight(72)",
+            page_source,
+        )
+        self.assertIn(
             "self.knowledge_source_details_text.setMaximumHeight(120)",
+            page_source,
+        )
+        self.assertIn(
+            "self.project_memory_details_text.setMinimumHeight(84)",
             page_source,
         )
         self.assertIn(
             "self.project_memory_details_text.setMaximumHeight(150)",
             page_source,
         )
+        maintenance_start = page_source.index(
+            "self.knowledge_maintenance_panel = QtWidgets.QWidget()"
+        )
+        self.assertLess(
+            page_source.index("self.knowledge_source_combo ="),
+            maintenance_start,
+        )
+        self.assertLess(
+            page_source.index("self.knowledge_import_files_button ="),
+            maintenance_start,
+        )
+        self.assertLess(
+            page_source.index("self.knowledge_import_thread_button ="),
+            maintenance_start,
+        )
+        self.assertGreater(
+            page_source.index("self.knowledge_repair_button ="),
+            maintenance_start,
+        )
+        self.assertGreater(
+            page_source.index("self.knowledge_delete_button ="),
+            maintenance_start,
+        )
+        self.assertNotIn("knowledge_actions = QtWidgets.QGridLayout()", page_source)
+        self.assertNotIn(".setFocus(", page_source)
+        self.assertNotIn("setFocusProxy", page_source)
+        self.assertNotIn("eventFilter", page_source)
         for name in (
             "knowledge_memory_tabs",
             "knowledge_maintenance_panel",
@@ -1559,7 +1763,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("资料库维护 ▾", panel.knowledge_maintenance_button.text())
         self.assertEqual("编辑记忆 ▾", panel.project_memory_editor_button.text())
 
-    def test_responsive_layout_collapses_sidebars_without_rewriting_state(
+    def test_resizing_never_changes_sidebar_visibility_or_panel_state(
         self,
     ) -> None:
         panel = _make_panel()
@@ -1575,28 +1779,24 @@ class PanelWiringTests(unittest.TestCase):
             "task": "审阅",
         }
 
-        panel._apply_responsive_layout(1_200)
-        self.assertTrue(panel.left_column.isVisible())
-        self.assertTrue(panel.right_column.isVisible())
+        for width in (1_200, 900, 700, 1_600, 420, 1_200):
+            with self.subTest(width=width, state="expanded"):
+                panel._apply_responsive_layout(width)
+                self.assertTrue(panel.left_column.isVisible())
+                self.assertTrue(panel.right_column.isVisible())
+                self.assertTrue(panel.history_sidebar_button.isChecked())
+                self.assertTrue(panel.task_sidebar_button.isChecked())
 
-        panel._apply_responsive_layout(900)
-        self.assertTrue(panel.left_column.isVisible())
-        self.assertFalse(panel.right_column.isVisible())
-        visibility_calls = panel.right_column.visible_set_calls
-        panel._apply_responsive_layout(900)
-        self.assertEqual(visibility_calls, panel.right_column.visible_set_calls)
-
-        panel._apply_responsive_layout(700)
-        self.assertFalse(panel.left_column.isVisible())
-        self.assertFalse(panel.right_column.isVisible())
-        panel._apply_responsive_layout(1_200)
-        self.assertTrue(panel.left_column.isVisible())
-        self.assertTrue(panel.right_column.isVisible())
-
+        panel._toggle_history_sidebar(False)
         panel._toggle_task_sidebar(False)
-        panel._apply_responsive_layout(700)
-        panel._apply_responsive_layout(1_200)
-        self.assertFalse(panel.right_column.isVisible())
+        for width in (420, 1_600, 700, 1_200):
+            with self.subTest(width=width, state="manually-collapsed"):
+                panel._apply_responsive_layout(width)
+                self.assertFalse(panel.left_column.isVisible())
+                self.assertFalse(panel.right_column.isVisible())
+                self.assertFalse(panel.history_sidebar_button.isChecked())
+                self.assertFalse(panel.task_sidebar_button.isChecked())
+
         self.assertEqual("保留中的中文草稿", panel.input_edit.toPlainText())
         self.assertEqual(
             ["E:/assets/reference.png"],
@@ -1604,6 +1804,18 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertEqual("保持当前目标", panel._current_goal["objective"])
         self.assertIn("child-1", panel._team_records)
+
+    def test_new_panel_defaults_to_both_sidebars_expanded(self) -> None:
+        first_panel = _make_panel()
+        first_panel._toggle_history_sidebar(False)
+        first_panel._toggle_task_sidebar(False)
+
+        recreated_panel = _make_panel()
+
+        self.assertTrue(recreated_panel.left_column.isVisible())
+        self.assertTrue(recreated_panel.right_column.isVisible())
+        self.assertTrue(recreated_panel.history_sidebar_button.isChecked())
+        self.assertTrue(recreated_panel.task_sidebar_button.isChecked())
 
     def test_runtime_settings_wrap_and_stay_operable_at_common_and_narrow_widths(
         self,
@@ -1638,6 +1850,7 @@ class PanelWiringTests(unittest.TestCase):
         )
 
         panel = _make_panel()
+        panel._toggle_runtime_settings(True)
         panel._on_action_completed(
             "models",
             {
@@ -3645,7 +3858,9 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("Turn：已停止", panel.turn_status_label.text())
         self.assertEqual(
             1,
-            rendered.count("Codex 已停止；已发出的 Houdini 操作可能仍在收尾。"),
+            rendered.count(
+                "Codex 已停止；当前没有已知的 in-flight Houdini 操作。"
+            ),
         )
         self.assertNotIn("NO_ACTIVE_TURN", rendered)
         self.assertNotIn("No interruptible active Turn", rendered)
@@ -4469,6 +4684,7 @@ class PanelWiringTests(unittest.TestCase):
         }
 
         panel._apply_models([model])
+        panel._toggle_runtime_settings(True)
 
         self.assertTrue(panel.service_tier_combo.isVisible())
         self.assertEqual("快速", panel.service_tier_combo.itemText(1))
@@ -5109,12 +5325,14 @@ class PanelWiringTests(unittest.TestCase):
         metrics = panel.knowledge_metrics_label.text()
         self.assertIn("文档：14", metrics)
         self.assertIn("内置卡片：10", metrics)
+        self.assertIn("词法：可用（待补全）", metrics)
         self.assertIn("向量：20 已建 / 20 待建", metrics)
         self.assertIn("最近更新：2026-07-26 09:30:00", metrics)
         metrics_tooltip = panel.knowledge_metrics_label.toolTip()
         self.assertIn("版本 1", metrics_tooltip)
         self.assertIn("托管资料：1", metrics_tooltip)
-        self.assertIn("索引：未完成", metrics_tooltip)
+        self.assertIn("词法索引：可用（待补全）", metrics_tooltip)
+        self.assertIn("索引内容：未完成", metrics_tooltip)
         self.assertEqual((0, 40), panel.knowledge_progress_bar._range)
         self.assertEqual(20, panel.knowledge_progress_bar.value())
         self.assertFalse(panel.knowledge_progress_bar.isVisible())
@@ -5135,6 +5353,10 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual(
             "知识环境：FTS5 降级",
             panel.knowledge_state_label.text(),
+        )
+        self.assertIn(
+            "向量：未启用（词法模式）",
+            panel.knowledge_metrics_label.text(),
         )
         payload["environment"] = {
             "state": "repair_required",
@@ -5723,7 +5945,107 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual([], panel._client.turn_requests)
         self.assertIsNone(panel._goal_continuation_boundary)
 
-    def test_initial_and_reopened_panel_stay_empty_until_manual_open(self) -> None:
+    def test_reopened_panel_recovers_active_turn_and_buffered_message(self) -> None:
+        old_panel = _make_panel()
+        _context, turn_id = _start_active_turn(old_panel, 1)
+        old_panel._event_sequence = 41
+        close_event = _CloseEvent()
+        old_panel.closeEvent(close_event)
+
+        panel = _make_panel(selected_thread_id=None)
+        panel._on_health(
+            {
+                "houdini_mcp": {"backend": "hia_v2", "available": True},
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-1",
+                    "turn_id": turn_id,
+                    "turn_status": "inProgress",
+                    "turn_active": True,
+                    "focus_mode": True,
+                },
+            }
+        )
+
+        self.assertEqual(1, close_event.base_close_calls)
+        self.assertEqual("thread-1", panel._selected_thread_id)
+        self.assertEqual("thread-1", panel._turn_state.thread_id)
+        self.assertEqual(turn_id, panel._turn_state.turn_id)
+        self.assertEqual(TurnPhase.IN_PROGRESS, panel._turn_state.phase)
+        self.assertTrue(panel._turn_state.busy)
+        self.assertEqual("thread-1", panel._stream_thread_id)
+        self.assertEqual(turn_id, panel._stream_turn_id)
+        self.assertTrue(panel.stop_button.isEnabled())
+        self.assertFalse(panel.new_thread_button.isEnabled())
+        self.assertFalse(panel.resume_thread_button.isEnabled())
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.resume_requests)
+        self.assertEqual(["thread-1"], panel._client.goal_get_requests)
+
+        panel._poll_once()
+        self.assertEqual([0], panel._client.event_polls)
+        panel._on_events(
+            {
+                "events": [
+                    {
+                        "seq": 1,
+                        "type": "codex_notification",
+                        "method": "turn/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": turn_id, "status": "inProgress"},
+                        },
+                    },
+                    {
+                        "seq": 2,
+                        "type": "codex_notification",
+                        "method": "item/agentMessage/delta",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": turn_id,
+                            "itemId": "message-before-reopen",
+                            "delta": "关闭 Panel 前后产生的回复仍然可见",
+                        },
+                    },
+                ],
+                "gap": False,
+            }
+        )
+
+        self.assertEqual(2, panel._event_sequence)
+        self.assertIn(
+            "关闭 Panel 前后产生的回复仍然可见",
+            panel.conversation.toPlainText(),
+        )
+        panel._on_action_completed(
+            "goal_get",
+            {
+                "ok": True,
+                "thread_id": "thread-1",
+                "focus_mode": True,
+                "goal": {
+                    "threadId": "thread-1",
+                    "objective": "继续恢复中的 Houdini 任务",
+                    "status": "active",
+                },
+            },
+        )
+        self.assertEqual(
+            "继续恢复中的 Houdini 任务",
+            panel._current_goal["objective"],
+        )
+        self.assertTrue(panel.goal_focus_checkbox.isChecked())
+        self.assertTrue(panel._turn_state.busy)
+
+        panel.input_edit.setPlainText("继续当前 Turn")
+        panel._send()
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual(1, len(panel._client.steer_requests))
+
+    def test_initial_and_reopened_panel_stay_empty_without_active_turn(
+        self,
+    ) -> None:
         first = _make_panel(selected_thread_id=None)
         self.assertIsNone(first._selected_thread_id)
         self.assertEqual("Thread：未选择", first.thread_status_label.text())
@@ -5747,8 +6069,8 @@ class PanelWiringTests(unittest.TestCase):
                     "authentication": "authenticated",
                     "thread_id": "thread-1",
                     "turn_id": "background-turn",
-                    "turn_status": "inProgress",
-                    "turn_active": True,
+                    "turn_status": "completed",
+                    "turn_active": False,
                     "focus_mode": True,
                 },
             }
@@ -6510,6 +6832,125 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("high", second_request[2])
         self.assertEqual("priority", panel._client.turn_service_tiers[-1])
 
+    def test_turn_start_freezes_settings_for_capacity_diagnostic_and_notice(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._on_action_completed(
+            "models",
+            {
+                "models": [
+                    {
+                        "model": "model-a",
+                        "displayName": "Model A",
+                        "isDefault": True,
+                        "inputModalities": ["text"],
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "low", "description": "Low"}
+                        ],
+                        "defaultReasoningEffort": "low",
+                        "serviceTiers": [
+                            {"id": "priority", "name": "Priority"}
+                        ],
+                        "defaultServiceTier": "priority",
+                    },
+                    {
+                        "model": "model-b",
+                        "displayName": "Model B",
+                        "inputModalities": ["text"],
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "medium", "description": "Medium"}
+                        ],
+                        "defaultReasoningEffort": "medium",
+                        "serviceTiers": [],
+                        "defaultServiceTier": None,
+                    },
+                ]
+            },
+        )
+        _context, turn_id = _start_active_turn(panel, 1)
+        self.assertEqual("model-a", panel._client.turn_requests[-1][1])
+        self.assertEqual("low", panel._client.turn_requests[-1][2])
+        self.assertEqual("priority", panel._client.turn_service_tiers[-1])
+        self.assertEqual("model-a", panel._diagnostic_snapshot["model"])
+        self.assertEqual("low", panel._diagnostic_snapshot["effort"])
+        self.assertEqual(
+            "priority",
+            panel._diagnostic_snapshot["service_tier"],
+        )
+
+        _select_model(panel, "model-b")
+        panel._render_event(_capacity_notification(turn_id))
+
+        notice = panel.conversation.toPlainText()
+        self.assertIn("model=model-a", notice)
+        self.assertIn("effort=low", notice)
+        self.assertIn("service tier=priority", notice)
+        self.assertNotIn("实际请求：model=model-b", notice)
+        self.assertTrue(panel.runtime_settings_group.isChecked())
+        self.assertTrue(panel._runtime_settings_expanded)
+        self.assertIsNone(panel._selected_service_tier())
+        self.assertEqual(1, panel._client.model_requests)
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertFalse(panel._reconnecting)
+        self.assertFalse(panel._reconnect_timer.isActive())
+
+    def test_capacity_single_model_is_terminal_and_refreshes_catalog_once(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._on_action_completed(
+            "models",
+            {"models": [_public_model_catalog()[0]]},
+        )
+        _context, turn_id = _start_active_turn(panel, 1)
+
+        notification = _capacity_notification(turn_id)
+        panel._render_event(notification)
+        panel._render_event(notification)
+
+        notice = panel.conversation.toPlainText()
+        self.assertIn("当前目录没有其他 model ID", notice)
+        self.assertIn("修改推理强度不是切换模型", notice)
+        self.assertIn("可以稍后手动重试同一模型", notice)
+        self.assertEqual(1, panel._client.model_requests)
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertFalse(panel._reconnecting)
+
+    def test_capacity_failure_then_user_selects_different_public_model(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        catalog = _public_model_catalog()
+        panel._on_action_completed("models", {"models": catalog})
+        _context, turn_id = _start_active_turn(panel, 1)
+        self.assertEqual("gpt-5.6-sol", panel._client.turn_requests[0][1])
+
+        panel._render_event(_capacity_notification(turn_id))
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertIn("gpt-5.6-terra", panel.conversation.toPlainText())
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": turn_id, "status": "failed"},
+                },
+            }
+        )
+        panel._on_action_completed("models", {"models": catalog})
+        _select_model(panel, "gpt-5.6-terra")
+        panel.input_edit.setPlainText("manual retry with another model")
+        panel._send()
+
+        self.assertEqual(2, len(panel._client.turn_requests))
+        self.assertEqual(
+            "gpt-5.6-terra",
+            panel._client.turn_requests[1][1],
+        )
+        self.assertEqual(1, panel._client.model_requests)
+
     def test_new_thread_uses_catalog_model_and_effort_updates_per_model(self) -> None:
         panel = _make_panel()
         panel._on_action_completed(
@@ -6697,8 +7138,8 @@ class PanelWiringTests(unittest.TestCase):
                 "params": {"threadId": "thread-1", "goal": complete_goal},
             }
         )
-        self.assertEqual("状态：已完成", panel.goal_status_label.text())
-        self.assertEqual("当前跟进：Goal 已完成", panel.goal_activity_label.text())
+        self.assertIn("等待实际场景验收", panel.goal_status_label.text())
+        self.assertIn("等待实际场景验收", panel.goal_activity_label.text())
 
     def test_native_goal_turn_activity_is_correlated_without_polluting_normal_turns(self) -> None:
         panel = _make_panel()
@@ -6873,6 +7314,604 @@ class PanelWiringTests(unittest.TestCase):
         panel._render_event(_completed_notification(normal_turn_id, sequence=99))
         self.assertIn("等待下一轮任务进展", panel.goal_activity_label.text())
 
+    def test_goal_revision_change_without_structured_validation_stays_pending(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {"threadId": "thread-1", "objective": "完成木屋", "status": "active"},
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        panel._apply_stage_plan(
+            [{"step": "建立主体", "status": "inProgress"}]
+        )
+        panel._render_event(
+            _houdini_item_notification(
+                "item/started",
+                turn_id,
+                item_id="hom-1",
+                tool="hia_execute_hom",
+                status="inProgress",
+                arguments={"mutable_root": "/obj/HIA_ASSET"},
+            )
+        )
+        panel._render_event(
+            _houdini_item_notification(
+                "item/completed",
+                turn_id,
+                item_id="hom-1",
+                tool="hia_execute_hom",
+                status="completed",
+                arguments={"mutable_root": "/obj/HIA_ASSET"},
+            )
+        )
+        panel._apply_stage_plan([{"step": "建立主体", "status": "completed"}])
+        panel._update_houdini_status({"scene_revision": 8})
+
+        self.assertEqual(
+            "pending",
+            panel._goal_stage_snapshot["acceptance_status"],
+        )
+        self.assertIn("structuredContent", panel.goal_acceptance_label.text())
+        self.assertFalse(panel._goal_completion_is_evidenced())
+
+    def test_failed_live_validation_stays_on_stage_without_auto_continue(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {"threadId": "thread-1", "objective": "完成木屋", "status": "active"},
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        events = [
+            {
+                "seq": 1,
+                "type": "codex_notification",
+                "method": "turn/plan/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": turn_id,
+                    "plan": [{"step": "验收主体", "status": "inProgress"}],
+                },
+            },
+            _houdini_item_notification(
+                "item/started",
+                turn_id,
+                item_id="validate-1",
+                tool="hia_validate",
+                status="inProgress",
+                arguments={"checks": ["node_errors"]},
+                sequence=2,
+            ),
+            _houdini_item_notification(
+                "item/completed",
+                turn_id,
+                item_id="validate-1",
+                tool="hia_validate",
+                status="completed",
+                arguments={"checks": ["node_errors"]},
+                structured={
+                    "ok": True,
+                    "errors": [],
+                    "result": {
+                        "valid": False,
+                        "complete": True,
+                        "check_results": [
+                            {"check": "node_errors", "status": "fail"}
+                        ],
+                    },
+                },
+                sequence=3,
+            ),
+            _completed_notification(turn_id, sequence=4),
+        ]
+        panel._on_events({"events": events, "gap": False})
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual(
+            "failed",
+            panel._goal_stage_snapshot["acceptance_status"],
+        )
+        self.assertEqual(
+            "修复并重新验收当前阶段",
+            panel._goal_stage_snapshot["next_stage"],
+        )
+
+    def test_passed_live_validation_auto_continues_exactly_once(self) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {"threadId": "thread-1", "objective": "完成木屋", "status": "active"},
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        events = [
+            {
+                "seq": 1,
+                "type": "codex_notification",
+                "method": "turn/plan/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": turn_id,
+                    "plan": [{"step": "验收主体", "status": "completed"}],
+                },
+            },
+            _houdini_item_notification(
+                "item/started",
+                turn_id,
+                item_id="validate-2",
+                tool="hia_validate",
+                status="inProgress",
+                arguments={"checks": ["node_errors"]},
+                sequence=2,
+            ),
+            _houdini_item_notification(
+                "item/completed",
+                turn_id,
+                item_id="validate-2",
+                tool="hia_validate",
+                status="completed",
+                arguments={"checks": ["node_errors"]},
+                structured={
+                    "ok": True,
+                    "errors": [],
+                    "result": {
+                        "valid": True,
+                        "complete": True,
+                        "check_results": [
+                            {"check": "node_errors", "status": "pass"}
+                        ],
+                    },
+                },
+                sequence=3,
+            ),
+            _completed_notification(turn_id, sequence=4),
+        ]
+        panel._on_events({"events": events, "gap": False})
+        self.assertEqual(
+            "passed",
+            panel._goal_stage_snapshot["acceptance_status"],
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+
+        panel._on_events(
+            {
+                "events": [_completed_notification(turn_id, sequence=5)],
+                "gap": False,
+            }
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+
+    def test_checked_node_warning_does_not_override_passing_checks(self) -> None:
+        panel = _make_panel()
+        outcome, message = panel._structured_houdini_acceptance(
+            {
+                "type": "mcpToolCall",
+                "tool": "hia_execute_hom",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "ok": True,
+                        "errors": [],
+                        "execution_evidence": {
+                            "postconditions": {
+                                "status": "passed",
+                                "node_errors": 0,
+                                "node_warnings": 1,
+                            },
+                            "validation": {
+                                "valid": True,
+                                "complete": True,
+                                "check_results": [
+                                    {"check": "node_errors", "status": "pass"}
+                                ],
+                            },
+                        },
+                    }
+                },
+            }
+        )
+        self.assertEqual("passed", outcome)
+        self.assertIn("warning", message)
+
+    def test_unproven_checks_stay_pending_and_explicit_failures_fail(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        pending_validate, _message = panel._structured_houdini_acceptance(
+            {
+                "type": "mcpToolCall",
+                "tool": "hia_validate",
+                "status": "completed",
+                "arguments": {"checks": ["geometry_summary"]},
+                "result": {
+                    "structuredContent": {
+                        "ok": True,
+                        "errors": [],
+                        "result": {
+                            "valid": True,
+                            "complete": False,
+                            "check_results": [
+                                {
+                                    "check": "geometry_summary",
+                                    "status": "partial",
+                                }
+                            ],
+                        },
+                    }
+                },
+            }
+        )
+        failed_validate, _message = panel._structured_houdini_acceptance(
+            {
+                "type": "mcpToolCall",
+                "tool": "hia_validate",
+                "status": "completed",
+                "arguments": {"checks": ["node_errors"]},
+                "result": {
+                    "structuredContent": {
+                        "ok": True,
+                        "errors": [],
+                        "result": {
+                            "valid": False,
+                            "complete": True,
+                            "check_results": [
+                                {"check": "node_errors", "status": "fail"}
+                            ],
+                        },
+                    }
+                },
+            }
+        )
+        pending_execute, _message = panel._structured_houdini_acceptance(
+            {
+                "type": "mcpToolCall",
+                "tool": "hia_execute_hom",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "ok": False,
+                        "errors": [
+                            {"code": "POSTCONDITION_NOT_PROVEN"}
+                        ],
+                        "structured_error": {
+                            "code": "POSTCONDITION_NOT_PROVEN"
+                        },
+                        "execution_evidence": {
+                            "postconditions": {
+                                "status": "failed",
+                                "node_errors": 0,
+                                "node_warnings": 0,
+                            },
+                            "validation": {
+                                "valid": True,
+                                "complete": False,
+                                "check_results": [
+                                    {
+                                        "check": "geometry_summary",
+                                        "status": "unknown",
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                },
+            }
+        )
+        failed_execute, _message = panel._structured_houdini_acceptance(
+            {
+                "type": "mcpToolCall",
+                "tool": "hia_execute_hom",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "ok": False,
+                        "errors": [{"code": "VALIDATION_FAILED"}],
+                        "structured_error": {"code": "VALIDATION_FAILED"},
+                        "execution_evidence": {
+                            "postconditions": {
+                                "status": "failed",
+                                "node_errors": 1,
+                                "node_warnings": 0,
+                            },
+                            "validation": {
+                                "valid": False,
+                                "complete": True,
+                                "check_results": [
+                                    {"check": "node_errors", "status": "fail"}
+                                ],
+                            },
+                        },
+                    }
+                },
+            }
+        )
+        pending_postcondition_statuses = []
+        for status in ("not_requested", "not_proven", "partial", "unknown"):
+            outcome, _message = panel._structured_houdini_acceptance(
+                {
+                    "type": "mcpToolCall",
+                    "tool": "hia_execute_hom",
+                    "status": "completed",
+                    "result": {
+                        "structuredContent": {
+                            "ok": True,
+                            "errors": [],
+                            "execution_evidence": {
+                                "postconditions": {
+                                    "status": status,
+                                    "node_errors": 0,
+                                    "node_warnings": 0,
+                                },
+                                "validation": {
+                                    "valid": True,
+                                    "complete": True,
+                                    "check_results": [
+                                        {
+                                            "check": "node_errors",
+                                            "status": "pass",
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                    },
+                }
+            )
+            pending_postcondition_statuses.append(outcome)
+        failed_without_evidence, _message = panel._structured_houdini_acceptance(
+            {
+                "type": "mcpToolCall",
+                "tool": "hia_execute_hom",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "ok": False,
+                        "errors": [{"code": "HOM_EXECUTION_FAILED"}],
+                        "structured_error": {
+                            "code": "HOM_EXECUTION_FAILED"
+                        },
+                    }
+                },
+            }
+        )
+
+        self.assertEqual("pending", pending_validate)
+        self.assertEqual("failed", failed_validate)
+        self.assertEqual("pending", pending_execute)
+        self.assertEqual("failed", failed_execute)
+        self.assertEqual(["pending"] * 4, pending_postcondition_statuses)
+        self.assertEqual("failed", failed_without_evidence)
+
+    def test_required_visual_evidence_stays_pending(self) -> None:
+        panel = _make_panel()
+        outcome, message = panel._structured_houdini_acceptance(
+            {
+                "type": "mcpToolCall",
+                "tool": "hia_execute_hom",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "ok": True,
+                        "errors": [],
+                        "execution_evidence": {
+                            "postconditions": {
+                                "status": "passed",
+                                "node_errors": 0,
+                                "node_warnings": 0,
+                                "visual_or_render_evidence": {
+                                    "status": "required"
+                                },
+                            },
+                            "validation": {
+                                "valid": True,
+                                "complete": True,
+                                "check_results": [
+                                    {"check": "node_errors", "status": "pass"}
+                                ],
+                            },
+                        },
+                    }
+                },
+            }
+        )
+
+        self.assertEqual("pending", outcome)
+        self.assertIn("视觉", message)
+
+    def test_multistage_goal_cannot_skip_unaccepted_stage(self) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {"threadId": "thread-1", "objective": "完成木屋", "status": "active"},
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        panel._apply_stage_plan(
+            [
+                {"step": "建立主体", "status": "completed"},
+                {"step": "连接细节", "status": "inProgress"},
+            ]
+        )
+        self.assertEqual("建立主体", panel._goal_stage_snapshot["title"])
+        self.assertEqual(0, panel._goal_stage_snapshot["stage_index"])
+        self.assertEqual(
+            "pending",
+            panel._goal_stage_snapshot["acceptance_status"],
+        )
+
+        for method, status in (
+            ("item/started", "inProgress"),
+            ("item/completed", "completed"),
+        ):
+            panel._render_event(
+                _houdini_item_notification(
+                    method,
+                    turn_id,
+                    item_id="validate-stage-1",
+                    tool="hia_validate",
+                    status=status,
+                    arguments={"checks": ["node_errors"]},
+                    structured=(
+                        {
+                            "ok": True,
+                            "errors": [],
+                            "result": {
+                                "valid": True,
+                                "complete": True,
+                                "check_results": [
+                                    {
+                                        "check": "node_errors",
+                                        "status": "pass",
+                                    }
+                                ],
+                            },
+                        }
+                        if method == "item/completed"
+                        else None
+                    ),
+                )
+            )
+        self.assertEqual("连接细节", panel._goal_stage_snapshot["title"])
+        self.assertEqual(1, panel._goal_stage_snapshot["stage_index"])
+        self.assertEqual(
+            "pending",
+            panel._goal_stage_snapshot["acceptance_status"],
+        )
+
+        panel._apply_stage_plan(
+            [
+                {"step": "建立主体", "status": "completed"},
+                {"step": "连接细节", "status": "completed"},
+            ]
+        )
+        for method, status in (
+            ("item/started", "inProgress"),
+            ("item/completed", "completed"),
+        ):
+            panel._render_event(
+                _houdini_item_notification(
+                    method,
+                    turn_id,
+                    item_id="validate-stage-2",
+                    tool="hia_validate",
+                    status=status,
+                    arguments={"checks": ["node_errors"]},
+                    structured=(
+                        {
+                            "ok": True,
+                            "errors": [],
+                            "result": {
+                                "valid": True,
+                                "complete": True,
+                                "check_results": [
+                                    {
+                                        "check": "node_errors",
+                                        "status": "pass",
+                                    }
+                                ],
+                            },
+                        }
+                        if method == "item/completed"
+                        else None
+                    ),
+                )
+            )
+        self.assertTrue(panel._goal_completion_is_evidenced())
+
+    def test_no_stage_plan_cannot_be_treated_as_goal_acceptance(self) -> None:
+        panel = _make_panel()
+        panel._goal_stage_snapshot.update(
+            {
+                "thread_id": "thread-1",
+                "title": "未公开阶段",
+                "acceptance_status": "passed",
+            }
+        )
+
+        self.assertFalse(panel._goal_completion_is_evidenced())
+
+    def test_thread_history_tool_completion_requires_live_revalidation(self) -> None:
+        panel = _make_panel()
+        panel._stage_items = [{"title": "历史阶段", "status": "completed"}]
+        panel._render_thread_read(
+            {
+                "read": {
+                    "thread": {
+                        "id": "thread-1",
+                        "turns": [
+                            {
+                                "id": "old-turn",
+                                "items": [
+                                    _houdini_item_notification(
+                                        "item/completed",
+                                        "old-turn",
+                                        item_id="old-validate",
+                                        tool="hia_validate",
+                                        status="completed",
+                                        structured={
+                                            "ok": True,
+                                            "errors": [],
+                                            "result": {
+                                                "valid": True,
+                                                "complete": True,
+                                                "check_results": [],
+                                            },
+                                        },
+                                    )["params"]["item"]
+                                ],
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        self.assertTrue(panel._goal_stage_snapshot["recovered"])
+        self.assertEqual(
+            "pending",
+            panel._goal_stage_snapshot["acceptance_status"],
+        )
+        self.assertIn("核对当前场景", panel._goal_stage_snapshot["acceptance"])
+        self.assertFalse(panel._goal_completion_is_evidenced())
+
+    def test_goal_houdini_inflight_blocks_continue_and_stop_is_explicit(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {"threadId": "thread-1", "objective": "完成木屋", "status": "active"},
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        panel._render_event(
+            _houdini_item_notification(
+                "item/started",
+                turn_id,
+                item_id="hom-live",
+                tool="hia_execute_hom",
+                status="inProgress",
+                arguments={"mutable_root": "/obj/HIA_ASSET"},
+            )
+        )
+
+        self.assertFalse(panel.send_button.isEnabled())
+        self.assertFalse(panel.goal_continue_button.isEnabled())
+        turn_count = len(panel._client.turn_requests)
+        panel._continue_goal()
+        self.assertEqual(turn_count, len(panel._client.turn_requests))
+        panel._stop()
+        self.assertIn("Codex 已停止", panel.goal_runtime_label.text())
+        self.assertIn("Houdini 执行中", panel.goal_runtime_label.text())
+        self.assertIn(
+            "操作仍在执行",
+            panel.conversation.toPlainText(),
+        )
+
     def test_focused_goal_completion_continues_without_fake_user_message(self) -> None:
         panel = _make_panel()
         panel._apply_models(
@@ -6945,10 +7984,9 @@ class PanelWiringTests(unittest.TestCase):
 
         self.assertEqual(1, len(panel._client.turn_requests))
         text, model, effort, images, context = panel._client.turn_requests[0]
-        self.assertEqual(
-            "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。",
-            text,
-        )
+        self.assertTrue(text.startswith("继续推进当前 Goal；"))
+        self.assertIn("实际场景证据", text)
+        self.assertIn("不能因为计划步骤耗尽", text)
         self.assertEqual("goal-model", model)
         self.assertEqual("high", effort)
         self.assertEqual("priority", panel._client.turn_service_tiers[0])
@@ -7059,8 +8097,13 @@ class PanelWiringTests(unittest.TestCase):
             {"events": [_completed_notification(turn_id)], "gap": False}
         )
         self.assertEqual(2, len(panel._client.turn_requests))
-        self.assertEqual(
-            "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。",
+        self.assertTrue(
+            panel._client.turn_requests[-1][0].startswith(
+                "继续推进当前 Goal；"
+            )
+        )
+        self.assertIn(
+            "不能因为计划步骤耗尽",
             panel._client.turn_requests[-1][0],
         )
         self.assertNotEqual(

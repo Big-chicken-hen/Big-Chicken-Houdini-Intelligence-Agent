@@ -1,58 +1,193 @@
-# Pyro field sourcing, bounds, and cache contracts
+# Pyro flame experiments, field sourcing, and cache evidence
 
 Source kind: `community_tutorial`
 Verification: `community_unverified`
-Version: sources span H17.5 and later DOP/SOP workflows; confirm the active sparse Pyro interfaces.
+Version: community evidence spans H16-H19.5; node and parameter labels were compatibility-checked against H22.0, but must still be confirmed in the active Houdini build.
 
 ## Use, prerequisites, and target
 
-Use for smoke, fire, explosions, or custom gaseous fields. Inputs are animation at real-world-like scale plus source attributes/volumes. The target is a sparse Pyro network whose source mappings, container bounds, voxel size, solver fields, and cache payload can be inspected and reproduced.
+Use this playbook when Codex must turn a visual fire target into a small, controlled Pyro experiment: an attached campfire, torch, fast directional flame, burning surface, or smoke-bearing flame. It also applies to smoke and explosions when the same field and cache contracts are needed. Prerequisites are a reference or written visual target, scene scale, FPS, configured simulation `Start Frame`, evaluation frame range, animated source, collision inputs, camera/background, and a coarse render budget.
+
+The target is not merely a cooking solver. The deliverable is a human-readable EffectSpec, an editable sparse Pyro network, one baseline plus two or three comparable candidate deltas, a versioned cache, a diagnostic viewport capture, a representative material/render capture, and evidence that explains the next iteration. This card deliberately does not define a new runtime JSON schema.
 
 ## Semantic network stages
 
-Geometry source → `Pyro Source SOP` → `Volume Rasterize Attributes SOP` → source-field inspection → `Pyro Solver SOP` → field inspection → `File Cache SOP` → render conversion/output. Keep collision preparation on a left branch into the solver's collision input.
+Visual target → EffectSpec and invariants → `IN_PYRO_SOURCE` → `Pyro Source SOP` → native source-shape/scalar/velocity variation → `Volume Rasterize Attributes SOP` → source-field inspection → `Pyro Solver SOP` shaping → solved-field inspection → candidate-specific `File Cache SOP` → `Pyro Bake Volume SOP` or render-field preparation → material assignment and representative render → acceptance/rejection record. Keep collision preparation on a left branch into input 2 of the solver. Keep diagnostics and disk reload as side branches; the final cached branch ends at `OUT_PYRO_CACHE`.
 
 ## Ordered workflow
 
-1. Audit scene scale, frame rate, source velocity, and emitter bounds. Apply transforms before simulation and name the boundary `IN_PYRO_SOURCE`. Fast motion may need substeps or trail-derived velocity.
-2. Use `Pyro Source SOP` to create purposeful source attributes such as `density`, `temperature`, `burn`, `flame`, and `v`. Do not author every field by habit. Visualize each scalar attribute and velocity before rasterization.
-3. Rasterize with `Volume Rasterize Attributes SOP`. List the exact attributes, choose voxel size, and map velocity to the expected vector volume. Add padding sufficient for filter width and motion. Inspect volume names, classes, resolutions, and active bounds.
-4. Configure `Pyro Solver SOP` sourcing so source volume names map to solver fields with intended operations: add, copy, maximum, or pull according to the desired accumulation. General principle: the destination field and operation are part of the contract; similar-looking smoke can hide a wrong mapping.
-5. Set sparse bounds and voxel size from a controlled quality parameter. Enable/adapt expansion to follow active fields while retaining a safety margin. Tune dissipation, buoyancy, cooling, disturbance, turbulence, and shredding one family at a time; avoid compensating for bad sourcing with extreme shaping.
-6. Validate collisions from the solver's guide/diagnostic views. Collision SDF sign, thickness, transform, and velocity must match the solver domain.
-7. Cache simulation fields with `File Cache SOP` after the solver. Include only fields required for rendering or downstream work, but retain at least density and any temperature/flame/velocity fields used later. Use an explicit frame range and non-overwriting versioned path.
-8. Reload the cache in a separate branch, bypass live simulation, and compare field list, bounds, frame coverage, and a representative viewport/render. Finish at `OUT_PYRO_CACHE`.
+1. Write the EffectSpec before creating the baseline and candidate deltas. Record flame archetype, physical scale, FPS, `Start Frame`, end frame, optional pre-roll, camera, background, target flame height/width, attachment to the source, rise direction/speed, large-scale rhythm, edge breakup, smoke-to-fire balance, decay, brightness, color, and a representative frame set selected by motion risk (runtime range 1-6; usually 3-6), covering the relevant contact, development, decay, and/or problem frames.
+2. Separate acceptance statements by control region. Source acceptance covers footprint, attachment, emission timing, and initial direction. Solver acceptance covers rise, lifespan, transport, large shapes, and breakup. Material acceptance covers density response, fire intensity/color mapping, and scattering. Render acceptance covers exposure, sampling, motion blur, lighting, and background contrast.
+3. Audit transforms, scale, source speed, and swept bounds. Apply intended transforms upstream and name the boundary `IN_PYRO_SOURCE`. For a moving emitter, inspect per-frame displacement relative to source and solver voxel sizes before deciding that more shaping is required.
+4. Use `Pyro Source SOP` to create only purposeful fields such as `density`, `temperature`, `flame`, and `v`. When the base is too uniform, use separate native `Attribute Noise SOP`, `Attribute Adjust Float SOP`, `Point Velocity SOP`, or `Attribute Adjust Vector SOP` nodes for source shape, scalar values, and velocity instead of one opaque operation. Visualize each scalar and velocity before rasterization and record min/max values on the comparison frames.
+5. Rasterize with `Volume Rasterize Attributes SOP`. List exact attributes, set `Voxel Size`, and preserve the vector nature of `v`. Add enough padding for filter width and swept motion. Inspect volume names, classes, resolutions, active bounds, and whether fast motion leaves holes between integer frames.
+6. Configure `Pyro Solver SOP` sourcing so every source volume names a destination field and operation. Establish `Voxel Size`, sparse padding/bounds, `Start Frame`, collision type, `Max Substeps`, and `CFL Condition` before look development. Reset and run from the configured start after any upstream or solver change.
+7. Build a source-only baseline at coarse resolution. Disable or neutralize optional shaping, retain the required transport/combustion behavior, and compare the source fields with the first solved frames. Reject the source before solver tuning if the base footprint, attachment, timing, or direction is already wrong.
+8. Tune bulk motion next. Treat incoming `temperature` range, `Ambient Temp (K)`, `Reference Temp (K)`, `Buoyancy Scale`, `Cooling Rate`, and `Flame Lifespan` as an interacting set. Change one parameter family, reset, and judge the same source-contact, developed, and decay frames.
+9. Add shape operators only after bulk motion passes. Use `Turbulence` for broad velocity variation, `Disturbance` for breaking smooth regions, `Shredding` for redirecting vertical licks, and `Dissipation` for density loss. Record control fields and ranges; do not hide a bad source beneath high-frequency noise.
+10. Gate material and render changes behind field inspection. If `flame` and `temperature` have plausible ranges, tune `Emission Field`, `Emission Scale`, `Emit Range`, `Emission Color Field`, temperature mapping, smoke `Density Scale`, and scattering without changing the simulation. If required fields are missing or flat, return to source/solver instead.
+11. Keep one baseline plus two or three candidate deltas in one control region. Each delta moves the primary control toward, beyond, or opposite the target direction so the set brackets the useful change. Keep seed, source, resolution, start frame, cache range, camera, lights, material, exposure, and render settings invariant unless that region is the one under test.
+12. Compare the baseline and candidate deltas across the selected representative frames. Select the candidate that removes the largest visual mismatch without breaking an already accepted invariant. Record the rejected candidates and the single next control region; do not blend several unexplained tweaks into a new baseline.
+13. Cache the selected simulation fields with `File Cache SOP`. Preserve `density`, all render-driving `temperature`/`flame` fields, and `vel` when motion blur or downstream advection needs it. Use an explicit range and a non-overwriting path containing candidate and cache versions.
+14. Reload the cache with the live solver bypassed. Validate first/middle/last files, field names, ranges, voxel size, bounds, start frame, and representative frames. Produce one viewport diagnostic and one render diagnostic under the same camera and color-management assumptions, then finish at `OUT_PYRO_CACHE`.
 
-## Key fields and responsibilities
+## EffectSpec and candidate decision contract
 
-`density` controls smoke presence; `temperature` commonly drives buoyancy/cooling; `vel` is the vector velocity field; `flame`/`burn` roles depend on the chosen combustion workflow. Pyro Source authors point fields, Rasterize converts them to volumes, Solver evolves destination fields, and File Cache proves persistence. Treat these meanings as workflow contracts, not universal renderer bindings.
+Keep the EffectSpec short enough to compare against images, but specific enough to generate a network. A useful specification contains:
+
+- **Shot contract:** scale in Houdini units, FPS, configured start/end, pre-roll policy, camera path, crop/resolution, background value, display/render color transform, and render-time ceiling.
+- **Source target:** emitting surface or volume, attachment tolerance, footprint, ignition timing, source motion, velocity direction, and expected ranges of `density`, `temperature`, `flame`, `v`, and `pscale`.
+- **Motion target:** flame height in source-widths, time to reach that height, dominant direction, number/size of broad lobes, acceptable lateral drift, flame persistence, and smoke decay.
+- **Look target:** smoke-to-emission balance, core-to-edge intensity, warm/cool color distribution, readability of transparent edges, shadow/scatter expectation, and whether glow is a render/comp treatment rather than a simulated field.
+- **Acceptance evidence:** source/contact, developed, and decay frames; field visualizers; parameter delta from the baseline; cache identity; and one sentence naming the largest remaining mismatch.
+
+Do not turn subjective words such as “cinematic” or “realistic” into unsupported parameters. Translate them into observable statements such as “the luminous core remains attached within one source voxel,” “the top breaks into two to four broad lobes before fine shredding,” or “smoke stays subordinate to emission for the first twelve frames.” These are human-readable expectations, not extensions to `semantic_checks`.
+
+## Visual target to control-region map
+
+| Visible target or mismatch | Inspect first | Primary adjustment direction | Important interaction |
+| --- | --- | --- | --- |
+| Base floats above, lags, or ignores emitter | Source points/volumes at the contact frame | Correct source footprint, emission timing, `pscale`, swept samples, and `v` before touching buoyancy | More solver substeps cannot repair a source that never covers the moving path |
+| Flame is too short or dies near the base | Incoming `flame` range and solved flame guide | Increase valid source coverage or `Flame Lifespan`; reduce premature cooling only if temperature transport is also short | Higher lifespan can detach fire from a moving source and can increase render brightness |
+| Flame rises too slowly or too quickly | Scene scale, temperature range, velocity guide | Adjust `Buoyancy Scale` after `Ambient Temp (K)`/`Reference Temp (K)` make sourced temperature meaningful; adjust `Cooling Rate` for where rise slows | Changing source temperature, reference temperature, buoyancy, and time scale together destroys attribution |
+| Silhouette is narrow and candle-smooth | Source variation, broad velocity structures | Add source variation first; then increase `Shredding` or modest broad `Turbulence` | Fine `Disturbance` may roughen edges while leaving the same implausible silhouette |
+| Motion is chaotic everywhere | Field guides and control masks | Reduce broad `Turbulence`; restrict shaping with a `Control Field`, `Control Range`, and ramp | Coarser voxel size changes the represented noise scale, so compare at fixed resolution |
+| Smoke overwhelms fire | `density`, `flame`, and temperature separately | Reduce sourced density or increase `Dissipation` if excess is simulated; otherwise lower material `Density Scale` | Solver density changes shadows and active bounds, while material density changes only appearance |
+| Field guides look correct but render is black | Cached field list and material bindings | Bind `flame` to emission and `temperature` to emission color; verify material assignment, exposure, and renderer support | Raising source temperature cannot fix a missing field or material binding |
+| Fire is a white solid blob | Flame/temperature ranges and unclipped render values | Narrow `Emit Range`, lower `Emission Scale`/exposure, and remap temperature after measuring ranges | Reducing solver flame may shorten motion and changes the cache, while shading changes are cheaper |
+| Smoke lacks readable depth | Density range, lights, and background | Tune smoke density/absorption and add side or rim lighting before adding solver noise | Extra disturbance increases simulation cost but may still render flat under frontal lighting |
+| Thin fast streaks or source stepping | Maximum speed, voxel size, swept source, actual substeps | Improve source interpolation/swept coverage; then raise `Max Substeps` or lower effective CFL movement | Integer-frame source caches can remain discontinuous even when the solver substeps |
+
+## Noise hierarchy and native-node workflow
+
+Noise is not one generic Pyro control. Diagnose the first stage and first frame where the unwanted smooth pillar, tube, candle, or mushroom shape appears, then change only that layer. If the rasterized source is already cylindrical and uniform, solver disturbance is a late cosmetic patch. If the source has useful variation but the solved plume later forms a smooth cap, the source may be correct and solver shaping is the appropriate layer.
+
+Use this editable native chain as the default:
+
+`IN_PYRO_SOURCE` → `Pyro Source SOP` → source-shape `Attribute Noise SOP` when needed → scalar `Attribute Noise SOP` or `Attribute Adjust Float SOP` nodes for `density`/`temperature`/`flame` → `Point Velocity SOP` or `Attribute Adjust Vector SOP` for `v` → `Volume Rasterize Attributes SOP` → field guides → `Pyro Solver SOP`.
+
+HOM should create, name, connect, position, and set parameters on these standard nodes; the authored network remains native and editable. Do not replace a missing node label with a `Python SOP`, direct `hou.Geometry` point construction, hard-coded voxel arrays, or baked geometry. If a label differs in the installed build, search installed node types/help for the terms below and resolve the native node before considering a short `Attribute Wrangle SOP`. A Wrangle is an exception for a relationship the native nodes cannot reasonably express, not the default way to add noise.
+
+| Noise layer | What it changes | Native nodes and parameter search terms | Route symptoms here when | Do not expect it to fix |
+| --- | --- | --- | --- | --- |
+| Source shape/distribution | Emitter footprint, point positions, clumps, holes, and `pscale` before fields exist | `Pyro Source SOP`; `Attribute Noise SOP`/`Attribute Noise 2.0`; `Attribute Names = P` or `pscale`; `Noise Along Vector`; `Element Size`; `Operation`; `Blend`; `Remap Ramp`; `Location Attribute` | The very first source/raster frame is a smooth disk, tube, sheet, or uniformly filled blob | A good source that only becomes smooth after transport |
+| Source scalar fields | Spatial amount of `density`, `temperature`, and `flame` injected at each location | One `Attribute Noise SOP` or `Attribute Adjust Float SOP` per field; `Attribute Names`; `Noise Range`; `Element Size`; `Operation`; `Minimum/Maximum`; `Animate Noise`; `Pulse Duration` | Base silhouette is acceptable but every point injects identical smoke, heat, or flame, producing a steady column | Missing lateral velocity, broad plume motion, or a renderer binding |
+| Source velocity | Initial direction, speed variation, curl, and inheritance from a moving emitter | `Point Velocity SOP`: `Compute from Deformation`, `Frame Sample`, `Add Curl Noise`, `Animated`, `Scale`, `Swirl Size`, `Pulse Duration`, `Location Attribute`; `Attribute Adjust Vector SOP`: `Direction Only`, `Length Only`; optional volume-first `Volume Velocity SOP`: `Add Curl Noise`, `Swirl Size`, `Turbulence`, `Time Dependent`, `Pulse Length`, `Mask` | The source has shape variation but all material rises in the same straight direction or a moving source does not pass motion into `v` | Density/flame amplitude variation or fine breakup that should develop during solving |
+| Solver shaping | Evolving velocity after sourcing: broad churning, smooth-cap breakup, and redirection of vertical licks | `Pyro Solver SOP` Shape tabs: `Turbulence`, `Swirl Size`, `Pulse Length`, `Roughness`, `Max Octaves`; `Disturbance`, `Mode`, `Continuous`, `Block-Based`, `Base Block Size`; `Shredding`; `Threshold Field`, `Control Field`, `Control Range`, `Compute Range` | Source guides look varied and directional, but later frames become a smooth cap, coherent mushroom, or repetitive vertical licks | A visibly uniform or disconnected source, wrong field mappings, or missing cache fields |
+
+Apply the layers in this order:
+
+1. **Shape first:** compare source points and rasterized fields on the initial/contact frames. Vary `P` or `pscale` only enough to break the primitive silhouette while preserving attachment and source coverage. Use a feature size several source voxels across; sub-voxel bumps disappear during rasterization and only add cost.
+2. **Scalar values second:** use separate nodes so `density`, `temperature`, and `flame` can be enabled and bypassed independently. Prefer multiply/remap or bounded add operations that retain non-negative ranges. A single shared noise can correlate the fields deliberately, but do not assume identical ranges or physical meaning.
+3. **Velocity third:** compute deformation velocity before adding noise. Use `Point Velocity SOP` Curl Noise for spatially coherent motion; use `Attribute Adjust Vector SOP` `Direction Only` when speed must remain fixed or `Length Only` when direction must remain fixed. Conical Noise is not spatially coherent, so reserve it for stable-seed directional jitter rather than broad flow.
+4. **Rasterize and inspect:** ensure the exact `density temperature flame v` contract survives `Volume Rasterize Attributes SOP`. Compare field slices and velocity streamers with optional noise nodes bypassed; a beauty viewport cannot identify which layer failed.
+5. **Bulk solve before shaping:** approve scale, source values, buoyancy, cooling, flame lifespan, bounds, and source velocity. Then add broad `Turbulence` first when the whole plume needs large churning, `Shredding` when fire licks need directional redirection without a primary speed change, and `Disturbance` when later smoke/flame regions need high-frequency breakup.
+6. **Mask solver noise:** use `Threshold Field` and `Control Field`/`Control Range` to keep shaping near relevant `density`, `flame`, `temperature`, or `speed` regions. Run `Compute Range` on representative frames before entering ranges; an unmeasured range can silently apply no noise or noise everywhere.
+
+Treat space and time explicitly:
+
+- `Element Size`, `Swirl Size`, and `Base Block Size` are visual scale controls, not interchangeable strengths. Choose them in world units relative to source width and solver `Voxel Size`. For a `Volume Velocity SOP`, the smallest octave should remain resolvable; the documented diagnostic is `Swirl Size / (2^Turbulence) >= 2 * voxel_size`.
+- `Location Attribute = P` samples world/deformed position, so moving points can swim through the pattern. Use a stable `rest` attribute when noise should remain attached to the emitter. This is a source-space decision, not a solver-shaping substitute.
+- `Animate Noise`/`Animated`, `Pulse Duration`, `Time Dependent`, and `Pulse Length` control temporal evolution. Start with static or slowly evolving coherent noise. Do not change `Seed` per frame or use uncorrelated random values for source fields; that produces boiling/flicker rather than evolving fire.
+- Solver `Turbulence` uses large `Swirl Size` for broad motion and higher `Pulse Length` for slower evolution. `Disturbance` and `Shredding` in `Continuous` mode change their pattern every frame; use a small strength or compare `Block-Based` with measured `Base Block Size` and `Pulse Length` when the result sparkles.
+- More octaves or roughness do not guarantee detail. If the smallest band approaches the voxel size, additional layers become unresolved noise. Preserve world-space scale when lowering `Voxel Size`, then retest one high-resolution window rather than multiplying every strength.
+
+Route common symptoms before experimenting:
+
+- **Straight smooth pillar from the first rasterized frame:** source footprint is uniform and `v` is nearly parallel. Test one source-shape delta, then one velocity-direction delta; do not start with solver `Disturbance`.
+- **Good base but a smooth mushroom cap later:** keep the source fixed. Test broad `Turbulence` for the cap scale, then `Disturbance` or `Shredding` for smaller breakup according to whether the problem is smoothness or repetitive vertical licks.
+- **Tiny boiling detail with no broad character:** noise scale is too small, roughness/octaves are too high, or only disturbance is active. Increase `Element Size`, `Swirl Size`, or `Base Block Size`, reduce high-frequency layers, and re-establish one broad motion band.
+- **Frame-to-frame sparkling:** a seed changes per frame, source noise evolves too quickly, or solver Continuous noise is too strong. Freeze the seed, lengthen `Pulse Duration`/`Pulse Length`, or compare Block-Based shaping.
+- **Whole plume wanders or detaches:** source curl/turbulence amplitude is too large or its scale is larger than the intended flame. Reduce the velocity delta while keeping scalar fields and solver shaping fixed.
+
+For an attached character fire failure such as a pig head with a narrow base, long straight continuous flame column, white-hot center through most of the container, and mushroom cap, use this minimum repair ladder:
+
+1. **Break up the source before the solver:** inspect the first source and raster frames for an over-concentrated region or uninterrupted injection. In `Pyro Source SOP`, distribute points as multiple surface-attached clusters rather than one central column; vary `pscale` and bounded `density`/legacy `fuel` or current `flame` with separate `Attribute Noise SOP` nodes. Add coherent source temporal breakup with `Animate Noise` plus `Pulse Duration` or a slowly moving stable offset. Keep the seed stable so breakup changes over time without sparkling, and prove every cluster still follows the pig surface.
+2. **Reduce the column-driving fields:** with source distribution fixed, lower sustained vertical `v` using `Point Velocity SOP` Scale or `Attribute Adjust Vector SOP` `Length Only`; then bracket source `temperature`, legacy `burn`/`fuel`, or current `flame` amplitude one family at a time. If the column remains too long, shorten `Flame Lifespan`, increase `Cooling Rate`, and only then add modest `Dissipation`. Do not lower all of velocity, temperature, lifespan, and emission in one candidate because the responsible control becomes unknowable.
+3. **Enable solver breakup by scale:** after the base no longer forms a continuous column, add low-strength small-scale `Disturbance`, then medium-scale `Shredding`, then large-scale `Turbulence`, enabling and validating one layer at a time. Use measured `Threshold Field`/`Control Field` ranges so the operators act on relevant flame or speed regions instead of the whole sparse domain.
+4. **Require temporal silhouette evidence:** inspect at least three time points covering contact/early attachment, developed motion, and the former problem or late frame. The main body must not form a thin straight column through most of the container; its silhouette must show time-varying interruption and lateral change while the flame base remains attached to the pig surface. A node merely existing, being connected, or showing a `Turbulence` label is not success; only the multi-frame silhouette and field evidence prove that the effect changed.
+
+For every layer, retain one baseline plus two or three small candidate deltas. Change only one amplitude, size, or time parameter family; reset from `Start Frame`; and judge the same motion-risk-selected representative frames, usually 3-6 within the runtime's 1-6 range. Reject any candidate that improves one still but causes source detachment, flicker, lost field ranges, or a worse developed/decay frame.
+
+Native-node retrieval phrases are represented verbatim: **Pyro smooth pillar mushroom source shape noise Attribute Noise SOP pscale density temperature flame**, **Pyro Point Velocity SOP Curl Noise Attribute Adjust Vector Direction Only Length Only**, **Pyro Solver Disturbance Block-Based Shredding Turbulence Swirl Size Pulse Length Control Field**, **HOM native Houdini Pyro nodes avoid Python SOP single variable multi-frame validation**, and **pig head long straight continuous flame column narrow base white-hot center mushroom cap surface attachment**.
+
+## Executable parameter and connection contract
+
+Use this as a reproducible diagnostic baseline, not as a claim about Houdini defaults or final art direction.
+
+1. Feed animated emitter geometry into input 1 of `Pyro Source SOP`. For already prepared points set `Mode` to **Keep Input**; use **Surface Scatter** or **Volume Scatter** only when the representation requires it. In the attribute multiparm author scalar `density` and, for a flame setup, `temperature` and `flame`; author `v` as a vector. Keep `density >= 0`, `pscale > 0`, and all vector components finite.
+2. Connect `Pyro Source SOP` to `Volume Rasterize Attributes SOP`. Set `Attributes` to the exact space-separated contract, for example `density temperature flame v`. Start with rasterizer `Voxel Size` equal to solver `Voxel Size`, `Particle Scale = 1`, and the Gaussian filter. Equality is a debugging baseline: changing source and solver resolution independently makes coverage failures difficult to attribute.
+3. Connect rasterized volumes to input 1 of `Pyro Solver SOP`; connect collision geometry or prepared fields to input 2. The sparse collision contract is an SDF named `collision` plus motion named `v` or the active solver's collision-velocity field. Do not merge collider polygons into the source-field stream.
+4. In the solver record `Simulation Type = Sparse`, `Start Frame`, `Velocity Voxel Scale`, and `Voxel Size`. Use several voxels across the narrowest feature that must survive rather than a magic scene-wide value. For an initial stability comparison, keep `Global Substeps = 1`, allow `Max Substeps = 2`, and try `CFL Condition = 1`; these are diagnostic trial values, not official defaults or guaranteed finals.
+5. Measure incoming temperature/flame maxima before solving. In the current interface, `Ambient Temp (K)` maps field value 0 and `Reference Temp (K)` helps give field value 1 a physical meaning; `Buoyancy Scale` then adjusts rise strength. Increase `Cooling Rate` when hot rise should stop sooner. Start flame work with `Flame Lifespan`; change activation ranges only after the incoming range is known. Confirm all labels in the active build.
+6. For smoke isolation set `Dissipation = 0` for one short baseline, then compare a small non-zero trial such as `0.05` or `0.1`. Keep `Clamp Below` active for sparse solves so negligible density does not expand the domain indefinitely. Use `Compute Range` before entering a `Control Range`; the control ramp operates on the mapped `0..1` result.
+7. After the solver, branch to diagnostic volume visualizers and to `Pyro Post-Process SOP` when export optimization is needed. Enable `Convert to VDB` for sparse VDB delivery and include `vel` in `Vector VDBs`. Keep `Voxel Size Scale = 1` for the reference; `2` intentionally halves resolution on each axis. Compare `Use 16bit Float` with a 32-bit reference because storage savings can trade precision and processing cost.
+8. For fast sources, calculate `speed * frame_duration / voxel_size`. Values spanning several voxels per frame require swept or subframe source coverage as well as solver timing attention. A `Trail SOP`-derived `v` can describe motion, but velocity alone does not fill unsampled gaps. Inspect the rasterized source at fractional frames if the upstream animation supports it.
+9. Connect the selected post-process/reference branch to `File Cache SOP`. Set explicit `Start/End/Inc`, versioned `Base Name`/path, and write mode. Include EffectSpec ID, candidate ID, source revision, solver revision, voxel size, start frame, and field list in nearby metadata or a human-readable cache ledger.
+10. The disk branch must use **Load from Disk** or an explicit reader and feed `OUT_PYRO_CACHE` with the live solver bypassed. Put `Pyro Bake Volume SOP` or the render material downstream of reload so every look candidate consumes the exact same simulation cache.
+
+Six intended retrieval phrases are deliberately represented in this card: **Pyro Source Volume Rasterize Attributes density temperature flame**, **sparse Pyro Solver Voxel Size CFL Condition Max Substeps collision SDF**, **Pyro Post-Process VDB 16-bit cache velocity motion blur**, **Pyro EffectSpec source solver material render candidate acceptance**, **detached flame candle smooth mushroom smoke black Karma render**, and **Pyro Start Frame low resolution viewport stale cache checkpoint**.
 
 ## Data flow, cache, version, and performance
 
-Voxel count grows cubically as voxel size decreases; sparse bounds still become expensive when padding or active regions expand. Prototype at coarse resolution, keep shaping scale-aware, then lower voxel size at a controlled cache stage. Never mix cache frames generated with different voxel sizes or source schemas under one version. Older DOP-network examples remain useful conceptually, but current SOP-level Pyro parameters can differ.
+Voxel count grows roughly cubically as `Voxel Size` decreases; halving voxel size can approach eight times the cell work before solver-specific overhead. Sparse bounds still become expensive when padding, residual density, or fast sources enlarge the active region. Coarse candidates should settle source timing, broad motion, and control-region direction; they cannot prove thin flame detail, small collisions, final sampling, or material response.
+
+Reset the simulation after every source or solver change and return to the configured `Start Frame`. A playbar positioned later is not proof that the solver recomputed its history. If the desired first visible frame needs established flow, start earlier and cache the pre-roll; `Frames Before Solve` is a solver behavior control, not a substitute for an intentional warm-up. Verify that sources and animated collisions are valid across the whole warm-up.
+
+Treat viewport volume display as a diagnostic, not the final judge. Tighe Rzankowski documented a 256³ viewport downsample limit in H16; that numeric limit is historical and must not be generalized to current Houdini. The durable lesson is to compare field guides and a representative render because viewport display, `Pyro Bake Volume SOP`, material, renderer, exposure, and color management can show different responses. Do not run expensive bake/look nodes while iterating on the solver if they obscure cook cost.
+
+Never mix frames from different source schemas, solver settings, voxel sizes, start frames, or candidates in one cache path. A cache signature should identify frame range, candidate, source revision, solver revision, field list, voxel size, precision, and renderer-facing post-process. A “complete” folder with stale middle frames is a failed cache.
 
 ## Common failures and repairs
 
-- **No smoke:** inspect rasterized volume names and source-to-destination mapping before increasing density.
-- **Domain clips:** increase adaptive padding/expansion or correct source/collision bounds; verify guides on the failing frame.
-- **Fire rises unrealistically:** check scale, temperature range, buoyancy, and time scale as a system.
-- **Flickering cache:** missing frames, mixed versions, or changing topology/bounds; inspect files and cache metadata.
-- **Excess memory:** coarsen voxel size, restrict fields and bounds, and cache only downstream-required volumes after validation.
+| Observable failure | Likely causes, in inspection order | Minimum repair and next experiment |
+| --- | --- | --- |
+| No smoke or fire | Wrong rasterized names; empty source range; source operation targets the wrong destination; cache lacks fields | Inspect node info and field guides, correct the mapping, reset from `Start Frame`, and rerun a five-frame source baseline |
+| Detached or floating flame | Source begins above the surface; sparse sampling misses motion; flame persists too long; inherited `v` points away from the target | Fix source coverage/attachment first, then bracket `Flame Lifespan`; keep buoyancy and material fixed |
+| Smooth candle spikes | Uniform source, no meaningful lateral velocity, insufficient shredding, or all shaping at a scale finer than the silhouette | Add measurable source variation, then compare one shredding or broad-turbulence delta |
+| Mushroom smoke instead of readable flame | Excess `density`, short `flame` lifespan, temperature cools too quickly, or emission mapping hides valid flame | Inspect the three fields separately; decide whether the failed region is simulation or material before changing it |
+| Fire guide exists but Karma render is black | `flame`/`temperature` omitted from cache, incorrect volume names, missing material assignment, unsupported node, exposure/color transform | Validate cached fields and bindings with a simple known material; do not resim until render plumbing passes |
+| White/yellow opaque blob | Emission source range too broad, scale/exposure clipped, smoke density too high, or scatter overwhelms structure | Measure field ranges, narrow `Emit Range`, lower look/exposure controls, and compare an unclipped render |
+| Fast source leaves beads or streaks | Integer-frame sampling, unswept raster source, missing velocity, insufficient `Max Substeps`, or large `CFL Condition` | Inspect fractional source frames, improve swept coverage, then raise the substep ceiling with recorded actual substeps |
+| Stair-step or clipped sparse edge | Padding too small, active domain cannot keep up, or cache contains mixed bounds/settings | Increase padding or fix bounds, reset, and validate the exact failing frame; never patch only the cached frame |
+| Flicker appears only from disk | Missing/duplicate frames, mixed candidates, changing precision or field list, stale checkpoint, or live branch still connected | Quarantine the versioned path, recache a short contiguous range, reload with solver bypassed, and compare hashes/metadata |
+| Low-res candidate works but final becomes noisy | Continuous disturbance/noise scale changed with voxel size, source coverage changed, or material step/sampling exposes different detail | Preserve world-space shaping intent, retest one high-resolution window, and tune final sampling separately |
+| Collision leaks | Wrong SDF sign/thickness, missing collision velocity, insufficient spatial resolution, substeps, or collision iterations | Inspect collision guide and motion fields, then change the smallest implicated control; capture the speed/voxel ratio |
+| Memory or cook time explodes | Smaller voxels, excessive padding, lingering density, unnecessary fields, bake nodes recooking, or caches sharing a branch | Coarsen the experiment, clamp/dissipate negligible density, restrict fields/bounds, and separate sim from lookdev |
+
+## Checkpoints and observable evidence
+
+- **P0 — EffectSpec and source:** the experiment/evidence record names target/invariants, start/end, scale, the motion-risk-selected representative frame set (runtime range 1-6; usually 3-6), and candidate deltas. On the first emission frame, the experiment/evidence record shows finite `P`, `pscale`, `v`, and only declared scalar attributes; a velocity visualizer points in the intended direction.
+- **P1 — rasterization:** node information lists exactly requested volume names; voxel sizes match the diagnostic baseline, non-zero bounds enclose the swept emitter with margin, and sampled `density`, `temperature`, and `flame` ranges are finite and recorded.
+- **P2 — solved candidates:** the baseline and all candidate deltas were reset and cooked from the configured start. Field guides and captures exist for the selected representative frames; only the declared control family differs, and the chosen candidate removes a named mismatch without breaking accepted invariants.
+- **P3 — collision and look:** collision guide encloses the collider with expected SDF sign and motion. The disk-loaded cache produces a material preview and representative render in which density, emission, temperature color, exposure, and camera/background are recorded.
+- **P4 — cache and decision:** first, middle, and last files are present and non-empty; reload reports matching fields, range, voxel size, bounds, start frame, and candidate signature. The record includes rejected candidate images, failure causes tested, selected candidate, and exactly one next control region.
+
+Successful engineering evidence is the combination of editable node paths and connections, parameter values and candidate deltas, source/field ranges, actual start/reset behavior, representative field guides, cache identity and coverage, material bindings, render settings, and visual comparisons. A failed case is still useful only when it records the observed mismatch, frame, invalidated hypothesis, unchanged invariants, and minimum next experiment. A lone beauty frame, a viewport flipbook without cache identity, or “looks better” is not acceptance.
+
+## When not to use this workflow
+
+Do not use a Pyro solve for static fog that can be modeled directly, a particle-only stylized plume needing no field evolution, a two-dimensional image effect better built in Copernicus, or a scientific combustion claim requiring validated physical chemistry. Do not invoke combustion fields for smoke-only work. Do not use this candidate loop when the defect is already a deterministic field-name, file, material-binding, or start-frame error; repair and verify that contract directly.
 
 ## Provenance boundary
 
-Matt Estela's DOP notes and Mark Spevick's fire/flames tutorial motivate field-oriented debugging. The sparse SOP topology, mapping table, and cache evidence are original synthesis. Exact solver parameter availability is unverified.
+Matt Estela's DOP notes and Mark Spevick's H17.5 fire/flames lesson motivate field-oriented debugging, separating fuel/temperature concerns, emitter work, caching, and rendering. Attila Torok's H19.5 creator talk motivates improving a small fire through an explicit visual thought process. Tighe Rzankowski's H16 flamethrower project contributes the author-specific warnings about fast-source time stepping, iterative low-resolution work, and the historical viewport limitation. These ideas are synthesized here rather than copied; no tutorial prose, code, transcript, video, or project file is redistributed.
+
+General Houdini principles in this card are: verify source fields before solving, establish bulk motion before shaping, separate simulation from material/render controls, reset from the configured start, vary one control family, and make caches reproducible. Author-specific techniques include Tighe's fast-source construction and H16 viewport observation, Mark's combustion walkthrough, and Attila's presentation-specific realism iterations. Exact best-looking values, old DOP labels, GPU/CPU parity, and the transfer of H16-H19.5 settings to H22 remain `community_unverified`. Current H22 parameter facts were checked against SideFX's separate official knowledge, but this card retains its explicit community source and verification status.
 
 ## Semantic expectations and verification checklist
 
-- Presence: rasterized and simulated volume names match the declared field map.
-- Mapping: every source field names one destination and operation; collision input resolves to the intended geometry/SDF.
-- Range: fields contain finite values; density is non-negative; active bounds enclose meaningful voxels with margin.
-- Cook evidence: solver advances across the requested frame range without recooking unrelated upstream topology.
-- Cache evidence: expected files exist for every frame; reload lists the required fields and matching resolution/bounds.
-- Visual evidence: source emission, motion, dissipation, and collision response are visible without container clipping or one-frame discontinuities.
+- Presence: the EffectSpec, candidate IDs, source fields, solved fields, cache fields, material inputs, and render evidence all exist.
+- Mapping: every source field names one destination and operation; collision input resolves to intended geometry/SDF; cached `flame` and `temperature` bind to declared look controls.
+- Range: fields are finite; density is non-negative; source maxima are recorded; active bounds enclose meaningful voxels with swept-motion margin.
+- Cook evidence: the baseline and every candidate delta reset and advance from the configured `Start Frame`; representative frames share source, seed, resolution, camera, and all non-tested controls.
+- Cache evidence: every requested frame exists under one version; reload lists required fields and matching resolution/bounds/signature with the live solver bypassed.
+- Visual evidence: contact, developed, and decay images expose source attachment, bulk motion, breakup, smoke/emission balance, collisions, and render response without clipping or unexplained discontinuity.
+- Decision evidence: acceptance/rejection names the largest mismatch, the control region responsible, candidate delta, invalidated hypotheses, and one bounded next step.
 
 ## Sources
 
-- Matt Estela, [Dops](https://www.tokeru.com/cgwiki/HoudiniDops.html).
-- Mark Spevick, [PyroFX Fire & Flames](https://www.sidefx.com/tutorials/pyrofx-fire-flames/).
+- Matt Estela, [Dops](https://www.tokeru.com/cgwiki/HoudiniDops.html), multiple Houdini generations; verify current interfaces.
+- Mark Spevick, [PyroFX Fire & Flames](https://www.sidefx.com/tutorials/pyrofx-fire-flames/), Houdini 17.5.
+- Attila Torok, [Sexy Fires Will Not Burn Your Hands!](https://www.sidefx.com/learn/talks/h195-sexy-fires-will-not-burn-your-hands/), Houdini 19.5.
+- Tighe Rzankowski, [Fire Hydrant](https://www.sidefx.com/tutorials/fire-hydrant/), Houdini 16.

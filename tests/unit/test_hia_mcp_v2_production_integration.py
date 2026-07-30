@@ -378,12 +378,21 @@ class BridgeBackendIntegrationTests(unittest.TestCase):
     def test_hia_environment_contract_ignores_upstream_values(self) -> None:
         token = "v2_" + "x" * 40
         expected_runtime = REPOSITORY_ROOT / ".runtime" / "hia-mcp-v2"
+        expected_executor = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "executor.py"
+        )
         environment = {
             "HIA_MCP_V2_HOST": "127.0.0.1",
             "HIA_MCP_V2_PORT": "45123",
             "HIA_MCP_V2_TOKEN": token,
             "HIA_MCP_V2_ROUTE": "/hia-mcp-v2/v1/execute",
             "HIA_MCP_V2_RUNTIME_DIR": str(expected_runtime),
+            "HIA_MCP_V2_EXECUTOR_PATH": str(expected_executor),
+            "HIA_LAUNCHER_SESSION_ID": "1" * 32,
             "FXHOUDINIMCP_PORT": "8999",
             "FXHOUDINIMCP_TOKEN": "upstream_" + "z" * 40,
         }
@@ -397,6 +406,8 @@ class BridgeBackendIntegrationTests(unittest.TestCase):
                 "HIA_MCP_V2_TOKEN",
                 "HIA_MCP_V2_ROUTE",
                 "HIA_MCP_V2_RUNTIME_DIR",
+                "HIA_MCP_V2_EXECUTOR_PATH",
+                "HIA_LAUNCHER_SESSION_ID",
             },
             set(result),
         )
@@ -462,6 +473,14 @@ class HoudiniRuntimeIntegrationTests(unittest.TestCase):
                     "HIA_MCP_V2_PORT": "45124",
                     "HIA_MCP_V2_TOKEN": "uiready_" + "a" * 40,
                     "HIA_MCP_V2_ROUTE": "/hia-mcp-v2/v1/execute",
+                    "HIA_MCP_V2_EXECUTOR_PATH": str(
+                        REPOSITORY_ROOT
+                        / "houdini_package"
+                        / "python_libs"
+                        / "hia_mcp_runtime"
+                        / "executor.py"
+                    ),
+                    "HIA_LAUNCHER_SESSION_ID": "1" * 32,
                     "FXHOUDINIMCP_AUTOSTART": "1",
                 }
                 with mock.patch.dict(os.environ, environment, clear=True), mock.patch.dict(
@@ -477,6 +496,14 @@ class HoudiniRuntimeIntegrationTests(unittest.TestCase):
                     project_root=REPOSITORY_ROOT.resolve(),
                     token="uiready_" + "a" * 40,
                     port=45124,
+                    launcher_session_id="1" * 32,
+                    expected_executor_path=(
+                        REPOSITORY_ROOT
+                        / "houdini_package"
+                        / "python_libs"
+                        / "hia_mcp_runtime"
+                        / "executor.py"
+                    ).resolve(),
                 )
                 fx_start.assert_not_called()
 
@@ -511,6 +538,9 @@ class HoudiniRuntimeIntegrationTests(unittest.TestCase):
         class FakeHipFile:
             def path(self) -> str:
                 return str(REPOSITORY_ROOT / "integration-test.hip")
+
+            def isNewFile(self) -> bool:  # noqa: N802
+                return False
 
             def hasUnsavedChanges(self) -> bool:
                 return False
@@ -555,17 +585,29 @@ class HoudiniRuntimeIntegrationTests(unittest.TestCase):
             project_root=REPOSITORY_ROOT,
         )
         token = "runtime_" + "r" * 40
+        launcher_session_id = "2" * 32
+        executor_path = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "executor.py"
+        ).resolve()
         session = start_runtime_server(
             executor=executor,
             project_root=REPOSITORY_ROOT,
             token=token,
             port=0,
+            launcher_session_id=launcher_session_id,
+            expected_executor_path=executor_path,
         )
         transport = LoopbackTransport(
             TransportConfig(
                 host="127.0.0.1",
                 port=session.port,
                 token=token,
+                launcher_session_id=launcher_session_id,
+                executor_module_path=str(executor_path),
                 route=RUNTIME_EXECUTE_ROUTE,
                 timeout_seconds=3,
             )
@@ -573,7 +615,9 @@ class HoudiniRuntimeIntegrationTests(unittest.TestCase):
         try:
             request = urllib.request.Request(
                 f"http://127.0.0.1:{session.port}{RUNTIME_HEALTH_ROUTE}",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                },
                 method="GET",
             )
             with urllib.request.urlopen(request, timeout=3) as response:
@@ -581,7 +625,12 @@ class HoudiniRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(RUNTIME_PROTOCOL, health["protocol"])
             self.assertTrue(health["ok"])
             self.assertEqual("hia_mcp_v2", health["result"]["server_id"])
-            self.assertEqual(0, dispatch_count)
+            identity = health["result"]["runtime_identity"]
+            self.assertEqual(launcher_session_id, identity["launcher_session_id"])
+            self.assertEqual(str(executor_path), identity["executor_module_path"])
+            self.assertEqual(str(REPOSITORY_ROOT / "integration-test.hip"), identity["hip_path"])
+            self.assertEqual("saved", identity["hip_state"])
+            self.assertGreaterEqual(dispatch_count, 1)
 
             result = transport.call(
                 "hia_context",
@@ -592,7 +641,7 @@ class HoudiniRuntimeIntegrationTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual("21.0.440", result["result"]["houdini_build"])
             self.assertEqual(["Lop", "Sop"], result["result"]["available_contexts"])
-            self.assertEqual(1, dispatch_count)
+            self.assertGreaterEqual(dispatch_count, 2)
             self.assertEqual("127.0.0.1", session.host)
             self.assertEqual(REPOSITORY_ROOT / ".runtime" / "hia-mcp-v2", session.runtime_directory)
         finally:

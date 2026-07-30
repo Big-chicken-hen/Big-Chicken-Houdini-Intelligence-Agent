@@ -178,6 +178,14 @@ class BridgeHTTPTests(unittest.TestCase):
 
     def test_hia_v2_health_uses_authenticated_get_and_strict_payload(self) -> None:
         mcp_token = "hia-runtime-" + "x" * 40
+        launcher_session_id = "1" * 32
+        executor_path = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "executor.py"
+        ).resolve()
         application = BridgeApplication(
             self.session,
             self.events,
@@ -185,14 +193,32 @@ class BridgeHTTPTests(unittest.TestCase):
             houdini_mcp_port=45123,
             houdini_mcp_token=mcp_token,
             houdini_mcp_backend="hia_v2",
+            houdini_launcher_session_id=launcher_session_id,
+            houdini_executor_path=executor_path,
         )
+        identity = {
+            "identity_version": 1,
+            "launcher_session_id": launcher_session_id,
+            "houdini_pid": 1234,
+            "hip_path": str(REPOSITORY_ROOT / "scene.hip"),
+            "hip_state": "saved",
+            "scene_revision": 4,
+            "executor_module_path": str(executor_path),
+            "executor_loaded_mtime_ns": executor_path.stat().st_mtime_ns,
+            "executor_disk_mtime_ns": executor_path.stat().st_mtime_ns,
+            "executor_source_status": "current",
+        }
         payload = {
             "protocol": "hia-mcp-v2/1",
             "ok": True,
-            "result": {"server_id": "hia_mcp_v2", "scene_revision": 4},
+            "result": {
+                "server_id": "hia_mcp_v2",
+                "scene_revision": 4,
+                "runtime_identity": identity,
+            },
         }
         with mock.patch(
-            "hia_bridge.http_server.urllib_request.urlopen",
+            "hia_mcp_v2.transport.urllib.request.urlopen",
             return_value=io.BytesIO(json.dumps(payload).encode("utf-8")),
         ) as open_url:
             status = application.houdini_mcp_status()
@@ -204,6 +230,9 @@ class BridgeHTTPTests(unittest.TestCase):
                 "display_name": "HIA MCP V2",
                 "available": True,
                 "scene_revision": 4,
+                "runtime_identity": identity,
+                "identity_status": "verified",
+                "restart_required": False,
             },
             status,
         )
@@ -216,18 +245,63 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(f"Bearer {mcp_token}", request.get_header("Authorization"))
         self.assertEqual(0.75, open_url.call_args.kwargs["timeout"])
 
-        invalid_payload = {**payload, "unexpected": True}
+        stale_identity = {
+            **identity,
+            "executor_loaded_mtime_ns": identity[
+                "executor_loaded_mtime_ns"
+            ]
+            + 1,
+            "executor_source_status": "stale",
+        }
+        stale_payload = {
+            **payload,
+            "result": {
+                **payload["result"],
+                "runtime_identity": stale_identity,
+            },
+        }
         with mock.patch(
-            "hia_bridge.http_server.urllib_request.urlopen",
+            "hia_mcp_v2.transport.urllib.request.urlopen",
+            return_value=io.BytesIO(
+                json.dumps(stale_payload).encode("utf-8")
+            ),
+        ):
+            stale = application.houdini_mcp_status()
+        self.assertFalse(stale["available"])
+        self.assertEqual("STALE_HOUDINI_RUNTIME", stale["identity_error_code"])
+        self.assertEqual(stale_identity, stale["runtime_identity"])
+        self.assertTrue(stale["restart_required"])
+
+        invalid_payload = {
+            "protocol": "hia-mcp-v2/1",
+            "ok": True,
+            "result": {"server_id": "hia_mcp_v2", "scene_revision": 4},
+        }
+        with mock.patch(
+            "hia_mcp_v2.transport.urllib.request.urlopen",
             return_value=io.BytesIO(json.dumps(invalid_payload).encode("utf-8")),
         ):
             unavailable = application.houdini_mcp_status()
         self.assertFalse(unavailable["available"])
         self.assertEqual("hia_v2", unavailable["backend"])
         self.assertIsNone(unavailable["scene_revision"])
+        self.assertEqual("stale_or_changed", unavailable["identity_status"])
+        self.assertEqual(
+            "STALE_HOUDINI_RUNTIME",
+            unavailable["identity_error_code"],
+        )
+        self.assertTrue(unavailable["restart_required"])
 
     def test_project_memory_route_forwards_only_the_fixed_hia_tool(self) -> None:
         mcp_token = "hia-runtime-" + "m" * 40
+        launcher_session_id = "2" * 32
+        executor_path = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "executor.py"
+        ).resolve()
         self.server.application = BridgeApplication(
             self.session,
             self.events,
@@ -235,6 +309,8 @@ class BridgeHTTPTests(unittest.TestCase):
             houdini_mcp_port=45124,
             houdini_mcp_token=mcp_token,
             houdini_mcp_backend="hia_v2",
+            houdini_launcher_session_id=launcher_session_id,
+            houdini_executor_path=executor_path,
         )
         active_id = "mem_" + "a" * 32
         old_id = "mem_" + "b" * 32
@@ -269,16 +345,21 @@ class BridgeHTTPTests(unittest.TestCase):
                 value["source_turn_id"] = source_turn_id
             return value
 
-        def runtime_response(request: Any, **_kwargs: Any) -> io.BytesIO:
-            envelope = json.loads(request.data.decode("utf-8"))
+        def runtime_response(
+            tool_name: str,
+            arguments: dict[str, Any],
+            *,
+            request_id: str,
+            cancellation: Any,
+        ) -> dict[str, Any]:
             captured.append(
                 {
-                    "url": request.full_url,
-                    "authorization": request.get_header("Authorization"),
-                    "envelope": envelope,
+                    "tool": tool_name,
+                    "arguments": dict(arguments),
+                    "request_id": request_id,
+                    "cancellation": cancellation,
                 }
             )
-            arguments = envelope["arguments"]
             action = arguments["action"]
             if action == "list":
                 result = {
@@ -363,23 +444,15 @@ class BridgeHTTPTests(unittest.TestCase):
                     "memory_id": arguments["memory_id"],
                     "deleted": True,
                 }
-            raw = json.dumps(
-                {
-                    "protocol": "hia-mcp-v2/1",
-                    "ok": True,
-                    "id": envelope["id"],
-                    "result": {
-                        "ok": True,
-                        "result": result,
-                        "stdout": "",
-                        "warnings": [],
-                        "errors": [],
-                        "revision": 7,
-                        "dirty": False,
-                    },
-                }
-            ).encode("utf-8")
-            return io.BytesIO(raw)
+            return {
+                "ok": True,
+                "result": result,
+                "stdout": "",
+                "warnings": [],
+                "errors": [],
+                "revision": 7,
+                "dirty": False,
+            }
 
         record_arguments = {
             "action": "record",
@@ -398,52 +471,51 @@ class BridgeHTTPTests(unittest.TestCase):
             "title": "Updated scale",
             "body": "Use surveyed dimensions.",
         }
-        with mock.patch(
-            "hia_bridge.http_server.urllib_request.urlopen",
-            side_effect=runtime_response,
-        ):
-            listed = self.request(
+        transport = mock.Mock()
+        transport.call.side_effect = runtime_response
+        self.server.application._hia_transport = transport
+        listed = self.request(
+            "POST",
+            "/v1/project-memory",
+            {
+                "action": "list",
+                "include_superseded": True,
+                "offset": 0,
+                "limit": 50,
+            },
+        )
+        searched = self.request(
+            "POST",
+            "/v1/project-memory",
+            {
+                "action": "search",
+                "query": "cabin scale",
+                "include_superseded": True,
+                "offset": 0,
+                "limit": 50,
+            },
+        )
+        recorded = self.request(
+            "POST",
+            "/v1/project-memory",
+            record_arguments,
+        )
+        superseded = self.request(
+            "POST",
+            "/v1/project-memory",
+            supersede_arguments,
+        )
+        deleted = self.request(
+            "POST",
+            "/v1/project-memory",
+            {"action": "delete", "memory_id": active_id},
+        )
+        with self.assertRaises(HTTPError) as missing_id:
+            self.request(
                 "POST",
                 "/v1/project-memory",
-                {
-                    "action": "list",
-                    "include_superseded": True,
-                    "offset": 0,
-                    "limit": 50,
-                },
+                {"action": "delete"},
             )
-            searched = self.request(
-                "POST",
-                "/v1/project-memory",
-                {
-                    "action": "search",
-                    "query": "cabin scale",
-                    "include_superseded": True,
-                    "offset": 0,
-                    "limit": 50,
-                },
-            )
-            recorded = self.request(
-                "POST",
-                "/v1/project-memory",
-                record_arguments,
-            )
-            superseded = self.request(
-                "POST",
-                "/v1/project-memory",
-                supersede_arguments,
-            )
-            deleted = self.request(
-                "POST",
-                "/v1/project-memory",
-                {"action": "delete", "memory_id": active_id},
-            )
-            with self.assertRaises(HTTPError) as missing_id:
-                self.request(
-                    "POST",
-                    "/v1/project-memory",
-                    {"action": "delete"},
-                )
 
         self.assertEqual(2, listed["total"])
         self.assertEqual(
@@ -499,24 +571,11 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(400, missing_id.exception.code)
         self.assertEqual(
             ["list", "search", "record", "supersede", "delete"],
-            [
-                entry["envelope"]["arguments"]["action"]
-                for entry in captured
-            ],
+            [entry["arguments"]["action"] for entry in captured],
         )
         for entry in captured:
-            self.assertEqual(
-                "http://127.0.0.1:45124/hia-mcp-v2/v1/execute",
-                entry["url"],
-            )
-            self.assertEqual(
-                f"Bearer {mcp_token}",
-                entry["authorization"],
-            )
-            self.assertEqual(
-                "hia_project_memory",
-                entry["envelope"]["tool"],
-            )
+            self.assertEqual("hia_project_memory", entry["tool"])
+            self.assertTrue(entry["request_id"].startswith("bridge-memory-"))
 
         with self.assertRaises(HTTPError) as raised:
             self.request(

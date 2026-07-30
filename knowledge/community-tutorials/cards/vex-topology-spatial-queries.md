@@ -29,6 +29,15 @@ Use this when VEX must walk connected geometry, find nearby elements, build rela
 - Mutation wrangle owns `addpoint`, `addprim`, `addvertex`, or removals; it must not silently discard `name`, `id`, or groups.
 - Diagnostic nodes prove cardinality and mapping, not just appearance.
 
+## Executable parameter and connection contract
+
+1. Connect the topology to input 1 of `Attribute Wrangle SOP` named `DISCOVER_RELATIONSHIPS`; connect a reference/search surface to input 2 when required. Set **Run Over** to Points for point neighbors, Primitives for primitive adjacency, or Detail for a deliberately serial graph-wide operation.
+2. For spatial neighbors expose `radius > 0` and integer `maxpoints >= 1`. A point-domain pattern is `i[]@neighbors = nearpoints(1, @P, chf("radius"), chi("maxpoints"));`. If the search uses the same geometry input, remove `@ptnum` deliberately; never remove that integer from a different input where it has another identity.
+3. For surface projection use `xyzdist(1, @P, i@hitprim, v@hituvw)` and retain the returned non-negative distance. Guard `i@hitprim >= 0` before `primuv`; sample only named attributes that exist on input 2. Put misses in `projection_miss` and do not fabricate a zero-position hit.
+4. For topological relationships use `pointprims`, `primpoints`, or half-edge functions on input 0. Store results first as bounded arrays and validate every index against `npoints(0)`/`nprimitives(0)`. A proximity match is not proof of shared topology.
+5. Connect discovery to a second `Attribute Wrangle SOP` named `APPLY_TOPOLOGY_EDIT`. This node alone may call `addpoint`, `addprim`, `addvertex`, or removals. Carry stable `id`/`name` fields across the edit; do not consume stored element numbers after an intervening topology-changing node.
+6. Parameter ranges are contract data: radius is in scene units, `maxpoints` is capped, distances are finite and non-negative, `hituvw` is finite, and required neighbor counts have declared minima/maxima. Use a group filter when only part of the geometry is eligible.
+
 ## Data flow, caching, version, and performance
 
 Topology indices are only stable until a topology-changing node. Cache either before discovery with a stable upstream hash or after mutation with the relationship attributes needed downstream. `nearpoints` with large radius/count per point trends toward costly all-to-all work; use spatial locality, groups, or a second input. Native SOPs may outperform VEX for common connectivity tasks. Function signatures are established Houdini concepts, but this exact staged implementation is the project's synthesis and is not live-verified.
@@ -40,6 +49,18 @@ Topology indices are only stable until a topology-changing node. Cache either be
 - **Results change after deletion:** stored indices referenced pre-mutation topology. Split discovery and mutation, or use stable `id`/`name`.
 - **Slow cook:** cap proximity results, avoid nested unbounded loops, and profile native alternatives.
 - **Projection jumps across surfaces:** restrict candidate primitives/groups or validate normal/distance in addition to nearest distance.
+
+## Checkpoints and observable evidence
+
+- **Q0 — input:** record point/primitive counts, shared-point structure, and the connected input number for every lookup.
+- **Q1 — discovery:** required-hit miss count is zero; optional misses are isolated. Neighbor-count min/max never exceed `maxpoints`, and every stored index resolves on the unchanged discovery geometry.
+- **Q2 — projection:** `hitprim`, `hituvw`, and distance reproduce a sampled position on the intended primitive within a documented tolerance.
+- **Q3 — mutation:** observed point/primitive count deltas equal the declared additions/removals, with zero accidental isolated points or degenerate primitives.
+- **Q4 — performance:** Performance Monitor shows bounded growth when input count doubles; an unbounded quadratic jump triggers a group/radius/native-node redesign.
+
+## When not to use this workflow
+
+Do not write VEX traversal for connectivity, transfer, or proximity that a clear native SOP already performs and profiles faster. Do not use spatial proximity when identity/topology is the actual relation, and do not store point or primitive numbers across a topology-changing boundary when stable `id`/`name` mapping is available.
 
 ## Provenance boundary
 

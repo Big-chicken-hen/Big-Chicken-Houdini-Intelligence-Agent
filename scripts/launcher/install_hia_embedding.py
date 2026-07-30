@@ -294,11 +294,14 @@ def build_plan(
 
     model_relative = getattr(profile, "model_directory", None)
     model_id = getattr(profile, "model_id", None)
+    repository_size_gb = getattr(profile, "repository_size_gb", None)
     if (
         not isinstance(model_relative, str)
         or not model_relative
         or not isinstance(model_id, str)
         or not model_id
+        or not isinstance(repository_size_gb, (int, float))
+        or repository_size_gb <= 0
     ):
         raise InstallerError("embedding profile contract is invalid")
     model_dir = (project_root / model_relative).resolve(strict=False)
@@ -322,6 +325,7 @@ def build_plan(
         not isinstance(serialized_profile, Mapping)
         or serialized_profile.get("model_id") != model_id
         or serialized_profile.get("model_directory") != model_relative
+        or serialized_profile.get("repository_size_gb") != repository_size_gb
     ):
         raise InstallerError("embedding profile registry disagrees with launcher contract")
 
@@ -349,6 +353,7 @@ def build_plan(
         "profile_id": profile_id,
         "model_id": model_id,
         "revision": revision,
+        "repository_size_gb": float(repository_size_gb),
         "model_dir": str(model_dir),
         "manifest_path": str(model_dir / MODEL_MANIFEST_NAME),
         "layout": layout,

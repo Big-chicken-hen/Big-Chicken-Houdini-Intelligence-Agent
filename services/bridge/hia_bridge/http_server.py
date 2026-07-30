@@ -11,8 +11,8 @@ import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
-from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlsplit
@@ -34,20 +34,23 @@ from .session import BridgeSession
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_SCENE_REQUEST_BYTES = 262_144
 MAX_SCENE_POLL_MS = 1_000
-MAX_MCP_HEALTH_RESPONSE_BYTES = 65_536
-MAX_MCP_TOOL_RESPONSE_BYTES = 4_194_304
 SCENE_EXECUTOR_HEADER = "X-HIA-Executor-Token"
 HIA_MCP_V2_BACKEND = "hia_v2"
 FXHOUDINI_MCP_BACKEND = "fxhoudini"
-HIA_MCP_V2_HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
-HIA_MCP_V2_EXECUTE_ROUTE = "/hia-mcp-v2/v1/execute"
-HIA_MCP_V2_WIRE_PROTOCOL = "hia-mcp-v2/1"
 _PROJECT_MEMORY_TOOL = "hia_project_memory"
 _PROJECT_MEMORY_ACTIONS = frozenset(
     {"record", "search", "list", "delete", "supersede"}
 )
 _PROJECT_MEMORY_ID = re.compile(r"^mem_[0-9a-f]{32}$")
 _PROJECT_MEMORY_TIMEOUT_SECONDS = 60.0
+_RUNTIME_IDENTITY_ERRORS = frozenset(
+    {
+        "HOUDINI_SESSION_CHANGED",
+        "HOUDINI_SESSION_MISMATCH",
+        "HOUDINI_RUNTIME_SOURCE_CHANGED",
+        "STALE_HOUDINI_RUNTIME",
+    }
+)
 _SCENE_CAPABILITY_PATH = "/v1/scene/capabilities"
 _SCENE_STATUS_PATH = "/v1/scene/status"
 _SCENE_RESULT_PATH = re.compile(
@@ -66,30 +69,6 @@ def _bounded_project_memory_text(value: Any, limit: int) -> str:
         return ""
     text = " ".join(value.replace("\x00", " ").split())
     return text[:limit]
-
-
-def _project_memory_runtime_error(
-    raw: bytes,
-) -> tuple[str, str, dict[str, Any]]:
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        payload = {}
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if not isinstance(error, dict):
-        return (
-            "PROJECT_MEMORY_FAILED",
-            "The project-memory runtime rejected the request",
-            {},
-        )
-    code = _bounded_project_memory_text(error.get("code"), 128)
-    message = _bounded_project_memory_text(error.get("message"), 2_048)
-    details = error.get("details")
-    return (
-        code or "PROJECT_MEMORY_FAILED",
-        message or "The project-memory runtime rejected the request",
-        dict(details) if isinstance(details, dict) else {},
-    )
 
 
 def _project_memory_item(
@@ -273,6 +252,8 @@ class BridgeApplication:
         houdini_mcp_port: int | None = None,
         houdini_mcp_token: str | None = None,
         houdini_mcp_backend: str = FXHOUDINI_MCP_BACKEND,
+        houdini_launcher_session_id: str | None = None,
+        houdini_executor_path: Path | None = None,
         knowledge_cli: KnowledgeCliRunner | None = None,
     ) -> None:
         if len(token) < 32:
@@ -336,6 +317,50 @@ class BridgeApplication:
         self._houdini_mcp_port = houdini_mcp_port
         self._houdini_mcp_token = houdini_mcp_token
         self._houdini_mcp_backend = houdini_mcp_backend
+        self._hia_transport: Any | None = None
+        self._hia_transport_error: type[Exception] = Exception
+        self._hia_cancellation_type: Any | None = None
+        if (
+            houdini_mcp_backend == HIA_MCP_V2_BACKEND
+            and houdini_mcp_port is not None
+            and houdini_mcp_token is not None
+        ):
+            if (
+                not isinstance(houdini_launcher_session_id, str)
+                or re.fullmatch(
+                    r"[0-9A-Fa-f]{32}",
+                    houdini_launcher_session_id,
+                )
+                is None
+                or not isinstance(houdini_executor_path, Path)
+                or not houdini_executor_path.is_absolute()
+            ):
+                raise ValueError(
+                    "HIA MCP V2 requires a launcher session and executor path"
+                )
+            try:
+                from hia_mcp_v2.errors import TransportError
+                from hia_mcp_v2.transport import (
+                    CancellationToken,
+                    LoopbackTransport,
+                    TransportConfig,
+                )
+            except ImportError as exc:
+                raise ValueError(
+                    "The HIA MCP V2 transport contract is unavailable"
+                ) from exc
+            self._hia_transport = LoopbackTransport(
+                TransportConfig(
+                    host="127.0.0.1",
+                    port=houdini_mcp_port,
+                    token=houdini_mcp_token,
+                    launcher_session_id=houdini_launcher_session_id,
+                    executor_module_path=str(houdini_executor_path),
+                    timeout_seconds=_PROJECT_MEMORY_TIMEOUT_SECONDS,
+                )
+            )
+            self._hia_transport_error = TransportError
+            self._hia_cancellation_type = CancellationToken
         self._knowledge_cli = knowledge_cli or KnowledgeCliRunner()
 
     def authorized(self, value: str | None) -> bool:
@@ -379,39 +404,45 @@ class BridgeApplication:
         }
         if backend == HIA_MCP_V2_BACKEND:
             status["scene_revision"] = None
+            status["runtime_identity"] = None
+            status["identity_status"] = "unavailable"
+            status["restart_required"] = False
         port = self._houdini_mcp_port
         token = self._houdini_mcp_token
         if port is None or token is None:
             return status
         if backend == HIA_MCP_V2_BACKEND:
-            request = urllib_request.Request(
-                f"http://127.0.0.1:{port}{HIA_MCP_V2_HEALTH_ROUTE}",
-                headers={"Authorization": f"Bearer {token}"},
-                method="GET",
-            )
-            try:
-                with urllib_request.urlopen(request, timeout=0.75) as response:
-                    raw = response.read(MAX_MCP_HEALTH_RESPONSE_BYTES + 1)
-                if len(raw) > MAX_MCP_HEALTH_RESPONSE_BYTES:
-                    return status
-                payload = json.loads(raw.decode("utf-8"))
-            except Exception:
+            transport = self._hia_transport
+            if transport is None:
                 return status
-            result = payload.get("result") if isinstance(payload, dict) else None
-            status["available"] = (
-                isinstance(payload, dict)
-                and set(payload) == {"protocol", "ok", "result"}
-                and payload.get("protocol") == HIA_MCP_V2_WIRE_PROTOCOL
-                and payload.get("ok") is True
-                and isinstance(result, dict)
-                and set(result) == {"server_id", "scene_revision"}
-                and result.get("server_id") == server_id
-                and isinstance(result.get("scene_revision"), int)
-                and not isinstance(result.get("scene_revision"), bool)
-                and result["scene_revision"] >= 0
-            )
-            if status["available"]:
-                status["scene_revision"] = result["scene_revision"]
+            try:
+                identity = dict(transport.health(timeout_seconds=0.75))
+            except self._hia_transport_error as exc:
+                code = str(getattr(exc, "code", "HOUDINI_UNAVAILABLE"))
+                raw_details = getattr(exc, "details", None)
+                details = (
+                    dict(raw_details)
+                    if isinstance(raw_details, dict)
+                    else {}
+                )
+                status["identity_status"] = (
+                    "stale_or_changed"
+                    if code in _RUNTIME_IDENTITY_ERRORS
+                    else "unavailable"
+                )
+                status["identity_error_code"] = code
+                status["restart_required"] = code in _RUNTIME_IDENTITY_ERRORS
+                runtime_identity = details.get("runtime_identity")
+                if isinstance(runtime_identity, dict):
+                    status["runtime_identity"] = runtime_identity
+                    status["scene_revision"] = runtime_identity.get(
+                        "scene_revision"
+                    )
+                return status
+            status["available"] = True
+            status["scene_revision"] = identity["scene_revision"]
+            status["runtime_identity"] = identity
+            status["identity_status"] = "verified"
             return status
 
         body = urllib_parse.urlencode(
@@ -475,80 +506,47 @@ class BridgeApplication:
                 dict(exc.details) if exc.details is not None else None,
             ) from exc
 
-        request_id = f"bridge-memory-{uuid.uuid4().hex}"
-        body = json.dumps(
-            {
-                "protocol": HIA_MCP_V2_WIRE_PROTOCOL,
-                "id": request_id,
-                "tool": _PROJECT_MEMORY_TOOL,
-                "arguments": arguments,
-            },
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        request = urllib_request.Request(
-            (
-                f"http://127.0.0.1:{self._houdini_mcp_port}"
-                f"{HIA_MCP_V2_EXECUTE_ROUTE}"
-            ),
-            data=body,
-            headers={
-                "Authorization": f"Bearer {self._houdini_mcp_token}",
-                "Content-Type": "application/json; charset=utf-8",
-                "Accept": "application/json",
-            },
-            method="POST",
-        )
+        transport = self._hia_transport
+        cancellation_type = self._hia_cancellation_type
+        if transport is None or cancellation_type is None:
+            raise BridgeError(
+                "PROJECT_MEMORY_UNAVAILABLE",
+                "Project memory requires the verified live HIA MCP V2 runtime",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
         try:
-            with urllib_request.urlopen(
-                request,
-                timeout=_PROJECT_MEMORY_TIMEOUT_SECONDS,
-            ) as response:
-                raw = response.read(MAX_MCP_TOOL_RESPONSE_BYTES + 1)
-        except urllib_error.HTTPError as exc:
-            raw_error = exc.read(MAX_MCP_TOOL_RESPONSE_BYTES + 1)
-            code, message, details = _project_memory_runtime_error(raw_error)
+            payload = transport.call(
+                _PROJECT_MEMORY_TOOL,
+                arguments,
+                request_id=f"bridge-memory-{uuid.uuid4().hex}",
+                cancellation=cancellation_type(),
+            )
+        except self._hia_transport_error as exc:
+            code = str(getattr(exc, "code", "PROJECT_MEMORY_UNAVAILABLE"))
+            message = str(
+                getattr(
+                    exc,
+                    "message",
+                    "The live HIA MCP V2 project-memory tool is unavailable",
+                )
+            )
+            raw_details = getattr(exc, "details", None)
+            details = dict(raw_details) if isinstance(raw_details, dict) else {}
             status = (
                 HTTPStatus.BAD_REQUEST
-                if exc.code == HTTPStatus.BAD_REQUEST
+                if details.get("http_status") == HTTPStatus.BAD_REQUEST
+                else HTTPStatus.CONFLICT
+                if code in _RUNTIME_IDENTITY_ERRORS
                 else HTTPStatus.SERVICE_UNAVAILABLE
             )
             raise BridgeError(code, message, status, details) from exc
-        except Exception as exc:
-            raise BridgeError(
-                "PROJECT_MEMORY_UNAVAILABLE",
-                "The live HIA MCP V2 project-memory tool is unavailable",
-                HTTPStatus.SERVICE_UNAVAILABLE,
-            ) from exc
-        if len(raw) > MAX_MCP_TOOL_RESPONSE_BYTES:
-            raise BridgeError(
-                "PROJECT_MEMORY_RESPONSE_TOO_LARGE",
-                "The project-memory response exceeded the Bridge byte limit",
-                HTTPStatus.BAD_GATEWAY,
-            )
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise BridgeError(
-                "INVALID_PROJECT_MEMORY_RESPONSE",
-                "The project-memory runtime returned invalid JSON",
-                HTTPStatus.BAD_GATEWAY,
-            ) from exc
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != {"protocol", "ok", "id", "result"}
-            or payload.get("protocol") != HIA_MCP_V2_WIRE_PROTOCOL
-            or payload.get("ok") is not True
-            or payload.get("id") != request_id
-            or not isinstance(payload.get("result"), dict)
-        ):
+        if not isinstance(payload, dict):
             raise BridgeError(
                 "INVALID_PROJECT_MEMORY_RESPONSE",
                 "The project-memory runtime response was malformed",
                 HTTPStatus.BAD_GATEWAY,
             )
-        runtime_result = payload["result"].get("result")
+        runtime_result = payload.get("result")
         if not isinstance(runtime_result, dict):
             raise BridgeError(
                 "INVALID_PROJECT_MEMORY_RESPONSE",
@@ -574,6 +572,8 @@ class BridgeApplication:
             ) from exc
 
     def close(self) -> None:
+        if self._hia_transport is not None:
+            self._hia_transport.close()
         self._knowledge_cli.close()
 
 

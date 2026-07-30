@@ -2639,26 +2639,33 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         session.start_thread()
 
         instructions = client.requests[0][1]["developerInstructions"]
-        self.assertLessEqual(len(instructions), 1_000)
+        self.assertLessEqual(len(instructions), 1_320)
         for required_text in (
             "HIA MCP V2 与 HOM",
-            "hia_execute_hom 批量执行",
-            "hia_context/hia_inspect",
-            "hia_scene_diff/hia_validate",
-            "复杂视觉里程碑（结构、材质/灯光、交付前）自动 hia_capture_viewport 640x360同帧预览",
-            "动画/模拟抽关键帧",
-            "简单任务不截图",
-            "只读 artifact-review 审阅",
-            "主任务每轮只修最大偏差",
-            "有限迭代、达标即停",
+            "明确小改只读目标值后直接执行",
+            "修改既有网络先用 hia_context/hia_inspect",
+            "输入输出、两层上游",
+            "公共控制、材质入口、引用和允许 scope",
+            "优先现有节点和标准原生节点网络",
+            "场景内 Python SOP 或直接几何须说明必要性",
+            "同一 scope 内一次 hia_execute_hom",
+            "fresh cook、hia_scene_diff/hia_validate",
+            "plan/revision/tool completed 不算通过",
+            "hia_capture_viewport，不固定尺寸",
+            "动画/模拟用代表帧或短序列",
+            "材质验收读取绑定、MaterialX 连接和正确输入",
+            "Stop 后已发 HOM 仍可能收尾",
+            "失败读 rollback.status/automatic_retry_safe",
+            "仅 rolled_back+true 可修正重试一次",
+            "unknown/partial/NO_OBSERVED_EFFECT 不 Undo 也不算完成",
+            "session/source drift 停写并正常重启，不热加载",
             "仅主任务串行调用 hia_*/HOM 并写 HIP",
             "子任务只研究、草拟、只读审阅",
             "MCP 无 caller lineage",
             "非代码级隔离",
-            "多个关键词先合并为一次批量查询并复用结果",
+            "多个关键词合并为一次批量查询",
             "同类读取不并发扇出",
             "QUEUE_FULL 不立即重试",
-            "hia_execute_hom 等场景写入始终由主代理执行",
             "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label",
             "聊天、关闭专注和逐参数操作不设",
             "主任务只保留原生 Goal、决定和子任务短摘要",
@@ -2676,11 +2683,12 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "create_node",
             "set_parameters",
             "截图写 HIA_CACHE_DIR/screenshots，预览写",
+            "640x360",
         ):
             self.assertNotIn(forbidden_text, instructions)
         self.assertEqual("hia_v2", session.snapshot()["mcp_backend"])
 
-    def test_scene_writes_require_research_before_hia_serial_io(
+    def test_complex_scene_writes_require_research_but_small_edits_do_not(
         self,
     ) -> None:
         for backend in ("fxhoudini", "hia_v2"):
@@ -2689,20 +2697,24 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                 session.start_thread()
                 instructions = client.requests[0][1]["developerInstructions"]
                 for required_text in (
-                    "首次场景写入前必须先",
+                    "复杂创建、修改或修复在首次场景写入前先",
                     "一次相关",
                     "批量检索并复用结果",
                     "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务",
                     "必须先用原生 web/search",
                     "当前 SideFX 官方与原始来源",
-                    "简单确定性修改不扩展为多轮网页研究",
+                    "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究",
                 ):
                     self.assertIn(required_text, instructions)
+                self.assertNotIn(
+                    "任何创建、修改或修复在首次场景写入前必须先",
+                    instructions,
+                )
                 if backend == "hia_v2":
                     self.assertIn("hia_local_help_search", instructions)
                     self.assertIn("检索不可用时明确说明，禁止静默跳过", instructions)
                     self.assertIn(
-                        "多个关键词先合并为一次批量查询并复用结果",
+                        "多个关键词合并为一次批量查询",
                         instructions,
                     )
                     self.assertIn(
@@ -2710,10 +2722,6 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                         instructions,
                     )
                     self.assertIn("不并发扇出", instructions)
-                    self.assertIn(
-                        "hia_execute_hom 等场景写入始终由主代理执行",
-                        instructions,
-                    )
                     self.assertIn(
                         "子任务只研究、草拟、只读审阅",
                         instructions,

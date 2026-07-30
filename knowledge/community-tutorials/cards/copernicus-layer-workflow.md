@@ -27,6 +27,16 @@ Input/layer creation → resolution/domain normalization → mask/pattern branch
 
 Input owns layer metadata; domain stage owns resolution; procedural nodes own masks; composite owns alpha math; color transform owns interpretation; file output owns channel/bit-depth persistence. Important contract fields are resolution, component count, layer name, alpha/premultiplication state, numeric range, and color/data role.
 
+## Executable parameter and connection contract
+
+1. In a current `COP Network`, create an explicit `Layer COP` named `DOMAIN_REF`. Set `Signature = RGBA` for color or **Mono** for a scalar data layer, enter the delivery `Resolution`, choose `Precision`, and set `Border`. A practical reference might be `2048 x 2048`, `16-bit` float color, and **Clamp**; use `32-bit` for height/derivative work where 16-bit precision is insufficient.
+2. Connect `DOMAIN_REF` to `size_ref` inputs of generators such as `Fractal Noise COP`, `Ramp COP`, or `Constant COP`. A mask branch uses Mono signature and a `0..1` range. Use **Wrap** border only for a deliberately tileable texture and prove it with a `3 x 3` tile visualization.
+3. Load files through the current `File COP`, set `File Name`, sequence token/frame policy, and required AOV ports. Tag color inputs with the project OCIO interpretation; treat roughness, normal, depth, ID, and masks as data and do not send them through a display/color transform.
+4. Use `Transform 2D COP` with recorded `Translate`, `Rotate` in degrees, `Scale`, `Pivot`, `Filter`, and `Border`. Keep `Rasterize` off for a lossless layer-space transform chain and rasterize deliberately later; turn it on only when the pixel result at the existing domain is required.
+5. For RGBA operations put `Premultiply COP` at the explicit unpremultiply/premultiply boundaries. Use `OCIO Transform COP` only on declared color layers. Probe alpha-zero pixels before and after compositing so hidden RGB does not create fringes.
+6. Connect the final named `Null COP`/output to `ROP Image Output COP`. Set the COP port/AOV mapping, filename including frame token, frame range, file format, precision, and output color space. For multiple outputs use `Add AOVs from COP` and verify each **Port** entry.
+7. Use the network `Pixel Scale` proxy (for example `1:2`) only during authoring; final output must cook at `1:1`. Reload a written frame through `File COP` and compare resolution, signature, precision, color/data policy, and representative pixels.
+
 ## Data flow, cache, version, and performance
 
 Resolution multiplies per-pixel cost; prototype at a proxy resolution but keep scale-dependent filters parameterized. Repeated resizes lose detail and add cost, so normalize domain once. Cache or write heavy stable intermediate layers when downstream iteration benefits, retaining data type and color-space metadata. Copernicus is evolving; current node/type names must be queried before automatic network authoring.
@@ -38,6 +48,18 @@ Resolution multiplies per-pixel cost; prototype at a proxy resolution but keep s
 - **Mask behaves like color:** color transform or multi-component interpretation applied to scalar data.
 - **Texture changes resolution midgraph:** implicit domain inheritance; insert explicit reference/domain stage.
 - **Saved output differs:** output bit depth, channel list, or color transform differs from preview; reload and compare numerically.
+
+## Checkpoints and observable evidence
+
+- **O0 — domain:** node info reports the declared resolution, signature, precision, pixel aspect, and border on every main branch.
+- **O1 — data roles:** each output port is labeled color or data; mask/depth/normal/ID branches have no OCIO display transform and mask extrema remain in the declared range.
+- **O2 — alpha/transform:** checkerboard inspection shows no fringe; alpha-zero RGB behavior is documented; a transform changes only the intended placement and uses the recorded filter/border.
+- **O3 — proxy/final:** a `1:2` proxy and `1:1` final preserve normalized layout while pixel-scale filters change according to their declared unit.
+- **O4 — output:** first/middle/last files reload with matching port names, resolution, precision, and representative pixel tolerances; there is no double display transform.
+
+## When not to use this workflow
+
+Do not use Copernicus for geometry operations whose truth belongs in SOPs, for a simple one-time image conversion already handled by a deterministic file tool, or for a color transform when the input is non-color data. Avoid 16-bit fixed/float storage for a measured height/derivative range that cannot preserve the required precision.
 
 ## Provenance boundary
 

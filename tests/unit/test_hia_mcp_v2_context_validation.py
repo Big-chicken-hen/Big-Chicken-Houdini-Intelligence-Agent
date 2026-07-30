@@ -21,7 +21,7 @@ sys.path.insert(
     str(REPOSITORY_ROOT / "services" / "hia_mcp_v2"),
 )
 
-from hia_mcp_runtime.executor import HoudiniExecutor  # noqa: E402
+from hia_mcp_runtime.executor import HiaRuntimeError, HoudiniExecutor  # noqa: E402
 from tests.unit.test_hia_mcp_v2_runtime import FakeHou, FakeNamed  # noqa: E402
 
 
@@ -58,9 +58,11 @@ class FakeValidationType:
         *,
         name: str = "test_sop",
         category: str = "Sop",
+        min_inputs: int = 0,
     ) -> None:
         self._name = name
         self._category = category
+        self._min_inputs = min_inputs
 
     def name(self) -> str:
         return self._name
@@ -75,7 +77,129 @@ class FakeValidationType:
         return ("", self._name, "", "")
 
     def minNumInputs(self) -> int:  # noqa: N802
-        return 0
+        return self._min_inputs
+
+
+class FakeControlTemplate:
+    def __init__(self, label: str) -> None:
+        self._label = label
+
+    def label(self) -> str:
+        return self._label
+
+    def isHidden(self) -> bool:  # noqa: N802
+        return False
+
+
+class FakeControlParm:
+    def __init__(
+        self,
+        node_path: str,
+        name: str,
+        value: Any,
+        *,
+        label: str = "",
+        at_default: bool = False,
+    ) -> None:
+        self._path = f"{node_path}/{name}"
+        self._name = name
+        self._value = value
+        self._template = FakeControlTemplate(label or name)
+        self._at_default = at_default
+
+    def path(self) -> str:
+        return self._path
+
+    def name(self) -> str:
+        return self._name
+
+    def parmTemplate(self) -> FakeControlTemplate:  # noqa: N802
+        return self._template
+
+    def eval(self) -> Any:
+        return self._value
+
+    def unexpandedString(self) -> str:  # noqa: N802
+        return str(self._value)
+
+    def isAtDefault(self) -> bool:  # noqa: N802
+        return self._at_default
+
+    def isTimeDependent(self) -> bool:  # noqa: N802
+        return False
+
+    def getReferencedParm(self) -> "FakeControlParm":  # noqa: N802
+        return self
+
+
+class FakeDigestKeyframe:
+    def __init__(self, expression: str) -> None:
+        self._expression = expression
+
+    def frame(self) -> float:
+        return 1.0
+
+    def time(self) -> float:
+        return 0.0
+
+    def value(self) -> float:
+        return 1.0
+
+    def expression(self) -> str:
+        return self._expression
+
+
+class FakeDigestParm:
+    def __init__(
+        self,
+        node_path: str,
+        name: str,
+        value: Any,
+        *,
+        hou_module: Any = None,
+        expression: str = "",
+    ) -> None:
+        self._path = f"{node_path}/{name}"
+        self._name = name
+        self._value = value
+        self._hou = hou_module
+        self._expression = expression
+
+    def path(self) -> str:
+        return self._path
+
+    def name(self) -> str:
+        return self._name
+
+    def eval(self) -> Any:
+        return self._hou.frame() if self._expression else self._value
+
+    def set(self, value: Any) -> None:
+        self._value = value
+
+    def unexpandedString(self) -> str:  # noqa: N802
+        raise RuntimeError("numeric parameter has no unexpanded string")
+
+    def keyframes(self) -> tuple[FakeDigestKeyframe, ...]:
+        return (
+            (FakeDigestKeyframe(self._expression),)
+            if self._expression
+            else ()
+        )
+
+    def expression(self) -> str:
+        if not self._expression:
+            raise RuntimeError("parameter has no expression")
+        return self._expression
+
+    def isTimeDependent(self) -> bool:  # noqa: N802
+        return bool(self._expression)
+
+    def isAtDefault(self) -> bool:  # noqa: N802
+        return False
+
+    def getReferencedParm(self) -> "FakeDigestParm":  # noqa: N802
+        return self
 
 
 class FakeValidationNode:
@@ -94,6 +218,11 @@ class FakeValidationNode:
         children: tuple["FakeValidationNode", ...] = (),
         geometry_raises: bool = False,
         on_cook: Any = None,
+        min_inputs: int = 0,
+        inputs: tuple["FakeValidationNode | None", ...] = (),
+        outputs: tuple["FakeValidationNode", ...] = (),
+        parms: tuple[Any, ...] = (),
+        inside_locked_hda: bool = False,
     ) -> None:
         self._path = path
         self._geometry = FakeGeometry(*counts)
@@ -102,6 +231,7 @@ class FakeValidationNode:
         self._type = FakeValidationType(
             name=type_name,
             category=category,
+            min_inputs=min_inputs,
         )
         self._display = display
         self._render = render
@@ -109,8 +239,15 @@ class FakeValidationNode:
         self._children = children
         self._geometry_raises = geometry_raises
         self._on_cook = on_cook
+        self._inputs = inputs
+        self._outputs = outputs
+        self._parms = parms
+        self._inside_locked_hda = inside_locked_hda
         self.geometry_calls = 0
         self.cook_calls = 0
+        self.cook_forces: list[bool] = []
+        self._cook_count = 0
+        self._last_cook_time = 0.0
 
     def path(self) -> str:
         return self._path
@@ -122,13 +259,13 @@ class FakeValidationNode:
         return self._type
 
     def inputs(self) -> tuple[Any, ...]:
-        return ()
+        return self._inputs
 
     def outputs(self) -> tuple[Any, ...]:
-        return ()
+        return self._outputs
 
     def parms(self) -> tuple[Any, ...]:
-        return ()
+        return self._parms
 
     def errors(self) -> tuple[str, ...]:
         return self._errors
@@ -151,14 +288,27 @@ class FakeValidationNode:
     def isBypassed(self) -> bool:  # noqa: N802
         return False
 
+    def isInsideLockedHDA(self) -> bool:  # noqa: N802
+        return self._inside_locked_hda
+
     def cook(self, *, force: bool) -> None:
-        del force
         self.cook_calls += 1
+        self.cook_forces.append(force)
+        if force or self._needs_to_cook:
+            self._cook_count += 1
+            self._last_cook_time += 1.0
+            self._needs_to_cook = False
         if callable(self._on_cook):
             self._on_cook()
 
     def needsToCook(self) -> bool:  # noqa: N802
         return self._needs_to_cook
+
+    def cookCount(self) -> int:  # noqa: N802
+        return self._cook_count
+
+    def lastCookTime(self) -> float:  # noqa: N802
+        return self._last_cook_time
 
     def children(self) -> tuple["FakeValidationNode", ...]:
         return self._children
@@ -331,6 +481,49 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         ).encode("utf-8")
         self.assertLessEqual(len(encoded), 4096)
         self.assertTrue(pack["limits"]["truncated"])
+
+    def test_context_pack_explicit_false_suppresses_task_enrichment(
+        self,
+    ) -> None:
+        self.executor._context_pack_live_snapshot = mock.Mock(  # type: ignore[method-assign]
+            side_effect=AssertionError("context pack must remain disabled")
+        )
+        self.executor._hybrid_knowledge_store = mock.Mock(  # type: ignore[method-assign]
+            side_effect=AssertionError("knowledge search must remain disabled")
+        )
+
+        response = self.executor.dispatch(
+            "hia_context",
+            {
+                "include_context_pack": False,
+                "task": "inspect the selected pyro network",
+                "knowledge_queries": ["pyro turbulence workflow"],
+            },
+        )
+
+        self.assertNotIn("context_pack", response["result"])
+        self.executor._context_pack_live_snapshot.assert_not_called()
+        self.executor._hybrid_knowledge_store.assert_not_called()
+
+    def test_context_pack_omitted_flag_keeps_task_compatibility(
+        self,
+    ) -> None:
+        store = FakeKnowledgeStore(self.runner_state)
+        self.executor._hybrid_knowledge_store = mock.Mock(  # type: ignore[method-assign]
+            return_value=store
+        )
+
+        response = self.executor.dispatch(
+            "hia_context",
+            {"task": "inspect the selected pyro network"},
+        )
+
+        self.assertIn("context_pack", response["result"])
+        self.assertEqual(1, len(store.calls))
+        self.assertEqual(
+            ["inspect the selected pyro network"],
+            store.calls[0]["queries"],
+        )
 
     def test_domain_checks_have_one_unified_bounded_shape(self) -> None:
         good = FakeValidationNode("/obj/good", counts=(3, 3, 1))
@@ -514,6 +707,93 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         self.assertEqual("unsupported_node_category", geometry["reason"])
         self.assertEqual(0, obj.geometry_calls)
 
+    def test_inspect_evidence_is_bounded_and_reports_local_network_facts(
+        self,
+    ) -> None:
+        source = FakeValidationNode("/obj/asset/source", type_name="sphere")
+        target_path = "/obj/asset/OUT_MODEL"
+        target = FakeValidationNode(
+            target_path,
+            type_name="null",
+            min_inputs=1,
+            inputs=(source,),
+            parms=(
+                FakeControlParm(
+                    target_path,
+                    "shop_materialpath",
+                    "/mat/lookdev",
+                    label="Material",
+                ),
+            ),
+        )
+        boxes = tuple(
+            FakeValidationNode(
+                f"/obj/asset/box_{index}",
+                type_name="box",
+            )
+            for index in range(8)
+        )
+        python_sop = FakeValidationNode(
+            "/obj/asset/python_geometry",
+            type_name="python",
+        )
+        broken = FakeValidationNode(
+            "/obj/asset/broken_merge",
+            type_name="merge",
+            min_inputs=1,
+        )
+        root = FakeValidationNode(
+            "/obj/asset",
+            category="Object",
+            type_name="geo",
+            children=(*boxes, python_sop, broken, target),
+        )
+        self.install_nodes(root, source, target, *boxes, python_sop, broken)
+
+        result = self.executor.dispatch(
+            "hia_inspect",
+            {
+                "paths": [target.path(), root.path()],
+                "use_selection": False,
+                "views": ["evidence"],
+            },
+        )["result"]
+        by_path = {
+            item["path"]: item["network_evidence"]
+            for item in result["nodes"]
+        }
+        target_evidence = by_path[target.path()]
+        self.assertEqual(
+            [{"index": 0, "path": source.path()}],
+            target_evidence["inputs"],
+        )
+        self.assertEqual(
+            source.path(),
+            target_evidence["upstream_chain"][0]["path"],
+        )
+        self.assertEqual(
+            ["shop_materialpath"],
+            [item["name"] for item in target_evidence["controls"]],
+        )
+        self.assertEqual(1, len(target_evidence["material_entries"]))
+        self.assertEqual("binding_consumer", target_evidence["material_role"])
+        self.assertIn("needs_to_cook", target_evidence["cook_state"])
+
+        quality = by_path[root.path()]["quality_evidence"]
+        codes = {item["code"] for item in quality["signals"]}
+        self.assertIn("BOX_PRIMITIVE_HEAVY", codes)
+        self.assertIn("REPEATED_NODE_TYPE_CLUSTER", codes)
+        self.assertIn("PYTHON_GEOMETRY_AUTHORING", codes)
+        self.assertIn("MISSING_REQUIRED_INPUT", codes)
+        self.assertFalse(quality["subjective_quality_proven"])
+        self.assertTrue(
+            any(
+                "intersections" in limitation
+                for limitation in quality["limitations"]
+            )
+        )
+        self.assertEqual(0, target.geometry_calls)
+
     def test_empty_output_only_checks_explicit_or_final_output_roles(
         self,
     ) -> None:
@@ -567,7 +847,7 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         self.assertEqual(0, blast.geometry_calls)
         self.assertEqual(1, final.geometry_calls)
 
-    def test_geometry_summary_with_some_valid_statistics_is_partial(
+    def test_geometry_summary_ignores_known_non_geometry_category(
         self,
     ) -> None:
         sop = FakeValidationNode("/obj/good", counts=(4, 4, 1))
@@ -587,14 +867,530 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
             },
         )["result"]["check_results"][0]
 
-        self.assertEqual("partial", check["status"])
+        self.assertEqual("pass", check["status"])
         self.assertEqual(1, check["evidence"]["available_paths"])
-        self.assertEqual(1, check["evidence"]["unavailable_paths"])
+        self.assertEqual(0, check["evidence"]["unavailable_paths"])
+        self.assertEqual(1, check["evidence"]["ignored_unsupported_paths"])
         self.assertEqual(0, obj.geometry_calls)
         self.assertEqual(
-            "partial",
+            "passed",
             self.executor._recent_evidence_snapshot([])[0]["status"],  # noqa: SLF001
         )
+
+    def test_execute_ignores_non_geometry_outputs_and_dormant_locked_messages(
+        self,
+    ) -> None:
+        class VolumePrimitive:
+            def type(self) -> FakeNamed:
+                return FakeNamed("Volume")
+
+            def vertices(self) -> tuple[Any, ...]:
+                return ()
+
+        flame = FakeValidationNode(
+            "/obj/HIA_PYRO_ACCEPTANCE/OUT_PYRO_FLAME",
+            counts=(0, 0, 6),
+        )
+        flame._geometry.prims = lambda: tuple(  # type: ignore[method-assign]
+            VolumePrimitive() for _index in range(6)
+        )
+        camera = FakeValidationNode(
+            "/obj/HIA_PYRO_CAM",
+            category="Object",
+            type_name="cam",
+            display=False,
+            render=False,
+            geometry_raises=True,
+        )
+        dormant_message = "Undefined variable OLD_POINTS in ensure_sdf_sop"
+        dormant = FakeValidationNode(
+            "/obj/HIA_PYRO_ACCEPTANCE/pyro/META/attribvop1",
+            category="Vop",
+            type_name="attribvop",
+            errors=(dormant_message,),
+            display=False,
+            render=False,
+            geometry_raises=True,
+            inside_locked_hda=True,
+        )
+        root = FakeValidationNode(
+            "/obj/HIA_PYRO_ACCEPTANCE",
+            category="Object",
+            type_name="geo",
+            errors=(dormant_message,),
+            display=False,
+            render=False,
+            geometry_raises=True,
+            children=(dormant,),
+        )
+        self.install_nodes(flame, camera, root, dormant)
+        before = {
+            root.path(): "root-before",
+            flame.path(): "flame",
+            camera.path(): "camera",
+            dormant.path(): "dormant-before",
+        }
+        after = {
+            **before,
+            root.path(): "root-after",
+        }
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[(before, False), (after, False)]
+        )
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "diff_root_path": root.path(),
+                "expected_outputs": [flame.path(), camera.path()],
+                "checks": ["geometry_summary", "empty_output"],
+            },
+        )
+
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(
+            "passed",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
+        checks = {
+            item["check"]: item
+            for item in response["execution_evidence"]["validation"][
+                "check_results"
+            ]
+        }
+        geometry = checks["geometry_summary"]
+        self.assertEqual("pass", geometry["status"])
+        self.assertEqual(1, geometry["evidence"]["available_paths"])
+        self.assertEqual(0, geometry["evidence"]["unavailable_paths"])
+        self.assertEqual(2, geometry["evidence"]["ignored_unsupported_paths"])
+        flame_geometry = next(
+            value
+            for value in geometry["evidence"]["geometry"]
+            if value["node_path"] == flame.path()
+        )
+        self.assertEqual(6, flame_geometry["primitive_count"])
+        self.assertEqual(6, flame_geometry["volume_primitive_count"])
+
+        empty = checks["empty_output"]
+        self.assertEqual("pass", empty["status"])
+        self.assertEqual([flame.path()], empty["evidence"]["output_paths"])
+        self.assertEqual(2, empty["evidence"]["ignored_non_output_paths"])
+        self.assertEqual(
+            [camera.path()],
+            [
+                value["path"]
+                for value in empty["evidence"][
+                    "ignored_non_output_path_details"
+                ]
+            ],
+        )
+
+        node_errors = checks["node_errors"]
+        self.assertEqual("pass", node_errors["status"])
+        self.assertEqual(
+            [dormant.path()],
+            node_errors["evidence"][
+                "ignored_dormant_locked_asset_internal"
+            ]["paths"],
+        )
+        self.assertEqual(
+            1,
+            node_errors["evidence"]["ignored_parent_aggregate_duplicates"],
+        )
+
+    def test_non_geometry_only_expected_output_is_not_proven(self) -> None:
+        camera = FakeValidationNode(
+            "/obj/HIA_PYRO_CAM",
+            category="Object",
+            type_name="cam",
+            display=False,
+            render=False,
+            geometry_raises=True,
+        )
+        self.install_nodes(camera)
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "capture_diff": False,
+                "require_scene_change": False,
+                "expected_outputs": [camera.path()],
+                "checks": ["empty_output", "geometry_summary"],
+            },
+        )
+
+        self.assertTrue(response["ok"], response)
+        self.assertEqual([], response["errors"])
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertEqual(
+            "partial",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
+        checks = {
+            item["check"]: item
+            for item in response["execution_evidence"]["validation"][
+                "check_results"
+            ]
+        }
+        self.assertEqual("unknown", checks["empty_output"]["status"])
+        self.assertEqual("unknown", checks["geometry_summary"]["status"])
+
+    def test_active_locked_asset_upstream_error_still_blocks_output(self) -> None:
+        active = FakeValidationNode(
+            "/obj/fx/locked_asset/active_vop",
+            category="Vop",
+            type_name="attribvop",
+            errors=("Active output computation failed",),
+            display=False,
+            render=False,
+            inside_locked_hda=True,
+        )
+        output = FakeValidationNode(
+            "/obj/fx/OUT_RESULT",
+            counts=(4, 4, 1),
+            inputs=(active,),
+        )
+        self.install_nodes(output, active)
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                (
+                    {
+                        output.path(): "output",
+                        active.path(): "active-before",
+                    },
+                    False,
+                ),
+                (
+                    {
+                        output.path(): "output",
+                        active.path(): "active-after",
+                    },
+                    False,
+                ),
+            ]
+        )
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "diff_root_path": "/obj/fx",
+                "expected_outputs": [output.path()],
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        node_errors = next(
+            item
+            for item in response["execution_evidence"]["validation"][
+                "check_results"
+            ]
+            if item["check"] == "node_errors"
+        )
+        self.assertEqual("fail", node_errors["status"])
+        self.assertEqual(
+            [active.path()],
+            [
+                finding["path"]
+                for finding in node_errors["findings"]
+                if finding["code"] == "NODE_ERROR"
+            ],
+        )
+        self.assertEqual(
+            [],
+            node_errors["evidence"][
+                "ignored_dormant_locked_asset_internal"
+            ]["paths"],
+        )
+
+    def test_frame_evaluation_does_not_change_protected_persistent_digest(
+        self,
+    ) -> None:
+        mutable_path = "/obj/new_effect"
+        protected_path = "/obj/legacy_pig"
+        mutable_parm = FakeDigestParm(
+            mutable_path,
+            "strength",
+            1.0,
+        )
+        frame_parm = FakeDigestParm(
+            protected_path,
+            "animated_scale",
+            1.0,
+            hou_module=self.hou,
+            expression="$F",
+        )
+        mutable = FakeValidationNode(
+            mutable_path,
+            parms=(mutable_parm,),
+        )
+        protected = FakeValidationNode(
+            protected_path,
+            parms=(frame_parm,),
+        )
+        self.install_nodes(mutable, protected)
+        self.hou.mutable_digest_parm = mutable_parm
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": (
+                    "hou.mutable_digest_parm.set(2.0)\n"
+                    "hou.setFrame(48)"
+                ),
+                "diff_paths": [mutable_path],
+                "mutable_root": mutable_path,
+                "protected_paths": [protected_path],
+            },
+        )
+
+        self.assertTrue(response["ok"], response)
+        self.assertEqual([mutable_path], response["diff"]["changed"])
+        self.assertNotIn(protected_path, response["created_or_changed_paths"])
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertEqual(48.0, frame_parm.eval())
+
+        self.hou.protected_digest_parm = frame_parm
+        expression_edit = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": (
+                    "hou.mutable_digest_parm.set(3.0)\n"
+                    "hou.protected_digest_parm._expression = '$F * 2'"
+                ),
+                "diff_paths": [mutable_path],
+                "mutable_root": mutable_path,
+                "protected_paths": [protected_path],
+            },
+        )
+        self.assertFalse(expression_edit["ok"])
+        self.assertIn(protected_path, expression_edit["diff"]["changed"])
+        self.assertEqual(
+            "rolled_back",
+            expression_edit["rollback"]["status"],
+        )
+
+    def test_real_protected_parameter_change_still_rolls_back(self) -> None:
+        mutable_path = "/obj/new_effect"
+        protected_path = "/obj/legacy_pig"
+        mutable_parm = FakeDigestParm(mutable_path, "strength", 1.0)
+        protected_parm = FakeDigestParm(protected_path, "scale", 1.0)
+        mutable = FakeValidationNode(
+            mutable_path,
+            parms=(mutable_parm,),
+        )
+        protected = FakeValidationNode(
+            protected_path,
+            parms=(protected_parm,),
+        )
+        self.install_nodes(mutable, protected)
+        self.hou.mutable_digest_parm = mutable_parm
+        self.hou.protected_digest_parm = protected_parm
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": (
+                    "hou.mutable_digest_parm.set(2.0)\n"
+                    "hou.protected_digest_parm.set(3.0)"
+                ),
+                "diff_paths": [mutable_path],
+                "mutable_root": mutable_path,
+                "protected_paths": [protected_path],
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertIn(protected_path, response["diff"]["changed"])
+        self.assertEqual("rolled_back", response["rollback"]["status"])
+
+    def test_real_protected_connection_change_still_rolls_back(self) -> None:
+        mutable_path = "/obj/new_effect"
+        protected_path = "/obj/legacy_pig"
+        mutable_parm = FakeDigestParm(mutable_path, "strength", 1.0)
+        mutable = FakeValidationNode(
+            mutable_path,
+            parms=(mutable_parm,),
+        )
+        protected = FakeValidationNode(protected_path)
+        self.install_nodes(mutable, protected)
+        self.hou.mutable_digest_parm = mutable_parm
+        self.hou.mutable_digest_node = mutable
+        self.hou.protected_digest_node = protected
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": (
+                    "hou.mutable_digest_parm.set(2.0)\n"
+                    "hou.protected_digest_node._inputs = "
+                    "(hou.mutable_digest_node,)"
+                ),
+                "diff_paths": [mutable_path],
+                "mutable_root": mutable_path,
+                "protected_paths": [protected_path],
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertIn(protected_path, response["diff"]["changed"])
+        self.assertEqual("rolled_back", response["rollback"]["status"])
+
+    def test_real_protected_subtree_parameter_change_still_rolls_back(
+        self,
+    ) -> None:
+        mutable_path = "/obj/new_effect"
+        protected_path = "/obj/legacy_asset"
+        child_path = f"{protected_path}/locked_child"
+        mutable_parm = FakeDigestParm(mutable_path, "strength", 1.0)
+        child_parm = FakeDigestParm(child_path, "scale", 1.0)
+        mutable = FakeValidationNode(
+            mutable_path,
+            parms=(mutable_parm,),
+        )
+        child = FakeValidationNode(
+            child_path,
+            parms=(child_parm,),
+        )
+        protected = FakeValidationNode(
+            protected_path,
+            children=(child,),
+        )
+        protected.allSubChildren = lambda: (child,)  # type: ignore[method-assign]
+        self.install_nodes(mutable, protected, child)
+        self.hou.mutable_digest_parm = mutable_parm
+        self.hou.protected_child_digest_parm = child_parm
+
+        def restore() -> None:
+            mutable_parm.set(1.0)
+            child_parm.set(1.0)
+
+        self.hou.undos.on_undo = restore
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": (
+                    "hou.mutable_digest_parm.set(2.0)\n"
+                    "hou.protected_child_digest_parm.set(3.0)"
+                ),
+                "diff_paths": [mutable_path],
+                "mutable_root": mutable_path,
+                "protected_paths": [protected_path],
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertIn(child_path, response["diff"]["changed"])
+        self.assertEqual("rolled_back", response["rollback"]["status"])
+        self.assertTrue(response["errors"][0]["automatic_retry_safe"])
+        self.assertEqual(1.0, child_parm.eval())
+
+    def test_execute_fresh_validation_false_skips_only_fresh_output_gate(
+        self,
+    ) -> None:
+        def run_created_output(
+            suffix: str,
+            *,
+            fresh_validation: bool,
+            checks: list[str] | None = None,
+            errors: tuple[str, ...] = (),
+        ) -> tuple[dict[str, Any], FakeValidationNode]:
+            source = FakeValidationNode(f"/obj/fx/source_{suffix}")
+            output = FakeValidationNode(
+                f"/obj/fx/OUT_{suffix}",
+                counts=(0, 0, 0),
+                errors=errors,
+                needs_to_cook=True,
+                min_inputs=1,
+                inputs=(source,),
+            )
+            mapping = self.install_nodes(source)
+
+            def create_output() -> None:
+                mapping[output.path()] = output
+
+            self.hou.create_output = create_output
+            self.hou.undos.on_undo = lambda: mapping.pop(
+                output.path(),
+                None,
+            )
+            arguments: dict[str, Any] = {
+                "script": "hou.create_output()",
+                "expected_outputs": [output.path()],
+                "mutable_root": "/obj/fx",
+                "fresh_validation": fresh_validation,
+            }
+            if checks is not None:
+                arguments["checks"] = checks
+            return (
+                self.executor.dispatch("hia_execute_hom", arguments),
+                output,
+            )
+
+        compatible, compatible_output = run_created_output(
+            "NO_FRESH",
+            fresh_validation=False,
+        )
+        self.assertTrue(compatible["ok"], compatible)
+        self.assertEqual(0, compatible_output.cook_calls)
+        self.assertNotIn(
+            "empty_output",
+            {
+                item["check"]
+                for item in compatible["execution_evidence"]["validation"][
+                    "check_results"
+                ]
+            },
+        )
+        self.assertEqual("not_needed", compatible["rollback"]["status"])
+
+        explicit, explicit_output = run_created_output(
+            "EXPLICIT_UNPROVEN",
+            fresh_validation=False,
+            checks=["empty_output"],
+        )
+        self.assertTrue(explicit["ok"], explicit)
+        self.assertEqual(0, explicit_output.cook_calls)
+        explicit_empty = next(
+            item
+            for item in explicit["execution_evidence"]["validation"][
+                "check_results"
+            ]
+            if item["check"] == "empty_output"
+        )
+        self.assertEqual("unknown", explicit_empty["status"])
+        self.assertEqual(
+            "partial",
+            explicit["execution_evidence"]["postconditions"]["status"],
+        )
+        self.assertEqual("not_needed", explicit["rollback"]["status"])
+
+        fresh, fresh_output = run_created_output(
+            "FRESH_EMPTY",
+            fresh_validation=True,
+            checks=["empty_output"],
+        )
+        self.assertFalse(fresh["ok"])
+        self.assertEqual("VALIDATION_FAILED", fresh["errors"][0]["code"])
+        self.assertEqual(1, fresh_output.cook_calls)
+        self.assertEqual("rolled_back", fresh["rollback"]["status"])
+        self.assertTrue(fresh["errors"][0]["automatic_retry_safe"])
+
+        erroneous, error_output = run_created_output(
+            "REAL_ERROR",
+            fresh_validation=False,
+            errors=("Output connection is invalid",),
+        )
+        self.assertFalse(erroneous["ok"])
+        self.assertEqual("VALIDATION_FAILED", erroneous["errors"][0]["code"])
+        self.assertEqual(0, error_output.cook_calls)
+        self.assertEqual("rolled_back", erroneous["rollback"]["status"])
 
     def test_validation_scope_is_bounded_for_paths_and_root(self) -> None:
         target = FakeValidationNode("/obj/target")
@@ -778,11 +1574,14 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
                 },
             )
 
-        self.assertTrue(response["ok"])
+        self.assertFalse(response["ok"])
+        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertEqual("rolled_back", response["rollback"]["status"])
         self.assertEqual([False], trace_runner_states)
         evidence = response["execution_evidence"]
-        self.assertEqual("changed", response["scene_change_status"])
+        self.assertEqual("rolled_back", response["scene_change_status"])
         self.assertFalse(evidence["validation"]["valid"])
+        self.assertEqual("failed", evidence["postconditions"]["status"])
         scope = next(
             item
             for item in evidence["validation"]["check_results"]
@@ -855,6 +1654,100 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         self.assertFalse(
             (self.outside_root / "escaped-runtime" / "execution-traces").exists()
         )
+
+    def test_execute_returns_compact_before_after_network_postconditions(
+        self,
+    ) -> None:
+        source = FakeValidationNode("/obj/source", type_name="sphere")
+        output_path = "/obj/OUT_MODEL"
+        output = FakeValidationNode(
+            output_path,
+            type_name="null",
+            min_inputs=1,
+            inputs=(source,),
+            parms=(
+                FakeControlParm(
+                    output_path,
+                    "shop_materialpath",
+                    "/mat/lookdev",
+                    label="Material",
+                ),
+            ),
+        )
+        self.install_nodes(source, output)
+        self.executor._hybrid_knowledge_store = mock.Mock(  # type: ignore[method-assign]
+            side_effect=AssertionError("execution must not gate on knowledge search")
+        )
+
+        bare = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "hia_result = {'executed': True}",
+                "capture_diff": False,
+            },
+        )
+        self.assertTrue(bare["ok"])
+        self.assertEqual(
+            "not_requested",
+            bare["execution_evidence"]["postconditions"]["status"],
+        )
+
+        self.executor._node_digest = mock.Mock(  # type: ignore[method-assign]
+            side_effect=["before", "after"]
+        )
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "hia_result = {'edited': True}",
+                "diff_paths": [output_path],
+                "expected_outputs": [output_path],
+            },
+        )
+
+        self.assertTrue(response["ok"])
+        evidence = response["execution_evidence"]
+        facts = evidence["network_facts"]
+        self.assertEqual(1, facts["path_count"])
+        self.assertEqual(output_path, facts["before"][0]["path"])
+        self.assertEqual(output_path, facts["after_attempt"][0]["path"])
+        self.assertEqual([], facts["differences"])
+        postconditions = evidence["postconditions"]
+        self.assertEqual("passed", postconditions["status"])
+        self.assertEqual("observed", postconditions["target_existence"])
+        self.assertEqual(
+            "observed",
+            postconditions["required_input_connections"],
+        )
+        self.assertEqual(1, postconditions["control_parameter_facts"])
+        self.assertEqual(1, postconditions["material_entry_facts"])
+        self.assertEqual(
+            "recompute_not_proven",
+            postconditions["cook_freshness"],
+        )
+        self.assertEqual(0, output.cook_calls)
+        self.assertEqual(
+            "not_observed",
+            postconditions["visual_or_render_evidence"]["status"],
+        )
+
+        self.executor._node_digest = mock.Mock(  # type: ignore[method-assign]
+            side_effect=["before", "after"]
+        )
+        partial = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "hia_result = {'edited': True}",
+                "diff_paths": [output_path],
+                "mutable_root": "/obj",
+            },
+        )
+        self.assertTrue(partial["ok"])
+        self.assertEqual(
+            "partial",
+            partial["execution_evidence"]["postconditions"]["status"],
+        )
+        self.executor._hybrid_knowledge_store.assert_not_called()
 
     def test_changed_scope_uses_path_segments_not_similar_prefixes(self) -> None:
         asset = FakeValidationNode("/obj/asset")
@@ -943,6 +1836,29 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         self.assertFalse(
             any("incomplete" in warning for warning in response["warnings"])
         )
+
+    def test_validation_requires_a_real_target_and_output_checks_cook_fresh(
+        self,
+    ) -> None:
+        with self.assertRaises(HiaRuntimeError) as raised:
+            self.executor.dispatch("hia_validate", {"checks": ["node_errors"]})
+        self.assertEqual("VALIDATION_TARGET_REQUIRED", raised.exception.code)
+
+        output = FakeValidationNode("/obj/OUT_RESULT", counts=(3, 3, 1))
+        self.install_nodes(output)
+        result = self.executor.dispatch(
+            "hia_validate",
+            {
+                "paths": [output.path()],
+                "checks": ["empty_output", "geometry_summary"],
+            },
+        )["result"]
+
+        self.assertTrue(result["valid"])
+        self.assertTrue(result["complete"])
+        self.assertTrue(result["cooked"])
+        self.assertEqual("recompute_verified", result["freshness"])
+        self.assertEqual([True], output.cook_forces)
 
 
 if __name__ == "__main__":

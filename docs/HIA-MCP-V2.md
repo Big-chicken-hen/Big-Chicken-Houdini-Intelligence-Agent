@@ -6,7 +6,7 @@ HIA MCP V2 是 Codex 的 Houdini 感知、知识、执行与验证层。Codex �
 
 第三方 `fxhoudinimcp` 1.3.0 暴露 179 个工具，其中大量是 `create_node`、`set_parameter`、`connect_nodes` 一类微操作。复杂网络因此需要很多往返调用，模型还要在大量重叠工具间选择。HIA V2 不复制其实现或模块路径，也不维护旧 HIA MCP 的五节点白名单；它按能力域提供可过滤、分页、批量的语义工具，复杂变更优先一次 `hia_execute_hom` 完成。
 
-HIA V2 不是固定五工具桥，也不是另一个 Agent。当前能力矩阵公开 17 个工具。目录由 stdio 注册表的唯一事实源 `TOOL_SPECS` 派生，不再维护第二份手写工具清单；`hia_search_capabilities` 可检索工具名、能力域、描述、参数名及少量中英文别名，并用 `catalog_health` 报告 registered/catalogued/missing/orphaned。`checkpoint/检查点/备份` 指向 `hia_execute_hom`，`runtime/recovery/恢复` 指向 `hia_context`；空结果明确区分 `NO_MATCH` 与 `CATALOG_INCOMPLETE`。
+HIA V2 不是固定五工具桥，也不是另一个 Agent。当前能力矩阵公开 18 个工具。目录由 stdio 注册表的唯一事实源 `TOOL_SPECS` 派生，不再维护第二份手写工具清单；`hia_search_capabilities` 可检索工具名、能力域、描述、参数名及少量中英文别名，并用 `catalog_health` 报告 registered/catalogued/missing/orphaned。`checkpoint/检查点/备份` 指向 `hia_execute_hom`，`runtime/recovery/恢复` 指向 `hia_context`；空结果明确区分 `NO_MATCH` 与 `CATALOG_INCOMPLETE`。
 
 ## 能力矩阵与首版工具
 
@@ -21,6 +21,7 @@ HIA V2 不是固定五工具桥，也不是另一个 Agent。当前能力矩阵�
 | 动画 | `hia_animation_summary` | 已实现 |
 | 模拟与缓存理解 | `hia_simulation_summary` | 已实现 |
 | 高能力执行 | `hia_execute_hom` | 已实现；一次批量 UI 主线程执行 |
+| 通用效果实验 | `hia_run_effect_experiment` | 已实现；临时 baseline + 2–3 candidates、多帧证据与 contact sheet，不评分 |
 | 调试与验证 | `hia_validate`, `hia_scene_diff` | 已实现 |
 | 视觉反馈 | `hia_capture_viewport` | 已实现；显式调用才截图/flipbook |
 | 本地帮助 | `hia_local_help_search` | 已实现；兼容的 SQLite FTS5 + 可选 Qwen hybrid 检索 |
@@ -167,10 +168,10 @@ HIA V2 不读取 `FXHOUDINIMCP_*`，不注册 `/api`，不使用 `fxhoudinimcp` 
 
 ## 复杂视觉任务的低分辨率审阅闭环
 
-复杂且可见结果占主导的任务必须由 Codex 串联现有能力完成有限审阅闭环，不新增 MCP 工具、服务、调度器、评分系统或第二个 Agent：
+复杂且可见结果占主导的任务由 Codex 串联现有能力完成有限审阅闭环。普通里程碑继续复用 `hia_capture_viewport`、`hia_validate` 与 `hia_scene_diff`；只有需要主观候选对比的 Full 任务才使用唯一的 `hia_run_effect_experiment`。该工具只执行临时 baseline/candidate 参数实验并返回多帧事实与 contact sheet，不评分、不生成 EffectSpec，也不新增服务、调度器或第二个 Agent：
 
 1. 在主要结构完成、任务范围内的材质/灯光完成、最终交付前等有意义视觉里程碑，Codex 自动调用现有 `hia_capture_viewport`。相邻或没有可见变化的阶段合并或跳过；Box、单参数修改和普通 HOM 报错等简单任务不截图。
-2. 阶段预览使用同帧 `flipbook`，默认 `640 x 360`、`return_image=true`；其他宽高比使用同级受限分辨率。动画和模拟只抽代表帧或关键帧，不为审阅生成连续长序列；任意 `frame_range` 跨度不得超过 240 帧。
+2. 阶段预览使用同帧 `flipbook` 与 `return_image=true`。省略宽高时从 live viewport 推导；只给一边时保留 viewport 纵横比；两边都给时精确采用请求尺寸。动画和模拟只抽代表帧或关键帧，不为审阅生成连续长序列；任意 `frame_range` 跨度不得超过 240 帧。
 3. 图片在安全的已保存 HIP 下写入同级唯一 `.hia/screenshots`，否则写入 `HIA_CACHE_DIR/screenshots`。路径每次调用重新读取，不缓存首次 HIP，因此 Save As 后自然切换。捕获不打开 MPlay、不抢焦点，并在成功或失败后恢复原相机、自由视图、相机锁定状态和当前帧。
 4. 只读 `houdini-artifact-review` 结合预览以及按需的 `hia_validate`、`hia_scene_diff`，检查比例/轮廓、浮空/穿插、支撑/接触、构图、材质、曝光、透明度和参考一致性。它只返回证据和最低修复建议，不写 HIP。
 5. 当前主任务是唯一 HIP writer，每轮只修最高影响的可见区域，再用相同证据复核。迭代预算按任务设为小范围；达到要求立即停止，预算耗尽或无法捕获则明确报告未验证项。
@@ -185,7 +186,7 @@ WPF launcher 现在提供互斥 backend 选择：默认 `hia_v2`，手动兼容�
 
 普通项目 `.codex/config.toml` 仍为 `required=false`，不会在未通过启动器运行 Houdini 时阻断普通 Codex 任务；受控 Houdini session 的 `required=true` 只由 Bridge 进程级 strict config 注入。
 
-固定 Codex 0.144.3 的离线 app-server 握手已验证：`thread/start` 成功；当前 `hia_mcp_v2` registry 暴露 17 个 `hia_` 工具，禁用的 `houdini_intelligence` 暴露 0 个工具。Codex 的真实 `tools/list` 请求携带标准 `_meta` 对象，stdio adapter 已兼容该形状。
+固定 Codex 0.144.3 的离线 app-server 握手已验证：`thread/start` 成功；当前 `hia_mcp_v2` registry 暴露 18 个 `hia_` 工具，禁用的 `houdini_intelligence` 暴露 0 个工具。Codex 的真实 `tools/list` 请求携带标准 `_meta` 对象，stdio adapter 已兼容该形状。
 
 ## 真实 Houdini 验收
 
@@ -210,6 +211,10 @@ Cook/cache 证据按 target 和 frame 记录 `needsToCook()`、`isTimeDependent(
 
 `hia_context(include_runtime_capabilities=true)` 返回 `hia-runtime-capabilities/1`，绑定当前 Houdini build，对 HIA 实际依赖的少量 HOM 方法分别报告 `documented`、`callable`、`probe_status` 与脱敏 error。`cook()`、`geometry()` 和体积采样只检查是否 callable，不在 capability probe 中调用。依据为 SideFX 当前官方 [`hou.OpNode`](https://www.sidefx.com/docs/houdini/hom/hou/OpNode.html)、[`hou.Geometry`](https://www.sidefx.com/docs/houdini/hom/hou/Geometry.html)、[`hou.Volume`](https://www.sidefx.com/docs/houdini/hom/hou/Volume.html) 与 [`hou.VDB`](https://www.sidefx.com/docs/houdini/hom/hou/VDB.html) 文档；文档存在不会被当作当前 build 中可调用的证明。
 
-`hia_execute_hom` 的原始 `script` 仍是唯一必填写入接口；可选 `task`、`mutable_root`、`protected_paths`、`expected_outputs`、`checks` 与同一份 `semantic_checks` 只是轻量执行 envelope。它复用定向 Scene Diff 和上述检查输出前后证据，但不是 HOM 沙箱、不会回滚，也不会把脚本转换为 IR。
+`hia_execute_hom` 的原始 `script` 仍是唯一必填写入接口；可选 `task`、`mutable_root`、`protected_paths`、`expected_outputs`、`checks` 与同一份 `semantic_checks` 只是轻量执行 envelope。它复用定向 Scene Diff 和上述检查输出前后证据，但不是 HOM 沙箱，也不会把脚本转换为 IR。`expected_outputs` 只隐式补目标存在性和节点错误检查；`empty_output`、`geometry_summary`、语义检查以及依赖新鲜输出的 cook 必须由调用方显式请求，`fresh_validation=false` 不会再偷偷追加或执行这些检查。`hia_context(include_context_pack=false)` 会明确关闭 Context Pack 和知识检索，即使同一次调用还带有 `task`、`change_scope` 或 `knowledge_queries`。
 
-每次 HOM 执行返回后，runtime 在 `.runtime/hia-mcp-v2/execution-traces/<session>.jsonl` 追加一条不超过 64 KiB 的机器事实：脚本 SHA-256、前后 revision、观察到的路径、check 状态、错误 code 与阶段耗时。Trace 不保存脚本正文、task 正文、聊天、stdout、结果、traceback、凭据，也不会自动写项目记忆或晋升为知识。协议工具仍为 17 个、Houdini runtime 工具仍为 16 个，没有新增服务或工具。
+每批写入位于一个 Houdini Undo group 内，但只在真实 HOM 异常，或已观察到的显式验证、scope、删除契约失败时请求 Undo；`unknown`、`partial` 与 `NO_OBSERVED_EFFECT` 会保持失败或未证明状态，不会触发整批回滚。调用方读取 `rollback.status` 与错误中的 `automatic_retry_safe`：只有 Undo 栈和 HIP dirty 状态都恢复到批处理前，回滚才会报告 `rolled_back`；随后只有 `automatic_retry_safe=true` 才允许一次修正后的有界重试。Undo 已撤销临时节点但 dirty 状态未恢复时会返回 `DIRTY_STATE_NOT_RESTORED` 和 `not_proven`，不会虚报无残留。未证明回滚、超时和可能存在外部文件/render 副作用时必须先检查实际场景。`protected_paths` 比较持久节点类型、参数、flag 与拓扑，不把切帧造成的 cook 计数、缓存或求值结果变化误判为场景写入。
+
+运行时身份绑定 launcher session、Houdini PID 和已加载的 executor 路径，并报告 HIP、scene revision 及 executor 源码 loaded/disk mtime。运行中源码或会话变化时，`hia_execute_hom` 与 `hia_run_effect_experiment` 在提交写入前返回 `restart_required`；health 和只读工具仍可用于确认实际连接，正常重连或重启后再写，不做热重载。HIP 路径和 revision 是状态证据，不会因为正常打开另一份 HIP 而永久锁死写入。
+
+每次 HOM 执行返回后，runtime 在 `.runtime/hia-mcp-v2/execution-traces/<session>.jsonl` 追加一条不超过 64 KiB 的机器事实：脚本 SHA-256、前后 revision、观察到的路径、check 状态、错误 code 与阶段耗时。Trace 不保存脚本正文、task 正文、聊天、stdout、结果、traceback、凭据，也不会自动写项目记忆或晋升为知识。协议工具为 18 个、Houdini runtime 工具为 17 个；本次只新增唯一通用 `hia_run_effect_experiment`，没有新增服务。

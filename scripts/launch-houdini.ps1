@@ -562,6 +562,69 @@ function Remove-ChildEnvironment {
     }
 }
 
+function Invoke-HiaKnowledgeBootstrapOnLaunch {
+    param(
+        [Parameter(Mandatory = $true)][string]$Python,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string[]]$PythonPathEntries,
+        [Parameter(Mandatory = $true)][hashtable]$EmbeddingEnvironment,
+        [Parameter(Mandatory = $true)][string[]]$EmbeddingEnvironmentNames
+    )
+
+    $environment = @{
+        'HIA_PROJECT_ROOT' = $Root
+        'PYTHONDONTWRITEBYTECODE' = '1'
+        'PYTHONIOENCODING' = 'utf-8'
+        'PYTHONNOUSERSITE' = '1'
+        'PYTHONUTF8' = '1'
+        'PYTHONPATH' = ($PythonPathEntries -join [System.IO.Path]::PathSeparator)
+    }
+    foreach ($entry in $EmbeddingEnvironment.GetEnumerator()) {
+        $environment[[string]$entry.Key] = [string]$entry.Value
+    }
+    $clearEnvironmentNames = @(
+        $EmbeddingEnvironmentNames |
+            Where-Object { -not $EmbeddingEnvironment.ContainsKey([string]$_) }
+    )
+
+    $invoke = {
+        param([string]$Action, [int]$TimeoutSeconds)
+        $arguments = @(
+            '-B',
+            '-m',
+            'hia_mcp_runtime.knowledge_index_cli',
+            '--project-root',
+            $Root,
+            '--format',
+            'json',
+            $Action
+        )
+        if ($Action -eq 'build') {
+            $arguments += @('--batch-size', '32')
+        }
+        $result = Invoke-HiaProcess `
+            -FilePath $Python `
+            -Arguments $arguments `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Environment $environment `
+            -RemoveEnvironmentVariables $clearEnvironmentNames `
+            -WorkingDirectory $Root
+        if ($result.timed_out -eq $true -or $result.exit_code -ne 0) {
+            throw "knowledge index $Action did not complete"
+        }
+        return ([string]$result.stdout).Trim() |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+
+    $bootstrap = & $invoke 'bootstrap' 180
+    if (
+        $bootstrap.installation.installed -eq $true -and
+        [int]$bootstrap.index.pending_chunks -gt 0
+    ) {
+        [void](& $invoke 'build' 3600)
+    }
+}
+
 function Get-EmbeddingLauncherContract {
     param(
         [Parameter(Mandatory = $true)][string]$Python,
@@ -1252,6 +1315,16 @@ $bridgePythonPath = Join-Path $ResolvedRoot 'services\bridge'
 $projectSourcePath = Join-Path $ResolvedRoot 'src'
 $panelPythonPath = Join-Path $ResolvedRoot 'houdini_package\python_libs'
 $packageDirectory = Join-Path $ResolvedRoot 'houdini_package\packages'
+try {
+    [void](Invoke-HiaKnowledgeBootstrapOnLaunch `
+        -Python $normalizedPython `
+        -Root $ResolvedRoot `
+        -PythonPathEntries @($panelPythonPath, $projectSourcePath) `
+        -EmbeddingEnvironment $embeddingEnvironment `
+        -EmbeddingEnvironmentNames $embeddingEnvironmentNames)
+} catch {
+    Write-Warning 'Local knowledge refresh did not complete; Houdini will continue with the current index.'
+}
 $bridgeToken = New-CryptographicToken
 do {
     $sceneExecutorToken = New-CryptographicToken
@@ -1286,6 +1359,8 @@ $backendEnvironmentNames = @(
     'HIA_MCP_V2_TOKEN',
     'HIA_MCP_V2_ROUTE',
     'HIA_MCP_V2_RUNTIME_DIR',
+    'HIA_MCP_V2_EXECUTOR_PATH',
+    'HIA_LAUNCHER_SESSION_ID',
     'HIA_CRASH_RECOVERY_THREAD_ID',
     'HIA_CRASH_RECOVERY_GOAL_BINDING',
     'HIA_CRASH_RECOVERY_PROMPT_ID'
@@ -1296,6 +1371,9 @@ if ($McpBackend -eq 'hia_v2') {
         -Root $ResolvedRoot
     $hiaMcpRuntimeSource = Assert-OrdinaryProjectPath `
         -Path (Join-Path $ResolvedRoot 'houdini_package\python_libs\hia_mcp_runtime\http_server.py') `
+        -Root $ResolvedRoot
+    $hiaMcpExecutorSource = Assert-OrdinaryProjectPath `
+        -Path (Join-Path $ResolvedRoot 'houdini_package\python_libs\hia_mcp_runtime\executor.py') `
         -Root $ResolvedRoot
     $hiaMcpRuntimeDirectory = Assert-OrdinaryProjectPath `
         -Path (Join-Path $ResolvedRoot '.runtime\hia-mcp-v2') `
@@ -1309,6 +1387,8 @@ if ($McpBackend -eq 'hia_v2') {
         'HIA_MCP_V2_TOKEN' = $houdiniMcpToken
         'HIA_MCP_V2_ROUTE' = '/hia-mcp-v2/v1/execute'
         'HIA_MCP_V2_RUNTIME_DIR' = $hiaMcpRuntimeDirectory
+        'HIA_MCP_V2_EXECUTOR_PATH' = $hiaMcpExecutorSource
+        'HIA_LAUNCHER_SESSION_ID' = $sessionId
     }
     $houdiniBackendEnvironment += $bridgeBackendEnvironment
     $houdiniBackendEnvironment['HIA_MCP_V2_AUTOSTART'] = '1'

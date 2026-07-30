@@ -10,14 +10,14 @@ Build complete assets as readable procedural systems. More nodes do not make a m
 ## Route the request
 
 1. Interpret a request to generate a nontrivial named asset as a complete, structurally resolved, editable deliverable unless the user explicitly asks for a blockout, proxy, placeholder, or technical test. A stylized or low-poly final asset can still be complete.
-2. Keep a single primitive, one parameter or connection change, routine inspection, and an ordinary HOM error Direct: reuse the single shared pre-write lookup, execute, and run one necessary targeted validation. Do not require a Brief, external research, capture, or artifact review, and do not load this workflow for material-only, animation-only, or read-only review work.
+2. Keep a single primitive, known parameter or connection change, routine inspection, and an ordinary HOM error Direct: execute without knowledge retrieval and run one necessary targeted validation. Do not require a Brief, external research, capture, or artifact review, and do not load this workflow for material-only, animation-only, or read-only review work.
 3. Treat a bounded familiar repair or restructuring as Focused and load only the one or two references or evidence steps that address its real uncertainty.
 4. Treat a complete multi-subsystem asset, substantial dependency/UV/integrity rebuild, version-sensitive technique, high-cost construction, or simulation/cache handoff as Full and use the shared Brief and acceptance evidence selectively.
 5. When running as the Architect role, return the construction plan, HOM draft, risks, and validation advice only. Keep the Director as the sole writer of the current HIP.
 
 ## Load only the needed guidance
 
-- Read [knowledge-and-memory.md](../houdini-visual-research/references/knowledge-and-memory.md) before the first scene write. Apply only its concise local lookup for a direct deterministic edit; use the full guidance when authoring a complex, unfamiliar, version-sensitive, or project-specific asset.
+- Read [knowledge-and-memory.md](../houdini-visual-research/references/knowledge-and-memory.md) only when node/parameter/version behavior, a complex workflow, historical project context, or failure cause is uncertain. Skip retrieval for a known deterministic edit.
 - Read [build-brief-and-review.md](../houdini-visual-research/references/build-brief-and-review.md) for the compact Build Brief, semantic stage order, native Codex roles, and domain-specific acceptance evidence for complex construction.
 - Read [modeling-judgment.md](references/modeling-judgment.md) to define identity, structural hierarchy, and the difference between a blockout and a complete asset.
 - Read [procedural-architecture.md](references/procedural-architecture.md) when choosing subsystems, representations, continuous paths, host dependencies, controls, repetition, performance strategy, or graph layout.
@@ -44,7 +44,7 @@ For the Full route, contribute the modeling decisions to the shared Build Brief:
 
 ## Use the live Houdini route
 
-Default current-scene work to HIA MCP V2 and HOM. Satisfy the request-level lookup through the shared `knowledge-and-memory.md` contract; if the main task or visual-research Skill already completed it, reuse that result and do not run a modeling-specific duplicate. For complex, unfamiliar, reference-driven, material-dependent, or version-sensitive construction, complete the shared external-research workflow before authoring; search durable project memory only when it can affect the decision. Obtain context with `hia_context` or `hia_inspect` only as needed, then prefer one or a small number of serial, cohesive `hia_execute_hom` batches. When several installed-node questions are genuinely needed, use one batched `hia_search_node_types` request, reuse its results, and batch any follow-up `hia_node_help` targets; do not fan out parallel queries. Avoid tool forests and parallel live-scene writes.
+Default current-scene work to HIA MCP V2 and HOM. When uncertainty triggers the shared `knowledge-and-memory.md` contract, reuse any result already supplied by the main task or visual-research Skill and do not run a modeling-specific duplicate. For complex, unfamiliar, reference-driven, material-dependent, or version-sensitive construction, complete only the external research that can change authoring; search durable project memory only when it can affect the decision. Obtain context with `hia_context` or `hia_inspect` only as needed, then prefer one or a small number of serial, cohesive `hia_execute_hom` batches. When several installed-node questions are genuinely needed, use one batched `hia_search_node_types` request, reuse its results, and batch any follow-up `hia_node_help` targets; do not fan out parallel queries. Avoid tool forests and parallel live-scene writes.
 
 Use native `hython` only when the user explicitly requests offline work, an independent HIP, batch processing, or background execution. Use FXHoudiniMCP only when the active HIA configuration explicitly selects that compatibility mode; never make it the default.
 
@@ -54,7 +54,7 @@ Require both relevant technical evidence and task-specific visual evidence befor
 
 Turn retrieved topology, attribute, dependency, placement, range, and version rules into explicit semantic expectations before a Focused or Full write. After execution, ask the current `hia_validate` semantic-expectation capability to test them through its live contract, then use only the other evidence needed by the claim. Node existence and an error-free cook do not prove the expected host relationship, group/attribute contract, placement range, or dependency update; report an unknown or not-proven result once as an unverified risk.
 
-For a complex visual asset, follow the stage-preview contract in `$houdini-visual-research`: capture a low-resolution same-frame preview at meaningful milestones rather than after every small edit, route the applicable modeling, network, or performance evidence to read-only `$houdini-artifact-review`, and let the Director apply only the selected highest-impact fix serially before the final completion claim.
+For a complex visual asset, follow the stage-preview contract in `$houdini-visual-research`: use its risk-appropriate static or temporal preview evidence at meaningful milestones rather than capturing after every small edit, route the applicable modeling, network, or performance evidence to read-only `$houdini-artifact-review`, and let the Director apply only the selected highest-impact fix serially before the final completion claim.
 
 When geometry integrity is relevant, bound the check as described in [geometry-integrity.md](references/geometry-integrity.md) and recheck the same scope after any repair before claiming completion.
 

@@ -27,6 +27,16 @@ Fracture/assembly → piece naming → pack/collision properties → constraint 
 
 Fracture owns piece topology; naming owns stable identity; packing owns transform representation; configure owns physical/collision properties; constraint branch owns endpoints, `constraint_name`, and strength; solver owns motion/break state. `name` is the central mapping field. Exact Bullet attribute names differ across node versions, so inspect the node's spreadsheet/help rather than inventing a field.
 
+## Executable parameter and connection contract
+
+1. Build a vertical render-geometry branch `RBD Material Fracture SOP -> Assemble SOP` (or the current fracture/packing equivalent). On `Assemble SOP`, enable creation of a primitive string `name` and packed geometry. The value must be non-empty and unique per packed primitive.
+2. Branch proxy pieces into `RBD Configure SOP`. Set `Active`, `Animated`, `Collision Geometry`, `Density`, `Friction`, and `Bounce` explicitly for the task. Contract ranges are `density > 0`, `friction >= 0`, and normally `0 <= bounce <= 1`; retain the starting defaults until a controlled physical test justifies a change.
+3. From unpacked named pieces, build constraints with `Connect Adjacent Pieces SOP` or explicit lines, then use `RBD Constraint Properties SOP`. Constraint primitives need endpoint identity that resolves to the piece `name`; declare `constraint_name` such as `Glue`, `Hard`, or `Soft` using the spelling emitted/accepted by the active nodes. Keep strength finite and non-negative. Do not invent a raw attribute when the SOP can author the active schema.
+4. Feed configured packed pieces to input 1 of `RBD Bullet Solver SOP`, constraint geometry to the constraint input, and collider geometry to its collision input. Keep high-resolution render pieces outside the solver and later drive them with `Transform Pieces SOP` using `name`.
+5. On the solver, use `Global Substeps = 1` for the baseline. If fast pieces tunnel, raise `Bullet Substeps` in a measured sequence such as `1 -> 2 -> 4`; using Bullet substeps is more efficient than raising global substeps when no custom substepped solver output is required. If joints visibly violate their target while collisions are detected, increase `Constraint Iterations` separately.
+6. Record `Collision Padding` in scene units and enable `Shrink Collision Geometry` when padding would otherwise enlarge shapes. Padding must be small relative to the smallest proxy dimension. Use `Solve Tolerance` only after a stable reference: larger tolerance may stop iteration earlier and trade accuracy for speed.
+7. Cache packed simulation geometry and any required broken-constraint output. `Transform Pieces SOP` input 1 receives high-resolution named pieces and the transform/reference inputs receive the cached packed pieces according to the active node interface. Confirm the `name` set matches before accepting the result.
+
 ## Data flow, cache, version, and performance
 
 Topology may change before packing, but piece identity must stabilize before constraints. Cache packed transforms, not repeatedly deformed high-resolution geometry. Convex hulls are fast but can misrepresent concavity; compound/concave shapes cost more. Excess constraints increase solve cost and can over-stiffen an object. Use physically meaningful pruning and measured collision/constraint complexity.
@@ -38,6 +48,18 @@ Topology may change before packing, but piece identity must stabilize before con
 - **Whole object never breaks:** strengths are too high, impacts too weak, or constraint network is excessively connected.
 - **Render pieces detach:** transform application uses different/missing `name`.
 - **Slow solver:** simplify collision proxies, prune constraints, and keep render geometry outside the solve.
+
+## Checkpoints and observable evidence
+
+- **R0 — pieces:** packed primitive count equals unique non-empty `name` count; proxy bounds and volumes are positive and no two proxies begin with unintended deep overlap.
+- **R1 — constraints:** every line has two resolvable endpoints, a recognized `constraint_name`, and finite strength. Display color by type and log unresolved endpoints as zero.
+- **R2 — baseline solve:** with a simple ground and one impact, intact bonds hold before the intended load. Record penetrating-contact count, maximum speed, and constraint-error/broken counts.
+- **R3 — quality isolation:** a Bullet-substep change reduces missed collisions without changing the constraint graph; an iteration change reduces joint error without changing collision proxy geometry. If neither metric changes, revert the extra cost.
+- **R4 — reconstruction:** disk-loaded packed pieces preserve the `name` set and transforms. High-resolution pieces follow them one-to-one with no unmatched names, double transforms, or render-geometry cooking inside the solver.
+
+## When not to use this workflow
+
+Do not use Bullet packed RBDs for continuously deforming rubber/cloth, fluid fracture, or a hero bend that requires finite-element deformation. Avoid dense glue networks for an object that can remain a single rigid piece until an authored trigger; activation or a simpler break switch may be clearer and cheaper.
 
 ## Provenance boundary
 

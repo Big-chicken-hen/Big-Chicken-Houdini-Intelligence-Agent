@@ -73,77 +73,6 @@ class P1AssetTests(unittest.TestCase):
         self.assertEqual(1, len(hou_imports))
         self.assertIn("hou_module=hou", embedded)
 
-    def test_offline_ime_diagnostic_panel_is_stock_and_content_blind(self) -> None:
-        source_path = (
-            REPOSITORY_ROOT
-            / "houdini_package"
-            / "python_libs"
-            / "hia_panel"
-            / "ime_diagnostic.py"
-        )
-        panel_path = (
-            REPOSITORY_ROOT
-            / "houdini_package"
-            / "python_panels"
-            / "hia_ime_diagnostic.pypanel"
-        )
-        source = source_path.read_text(encoding="utf-8")
-        ast.parse(source)
-        document = ET.parse(panel_path)
-        interface = document.getroot().find("interface")
-        self.assertIsNotNone(interface)
-        self.assertEqual("hia_ime_diagnostic", interface.attrib["name"])
-        self.assertEqual("HIA IME Diagnostic (Offline)", interface.attrib["label"])
-        ast.parse(interface.find("script").text)
-
-        self.assertEqual(1, source.count("QtWidgets.QLineEdit()"))
-        self.assertEqual(1, source.count("QtWidgets.QTextEdit()"))
-        self.assertEqual(1, source.count("QtWidgets.QPlainTextEdit()"))
-        self.assertEqual(1, source.count("QtCore.QTimer(self)"))
-        for forbidden in (
-            "setAttribute(",
-            "setInputMethodHints(",
-            "setFocusPolicy(",
-            "eventFilter",
-            "keyPressEvent",
-            "inputMethodEvent",
-            "focusProxy",
-            "viewport",
-            "QInputMethodEvent",
-            "BridgeClient",
-            "urllib",
-            "http.client",
-            "QtNetwork",
-            ".text(",
-            "toPlainText(",
-            "selectedText(",
-            "displayText(",
-            "toHtml(",
-            "toMarkdown(",
-            ".document(",
-        ):
-            self.assertNotIn(forbidden, source)
-
-        allowed_record_fields = {
-            "focusWidget",
-            "QLineEdit",
-            "QTextEdit",
-            "QPlainTextEdit",
-            "hasFocus",
-            "WA_InputMethodEnabled",
-            "inputMethodHints",
-            "inputMethod().isVisible",
-        }
-        tree = ast.parse(source)
-        recorded_fields = {
-            key.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Dict)
-            for key in node.keys
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
-        self.assertEqual(allowed_record_fields, recorded_fields)
-
     def test_panel_python_has_no_houdini_scene_calls(self) -> None:
         panel_path = (
             REPOSITORY_ROOT
@@ -198,18 +127,6 @@ class P1AssetTests(unittest.TestCase):
             "uninstallFile",
             "reloadAllFiles",
         }
-        dormant = (
-            package_root
-            / "python_libs"
-            / "hia_panel"
-            / "houdini_write_adapter.py"
-        )
-        local_acceptance = (
-            package_root
-            / "python_libs"
-            / "hia_panel"
-            / "b4b_acceptance.py"
-        )
         hia_runtime = (
             package_root
             / "python_libs"
@@ -233,21 +150,15 @@ class P1AssetTests(unittest.TestCase):
                     )
                 ):
                     found.setdefault(path, set()).add(node.func.attr)
-        self.assertEqual({dormant, hia_runtime}, set(found))
-        self.assertEqual({"createNode", "setInput", "destroy"}, found[dormant])
+        self.assertEqual({hia_runtime}, set(found))
         self.assertEqual({"cook"}, found[hia_runtime])
 
         for path in sorted(package_root.rglob("*.py")):
-            if path in {dormant, local_acceptance}:
-                continue
             self.assertNotIn(
                 "houdini_write_adapter",
                 path.read_text(encoding="utf-8"),
                 str(path.relative_to(REPOSITORY_ROOT)),
             )
-
-        acceptance_source = local_acceptance.read_text(encoding="utf-8")
-        self.assertIn("from .houdini_write_adapter import", acceptance_source)
         self.assertNotIn("b4b_acceptance", (package_root / "python_libs" / "hia_panel" / "panel.py").read_text(encoding="utf-8"))
         self.assertNotIn("b4b_acceptance", (package_root / "python_panels" / "houdini_intelligence.pypanel").read_text(encoding="utf-8"))
 
@@ -422,8 +333,31 @@ class P1AssetTests(unittest.TestCase):
         self.assertIn("self._client.get_models()", source)
         self.assertIn("self._client.start_thread(", source)
         self.assertIn("model=self._selected_model_id()", source)
-        self.assertIn("effort=self._selected_effort()", source)
-        self.assertIn("service_tier=self._selected_service_tier()", source)
+        tree = ast.parse(source)
+        start_turn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_start_new_turn"
+        )
+        start_turn_source = ast.get_source_segment(source, start_turn)
+        self.assertIsInstance(start_turn_source, str)
+        self.assertEqual(
+            1,
+            start_turn_source.count(
+                "runtime_settings = self._capture_turn_runtime_settings()"
+            ),
+        )
+        for field in ("model", "effort", "service_tier"):
+            self.assertIn(
+                f'{field}=runtime_settings["{field}"]',
+                start_turn_source,
+            )
+        for repeated_ui_read in (
+            "self._selected_model_id()",
+            "self._selected_effort()",
+            "self._selected_service_tier()",
+        ):
+            self.assertNotIn(repeated_ui_read, start_turn_source)
         self.assertIn('payload.get("models")', source)
         self.assertIn("supportedReasoningEfforts", source)
         self.assertIn("defaultReasoningEffort", source)
@@ -869,45 +803,6 @@ foreach ($case in $cases) {{
             check=False,
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
-
-    def test_legacy_launcher_is_a_three_parameter_forwarding_wrapper(self) -> None:
-        generic = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
-        legacy = REPOSITORY_ROOT / "scripts" / "launch-houdini-21.0.440.ps1"
-        self.assertTrue(generic.is_file())
-        self.assertTrue(legacy.is_file())
-        source = legacy.read_text(encoding="utf-8")
-        self.assertLessEqual(len(source.splitlines()), 14)
-        self.assertIn("[string]$BridgePython =", source)
-        self.assertIn("[string]$HoudiniExe = ''", source)
-        self.assertIn("[string]$McpBackend = 'hia_v2'", source)
-        self.assertEqual(1, source.count("launch-houdini.ps1"))
-        self.assertEqual(1, source.count("-BridgePython $BridgePython"))
-        self.assertEqual(1, source.count("-HoudiniExe $HoudiniExe"))
-        self.assertEqual(1, source.count("-McpBackend $McpBackend"))
-        for duplicated_logic in (
-            "function Resolve-HoudiniExecutable",
-            "Get-Command -Name 'houdini.exe'",
-            "ProcessStartInfo",
-            "HIA_BRIDGE_URL",
-            "/v1/shutdown",
-        ):
-            self.assertNotIn(duplicated_logic, source)
-
-        for launcher in (generic, legacy):
-            escaped_launcher = str(launcher).replace("'", "''")
-            parse_command = (
-                "[void][scriptblock]::Create([IO.File]::ReadAllText("
-                f"'{escaped_launcher}'))"
-            )
-            completed = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", parse_command],
-                cwd=REPOSITORY_ROOT,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            self.assertEqual(0, completed.returncode, completed.stderr)
 
     def test_b2_runtime_wiring_is_read_only_and_live_start_remains_manual(self) -> None:
         bridge_main = (

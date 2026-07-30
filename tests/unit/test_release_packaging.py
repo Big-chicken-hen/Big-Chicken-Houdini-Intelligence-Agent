@@ -21,6 +21,7 @@ HIA_MCP_V2_PATH = REPOSITORY_ROOT / "docs" / "HIA-MCP-V2.md"
 XAML_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.xaml"
 WPF_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Wpf.ps1"
 CORE_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Core.psm1"
+LAUNCHER_PATH = REPOSITORY_ROOT / "scripts" / "hia-launcher.ps1"
 CS_PROJECT_PATH = (
     REPOSITORY_ROOT
     / "launcher"
@@ -98,6 +99,8 @@ class ReleasePackagingTests(unittest.TestCase):
         for required in (
             "$releaseFileAllowlist",
             "$releaseDirectoryAllowlist",
+            "$releaseBuildInputFiles",
+            "$releaseSourceRequiredFiles",
             "$releaseDenyPatterns",
             ".agents/skills/houdini-visual-research/references/build-brief-and-review.md",
             "scripts/bootstrap-runtime.ps1",
@@ -133,11 +136,15 @@ class ReleasePackagingTests(unittest.TestCase):
             "vcruntime140_cor3.dll",
             "wpfgfx_cor3.dll",
             "check-public-release.py",
-            "SHA256SUMS.txt",
+            'SHA256SUMS-v$Version.txt',
             "CreateEntryFromFile",
             "licenses\\dotnet",
             "ThirdPartyNotices.txt",
             "assets/launcher/launcher-hero.png",
+            "launcher/HoudiniIntelligenceLauncher/App.xaml",
+            "launcher/HoudiniIntelligenceLauncher/App.xaml.cs",
+            "launcher/HoudiniIntelligenceLauncher/HoudiniIntelligenceLauncher.csproj",
+            "launcher/HoudiniIntelligenceLauncher/ProjectRootLocator.cs",
         ):
             self.assertIn(required, source)
         self.assertNotIn("'houdini_package/',", source)
@@ -168,10 +175,15 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertIn("$buildArguments = @{ OutputDirectory = $launcherDist }", source)
         self.assertNotIn("Join-Path $runtimeRoot 'dist\\launcher'", source)
         self.assertIn(
-            "& $python.Source -B $publicReleaseChecker --source-tree $projectRoot",
+            "& $releasePython -I -B $publicReleaseChecker "
+            "--source-tree $projectRoot",
             source,
         )
-        self.assertIn("& $python.Source -B $publicReleaseChecker $archivePath", source)
+        self.assertIn(
+            "& $releasePython -I -B $publicReleaseChecker",
+            source,
+        )
+        self.assertIn("--forbid-text $projectRoot", source)
         self.assertLess(
             source.index("--source-tree $projectRoot"),
             source.index("& $launcherBuildScript"),
@@ -182,6 +194,16 @@ class ReleasePackagingTests(unittest.TestCase):
         )
         self.assertNotIn("Copy-Item", source)
         self.assertNotIn("Remove-Item", source)
+        self.assertNotIn("Get-Command -Name 'python.exe'", source)
+        self.assertIn(
+            '$checksumsPath = Join-Path $releaseRoot '
+            '"SHA256SUMS-v$Version.txt"',
+            source,
+        )
+        self.assertNotIn(
+            "$checksumsPath = Join-Path $releaseRoot 'SHA256SUMS.txt'",
+            source,
+        )
         self.assertIsNone(re.search(r"(?i)(?:^|[\"'\s])[a-z]:[\\/]", source))
         allowlist_source = source[
             source.index("$releaseFileAllowlist")
@@ -239,6 +261,67 @@ class ReleasePackagingTests(unittest.TestCase):
         ]
         self.assertIn("'knowledge/sidefx-official/'", directory_allowlist)
 
+    def test_release_preflight_is_read_only_and_uses_canonical_venv(
+        self,
+    ) -> None:
+        source = BUILD_RELEASE_PATH.read_text(encoding="utf-8-sig")
+        preflight = source[
+            source.index("function Invoke-ReleaseSourcePreflight"):
+            source.index("function Copy-ReleaseFile")
+        ]
+        self.assertIn(
+            "Join-Path $projectRoot '.venv\\Scripts\\python.exe'",
+            preflight,
+        )
+        self.assertIn("git -C $projectRoot ls-files --", preflight)
+        self.assertIn(
+            "git -C $projectRoot ls-files --others --exclude-standard --",
+            preflight,
+        )
+        self.assertIn(
+            "Required release source is not tracked by git",
+            preflight,
+        )
+        self.assertIn("Untracked release source would be omitted", preflight)
+        self.assertIn("[switch]$PreflightOnly", source)
+        self.assertLess(
+            source.index("$releasePython = Invoke-ReleaseSourcePreflight"),
+            source.index(
+                "[System.IO.Directory]::CreateDirectory($directory)"
+            ),
+        )
+        self.assertLess(
+            source.index("if ($PreflightOnly)"),
+            source.index("& $launcherBuildScript"),
+        )
+
+    def test_current_release_source_preflight_passes_without_building(
+        self,
+    ) -> None:
+        completed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(BUILD_RELEASE_PATH),
+                "-PreflightOnly",
+            ],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+        self.assertIn("[release-preflight]", completed.stdout)
+        self.assertNotIn("[release] archive:", completed.stdout)
+
     def test_release_docs_distinguish_historical_artifacts_and_counts(self) -> None:
         readme = README_PATH.read_text(encoding="utf-8")
         installation = INSTALLATION_PATH.read_text(encoding="utf-8")
@@ -254,6 +337,44 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertIn("`hia-knowledge.ps1 list`", report)
         self.assertNotIn("`hia-knowledge.ps1 sources list`", report)
         self.assertIn("尚缺 33 张卡", report)
+
+    def test_cold_start_and_gui_cli_parity_contracts_are_documented(
+        self,
+    ) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        installation = INSTALLATION_PATH.read_text(encoding="utf-8")
+        launcher = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
+        wpf = WPF_PATH.read_text(encoding="utf-8-sig")
+        combined_docs = re.sub(r"\s+", " ", readme + "\n" + installation)
+
+        for required in (
+            "With only Houdini installed",
+            "project-local Codex runtime is already verified and logged in",
+            "## GUI and command-line parity",
+            "hia-launcher.ps1 -CheckOnly -Json",
+            "hia-launcher.ps1 -PrintCodexLoginCommand -Json",
+            "scripts\\launch-houdini.ps1",
+            "hia-knowledge.ps1 environment-install",
+            "hia-cache.ps1 -Action <list\\|clear>",
+            "build-release.ps1 -PreflightOnly",
+            "There is intentionally no separate background Houdini stop service",
+        ):
+            self.assertIn(required, combined_docs)
+        self.assertIn("[switch]$PrintCodexLoginCommand", launcher)
+        self.assertIn(
+            "Get-HiaCodexLoginCommand -ProjectRoot $projectRoot",
+            launcher,
+        )
+        for shared_entry in (
+            "Invoke-PreflightAndReport",
+            "Start-ExistingHoudiniLauncher",
+            "scripts\\bootstrap-runtime.ps1",
+            "'hia-knowledge.ps1'",
+            "'hia-cache.ps1'",
+            "Install-HiaEmbedding.ps1",
+        ):
+            self.assertIn(shared_entry, launcher + "\n" + wpf)
+        self.assertNotIn(r"E:\houdini-intelligence-agent", launcher + wpf)
 
     def test_gitignore_covers_private_and_large_generated_outputs(self) -> None:
         ignored = set(GITIGNORE_PATH.read_text(encoding="utf-8").splitlines())
@@ -323,7 +444,7 @@ class ReleasePackagingTests(unittest.TestCase):
         for required in (
             r".\scripts\build-release.ps1",
             r".runtime\release",
-            "SHA256SUMS.txt",
+            "SHA256SUMS-v<version>.txt",
             "check-public-release.py",
             "0.1.1-preview",
         ):

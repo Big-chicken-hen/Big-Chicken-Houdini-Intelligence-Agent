@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import html
 import io
 import json
 import math
@@ -41,6 +42,10 @@ from .viewport_quality import analyze_png_quality
 
 MAX_SCRIPT_CHARS = 524_288
 MAX_FLIPBOOK_FRAME_SPAN = 240.0
+MAX_CAPTURE_FRAMES = 24
+MAX_EXPERIMENT_SAMPLE_FRAMES = 6
+MAX_EXPERIMENT_PARAMETERS = 16
+MAX_EXPERIMENT_COOK_CALLS = 1024
 MAX_BATCH_QUERIES = 16
 MAX_TEXT_CHARS = 65_536
 MAX_SNAPSHOT_NODES = 10_000
@@ -51,6 +56,7 @@ DEFAULT_CONTEXT_PACK_BYTES = 16_384
 MAX_CONTEXT_PACK_ENTITIES = 16
 MAX_CONTEXT_PACK_QUERIES = 4
 MAX_RECENT_EVIDENCE = 32
+MAX_NETWORK_EVIDENCE_PATHS = 16
 MAX_VALIDATION_GEOMETRY_PATHS = 16
 MAX_COOK_EVIDENCE_PATHS = 64
 MAX_SEMANTIC_CHECKS = 32
@@ -118,6 +124,7 @@ class HoudiniExecutor:
         "hia_simulation_summary",
         "hia_validate",
         "hia_execute_hom",
+        "hia_run_effect_experiment",
         "hia_scene_diff",
         "hia_capture_viewport",
         "hia_local_help_search",
@@ -197,6 +204,7 @@ class HoudiniExecutor:
             "hia_simulation_summary": self._simulation_summary,
             "hia_validate": self._validate,
             "hia_execute_hom": self._execute_hom,
+            "hia_run_effect_experiment": self._run_effect_experiment,
             "hia_scene_diff": self._scene_diff,
             "hia_capture_viewport": self._capture_viewport,
         }
@@ -384,10 +392,11 @@ class HoudiniExecutor:
 
     @staticmethod
     def _context_pack_requested(arguments: Mapping[str, Any]) -> bool:
+        if "include_context_pack" in arguments:
+            return arguments.get("include_context_pack") is True
         return any(
             arguments.get(name)
             for name in (
-                "include_context_pack",
                 "task",
                 "change_scope",
                 "knowledge_queries",
@@ -727,6 +736,7 @@ class HoudiniExecutor:
 
     def _node_help_result(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         node_type = None
+        node = None
         node_path = str(arguments.get("node_path", ""))
         if node_path:
             node = self._hou.node(node_path)
@@ -784,7 +794,11 @@ class HoudiniExecutor:
         limit = _limit(arguments)
         parameters = []
         if bool(arguments.get("include_parameters", True)):
-            parameters = self._parameter_templates(node_type, parameter_query)
+            parameters = self._parameter_templates(
+                node_type,
+                parameter_query,
+                node=node,
+            )
         category = _safe_call(node_type, "category", None)
         definition = _safe_call(node_type, "definition", None)
         result = {
@@ -800,6 +814,10 @@ class HoudiniExecutor:
             "help_url": str(_safe_call(node_type, "helpUrl", "")),
             "source_path": _redact_path(str(_safe_call(node_type, "sourcePath", ""))),
             "definition_library": _redact_path(str(_safe_call(definition, "libraryFilePath", ""))),
+            "node_path": node_path or None,
+            "parameter_name_mode": (
+                "runtime_instances" if node is not None else "template_patterns"
+            ),
             "parameters": parameters[offset : offset + limit],
             "parameter_total": len(parameters),
             "offset": offset,
@@ -1031,6 +1049,11 @@ class HoudiniExecutor:
             field_name="expected_paths",
             maximum=64,
         )
+        if not paths and not expected:
+            raise HiaRuntimeError(
+                "VALIDATION_TARGET_REQUIRED",
+                "Validation requires paths, root_path, semantic check paths, expected_paths, or a current selection",
+            )
         changed_paths = self._absolute_node_paths(
             arguments.get("changed_paths") or [],
             field_name="changed_paths",
@@ -1055,6 +1078,13 @@ class HoudiniExecutor:
             checks.append("critical_paths")
         if semantic_checks and "semantic_expectations" not in checks:
             checks.append("semantic_expectations")
+        if "cook" in arguments:
+            cook_requested = bool(arguments["cook"])
+        else:
+            cook_requested = bool(
+                {"empty_output", "geometry_summary", "semantic_expectations"}
+                .intersection(checks)
+            )
         validated_path_limit = max(limit, min(len(semantic_paths), 64))
         validated_paths = list(
             dict.fromkeys([*semantic_paths, *paths])
@@ -1071,7 +1101,7 @@ class HoudiniExecutor:
         validation = self._run_domain_validation(
             paths=validated_paths,
             checks=checks,
-            cook=bool(arguments.get("cook", False)),
+            cook=cook_requested,
             expected_paths=expected,
             explicit_output_paths=explicit_output_paths,
             changed_paths=changed_paths,
@@ -1110,12 +1140,12 @@ class HoudiniExecutor:
             "missing_expected_paths": validation["missing_expected_paths"],
             "counts": counts,
             "cooked": bool(
-                arguments.get("cook", False)
-                and validation["cook_cache_evidence"]["target_count"]
-                and validation["cook_cache_evidence"]["calls_completed"]
-                == validation["cook_cache_evidence"]["target_count"]
+                cook_requested
+                and validation["cook_cache_evidence"]["assessment"]
+                == "recompute_verified"
             ),
-            "cook_requested": bool(arguments.get("cook", False)),
+            "cook_requested": cook_requested,
+            "freshness": validation["cook_cache_evidence"]["assessment"],
             "cook_cache_evidence": validation["cook_cache_evidence"],
             "messages": validation["messages"],
             "check_results": validation["check_results"],
@@ -1216,7 +1246,7 @@ class HoudiniExecutor:
             if cook:
                 cook_started = True
                 try:
-                    node.cook(force=False)
+                    node.cook(force=True)
                     cook_completed = True
                 except Exception as exc:
                     cook_errors[path] = _bounded_text(
@@ -1294,6 +1324,83 @@ class HoudiniExecutor:
                 interrupted_paths: list[str] = []
                 interrupted_message = ""
                 root_cause = ""
+                explicit_outputs = {
+                    path
+                    for path in explicit_output_paths
+                    if nodes.get(path) is not None
+                }
+                active_output_paths: set[str] = set()
+                pending = [nodes[path] for path in explicit_outputs]
+                while pending and len(active_output_paths) < 256:
+                    active_node = pending.pop()
+                    active_path = _safe_path(active_node)
+                    if not active_path or active_path in active_output_paths:
+                        continue
+                    active_output_paths.add(active_path)
+                    pending.extend(
+                        value
+                        for value in _safe_call(active_node, "inputs", ())
+                        if value is not None
+                    )
+                error_source_nodes = dict(nodes)
+                descendant_queue = [
+                    child
+                    for path, node in nodes.items()
+                    if node is not None and path not in explicit_outputs
+                    for child in _safe_call(node, "children", ())
+                ]
+                while descendant_queue and len(error_source_nodes) < 256:
+                    descendant = descendant_queue.pop()
+                    descendant_path = _safe_path(descendant)
+                    if (
+                        not descendant_path
+                        or descendant_path in error_source_nodes
+                    ):
+                        continue
+                    error_source_nodes[descendant_path] = descendant
+                    descendant_queue.extend(
+                        _safe_call(descendant, "children", ())
+                    )
+                message_cache = {
+                    path: {
+                        "errors": [
+                            str(value)
+                            for value in list(_safe_call(node, "errors", ()))[:32]
+                        ],
+                        "warnings": [
+                            str(value)
+                            for value in list(_safe_call(node, "warnings", ()))[:32]
+                        ],
+                    }
+                    for path, node in error_source_nodes.items()
+                    if node is not None
+                }
+                explicit_outputs_clean = bool(explicit_outputs) and all(
+                    not message_cache[path]["errors"]
+                    and not message_cache[path]["warnings"]
+                    for path in explicit_outputs
+                )
+                dormant_locked_paths = {
+                    path
+                    for path, node in error_source_nodes.items()
+                    if (
+                        node is not None
+                        and explicit_outputs_clean
+                        and path not in explicit_outputs
+                        and path not in active_output_paths
+                        and _safe_call(node, "isInsideLockedHDA", None) is True
+                        and not bool(_safe_call(node, "isDisplayFlagSet", False))
+                        and not bool(_safe_call(node, "isRenderFlagSet", False))
+                    )
+                }
+                dormant_messages = {
+                    (severity, " ".join(message.split()).casefold())
+                    for path in dormant_locked_paths
+                    for severity in ("errors", "warnings")
+                    for message in message_cache[path][severity]
+                }
+                ignored_dormant = 0
+                ignored_parent_duplicates = 0
 
                 def note(path: str, severity: str, code: str, message: str) -> None:
                     totals["findings"] += 1
@@ -1305,6 +1412,13 @@ class HoudiniExecutor:
                     if node is None:
                         note(path, "error", "NODE_NOT_FOUND", "Node does not exist")
                         continue
+                    if path in dormant_locked_paths:
+                        ignored_dormant += (
+                            len(message_cache[path]["errors"])
+                            + len(message_cache[path]["warnings"])
+                            + int(bool(cook_errors.get(path)))
+                        )
+                        continue
                     cook_error = cook_errors.get(path)
                     if cook_error:
                         if _is_cooking_interrupted_message(cook_error):
@@ -1313,16 +1427,37 @@ class HoudiniExecutor:
                         else:
                             root_cause = root_cause or cook_error
                             note(path, "error", "COOK_FAILED", cook_error)
-                    for message in list(_safe_call(node, "errors", ()))[:32]:
-                        text = str(message)
+                    for text in message_cache[path]["errors"]:
+                        if (
+                            path not in explicit_outputs
+                            and path not in active_output_paths
+                            and (
+                                "errors",
+                                " ".join(text.split()).casefold(),
+                            )
+                            in dormant_messages
+                        ):
+                            ignored_parent_duplicates += 1
+                            continue
                         if _is_cooking_interrupted_message(text):
                             interrupted_paths.append(path)
                             interrupted_message = interrupted_message or text
                         else:
                             root_cause = root_cause or text
                             note(path, "error", "NODE_ERROR", text)
-                    for message in list(_safe_call(node, "warnings", ()))[:32]:
-                        note(path, "warning", "NODE_WARNING", str(message))
+                    for text in message_cache[path]["warnings"]:
+                        if (
+                            path not in explicit_outputs
+                            and path not in active_output_paths
+                            and (
+                                "warnings",
+                                " ".join(text.split()).casefold(),
+                            )
+                            in dormant_messages
+                        ):
+                            ignored_parent_duplicates += 1
+                            continue
+                        note(path, "warning", "NODE_WARNING", text)
                     minimum = _safe_call(_safe_call(node, "type", None), "minNumInputs", 0)
                     connected = sum(value is not None for value in _safe_call(node, "inputs", ()))
                     if isinstance(minimum, int) and minimum > connected:
@@ -1355,6 +1490,13 @@ class HoudiniExecutor:
                         "paths_checked": len(nodes), "cook_requested": cook,
                         "errors": totals["errors"], "warnings": totals["warnings"],
                         "interrupted": interrupted_evidence,
+                        "ignored_dormant_locked_asset_internal": {
+                            "paths": sorted(dormant_locked_paths)[:32],
+                            "message_count": ignored_dormant,
+                        },
+                        "ignored_parent_aggregate_duplicates": (
+                            ignored_parent_duplicates
+                        ),
                     },
                     total=totals["findings"],
                 )
@@ -1364,12 +1506,31 @@ class HoudiniExecutor:
                 findings = []
                 summaries = []
                 unavailable = 0
-                output_paths = [
+                explicit_candidates = [
                     path
                     for path in dict.fromkeys(explicit_output_paths)
                     if path in nodes and nodes[path] is not None
                 ]
-                if not output_paths:
+                output_paths = [
+                    path
+                    for path in explicit_candidates
+                    if str(
+                        self._type_record(nodes[path]).get("category") or ""
+                    ).casefold()
+                    == "sop"
+                ]
+                ignored_explicit = [
+                    {
+                        "path": path,
+                        "category": self._type_record(nodes[path]).get(
+                            "category"
+                        ),
+                        "reason": "unsupported_node_category",
+                    }
+                    for path in explicit_candidates
+                    if path not in output_paths
+                ]
+                if not explicit_output_paths and not output_paths:
                     for path, node in nodes.items():
                         if node is None:
                             continue
@@ -1405,17 +1566,26 @@ class HoudiniExecutor:
                     "fail"
                     if findings
                     else (
-                        "skipped"
+                        (
+                            "unknown"
+                            if explicit_output_paths
+                            else "skipped"
+                        )
                         if not output_paths
-                        else ("partial" if measurable else "unknown")
-                        if unavailable
-                        else "pass"
+                        else (
+                            ("partial" if measurable else "unknown")
+                            if unavailable
+                            else "pass"
+                        )
                     )
                 )
                 add_result(check, status, findings, {
                     "geometry": summaries[:finding_limit],
                     "output_paths": output_paths,
                     "ignored_non_output_paths": len(nodes) - len(output_paths),
+                    "ignored_non_output_path_details": ignored_explicit[
+                        :finding_limit
+                    ],
                     "measurable_paths": measurable,
                     "unavailable_paths": unavailable,
                 })
@@ -1445,12 +1615,23 @@ class HoudiniExecutor:
                     records.append({
                         name: _json_value(record.get(name))
                         for name in (
-                            "node_path", "available", "point_count", "vertex_count",
+                            "node_path", "available", "category",
+                            "point_count", "vertex_count",
                             "primitive_count", "bbox", "primitive_kinds",
                             "packed_primitive_count", "volume_primitive_count",
                             "topology", "reason", "error", "errors",
                         ) if name in record
                     })
+                ignored_unsupported = [
+                    record
+                    for record in records
+                    if record.get("reason") == "unsupported_node_category"
+                ]
+                observed_records = [
+                    record
+                    for record in records
+                    if record.get("reason") != "unsupported_node_category"
+                ]
                 measurable = sum(
                     bool(record.get("available"))
                     and any(
@@ -1461,21 +1642,23 @@ class HoudiniExecutor:
                             "primitive_count",
                         )
                     )
-                    for record in records
+                    for record in observed_records
                 )
+                unavailable = len(observed_records) - measurable
                 truncated = len(paths) > len(selected)
                 status = (
                     "skipped"
                     if not records
                     else (
                         "pass"
-                        if measurable == len(records) and not truncated
+                        if measurable and not unavailable and not truncated
                         else ("partial" if measurable else "unknown")
                     )
                 )
                 add_result(check, status, [], {
                     "geometry": records, "available_paths": measurable,
-                    "unavailable_paths": len(records) - measurable,
+                    "unavailable_paths": unavailable,
+                    "ignored_unsupported_paths": len(ignored_unsupported),
                     "total_paths": len(paths),
                 }, truncated=truncated)
                 continue
@@ -1599,7 +1782,11 @@ class HoudiniExecutor:
                 statuses["unknown"] == 0
                 and statuses["partial"] == 0
                 and statuses["unsupported"] == 0
-                and cook_cache_evidence["assessment"] != "stale_cache_risk"
+                and (
+                    cook_cache_evidence["assessment"] == "recompute_verified"
+                    if cook
+                    else cook_cache_evidence["assessment"] != "stale_cache_risk"
+                )
             ),
             "missing_expected_paths": missing_expected_paths,
             "check_results": check_results,
@@ -1792,6 +1979,21 @@ class HoudiniExecutor:
                     "message": (
                         "At least one target needed to cook while cook=false; "
                         "last-cook errors or data do not prove current output"
+                    ),
+                }
+            )
+        elif (
+            cook_cache_evidence.get("cook_requested")
+            and cook_cache_evidence.get("assessment") == "recompute_not_proven"
+        ):
+            messages.append(
+                {
+                    "level": "notice",
+                    "code": "RECOMPUTE_NOT_PROVEN",
+                    "check": "cook_cache_evidence",
+                    "message": (
+                        "Fresh cooking was requested, but the available HOM "
+                        "signals do not prove that every target recomputed"
                     ),
                 }
             )
@@ -2573,6 +2775,13 @@ class HoudiniExecutor:
         if len(script) > MAX_SCRIPT_CHARS:
             raise HiaRuntimeError("REQUEST_TOO_LARGE", "The HOM script exceeds the character limit", {"limit": MAX_SCRIPT_CHARS})
         try:
+            compiled_script = compile(script, "<hia_execute_hom>", "exec")
+        except (SyntaxError, ValueError) as exc:
+            raise HiaRuntimeError(
+                "INVALID_HOM_SCRIPT",
+                _bounded_text(_redact_text(str(exc)), 2048),
+            ) from exc
+        try:
             timeout_seconds = float(arguments.get("timeout_seconds", 60.0))
         except (TypeError, ValueError) as exc:
             raise HiaRuntimeError("INVALID_ARGUMENTS", "timeout_seconds must be a number") from exc
@@ -2598,6 +2807,11 @@ class HoudiniExecutor:
             field_name="expected_outputs",
             maximum=64,
         )
+        expected_deletions = self._absolute_node_paths(
+            arguments.get("expected_deletions") or [],
+            field_name="expected_deletions",
+            maximum=64,
+        )
         requested_checks = self._validation_check_names(
             arguments.get("checks"),
             default=(),
@@ -2605,23 +2819,24 @@ class HoudiniExecutor:
         semantic_checks = self._semantic_checks(
             arguments.get("semantic_checks") or []
         )
+        semantic_paths = self._semantic_check_paths(semantic_checks)
         if semantic_checks and "semantic_expectations" not in requested_checks:
             requested_checks.append("semantic_expectations")
         if mutable_root:
             outside = [
                 path
-                for path in expected_outputs
+                for path in [*expected_outputs, *expected_deletions]
                 if not _houdini_path_is_within(path, mutable_root)
             ]
             if outside:
                 raise HiaRuntimeError(
                     "INVALID_ARGUMENTS",
-                    "expected_outputs must be inside mutable_root",
+                    "expected_outputs and expected_deletions must be inside mutable_root",
                     {"paths": outside},
                 )
         protected_expected = [
             path
-            for path in expected_outputs
+            for path in [*expected_outputs, *expected_deletions]
             if any(
                 _houdini_path_is_within(path, protected)
                 for protected in protected_paths
@@ -2630,7 +2845,7 @@ class HoudiniExecutor:
         if protected_expected:
             raise HiaRuntimeError(
                 "INVALID_ARGUMENTS",
-                "expected_outputs cannot be inside protected_paths",
+                "expected_outputs and expected_deletions cannot be inside protected_paths",
                 {"paths": protected_expected},
             )
         if mutable_root and any(
@@ -2655,11 +2870,72 @@ class HoudiniExecutor:
                 "INVALID_ARGUMENTS",
                 "checkpoint_label must use 1-128 letters, numbers, dot, underscore, or dash",
             )
+        fresh_validation = bool(arguments.get("fresh_validation", True))
+        explicit_require_change = arguments.get("require_scene_change")
+        if explicit_require_change is not None and not isinstance(
+            explicit_require_change, bool
+        ):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "require_scene_change must be a boolean",
+            )
+        undos = getattr(self._hou, "undos", None)
+        undo_group = getattr(undos, "group", None)
+        undo_labels = getattr(undos, "undoLabels", None)
+        perform_undo = getattr(undos, "performUndo", None)
+        undos_enabled = getattr(undos, "areEnabled", None)
+        if not all(
+            callable(value)
+            for value in (undo_group, undo_labels, perform_undo, undos_enabled)
+        ):
+            raise HiaRuntimeError(
+                "UNDO_ROLLBACK_UNAVAILABLE",
+                "The current Houdini runtime does not expose the required undo-group API",
+            )
+        try:
+            if not bool(undos_enabled()):
+                raise HiaRuntimeError(
+                    "UNDO_ROLLBACK_UNAVAILABLE",
+                    "Houdini undo recording is disabled, so the batch cannot be safely rolled back on failure",
+                )
+            undo_labels_before = tuple(str(value) for value in undo_labels())
+        except HiaRuntimeError:
+            raise
+        except Exception as exc:
+            raise HiaRuntimeError(
+                "UNDO_ROLLBACK_UNAVAILABLE",
+                "The Houdini undo stack could not be inspected before execution",
+                {"reason": _bounded_text(_redact_text(str(exc)), 1024)},
+            ) from exc
+        undo_label = f"HIA MCP V2 {execution_id}"
 
         revision_before = self.scene_revision
         targeted_before: dict[str, str | None | object] = {}
         marker_only_baselines: set[str] = set()
         targeted_truncated = False
+        protected_snapshot_roots = [
+            path
+            for path in protected_paths
+            if not any(
+                path != other
+                and _houdini_path_is_within(path, other)
+                for other in protected_paths
+            )
+        ]
+        protected_before: dict[
+            str,
+            tuple[dict[str, str], bool] | object,
+        ] = {}
+        for path in protected_snapshot_roots:
+            try:
+                protected_before[path] = self._snapshot_map(path)
+            except HiaRuntimeError as exc:
+                if exc.code == "NODE_NOT_FOUND":
+                    protected_before[path] = ({}, False)
+                else:
+                    protected_before[path] = _NODE_DIGEST_UNAVAILABLE
+            except Exception:
+                protected_before[path] = _NODE_DIGEST_UNAVAILABLE
 
         def add_targeted_baseline(path: str, *, marker_only: bool = False) -> None:
             nonlocal targeted_truncated
@@ -2682,9 +2958,37 @@ class HoudiniExecutor:
                         "diff_paths must contain absolute Houdini node paths",
                     )
                 add_targeted_baseline(value)
-        for path in [*protected_paths, *expected_outputs]:
+        for path in [*protected_paths, *expected_outputs, *expected_deletions]:
             add_targeted_baseline(path)
-        dirty_before = self._dirty()
+        all_network_evidence_paths = list(
+            dict.fromkeys(
+                [
+                    *expected_outputs,
+                    *expected_deletions,
+                    *semantic_paths,
+                    *[
+                        path
+                        for path in requested_diff_paths
+                        if isinstance(path, str) and path.startswith("/")
+                    ],
+                    *([mutable_root] if mutable_root else []),
+                    *protected_paths,
+                ]
+            )
+        )
+        network_evidence_paths = all_network_evidence_paths[
+            :MAX_NETWORK_EVIDENCE_PATHS
+        ]
+        network_evidence_before = [
+            self._local_network_evidence(path)
+            for path in network_evidence_paths
+        ]
+        dirty_before_state = self._dirty_observation()
+        dirty_before = (
+            dirty_before_state
+            if dirty_before_state is not None
+            else False
+        )
         marked: set[str] = set()
 
         def mark_changed(value: Any) -> str:
@@ -2712,11 +3016,21 @@ class HoudiniExecutor:
         warning_records: list[str] = []
         hom_started = time.monotonic()
         failure: dict[str, Any] | None = None
+        rollback: dict[str, Any] = {
+            "requested": False,
+            "reason": None,
+            "status": "not_needed",
+            "undo_label": undo_label,
+            "houdini_scene_changes_rolled_back": False,
+            "external_side_effects_rollbackable": False,
+            "error": None,
+        }
         try:
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), python_warnings.catch_warnings(record=True) as caught:
-                python_warnings.simplefilter("always")
-                exec(compile(script, "<hia_execute_hom>", "exec"), namespace, namespace)
-                warning_records.extend(str(item.message) for item in caught)
+            with undo_group(undo_label):
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), python_warnings.catch_warnings(record=True) as caught:
+                    python_warnings.simplefilter("always")
+                    exec(compiled_script, namespace, namespace)
+                    warning_records.extend(str(item.message) for item in caught)
         except Exception as exc:
             failure = {
                 "code": "HOM_EXECUTION_FAILED",
@@ -2737,6 +3051,92 @@ class HoudiniExecutor:
                         targeted_truncated = True
                         continue
                     explicitly_changed.add(value)
+
+        def rollback_batch(reason: str) -> None:
+            rollback.update(
+                {
+                    "requested": True,
+                    "reason": reason,
+                    "status": "not_proven",
+                }
+            )
+            try:
+                current_labels = tuple(str(value) for value in undo_labels())
+                if not current_labels or current_labels[0] != undo_label:
+                    rollback["error"] = {
+                        "code": "UNDO_ITEM_NOT_FOUND",
+                        "message": (
+                            "The batch's undo item is not the current Houdini "
+                            "undo item, so no unrelated user action was undone"
+                        ),
+                    }
+                    return
+                perform_undo()
+                remaining_labels = tuple(str(value) for value in undo_labels())
+                if remaining_labels != undo_labels_before:
+                    rollback["error"] = {
+                        "code": "UNDO_STACK_NOT_RESTORED",
+                        "message": (
+                            "Houdini performed undo, but the undo stack does "
+                            "not match its pre-batch state"
+                        ),
+                    }
+                    return
+                dirty_after_undo = self._dirty_observation()
+                if dirty_before_state is None or dirty_after_undo is None:
+                    rollback["error"] = {
+                        "code": "DIRTY_STATE_UNAVAILABLE",
+                        "message": (
+                            "Houdini performed undo, but the HIP dirty state "
+                            "could not be observed before and after the batch"
+                        ),
+                        "details": {
+                            "dirty_before_available": (
+                                dirty_before_state is not None
+                            ),
+                            "dirty_after_undo_available": (
+                                dirty_after_undo is not None
+                            ),
+                        },
+                    }
+                    return
+                if dirty_after_undo != dirty_before:
+                    rollback["error"] = {
+                        "code": "DIRTY_STATE_NOT_RESTORED",
+                        "message": (
+                            "Houdini performed undo, but the HIP dirty state "
+                            "does not match its pre-batch state"
+                        ),
+                        "details": {
+                            "dirty_before": dirty_before,
+                            "dirty_after_undo": dirty_after_undo,
+                        },
+                    }
+                    return
+                rollback["status"] = "rolled_back"
+                rollback["houdini_scene_changes_rolled_back"] = True
+                if failure is not None:
+                    failure["partial_scene_changes_possible"] = False
+                    failure["houdini_scene_rollback"] = "verified"
+                    failure["automatic_retry_safe"] = bool(
+                        str(failure.get("code") or "")
+                        not in {
+                            "EXECUTION_TIMEOUT",
+                            "HOM_EXECUTION_TIMEOUT",
+                        }
+                        and not failure.get(
+                            "external_side_effects_possible",
+                            False,
+                        )
+                    )
+            except Exception as exc:
+                rollback["error"] = {
+                    "code": "UNDO_FAILED",
+                    "message": _bounded_text(_redact_text(str(exc)), 2048),
+                }
+
+        if failure is not None:
+            rollback_batch("hom_execution_failed")
 
         if full_diff:
             try:
@@ -2815,6 +3215,59 @@ class HoudiniExecutor:
             }
         else:
             diff = None
+        protected_delta = {
+            "created": set(),
+            "deleted": set(),
+            "changed": set(),
+        }
+        protected_unverified_paths: set[str] = set()
+        for path, before_state in protected_before.items():
+            if before_state is _NODE_DIGEST_UNAVAILABLE:
+                protected_unverified_paths.add(path)
+                continue
+            before_map, before_was_truncated = before_state
+            try:
+                after_map, after_was_truncated = self._snapshot_map(path)
+            except HiaRuntimeError as exc:
+                if exc.code == "NODE_NOT_FOUND":
+                    after_map, after_was_truncated = {}, False
+                else:
+                    protected_unverified_paths.add(path)
+                    continue
+            except Exception:
+                protected_unverified_paths.add(path)
+                continue
+            protected_diff = self._diff_maps(before_map, after_map)
+            for key in protected_delta:
+                protected_delta[key].update(protected_diff[key])
+            if before_was_truncated or after_was_truncated:
+                protected_unverified_paths.add(path)
+        protected_observed_paths = {
+            path
+            for values in protected_delta.values()
+            for path in values
+        }
+        if isinstance(diff, dict):
+            for key in protected_delta:
+                diff[key] = sorted(
+                    set(diff.get(key, [])) | protected_delta[key]
+                )
+            diff["unverified_paths"] = sorted(
+                set(diff.get("unverified_paths", []))
+                | protected_unverified_paths
+            )
+        if isinstance(diff, dict):
+            observed_deleted = set(str(path) for path in diff["deleted"])
+            expected_deleted = set(expected_deletions)
+            diff["expected_deletions"] = sorted(
+                observed_deleted.intersection(expected_deleted)
+            )
+            diff["missing_expected_deletions"] = sorted(
+                expected_deleted.difference(observed_deleted)
+            )
+            diff["unexpected_deletions"] = sorted(
+                observed_deleted.difference(expected_deleted)
+            )
 
         verified_diff_paths = (
             {
@@ -2838,32 +3291,41 @@ class HoudiniExecutor:
                     envelope_unverified_paths.add(path)
                 elif before_state != after_state:
                     envelope_observed_paths.add(path)
-        observed_paths = verified_diff_paths | envelope_observed_paths
-        changed_paths = sorted(observed_paths)[:MAX_TARGETED_DIFF_PATHS]
+        observed_paths = (
+            verified_diff_paths
+            | envelope_observed_paths
+            | protected_observed_paths
+        )
+        changed_paths = list(
+            dict.fromkeys(
+                [
+                    *sorted(protected_observed_paths),
+                    *sorted(observed_paths),
+                ]
+            )
+        )[:MAX_TARGETED_DIFF_PATHS]
         dirty_after_script = self._dirty()
         observed_change = bool(observed_paths) or dirty_before != dirty_after_script
         unverified_paths = (
             set(str(path) for path in diff.get("unverified_paths", []))
             if isinstance(diff, Mapping)
             else set()
-        ) | envelope_unverified_paths
+        ) | envelope_unverified_paths | protected_unverified_paths
         if observed_change:
             scene_change_status = "changed"
         elif failure is not None or unverified_paths or marked or explicitly_changed or not capture_diff:
             scene_change_status = "unknown"
         else:
             scene_change_status = "unchanged"
-        if observed_change:
-            with self._state_lock:
-                self._scene_revision += 1
 
         validation_started = time.monotonic()
         effective_checks = list(requested_checks)
         if expected_outputs and "critical_paths" not in effective_checks:
             effective_checks.append("critical_paths")
+        if expected_outputs and "node_errors" not in effective_checks:
+            effective_checks.append("node_errors")
         if (mutable_root or protected_paths) and "changed_scope" not in effective_checks:
             effective_checks.append("changed_scope")
-        semantic_paths = self._semantic_check_paths(semantic_checks)
         validation_paths = list(
             dict.fromkeys([*expected_outputs, *changed_paths, *semantic_paths])
         )[:64]
@@ -2893,10 +3355,19 @@ class HoudiniExecutor:
                 )
             )
         )
+        validation_cook = bool(
+            fresh_validation
+            and validation_paths
+            and {
+                "empty_output",
+                "geometry_summary",
+                "semantic_expectations",
+            }.intersection(effective_checks)
+        )
         validation = self._run_domain_validation(
             paths=validation_paths,
             checks=effective_checks,
-            cook=False,
+            cook=validation_cook,
             expected_paths=expected_outputs,
             explicit_output_paths=list(expected_outputs),
             changed_paths=changed_paths,
@@ -2907,17 +3378,180 @@ class HoudiniExecutor:
             scope_complete=scope_complete,
             change_provenance="observed",
         )
+        network_evidence_after = [
+            self._local_network_evidence(path)
+            for path in network_evidence_paths
+        ]
+        before_facts = {
+            str(item.get("path") or ""): item
+            for item in network_evidence_before
+        }
+        fact_differences = []
+        for after_fact in network_evidence_after:
+            path = str(after_fact.get("path") or "")
+            before_fact = before_facts.get(path, {"path": path, "exists": False})
+            changed_fields = [
+                field
+                for field in (
+                    "exists",
+                    "type",
+                    "inputs",
+                    "outputs",
+                    "controls",
+                    "material_entries",
+                    "material_role",
+                    "flags",
+                    "cook_state",
+                    "errors",
+                    "warnings",
+                )
+                if before_fact.get(field) != after_fact.get(field)
+            ]
+            if changed_fields:
+                fact_differences.append(
+                    {"path": path, "changed_fields": changed_fields}
+                )
         validation_seconds = time.monotonic() - validation_started
+        require_scene_change = (
+            bool(explicit_require_change)
+            if explicit_require_change is not None
+            else bool(
+                expected_outputs
+                or requested_diff_paths
+                or checkpoint_label
+                or expected_deletions
+                or marked
+                or explicitly_changed
+            )
+        )
+        if failure is None and not validation["valid"]:
+            failure = {
+                "code": "VALIDATION_FAILED",
+                "message": "One or more requested postconditions failed",
+                "partial_scene_changes_possible": observed_change,
+                "automatic_retry_safe": False,
+            }
+        if (
+            failure is None
+            and isinstance(diff, Mapping)
+            and diff.get("unexpected_deletions")
+        ):
+            failure = {
+                "code": "UNEXPECTED_DELETION",
+                "message": "The batch deleted one or more undeclared node paths",
+                "details": {
+                    "paths": list(diff["unexpected_deletions"])[:64],
+                },
+                "partial_scene_changes_possible": observed_change,
+                "automatic_retry_safe": False,
+            }
+        if (
+            failure is None
+            and isinstance(diff, Mapping)
+            and diff.get("missing_expected_deletions")
+        ):
+            failure = {
+                "code": "EXPECTED_DELETION_NOT_OBSERVED",
+                "message": "One or more expected node deletions were not observed",
+                "details": {
+                    "paths": list(diff["missing_expected_deletions"])[:64],
+                },
+                "partial_scene_changes_possible": observed_change,
+                "automatic_retry_safe": False,
+            }
+        if failure is None and require_scene_change and not observed_change:
+            failure = {
+                "code": "NO_OBSERVED_EFFECT",
+                "message": (
+                    "The batch required a scene change, but no created, "
+                    "deleted, changed, or dirty-state evidence was observed"
+                ),
+                "partial_scene_changes_possible": bool(unverified_paths),
+                "automatic_retry_safe": False,
+            }
+        not_proven_failure_codes = {
+            "NO_OBSERVED_EFFECT",
+            "POSTCONDITION_NOT_PROVEN",
+            "FRESH_OUTPUT_NOT_PROVEN",
+        }
+        failure_code = (
+            str(failure.get("code") or "")
+            if failure is not None
+            else ""
+        )
+        rollback_required = bool(
+            failure is not None
+            and failure_code not in not_proven_failure_codes
+        )
+        if rollback_required and not rollback["requested"]:
+            rollback_batch("postcondition_failed")
+        attempted_changed_paths = list(changed_paths)
+        attempted_scene_change_status = scene_change_status
+        if rollback["status"] == "rolled_back":
+            changed_paths = []
+            scene_change_status = "rolled_back"
+        elif observed_change:
+            with self._state_lock:
+                self._scene_revision += 1
         for message in validation["messages"]:
             if message["level"] not in {"error", "warning"}:
                 continue
-            warning_records.append(
-                (
-                    f"[{message['level'].upper()}] {message['code']}: "
-                    f"{message['message']}; scene changes were not rolled back "
-                    "and the write must not be retried automatically"
-                )
+            warning_text = (
+                f"[{message['level'].upper()}] {message['code']}: "
+                f"{message['message']}"
             )
+            if failure is not None:
+                warning_text += (
+                    f"; rollback status is {rollback['status']}; "
+                    "automatic_retry_safe="
+                    f"{str(bool(failure.get('automatic_retry_safe'))).lower()}"
+                )
+            warning_records.append(warning_text)
+
+        node_error_check = next(
+            (
+                item
+                for item in validation["check_results"]
+                if item["check"] == "node_errors"
+            ),
+            None,
+        )
+        scope_check = next(
+            (
+                item
+                for item in validation["check_results"]
+                if item["check"] == "changed_scope"
+            ),
+            None,
+        )
+        node_findings = (
+            list(node_error_check.get("findings") or [])
+            if isinstance(node_error_check, Mapping)
+            else []
+        )
+        missing_input_count = sum(
+            finding.get("code") == "MISSING_INPUT"
+            for finding in node_findings
+        )
+        postconditions_requested = bool(
+            expected_outputs
+            or expected_deletions
+            or requested_checks
+            or semantic_checks
+            or mutable_root
+            or protected_paths
+        )
+        postcondition_evidence_observed = bool(
+            any(
+                item.get("status") == "pass"
+                for item in validation["check_results"]
+            )
+            or (
+                expected_deletions
+                and isinstance(diff, Mapping)
+                and not diff.get("missing_expected_deletions")
+            )
+        )
 
         execution_evidence = {
             "envelope": {
@@ -2925,10 +3559,103 @@ class HoudiniExecutor:
                 "mutable_root": mutable_root or None,
                 "protected_paths": protected_paths,
                 "expected_outputs": expected_outputs,
+                "expected_deletions": expected_deletions,
                 "checks": requested_checks,
                 "semantic_check_count": len(semantic_checks),
+                "fresh_validation": fresh_validation,
+                "require_scene_change": require_scene_change,
+                "authoring_policy": "native_nodes_preferred",
             },
             "before": {"revision": revision_before, "dirty": dirty_before},
+            "attempted": {
+                "scene_change_status": attempted_scene_change_status,
+                "changed_paths": attempted_changed_paths,
+            },
+            "network_facts": {
+                "scope": {
+                    "mutable_root": mutable_root or None,
+                    "protected_paths": protected_paths,
+                },
+                "before": network_evidence_before,
+                "after_attempt": network_evidence_after,
+                "differences": fact_differences,
+                "path_count": len(network_evidence_paths),
+                "truncated": (
+                    len(all_network_evidence_paths)
+                    > MAX_NETWORK_EVIDENCE_PATHS
+                ),
+            },
+            "postconditions": {
+                "status": (
+                    "not_requested"
+                    if not postconditions_requested
+                    else (
+                        "not_proven"
+                        if failure_code in not_proven_failure_codes
+                        else (
+                            "failed"
+                            if failure is not None
+                            else (
+                                "partial"
+                                if not validation["complete"]
+                                else (
+                                    "passed"
+                                    if postcondition_evidence_observed
+                                    else "not_proven"
+                                )
+                            )
+                        )
+                    )
+                ),
+                "target_paths": expected_outputs,
+                "target_existence": (
+                    "not_requested"
+                    if not expected_outputs
+                    else (
+                        "failed"
+                        if validation["missing_expected_paths"]
+                        else "observed"
+                    )
+                ),
+                "missing_targets": validation["missing_expected_paths"],
+                "required_input_connections": (
+                    "not_requested"
+                    if node_error_check is None
+                    else ("failed" if missing_input_count else "observed")
+                ),
+                "missing_required_input_count": missing_input_count,
+                "control_parameter_facts": sum(
+                    len(item.get("controls") or [])
+                    for item in network_evidence_after
+                ),
+                "material_entry_facts": sum(
+                    len(item.get("material_entries") or [])
+                    for item in network_evidence_after
+                ),
+                "cook_freshness": validation["cook_cache_evidence"][
+                    "assessment"
+                ],
+                "scope_state": (
+                    scope_check["evidence"].get("scope_state")
+                    if isinstance(scope_check, Mapping)
+                    else "not_requested"
+                ),
+                "node_errors": sum(
+                    len(item.get("errors") or [])
+                    for item in network_evidence_after
+                ),
+                "node_warnings": sum(
+                    len(item.get("warnings") or [])
+                    for item in network_evidence_after
+                ),
+                "visual_or_render_evidence": {
+                    "status": "not_observed",
+                    "reason": (
+                        "hia_execute_hom does not automatically capture the "
+                        "viewport or render output"
+                    ),
+                },
+            },
             "validation": validation,
         }
 
@@ -2943,7 +3670,9 @@ class HoudiniExecutor:
         }
         if checkpoint_label:
             if failure is not None:
-                checkpoint["skipped_reason"] = "HOM_EXECUTION_FAILED"
+                checkpoint["skipped_reason"] = str(
+                    failure.get("code") or "EXECUTION_FAILED"
+                )
             elif not observed_change:
                 checkpoint["skipped_reason"] = "NO_CONFIRMED_SCENE_CHANGE"
             elif focus_target is None:
@@ -3043,6 +3772,7 @@ class HoudiniExecutor:
             "diff": diff,
             "checkpoint": checkpoint,
             "execution_evidence": execution_evidence,
+            "rollback": rollback,
             "execution_trace": {
                 "schema": "hia-execution-trace/1",
                 "trace_id": execution_id,
@@ -3165,6 +3895,1208 @@ class HoudiniExecutor:
         })
         return result
 
+    def _effect_experiment_preflight(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        def scalar(value: Any, field: str) -> Any:
+            if value is None or not isinstance(value, (str, bool, int, float)):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    f"{field} must be a scalar bool, int, finite float, or string",
+                )
+            if isinstance(value, float) and not math.isfinite(value):
+                raise HiaRuntimeError("INVALID_ARGUMENTS", f"{field} must be finite")
+            if isinstance(value, str) and (len(value) > 4096 or "\x00" in value):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    f"{field} contains an unsafe string",
+                )
+            return value
+
+        def variant(
+            raw: Any,
+            field: str,
+            *,
+            allow_empty: bool = False,
+            default_name: str = "",
+        ) -> dict[str, Any]:
+            if not isinstance(raw, Mapping):
+                raise HiaRuntimeError("INVALID_ARGUMENTS", f"{field} must be an object")
+            name = str(raw.get("name") or default_name).strip()
+            values = raw.get("parameters")
+            if (
+                not name
+                or len(name) > 64
+                or any(ord(character) < 32 for character in name)
+                or not isinstance(values, Mapping)
+                or (not values and not allow_empty)
+                or len(values) > MAX_EXPERIMENT_PARAMETERS
+            ):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    f"{field} has an invalid name or parameter count",
+                )
+            parameters: dict[str, Any] = {}
+            for key, value in values.items():
+                path = str(key).strip() if isinstance(key, str) else ""
+                if not _valid_houdini_node_path(path) or path == "/":
+                    raise HiaRuntimeError(
+                        "INVALID_ARGUMENTS",
+                        f"{field}.parameters requires expanded absolute hou.Parm paths",
+                    )
+                parameters[path] = scalar(value, f"{field}.parameters[{path}]")
+            return {"name": name, "parameters": parameters}
+
+        target = str(arguments.get("target_network") or "").strip()
+        if not _valid_houdini_node_path(target) or target == "/":
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "target_network must be a non-root absolute node path",
+            )
+        if self._hou.node(target) is None:
+            raise HiaRuntimeError(
+                "NODE_NOT_FOUND",
+                "The experiment target network does not exist",
+                {"path": target},
+            )
+        baseline = variant(
+            arguments.get("baseline"),
+            "baseline",
+            allow_empty=True,
+            default_name="baseline",
+        )
+        raw_candidates = arguments.get("candidates")
+        if not isinstance(raw_candidates, (list, tuple)) or not 2 <= len(raw_candidates) <= 3:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "candidates must contain two or three entries",
+            )
+        candidates = [
+            variant(value, f"candidates[{index}]")
+            for index, value in enumerate(raw_candidates)
+        ]
+        names = [baseline["name"], *[value["name"] for value in candidates]]
+        if len(names) != len({value.casefold() for value in names}):
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "Variant names must be unique")
+
+        input_paths = list(
+            dict.fromkeys(
+                [
+                    *baseline["parameters"],
+                    *[
+                        path
+                        for candidate in candidates
+                        for path in candidate["parameters"]
+                    ],
+                ]
+            )
+        )
+        if not input_paths or len(input_paths) > MAX_EXPERIMENT_PARAMETERS:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                f"The experiment must touch 1-{MAX_EXPERIMENT_PARAMETERS} parameters",
+            )
+        hou_parm = getattr(self._hou, "parm", None)
+        if not callable(hou_parm):
+            raise HiaRuntimeError(
+                "EXPERIMENT_PARM_API_UNAVAILABLE",
+                "The current runtime does not expose hou.parm",
+            )
+        by_input: dict[str, Any] = {}
+        by_path: dict[str, Any] = {}
+        originals: dict[str, Any] = {}
+        for requested_path in input_paths:
+            parm = hou_parm(requested_path)
+            actual_path = _safe_path(parm) if parm is not None else ""
+            owner_path = actual_path.rsplit("/", 1)[0] if "/" in actual_path else ""
+            if (
+                parm is None
+                or not _valid_houdini_node_path(actual_path)
+                or not _houdini_path_is_within(owner_path, target)
+                or actual_path in by_path
+                or not callable(getattr(parm, "set", None))
+                or bool(_safe_call(parm, "isLocked", False))
+                or bool(_safe_call(parm, "isDisabled", False))
+            ):
+                raise HiaRuntimeError(
+                    "INVALID_EXPERIMENT_PARAMETER",
+                    "A parameter is missing, duplicated, outside the target, or not writable",
+                    {"requested_path": requested_path, "actual_path": actual_path},
+                )
+            keyframes = getattr(parm, "keyframes", None)
+            time_dependent = getattr(parm, "isTimeDependent", None)
+            if not callable(keyframes) or not callable(time_dependent):
+                raise HiaRuntimeError(
+                    "EXPERIMENT_RESTORE_NOT_PROVABLE",
+                    "The parameter animation state cannot be inspected",
+                    {"path": actual_path},
+                )
+            if list(keyframes()) or bool(time_dependent()):
+                raise HiaRuntimeError(
+                    "EXPERIMENT_PARM_NOT_STATIC",
+                    "Only unkeyed, non-time-dependent scalar parameters can be restored safely",
+                    {"path": actual_path},
+                )
+            try:
+                original = scalar(parm.eval(), f"original parameter {actual_path}")
+            except HiaRuntimeError:
+                raise
+            except Exception as exc:
+                raise HiaRuntimeError(
+                    "EXPERIMENT_RESTORE_NOT_PROVABLE",
+                    "The original parameter value could not be read",
+                    {"path": actual_path, "reason": _bounded_text(_redact_text(str(exc)), 1024)},
+                ) from exc
+            by_input[requested_path] = parm
+            by_path[actual_path] = parm
+            originals[actual_path] = original
+
+        def normalize(values: Mapping[str, Any]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for requested_path, value in values.items():
+                actual_path = _safe_path(by_input[requested_path])
+                if actual_path in result:
+                    raise HiaRuntimeError(
+                        "INVALID_EXPERIMENT_PARAMETER",
+                        "A variant resolves duplicate runtime parameters",
+                        {"path": actual_path},
+                    )
+                result[actual_path] = value
+            return result
+
+        baseline_values = normalize(baseline["parameters"])
+        candidate_values = [normalize(value["parameters"]) for value in candidates]
+        baseline_state = dict(originals)
+        baseline_state.update(baseline_values)
+
+        reset_parms: list[tuple[str, Any]] = []
+        for requested_path in self._absolute_node_paths(
+            arguments.get("cache_reset_parms") or [],
+            field_name="cache_reset_parms",
+            maximum=8,
+        ):
+            parm = hou_parm(requested_path)
+            actual_path = _safe_path(parm) if parm is not None else ""
+            owner_path = actual_path.rsplit("/", 1)[0] if "/" in actual_path else ""
+            if (
+                parm is None
+                or not _houdini_path_is_within(owner_path, target)
+                or not callable(getattr(parm, "pressButton", None))
+                or bool(_safe_call(parm, "isLocked", False))
+                or bool(_safe_call(parm, "isDisabled", False))
+                or actual_path in by_path
+            ):
+                raise HiaRuntimeError(
+                    "INVALID_CACHE_RESET_PARAMETER",
+                    "cache_reset_parms must be enabled buttons inside target_network",
+                    {"path": requested_path},
+                )
+            reset_parms.append((actual_path, parm))
+
+        def nodes(field: str, maximum: int, *, require_cook: bool) -> list[tuple[str, Any]]:
+            values = self._absolute_node_paths(
+                arguments.get(field) or [],
+                field_name=field,
+                maximum=maximum,
+            )
+            result = []
+            for path in values:
+                node = self._hou.node(path)
+                if (
+                    node is None
+                    or not _houdini_path_is_within(path, target)
+                    or (require_cook and not callable(getattr(node, "cook", None)))
+                ):
+                    raise HiaRuntimeError(
+                        "INVALID_EXPERIMENT_TARGET",
+                        f"{field} contains an unavailable target",
+                        {"path": path},
+                    )
+                result.append((path, node))
+            return result
+
+        cook_nodes = nodes("cook_targets", 8, require_cook=True)
+        metric_nodes = nodes("metric_targets", 4, require_cook=False)
+        expected_deletions = self._absolute_node_paths(
+            arguments.get("expected_deletions") or [],
+            field_name="expected_deletions",
+            maximum=16,
+        )
+        if target in expected_deletions or any(
+            not _houdini_path_is_within(path, target)
+            for path in expected_deletions
+        ):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "expected_deletions must be descendants of target_network",
+            )
+
+        raw_range = arguments.get("frame_range")
+        samples = arguments.get("sample_frames")
+        if (
+            not isinstance(raw_range, (list, tuple))
+            or len(raw_range) != 2
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in raw_range)
+            or not isinstance(samples, (list, tuple))
+            or not 1 <= len(samples) <= MAX_EXPERIMENT_SAMPLE_FRAMES
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in samples)
+        ):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "frame_range and sample_frames require bounded whole frames",
+            )
+        start, end = map(int, raw_range)
+        sample_frames = [int(value) for value in samples]
+        if (
+            end < start
+            or end - start > int(MAX_FLIPBOOK_FRAME_SPAN)
+            or any(a >= b for a, b in zip(sample_frames, sample_frames[1:]))
+            or any(value < start or value > end for value in sample_frames)
+        ):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "Frame range or ordered sample frames are out of bounds",
+            )
+        cook_calls = (1 + len(candidates)) * (end - start + 1) * len(cook_nodes)
+        if cook_calls > MAX_EXPERIMENT_COOK_CALLS:
+            raise HiaRuntimeError(
+                "REQUEST_TOO_LARGE",
+                "The bounded cook-call budget was exceeded",
+                {"cook_calls": cook_calls, "maximum": MAX_EXPERIMENT_COOK_CALLS},
+            )
+        if str(arguments.get("capture_mode", "contact_sheet")) != "contact_sheet":
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "capture_mode must be contact_sheet")
+
+        raw_metrics = arguments.get("metrics")
+        metrics = (
+            {"cook_evidence", "node_messages", "image_quality"}
+            if raw_metrics is None
+            else {str(value) for value in raw_metrics}
+            if isinstance(raw_metrics, (list, tuple))
+            else set()
+        )
+        if raw_metrics is not None and not isinstance(raw_metrics, (list, tuple)):
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "metrics must be an array")
+        if metric_nodes and raw_metrics is None:
+            metrics.add("geometry_summary")
+        allowed_metrics = {
+            "cook_evidence",
+            "node_messages",
+            "geometry_summary",
+            "image_quality",
+        }
+        if not metrics.issubset(allowed_metrics):
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "metrics contains an unsupported value")
+        if "geometry_summary" in metrics and not metric_nodes:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "geometry_summary requires metric_targets",
+            )
+
+        if not bool(_safe_call(self._hou, "isUIAvailable", True)):
+            raise HiaRuntimeError("VIEWPORT_UNAVAILABLE", "A Houdini UI session is required")
+        scene_viewer = self._hou.ui.curDesktop().paneTabOfType(
+            self._hou.paneTabType.SceneViewer
+        )
+        if (
+            scene_viewer is None
+            or not callable(getattr(scene_viewer, "flipbook", None))
+            or not callable(getattr(scene_viewer, "flipbookSettings", None))
+        ):
+            raise HiaRuntimeError("VIEWPORT_UNAVAILABLE", "SceneViewer.flipbook is unavailable")
+        viewport = scene_viewer.curViewport()
+        preview = arguments.get("preview") or {}
+        if not isinstance(preview, Mapping):
+            raise HiaRuntimeError("INVALID_ARGUMENTS", "preview must be an object")
+        resolution_request = {
+            key: preview[key] for key in ("width", "height") if key in preview
+        }
+        base_width, base_height, source = self._capture_resolution(
+            resolution_request,
+            viewport,
+        )
+        try:
+            quality_scale = float(preview.get("quality_scale", 1.0))
+        except (TypeError, ValueError) as exc:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "preview.quality_scale must be numeric",
+            ) from exc
+        if not math.isfinite(quality_scale) or not 0.1 <= quality_scale <= 1.0:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "preview.quality_scale must be between 0.1 and 1.0",
+            )
+        scale = max(quality_scale, 64 / base_width, 64 / base_height)
+        if not resolution_request:
+            scale = min(scale, 1920 / max(base_width, base_height))
+        width, height = round(base_width * scale), round(base_height * scale)
+        if not 64 <= width <= 1920 or not 64 <= height <= 1920:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "The preview resolves outside 64-1920 pixels",
+            )
+        if scale != 1:
+            source += "_quality_scaled"
+
+        camera_path = str(arguments.get("camera_path") or "").strip()
+        if camera_path and (
+            not _valid_houdini_node_path(camera_path)
+            or self._hou.node(camera_path) is None
+        ):
+            raise HiaRuntimeError("NODE_NOT_FOUND", "The experiment camera does not exist")
+        framing = str(
+            arguments.get("framing", "camera" if camera_path else "current_view")
+        )
+        if framing not in {"camera", "current_view"} or (
+            (framing == "camera") != bool(camera_path)
+        ):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "framing and camera_path are inconsistent",
+            )
+        initial_view = _viewport_capture_source_state(
+            self._hou,
+            scene_viewer,
+            viewport,
+            scene_viewer.flipbookSettings().stash(),
+            "",
+            (width, height),
+        )
+        observed_display = str(
+            initial_view.get("display_options", {}).get("shading", "unverified")
+        )
+        requested_display = str(arguments.get("display_mode") or "").strip()
+        if requested_display and (
+            observed_display == "unverified"
+            or requested_display.casefold() != observed_display.casefold()
+        ):
+            raise HiaRuntimeError(
+                "VIEWPORT_DISPLAY_MODE_MISMATCH",
+                "The current viewport shading mode does not match display_mode",
+                {"requested": requested_display, "observed": observed_display},
+            )
+
+        undos = getattr(self._hou, "undos", None)
+        undo_group = getattr(undos, "group", None)
+        undo_labels = getattr(undos, "undoLabels", None)
+        perform_undo = getattr(undos, "performUndo", None)
+        undos_enabled = getattr(undos, "areEnabled", None)
+        if not all(
+            callable(value)
+            for value in (undo_group, undo_labels, perform_undo, undos_enabled)
+        ) or not bool(undos_enabled()):
+            raise HiaRuntimeError(
+                "UNDO_ROLLBACK_UNAVAILABLE",
+                "A private Houdini undo boundary is unavailable",
+            )
+        initial_snapshot, truncated = self._snapshot_map(target)
+        if truncated:
+            raise HiaRuntimeError(
+                "EXPERIMENT_TARGET_TOO_LARGE",
+                "The bounded target snapshot was truncated",
+            )
+        missing = sorted(set(expected_deletions).difference(initial_snapshot))
+        if missing:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "expected_deletions was absent before execution",
+                {"paths": missing},
+            )
+        capture_dir, storage_scope, _hip = self._artifact_directory(
+            "screenshots",
+            fallback=self._screenshot_root,
+        )
+        return {
+            "target": target,
+            "baseline_name": baseline["name"],
+            "candidates": [
+                {"name": value["name"], "parameters": parameters}
+                for value, parameters in zip(candidates, candidate_values, strict=True)
+            ],
+            "baseline_state": baseline_state,
+            "baseline_overrides": baseline_values,
+            "parms": by_path,
+            "originals": originals,
+            "reset_parms": reset_parms,
+            "cook_nodes": cook_nodes,
+            "metric_nodes": metric_nodes,
+            "expected_deletions": expected_deletions,
+            "start": start,
+            "end": end,
+            "sample_frames": sample_frames,
+            "metrics": metrics,
+            "scene_viewer": scene_viewer,
+            "viewport": viewport,
+            "initial_view": initial_view,
+            "display_mode": observed_display,
+            "camera_path": camera_path,
+            "framing": framing,
+            "width": width,
+            "height": height,
+            "quality_scale": quality_scale,
+            "resolution_source": source,
+            "undo_group": undo_group,
+            "undo_labels": undo_labels,
+            "perform_undo": perform_undo,
+            "undo_labels_before": tuple(str(value) for value in undo_labels()),
+            "initial_snapshot": initial_snapshot,
+            "capture_dir": capture_dir,
+            "storage_scope": storage_scope,
+        }
+
+    def _run_effect_experiment(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        cfg = self._effect_experiment_preflight(arguments)
+        original_frame = float(_safe_call(self._hou, "frame", 1.0))
+        dirty_before = self._dirty()
+        label = f"HIA Effect Experiment {uuid.uuid4().hex}"
+        variants = [
+            {"name": cfg["baseline_name"], "kind": "baseline", "parameters": {}},
+            *[
+                {"name": value["name"], "kind": "candidate", "parameters": value["parameters"]}
+                for value in cfg["candidates"]
+            ],
+        ]
+        variant_results: list[dict[str, Any]] = []
+        cells: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        errors: list[dict[str, Any]] = []
+        restore_errors: list[dict[str, Any]] = []
+        fixed_state: dict[str, Any] | None = None
+        fixed_digest: str | None = None
+        view_lock_failed = False
+        abort = False
+
+        def same(expected: Any, actual: Any) -> bool:
+            if (
+                isinstance(expected, (int, float))
+                and not isinstance(expected, bool)
+                and isinstance(actual, (int, float))
+                and not isinstance(actual, bool)
+            ):
+                return math.isclose(
+                    float(expected),
+                    float(actual),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            return expected == actual
+
+        def digest(value: Any) -> str:
+            payload = json.dumps(
+                _json_value(value),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return hashlib.sha256(payload).hexdigest()
+
+        def classify_creations(paths: Iterable[str]) -> tuple[list[str], list[str]]:
+            created = sorted(set(paths))
+            ignored = [
+                path
+                for path in created
+                if _safe_call(
+                    self._hou.node(path),
+                    "isInsideLockedHDA",
+                    None,
+                )
+                is True
+            ]
+            return ignored, sorted(set(created) - set(ignored))
+
+        def view_core(state: Mapping[str, Any]) -> dict[str, Any]:
+            camera = dict(state.get("camera") or {})
+            camera.pop("requested_path", None)
+            return {
+                "scene_viewer": state.get("scene_viewer"),
+                "viewport": state.get("viewport"),
+                "camera": camera,
+                "display_options": state.get("display_options"),
+                "color_management": state.get("color_management"),
+            }
+
+        def restore() -> list[dict[str, Any]]:
+            failures = []
+            for path, original in cfg["originals"].items():
+                parm = cfg["parms"][path]
+                try:
+                    if not same(original, parm.eval()):
+                        parm.set(original)
+                    if not same(original, parm.eval()):
+                        raise RuntimeError("parameter readback mismatch")
+                except Exception as exc:
+                    failures.append(
+                        {
+                            "operation": "restore_parameter",
+                            "path": path,
+                            "message": _bounded_text(_redact_text(str(exc)), 1024),
+                        }
+                    )
+            try:
+                self._hou.setFrame(original_frame)
+                if not math.isclose(
+                    float(self._hou.frame()),
+                    original_frame,
+                    rel_tol=0,
+                    abs_tol=1e-6,
+                ):
+                    raise RuntimeError("frame readback mismatch")
+            except Exception as exc:
+                failures.append(
+                    {
+                        "operation": "restore_frame",
+                        "message": _bounded_text(_redact_text(str(exc)), 1024),
+                    }
+                )
+            return failures
+
+        try:
+            with cfg["undo_group"](label):
+                try:
+                    for variant in variants:
+                        if abort:
+                            variant_results.append(
+                                {
+                                    "name": variant["name"],
+                                    "kind": variant["kind"],
+                                    "status": "not_run",
+                                    "errors": [{"code": "STRUCTURAL_CHANGE_ABORT"}],
+                                }
+                            )
+                            continue
+                        variant_started = time.monotonic()
+                        local_errors: list[dict[str, Any]] = []
+                        local_warnings: list[str] = []
+                        cook_records: list[dict[str, Any]] = []
+                        messages: list[dict[str, Any]] = []
+                        frame_records: list[dict[str, Any]] = []
+                        actual_parameters: list[dict[str, Any]] = []
+                        reset_status = "not_proven" if not cfg["reset_parms"] else "pending"
+                        effective = dict(cfg["baseline_state"])
+                        effective.update(variant["parameters"])
+                        try:
+                            for path, value in cfg["baseline_state"].items():
+                                cfg["parms"][path].set(value)
+                            for path, value in variant["parameters"].items():
+                                cfg["parms"][path].set(value)
+                            for path, expected in effective.items():
+                                actual = cfg["parms"][path].eval()
+                                if not same(expected, actual):
+                                    raise RuntimeError(f"{path} readback mismatch")
+                                actual_parameters.append(
+                                    {
+                                        "path": path,
+                                        "requested": _json_value(expected),
+                                        "actual": _json_value(actual),
+                                        "source": (
+                                            "candidate"
+                                            if path in variant["parameters"]
+                                            else "baseline_override"
+                                            if path in cfg["baseline_overrides"]
+                                            else "scene_baseline"
+                                        ),
+                                    }
+                                )
+                            self._hou.setFrame(cfg["start"])
+                            if float(self._hou.frame()) != float(cfg["start"]):
+                                raise RuntimeError("configured start frame mismatch")
+                            for _path, parm in cfg["reset_parms"]:
+                                parm.pressButton()
+                            if cfg["reset_parms"]:
+                                reset_status = "observed"
+
+                            for frame in range(cfg["start"], cfg["end"] + 1):
+                                self._hou.setFrame(frame)
+                                if float(self._hou.frame()) != float(frame):
+                                    raise RuntimeError(f"frame {frame} lock failed")
+                                frame_failed = False
+                                for path, node in cfg["cook_nodes"]:
+                                    before = self._cook_state(node)
+                                    cook_error = None
+                                    completed = False
+                                    try:
+                                        node.cook(force=True)
+                                        completed = True
+                                    except Exception as exc:
+                                        cook_error = _bounded_text(_redact_text(str(exc)), 2048)
+                                    after = self._cook_state(node)
+                                    record = self._cook_evidence_record(
+                                        path=path,
+                                        frame=frame,
+                                        requested=True,
+                                        started=True,
+                                        completed=completed,
+                                        before=before,
+                                        after=after,
+                                        error=cook_error,
+                                    )
+                                    record["evidence"]["reset"] = reset_status
+                                    cook_records.append(record)
+                                    node_errors = [
+                                        _bounded_text(_redact_text(str(value)), 1024)
+                                        for value in list(_safe_call(node, "errors", ()))[:8]
+                                        if not _is_cooking_interrupted_message(value)
+                                    ]
+                                    node_warnings = [
+                                        _bounded_text(_redact_text(str(value)), 1024)
+                                        for value in list(_safe_call(node, "warnings", ()))[:8]
+                                    ]
+                                    if node_errors or node_warnings:
+                                        messages.append(
+                                            {
+                                                "frame": frame,
+                                                "path": path,
+                                                "errors": node_errors,
+                                                "warnings": node_warnings,
+                                            }
+                                        )
+                                    frame_failed = frame_failed or bool(cook_error or node_errors)
+                                if frame_failed:
+                                    raise RuntimeError(f"Cook failed at frame {frame}")
+                                if frame not in cfg["sample_frames"]:
+                                    continue
+                                capture = self._capture_viewport(
+                                    {
+                                        "mode": "flipbook",
+                                        "camera_path": cfg["camera_path"],
+                                        "frame": frame,
+                                        "width": cfg["width"],
+                                        "height": cfg["height"],
+                                        "return_image": False,
+                                    }
+                                )
+                                observed = capture["result"]
+                                if not capture["ok"] or any(
+                                    not isinstance(observed.get(key), (int, float))
+                                    or not math.isclose(
+                                        float(observed[key]),
+                                        float(frame),
+                                        rel_tol=0,
+                                        abs_tol=1e-6,
+                                    )
+                                    for key in ("actual_frame", "cook_frame")
+                                ):
+                                    raise RuntimeError(f"Capture frame {frame} was not proven")
+                                source = observed.get("source_state") or {}
+                                capture_state = {
+                                    "camera": source.get("camera"),
+                                    "viewport": source.get("viewport"),
+                                    "display_options": source.get("display_options"),
+                                    "color_management": source.get("color_management"),
+                                    "resolution": [
+                                        observed.get("width"),
+                                        observed.get("height"),
+                                        observed.get("aspect_ratio"),
+                                    ],
+                                }
+                                capture_digest = digest(capture_state)
+                                if fixed_digest is None:
+                                    fixed_digest, fixed_state = capture_digest, capture_state
+                                elif capture_digest != fixed_digest:
+                                    view_lock_failed = True
+                                    raise RuntimeError("Viewport state changed between captures")
+                                frame_record = {
+                                    "requested_frame": frame,
+                                    "actual_frame": observed["actual_frame"],
+                                    "cook_frame": observed["cook_frame"],
+                                    "absolute_path": observed["absolute_path"],
+                                    "width": observed["width"],
+                                    "height": observed["height"],
+                                    "aspect_ratio": observed["aspect_ratio"],
+                                    "quality_status": observed["quality_status"],
+                                }
+                                if "image_quality" in cfg["metrics"]:
+                                    frame_record["quality_metrics"] = observed.get("quality_metrics")
+                                if "geometry_summary" in cfg["metrics"]:
+                                    frame_record["geometry"] = [
+                                        self._geometry_record(
+                                            node,
+                                            include_attributes=False,
+                                            sample_limit=0,
+                                            allow_cook=False,
+                                        )
+                                        for _path, node in cfg["metric_nodes"]
+                                    ]
+                                frame_records.append(frame_record)
+                                cells.append(
+                                    {
+                                        "variant": variant["name"],
+                                        "frame": frame,
+                                        "absolute_path": observed["absolute_path"],
+                                        "width": observed["width"],
+                                        "height": observed["height"],
+                                    }
+                                )
+                                local_warnings.extend(capture.get("warnings", []))
+                        except Exception as exc:
+                            if reset_status == "pending":
+                                reset_status = "failed"
+                            local_errors.append(
+                                {
+                                    "code": "EXPERIMENT_CANDIDATE_FAILED",
+                                    "message": _bounded_text(_redact_text(str(exc)), 2048),
+                                }
+                            )
+
+                        try:
+                            snapshot, truncated = self._snapshot_map(cfg["target"])
+                            structural = self._diff_maps(cfg["initial_snapshot"], snapshot)
+                            deleted = set(structural["deleted"])
+                            expected = set(cfg["expected_deletions"])
+                            (
+                                ignored_locked_asset_internal,
+                                unexpected_creations,
+                            ) = classify_creations(
+                                structural["created"]
+                            )
+                            structural.update(
+                                {
+                                    "expected_deletions": sorted(deleted & expected),
+                                    "missing_expected_deletions": sorted(expected - deleted),
+                                    "unexpected_deletions": sorted(deleted - expected),
+                                    "unexpected_creations": unexpected_creations,
+                                    "ignored_locked_asset_internal": (
+                                        ignored_locked_asset_internal
+                                    ),
+                                    "truncated": truncated,
+                                }
+                            )
+                            for code, key in (
+                                ("EXPECTED_DELETION_NOT_OBSERVED", "missing_expected_deletions"),
+                                ("UNEXPECTED_DELETION", "unexpected_deletions"),
+                                ("UNEXPECTED_CREATION", "unexpected_creations"),
+                            ):
+                                if structural[key]:
+                                    local_errors.append(
+                                        {"code": code, "paths": structural[key][:16]}
+                                    )
+                            abort = bool(
+                                structural["unexpected_creations"]
+                                or structural["deleted"]
+                            )
+                        except Exception as exc:
+                            structural = {
+                                "status": "unavailable",
+                                "error": _bounded_text(_redact_text(str(exc)), 1024),
+                            }
+                            local_errors.append({"code": "STRUCTURAL_DIFF_UNAVAILABLE"})
+
+                        summary = self._summarize_cook_evidence(
+                            cook_records,
+                            requested=bool(cfg["cook_nodes"]),
+                        )
+                        freshness = (
+                            "recompute_verified"
+                            if reset_status == "observed"
+                            and cook_records
+                            and summary["assessment"] == "recompute_verified"
+                            else "recompute_not_proven"
+                        )
+                        try:
+                            hashes, temporal_evidence = _temporal_image_evidence(
+                                [
+                                    Path(str(value["absolute_path"]))
+                                    for value in frame_records
+                                ]
+                            )
+                            for value, image_hash in zip(
+                                frame_records,
+                                hashes,
+                                strict=True,
+                            ):
+                                value["sha256"] = image_hash
+                        except Exception as exc:
+                            temporal_evidence = {
+                                "sample_count": len(frame_records),
+                                "unique_hash_count": 0,
+                                "no_change_detected": False,
+                                "simulation_advancement": "unavailable",
+                            }
+                            local_errors.append(
+                                {
+                                    "code": "TEMPORAL_EVIDENCE_UNAVAILABLE",
+                                    "message": _bounded_text(
+                                        _redact_text(str(exc)),
+                                        1024,
+                                    ),
+                                }
+                            )
+                        variant_results.append(
+                            {
+                                "name": variant["name"],
+                                "kind": variant["kind"],
+                                "status": "failed" if local_errors else "completed",
+                                "actual_parameters": actual_parameters,
+                                "frame_range": [cfg["start"], cfg["end"]],
+                                "frames_evaluated": cfg["end"] - cfg["start"] + 1,
+                                "sample_frames": frame_records,
+                                "temporal_evidence": temporal_evidence,
+                                "cache_reset": {
+                                    "status": reset_status,
+                                    "parameters": [path for path, _parm in cfg["reset_parms"]],
+                                },
+                                "freshness": freshness,
+                                "cook_errors_and_warnings": (
+                                    messages
+                                    if "node_messages" in cfg["metrics"]
+                                    else [value for value in messages if value["errors"]]
+                                ),
+                                "cook_evidence": (
+                                    summary
+                                    if "cook_evidence" in cfg["metrics"]
+                                    else {
+                                        key: summary[key]
+                                        for key in (
+                                            "assessment",
+                                            "counts",
+                                            "target_count",
+                                            "calls_completed",
+                                        )
+                                    }
+                                ),
+                                "structural_diff": {
+                                    key: value[:64] if isinstance(value, list) else value
+                                    for key, value in structural.items()
+                                },
+                                "warnings": list(dict.fromkeys(local_warnings))[:32],
+                                "errors": local_errors,
+                                "elapsed_seconds": _seconds(time.monotonic() - variant_started),
+                            }
+                        )
+                finally:
+                    restore_errors.extend(restore())
+        except Exception as exc:
+            errors.append(
+                {
+                    "code": "EXPERIMENT_EXECUTION_FAILED",
+                    "message": _bounded_text(_redact_text(str(exc)), 2048),
+                }
+            )
+
+        undo = {"label": label, "status": "not_proven", "user_history_untouched": True}
+        try:
+            labels = tuple(str(value) for value in cfg["undo_labels"]())
+            if labels == cfg["undo_labels_before"]:
+                undo["status"] = "no_undo_item"
+            elif labels and labels[0] == label:
+                cfg["perform_undo"]()
+                if tuple(str(value) for value in cfg["undo_labels"]()) != cfg["undo_labels_before"]:
+                    raise RuntimeError("undo labels were not restored")
+                undo["status"] = "rolled_back_own_item"
+            else:
+                raise RuntimeError("own undo item was not current; user history was not touched")
+        except Exception as exc:
+            undo["error"] = _bounded_text(_redact_text(str(exc)), 1024)
+        restore_errors.extend(restore())
+
+        parm_evidence = []
+        for path, original in cfg["originals"].items():
+            try:
+                actual = cfg["parms"][path].eval()
+                restored = same(original, actual)
+            except Exception as exc:
+                actual, restored = f"<readback failed: {exc}>", False
+            parm_evidence.append(
+                {
+                    "path": path,
+                    "original": _json_value(original),
+                    "actual": _json_value(actual),
+                    "restored": restored,
+                }
+            )
+        try:
+            final_snapshot, truncated = self._snapshot_map(cfg["target"])
+            network_diff = self._diff_maps(cfg["initial_snapshot"], final_snapshot)
+            (
+                ignored_locked_asset_internal,
+                unexpected_creations,
+            ) = classify_creations(network_diff["created"])
+            network_diff.update(
+                {
+                    "unexpected_creations": unexpected_creations,
+                    "ignored_locked_asset_internal": (
+                        ignored_locked_asset_internal
+                    ),
+                    "truncated": truncated,
+                }
+            )
+        except Exception as exc:
+            network_diff = {
+                "status": "unavailable",
+                "error": _bounded_text(_redact_text(str(exc)), 1024),
+            }
+            restore_errors.append({"operation": "verify_network_restoration"})
+        final_view = _viewport_capture_source_state(
+            self._hou,
+            cfg["scene_viewer"],
+            cfg["viewport"],
+            cfg["scene_viewer"].flipbookSettings().stash(),
+            "",
+            (cfg["width"], cfg["height"]),
+        )
+        final_frame = _safe_call(self._hou, "frame", None)
+        frame_restored = isinstance(final_frame, (int, float)) and math.isclose(
+            float(final_frame),
+            original_frame,
+            rel_tol=0,
+            abs_tol=1e-6,
+        )
+        network_restored = (
+            network_diff.get("status") != "unavailable"
+            and not network_diff.get("unexpected_creations")
+            and not network_diff.get("deleted")
+            and not network_diff.get("changed")
+            and not network_diff.get("truncated")
+        )
+        view_restored = digest(view_core(cfg["initial_view"])) == digest(view_core(final_view))
+        dirty_after = self._dirty()
+        restoration_verified = (
+            not restore_errors
+            and all(value["restored"] for value in parm_evidence)
+            and frame_restored
+            and network_restored
+            and view_restored
+            and dirty_after == dirty_before
+            and undo["status"] in {"no_undo_item", "rolled_back_own_item"}
+        )
+        restoration = {
+            "status": "verified" if restoration_verified else "failed",
+            "parameters": parm_evidence,
+            "frame": {"before": original_frame, "after": _json_value(final_frame), "restored": frame_restored},
+            "view_state_restored": view_restored,
+            "network": network_diff,
+            "dirty": {"before": dirty_before, "after": dirty_after, "restored": dirty_after == dirty_before},
+            "undo": undo,
+            "cache_state": "not_restorable_or_observable_through_generic_HOM",
+            "errors": restore_errors[:32],
+        }
+        if restore_errors:
+            errors.append({"code": "EXPERIMENT_RESTORE_FAILED", "details": restore_errors[:32]})
+
+        try:
+            contact_sheet = (
+                self._write_effect_contact_sheet(
+                    capture_dir=cfg["capture_dir"],
+                    storage_scope=cfg["storage_scope"],
+                    variants=[value["name"] for value in variants],
+                    sample_frames=cfg["sample_frames"],
+                    cells=cells,
+                )
+                if cells
+                else {"status": "not_created", "reason": "No sample frame was captured"}
+            )
+        except Exception as exc:
+            contact_sheet = {
+                "status": "failed",
+                "error": _bounded_text(_redact_text(str(exc)), 2048),
+            }
+            errors.append({"code": "CONTACT_SHEET_FAILED", "message": contact_sheet["error"]})
+
+        incomplete = [
+            value["name"]
+            for value in variant_results
+            if value.get("status") != "completed"
+        ]
+        if incomplete:
+            errors.append({"code": "EXPERIMENT_VARIANTS_INCOMPLETE", "variants": incomplete})
+        if not cfg["reset_parms"]:
+            warnings.append(
+                "No cache_reset_parms were supplied; force cooking does not prove retained simulation steps were cleared"
+            )
+        if not cfg["cook_nodes"]:
+            warnings.append(
+                "No cook_targets were supplied; viewport evaluation does not prove target recomputation"
+            )
+        complete = (
+            not errors
+            and len(variant_results) == len(variants)
+            and restoration_verified
+            and contact_sheet.get("status") == "created"
+            and fixed_digest is not None
+            and not view_lock_failed
+        )
+        return {
+            "ok": complete,
+            "result": {
+                "status": "completed" if complete else "partial" if cells and restoration_verified else "failed",
+                "target_network": cfg["target"],
+                "variants": variant_results,
+                "frame_range": [cfg["start"], cfg["end"]],
+                "sample_frames": cfg["sample_frames"],
+                "preview": {
+                    "width": cfg["width"],
+                    "height": cfg["height"],
+                    "aspect_ratio": round(cfg["width"] / cfg["height"], 8),
+                    "quality_scale": cfg["quality_scale"],
+                    "resolution_source": cfg["resolution_source"],
+                },
+                "view_lock": {
+                    "status": "verified" if fixed_digest and not view_lock_failed else "not_proven",
+                    "framing": cfg["framing"],
+                    "camera_path": cfg["camera_path"] or None,
+                    "display_mode": cfg["display_mode"],
+                    "signature": fixed_digest,
+                    "state": fixed_state,
+                },
+                "cache_reset": (
+                    "observed"
+                    if cfg["reset_parms"]
+                    and variant_results
+                    and all(
+                        value.get("cache_reset", {}).get("status") == "observed"
+                        for value in variant_results
+                        if value.get("status") != "not_run"
+                    )
+                    else "not_proven"
+                ),
+                "contact_sheet": contact_sheet,
+                "restoration": restoration,
+                "incomplete_variants": incomplete,
+                "elapsed_seconds": _seconds(time.monotonic() - started),
+                "limitations": [
+                    "Generic HOM cannot restore or universally observe cache contents",
+                    "The tool records evidence but Codex evaluates candidate quality",
+                ],
+            },
+            "warnings": warnings[:32],
+            "errors": errors[:32],
+            "revision": self.scene_revision,
+            "dirty": dirty_after,
+        }
+
+    def _write_effect_contact_sheet(
+        self,
+        *,
+        capture_dir: Path,
+        storage_scope: str,
+        variants: list[str],
+        sample_frames: list[int],
+        cells: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        if not cells:
+            raise RuntimeError("No captured frames were supplied")
+        cell_by_key = {
+            (str(cell["variant"]), int(cell["frame"])): cell
+            for cell in cells
+        }
+        first = cells[0]
+        source_width = int(first["width"])
+        source_height = int(first["height"])
+        aspect = source_width / source_height
+        image_width = min(320, max(1, int(round(180 * aspect))))
+        image_height = min(180, max(1, int(round(320 / aspect))))
+        if image_width / image_height > aspect:
+            image_width = max(1, int(round(image_height * aspect)))
+        else:
+            image_height = max(1, int(round(image_width / aspect)))
+        cell_width = 340
+        cell_height = image_height + 58
+        sheet_width = cell_width * len(sample_frames)
+        sheet_height = cell_height * len(variants)
+        parts = [
+            (
+                f'<svg xmlns="http://www.w3.org/2000/svg" '
+                f'width="{sheet_width}" height="{sheet_height}" '
+                f'viewBox="0 0 {sheet_width} {sheet_height}">'
+            ),
+            "<rect width=\"100%\" height=\"100%\" fill=\"#15181d\"/>",
+            (
+                "<style>text{font-family:Segoe UI,Arial,sans-serif;"
+                "fill:#f2f4f8;font-size:14px}.frame{fill:#b9c2cf;"
+                "font-size:12px}.missing{fill:#2c313a;stroke:#d85c5c;"
+                "stroke-width:2}</style>"
+            ),
+        ]
+        sources: list[dict[str, Any]] = []
+        for row, variant in enumerate(variants):
+            for column, frame in enumerate(sample_frames):
+                x = column * cell_width
+                y = row * cell_height
+                label = html.escape(variant)
+                parts.append(
+                    f'<text x="{x + 10}" y="{y + 20}">{label}</text>'
+                )
+                parts.append(
+                    (
+                        f'<text class="frame" x="{x + 10}" y="{y + 39}">'
+                        f'frame {frame}</text>'
+                    )
+                )
+                cell = cell_by_key.get((variant, frame))
+                image_x = x + (cell_width - image_width) // 2
+                image_y = y + 48
+                if cell is None:
+                    parts.append(
+                        (
+                            f'<rect class="missing" x="{image_x}" '
+                            f'y="{image_y}" width="{image_width}" '
+                            f'height="{image_height}"/>'
+                        )
+                    )
+                    continue
+                source_path = Path(str(cell["absolute_path"])).resolve(
+                    strict=True
+                )
+                if source_path.parent != capture_dir.resolve(strict=True):
+                    raise RuntimeError(
+                        "A contact-sheet source escaped its capture directory"
+                    )
+                encoded = base64.b64encode(source_path.read_bytes()).decode(
+                    "ascii"
+                )
+                parts.append(
+                    (
+                        f'<image x="{image_x}" y="{image_y}" '
+                        f'width="{image_width}" height="{image_height}" '
+                        f'preserveAspectRatio="xMidYMid meet" '
+                        f'href="data:image/png;base64,{encoded}"/>'
+                    )
+                )
+                sources.append(
+                    {
+                        "variant": variant,
+                        "frame": frame,
+                        "absolute_path": str(source_path),
+                        "width": int(cell["width"]),
+                        "height": int(cell["height"]),
+                    }
+                )
+        parts.append("</svg>")
+        identifier = (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            + "-"
+            + uuid.uuid4().hex[:8]
+        )
+        output_path = capture_dir / f"effect-experiment-{identifier}.svg"
+        output_path.write_text("".join(parts), encoding="utf-8")
+        absolute_path = str(output_path.resolve(strict=True))
+        display_path = (
+            output_path.relative_to(self._project_root).as_posix()
+            if storage_scope == "runtime_fallback"
+            else absolute_path
+        )
+        return {
+            "status": "created",
+            "path": display_path,
+            "absolute_path": absolute_path,
+            "storage_scope": storage_scope,
+            "mime_type": "image/svg+xml",
+            "embedded_images": True,
+            "width": sheet_width,
+            "height": sheet_height,
+            "columns": len(sample_frames),
+            "rows": len(variants),
+            "variants": variants,
+            "frames": sample_frames,
+            "source_frames": sources,
+        }
+
     def _scene_diff(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         action = str(arguments.get("action", ""))
         snapshot_id = str(arguments.get("snapshot_id", ""))
@@ -3215,9 +5147,32 @@ class HoudiniExecutor:
             return self._success({"forgotten": snapshot_id})
         if action != "compare":
             raise HiaRuntimeError("INVALID_ARGUMENTS", "Unsupported scene diff action")
+        expected_deletions = self._absolute_node_paths(
+            arguments.get("expected_deletions") or [],
+            field_name="expected_deletions",
+            maximum=64,
+        )
         current, truncated = self._snapshot_map(snapshot.root_path)
         diff = self._diff_maps(snapshot.nodes, current)
-        for key in ("created", "deleted", "changed"):
+        observed_deleted = set(diff["deleted"])
+        expected_deleted = set(expected_deletions)
+        diff["expected_deletions"] = sorted(
+            observed_deleted.intersection(expected_deleted)
+        )
+        diff["missing_expected_deletions"] = sorted(
+            expected_deleted.difference(observed_deleted)
+        )
+        diff["unexpected_deletions"] = sorted(
+            observed_deleted.difference(expected_deleted)
+        )
+        for key in (
+            "created",
+            "deleted",
+            "changed",
+            "expected_deletions",
+            "missing_expected_deletions",
+            "unexpected_deletions",
+        ):
             diff[key] = diff[key][:limit]
         return self._success(
             {
@@ -3230,6 +5185,341 @@ class HoudiniExecutor:
             }
         )
 
+    def _capture_frame_values(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        mode: str,
+        current_frame: float,
+    ) -> list[float]:
+        selectors = [
+            name
+            for name in ("frame", "frames", "frame_range")
+            if name in arguments
+        ]
+        if len(selectors) > 1:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "Provide only one of frame, frames, or frame_range",
+                {"fields": selectors},
+            )
+        if "frame_step" in arguments and "frame_range" not in arguments:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "frame_step is valid only with frame_range",
+            )
+
+        def finite_frame(value: Any, field: str) -> float:
+            try:
+                frame = float(value)
+            except (TypeError, ValueError) as exc:
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    f"{field} must contain finite frame numbers",
+                ) from exc
+            if not math.isfinite(frame):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    f"{field} must contain finite frame numbers",
+                )
+            return frame
+
+        if "frame" in arguments:
+            frames = [finite_frame(arguments["frame"], "frame")]
+        elif "frames" in arguments:
+            raw_frames = arguments["frames"]
+            if (
+                not isinstance(raw_frames, (list, tuple))
+                or not 1 <= len(raw_frames) <= MAX_CAPTURE_FRAMES
+            ):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    f"frames must contain 1-{MAX_CAPTURE_FRAMES} frame numbers",
+                )
+            frames = [
+                finite_frame(value, f"frames[{index}]")
+                for index, value in enumerate(raw_frames)
+            ]
+        elif "frame_range" in arguments:
+            raw_range = arguments["frame_range"]
+            if (
+                not isinstance(raw_range, (list, tuple))
+                or len(raw_range) != 2
+            ):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    "frame_range must contain exactly two frame numbers",
+                )
+            start = finite_frame(raw_range[0], "frame_range")
+            end = finite_frame(raw_range[1], "frame_range")
+            if end < start:
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    "frame_range end must not precede its start",
+                )
+            if end - start > MAX_FLIPBOOK_FRAME_SPAN:
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    f"frame_range may span at most {int(MAX_FLIPBOOK_FRAME_SPAN)} frames",
+                    {
+                        "frame_range": [start, end],
+                        "maximum_frame_span": int(MAX_FLIPBOOK_FRAME_SPAN),
+                    },
+                )
+            if not start.is_integer() or not end.is_integer():
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    "Multi-frame frame_range endpoints must be whole frames",
+                )
+            step = _bounded_int(arguments.get("frame_step", 1), 1, 240)
+            frames = [
+                float(value)
+                for value in range(int(start), int(end) + 1, step)
+            ]
+            if len(frames) > MAX_CAPTURE_FRAMES:
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    f"A capture sequence may contain at most {MAX_CAPTURE_FRAMES} frames",
+                    {
+                        "frame_count": len(frames),
+                        "maximum_frame_count": MAX_CAPTURE_FRAMES,
+                    },
+                )
+        else:
+            frames = [current_frame]
+        if len(frames) > 1:
+            if mode != "flipbook":
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    "Multiple frames require mode=flipbook",
+                )
+            if any(not frame.is_integer() for frame in frames):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    "Capture sequences require whole frame numbers",
+                )
+            if any(
+                current >= following
+                for current, following in zip(frames, frames[1:])
+            ):
+                raise HiaRuntimeError(
+                    "INVALID_ARGUMENTS",
+                    "Sequence frames must be strictly increasing",
+                )
+        return frames
+
+    @staticmethod
+    def _capture_resolution(
+        arguments: Mapping[str, Any],
+        viewport: Any,
+    ) -> tuple[int, int, str]:
+        raw_width = arguments.get("width")
+        raw_height = arguments.get("height")
+        width = (
+            _bounded_int(raw_width, 64, 4096)
+            if raw_width is not None
+            else None
+        )
+        height = (
+            _bounded_int(raw_height, 64, 4096)
+            if raw_height is not None
+            else None
+        )
+        size = _safe_call(viewport, "size", ())
+        viewport_width = viewport_height = 0
+        if (
+            isinstance(size, (list, tuple))
+            and len(size) == 4
+            and all(isinstance(value, (int, float)) for value in size)
+        ):
+            viewport_width = int(round(float(size[2])))
+            viewport_height = int(round(float(size[3])))
+        if width is not None and height is not None:
+            return width, height, "requested"
+        if viewport_width <= 0 or viewport_height <= 0:
+            raise HiaRuntimeError(
+                "VIEWPORT_RESOLUTION_UNAVAILABLE",
+                "Specify width and height because the live viewport size could not be observed",
+            )
+        aspect = viewport_width / viewport_height
+        if width is None and height is None:
+            scale = min(1.0, 4096 / max(viewport_width, viewport_height))
+            width = int(round(viewport_width * scale))
+            height = int(round(viewport_height * scale))
+            source = "viewport"
+        elif width is None:
+            width = int(round(height * aspect))
+            source = "requested_height_viewport_aspect"
+        else:
+            height = int(round(width / aspect))
+            source = "requested_width_viewport_aspect"
+        if not 64 <= width <= 4096 or not 64 <= height <= 4096:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "The derived viewport resolution is outside 64-4096 pixels",
+                {
+                    "derived_resolution": [width, height],
+                    "viewport_resolution": [viewport_width, viewport_height],
+                },
+            )
+        return width, height, source
+
+    def _capture_viewport_sequence(
+        self,
+        arguments: Mapping[str, Any],
+        frames: list[float],
+    ) -> dict[str, Any]:
+        original_frame = float(_safe_call(self._hou, "frame", 1.0))
+        frame_records: list[dict[str, Any]] = []
+        successful: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        errors: list[str] = []
+        restore_error: str | None = None
+        try:
+            for requested_frame in frames:
+                member_arguments = dict(arguments)
+                for name in ("frame", "frames", "frame_step", "expect_change"):
+                    member_arguments.pop(name, None)
+                member_arguments["mode"] = "flipbook"
+                member_arguments["frame_range"] = [
+                    requested_frame,
+                    requested_frame,
+                ]
+                member_arguments["return_image"] = False
+                try:
+                    response = self._capture_viewport(member_arguments)
+                except HiaRuntimeError as exc:
+                    frame_records.append(
+                        {
+                            "requested_frame": requested_frame,
+                            "actual_frame": None,
+                            "cook_frame": None,
+                            "status": "failed",
+                            "error": {
+                                "code": exc.code,
+                                "message": exc.message,
+                            },
+                        }
+                    )
+                    errors.append(
+                        f"Frame {requested_frame:g}: {exc.code}: {exc.message}"
+                    )
+                    if exc.code == "VIEWPORT_STATE_RESTORE_FAILED":
+                        break
+                    continue
+                captured = response["result"]
+                path = Path(captured["absolute_path"])
+                record = {
+                    "requested_frame": requested_frame,
+                    "actual_frame": captured.get("actual_frame"),
+                    "cook_frame": captured.get("cook_frame"),
+                    "status": "captured" if response["ok"] else "failed",
+                    "width": captured.get("width"),
+                    "height": captured.get("height"),
+                    "absolute_path": str(path),
+                }
+                frame_records.append(record)
+                if response["ok"]:
+                    successful.append(response)
+                else:
+                    errors.extend(str(value) for value in response["errors"])
+                warnings.extend(str(value) for value in response["warnings"])
+        finally:
+            try:
+                self._hou.setFrame(original_frame)
+                restored_frame = float(self._hou.frame())
+                if not math.isclose(
+                    restored_frame,
+                    original_frame,
+                    rel_tol=0.0,
+                    abs_tol=1.0e-6,
+                ):
+                    raise RuntimeError(
+                        f"restored frame is {restored_frame:g}, expected {original_frame:g}"
+                    )
+            except Exception as exc:
+                restore_error = _bounded_text(_redact_text(str(exc)), 1024)
+        if restore_error is not None:
+            raise HiaRuntimeError(
+                "VIEWPORT_STATE_RESTORE_FAILED",
+                "The frame sequence finished, but the original frame could not be restored",
+                {"errors": [{"operation": "restore_frame", "message": restore_error}]},
+            )
+
+        captured_records = [
+            record for record in frame_records if record["status"] == "captured"
+        ]
+        hashes, temporal_evidence = _temporal_image_evidence(
+            [Path(str(record["absolute_path"])) for record in captured_records]
+        )
+        for record, digest in zip(captured_records, hashes, strict=True):
+            record["sha256"] = digest
+        no_change = bool(temporal_evidence["no_change_detected"])
+        expect_change = bool(arguments.get("expect_change", True))
+        missing_frames = [
+            record["requested_frame"]
+            for record in frame_records
+            if record["status"] != "captured"
+        ]
+        if missing_frames:
+            temporal_status = "failed"
+        elif no_change and expect_change:
+            temporal_status = "failed"
+            errors.append(
+                "All captured frames are byte-identical; temporal change or simulation advancement was not proven"
+            )
+        else:
+            temporal_status = "passed"
+        evidence_paths = [
+            record["absolute_path"]
+            for record in (
+                captured_records[:1] + captured_records[-1:]
+                if len(captured_records) > 1
+                else captured_records
+            )
+        ]
+        compact_frames = []
+        for record in frame_records:
+            compact = {
+                key: value
+                for key, value in record.items()
+                if key != "absolute_path"
+            }
+            if record.get("absolute_path") in evidence_paths:
+                compact["evidence_path"] = record["absolute_path"]
+            compact_frames.append(compact)
+        first = successful[0] if successful else None
+        first_result = dict(first["result"]) if first is not None else {}
+        first_result.update(
+            {
+                "mode": "sequence",
+                "requested_frames": frames,
+                "actual_frames": [
+                    record.get("actual_frame") for record in frame_records
+                ],
+                "sequence": {
+                    "status": temporal_status,
+                    "requested_count": len(frames),
+                    "captured_count": len(captured_records),
+                    "failed_count": len(frames) - len(captured_records),
+                    "missing_or_failed_frames": missing_frames,
+                    **temporal_evidence,
+                    "temporal_jump_detected": bool(missing_frames),
+                    "frames": compact_frames,
+                    "evidence_paths": evidence_paths,
+                },
+            }
+        )
+        result: dict[str, Any] = {
+            "ok": bool(successful) and temporal_status != "failed",
+            "result": first_result,
+            "warnings": list(dict.fromkeys(warnings))[:32],
+            "errors": list(dict.fromkeys(errors))[:32],
+            "revision": self.scene_revision,
+            "dirty": self._dirty(),
+        }
+        return result
+
     def _capture_viewport(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         if not bool(_safe_call(self._hou, "isUIAvailable", True)):
             raise HiaRuntimeError("VIEWPORT_UNAVAILABLE", "Viewport capture requires a graphical Houdini session")
@@ -3240,54 +5530,25 @@ class HoudiniExecutor:
                 "Viewport capture mode must be viewport or flipbook",
                 {"mode": mode},
             )
-        width = _bounded_int(arguments.get("width", 640), 64, 4096)
-        height = _bounded_int(arguments.get("height", 360), 64, 4096)
         current_frame = float(_safe_call(self._hou, "frame", 1.0))
-        validated_frame_range = (current_frame, current_frame)
-        if mode == "flipbook":
-            raw_frame_range = arguments.get("frame_range")
-            if raw_frame_range is not None:
-                if (
-                    not isinstance(raw_frame_range, (list, tuple))
-                    or len(raw_frame_range) != 2
-                ):
-                    raise HiaRuntimeError(
-                        "INVALID_ARGUMENTS",
-                        "Flipbook frame_range must contain exactly two frame numbers",
-                    )
-                try:
-                    start = float(raw_frame_range[0])
-                    end = float(raw_frame_range[1])
-                except (TypeError, ValueError) as exc:
-                    raise HiaRuntimeError(
-                        "INVALID_ARGUMENTS",
-                        "Flipbook frame_range values must be finite numbers",
-                    ) from exc
-                if not math.isfinite(start) or not math.isfinite(end):
-                    raise HiaRuntimeError(
-                        "INVALID_ARGUMENTS",
-                        "Flipbook frame_range values must be finite numbers",
-                    )
-                if end < start:
-                    raise HiaRuntimeError(
-                        "INVALID_ARGUMENTS",
-                        "Flipbook frame_range end must not precede its start",
-                    )
-                if end - start > MAX_FLIPBOOK_FRAME_SPAN:
-                    raise HiaRuntimeError(
-                        "INVALID_ARGUMENTS",
-                        f"Flipbook frame_range may span at most {int(MAX_FLIPBOOK_FRAME_SPAN)} frames",
-                        {
-                            "frame_range": [start, end],
-                            "maximum_frame_span": int(MAX_FLIPBOOK_FRAME_SPAN),
-                        },
-                    )
-                validated_frame_range = (start, end)
+        frame_values = self._capture_frame_values(
+            arguments,
+            mode=mode,
+            current_frame=current_frame,
+        )
+        if len(frame_values) > 1:
+            return self._capture_viewport_sequence(arguments, frame_values)
+        requested_frame = frame_values[0]
+        validated_frame_range = (requested_frame, requested_frame)
         desktop = self._hou.ui.curDesktop()
         scene_viewer = desktop.paneTabOfType(self._hou.paneTabType.SceneViewer)
         if scene_viewer is None:
             raise HiaRuntimeError("VIEWPORT_UNAVAILABLE", "No Scene Viewer pane is available")
         viewport = scene_viewer.curViewport()
+        width, height, resolution_source = self._capture_resolution(
+            arguments,
+            viewport,
+        )
         camera_path = str(arguments.get("camera_path", ""))
         camera = None
         if camera_path:
@@ -3303,7 +5564,7 @@ class HoudiniExecutor:
             + "-"
             + uuid.uuid4().hex[:8]
         )
-        frame = int(round(current_frame))
+        frame = int(round(requested_frame))
         output_path = capture_dir / f"viewport-{identifier}-{frame:04d}.png"
         original_camera = viewport.camera() if camera is not None else None
         saved_default_camera = None
@@ -3312,12 +5573,79 @@ class HoudiniExecutor:
             if original_camera is None:
                 saved_default_camera = viewport.defaultCamera().stash()
             original_camera_lock = bool(viewport.isCameraLockedToView())
-        original_frame: float | None = None
+        original_frame = float(self._hou.frame())
+        validation_paths = self._absolute_node_paths(
+            arguments.get("validation_paths") or [],
+            field_name="validation_paths",
+            maximum=16,
+        )
+        frame_lock_evidence: dict[str, Any] = {
+            "requested_frame": requested_frame,
+            "frame_before": original_frame,
+            "frame_before_capture": None,
+            "cook_frame": None,
+            "actual_frame": None,
+            "restored_frame": None,
+        }
+        per_frame_cook_records: list[dict[str, Any]] = []
         capture_error: Exception | None = None
         capture_api = ""
         source_state: dict[str, Any] = {}
         restore_errors: list[dict[str, str]] = []
         try:
+            self._hou.setFrame(requested_frame)
+            actual_before_capture = float(self._hou.frame())
+            frame_lock_evidence["frame_before_capture"] = actual_before_capture
+            if not math.isclose(
+                actual_before_capture,
+                requested_frame,
+                rel_tol=0.0,
+                abs_tol=1.0e-6,
+            ):
+                raise RuntimeError(
+                    f"Houdini set frame {actual_before_capture:g}, expected {requested_frame:g}"
+                )
+            for path in validation_paths:
+                node = self._hou.node(path)
+                if node is None:
+                    raise RuntimeError(
+                        f"Validation target does not exist at frame {requested_frame:g}: {path}"
+                    )
+                before = self._cook_state(node)
+                error = None
+                completed = False
+                try:
+                    node.cook(force=True)
+                    completed = True
+                except Exception as exc:
+                    error = _bounded_text(_redact_text(str(exc)), 2048)
+                after = self._cook_state(node)
+                record = self._cook_evidence_record(
+                    path=path,
+                    frame=requested_frame,
+                    requested=True,
+                    started=True,
+                    completed=completed,
+                    before=before,
+                    after=after,
+                    error=error,
+                )
+                per_frame_cook_records.append(record)
+                if error is not None:
+                    raise RuntimeError(
+                        f"Fresh cook failed at frame {requested_frame:g} for {path}: {error}"
+                    )
+            cook_frame = float(self._hou.frame())
+            frame_lock_evidence["cook_frame"] = cook_frame
+            if not math.isclose(
+                cook_frame,
+                requested_frame,
+                rel_tol=0.0,
+                abs_tol=1.0e-6,
+            ):
+                raise RuntimeError(
+                    f"Cook changed frame to {cook_frame:g}, expected {requested_frame:g}"
+                )
             if camera is not None:
                 viewport.lockCameraToView(False)
                 viewport.setCamera(camera)
@@ -3344,7 +5672,12 @@ class HoudiniExecutor:
                 settings.outputZoom(100)
                 settings.useSheetSize(False)
                 settings.outputToMPlay(False)
-                original_frame = self._hou.frame()
+                crop_method = getattr(settings, "cropOutMaskOverlay", None)
+                if callable(crop_method):
+                    try:
+                        crop_method(False)
+                    except TypeError:
+                        pass
                 scene_viewer.flipbook(viewport, settings, open_dialog=False)
                 output_path = capture_dir / (
                     f"{prefix}-{identifier}-{int(round(start)):04d}.png"
@@ -3366,6 +5699,17 @@ class HoudiniExecutor:
             else:
                 raise RuntimeError(
                     "The documented SceneViewer.flipbook capture API is unavailable"
+                )
+            actual_frame = float(self._hou.frame())
+            frame_lock_evidence["actual_frame"] = actual_frame
+            if not math.isclose(
+                actual_frame,
+                requested_frame,
+                rel_tol=0.0,
+                abs_tol=1.0e-6,
+            ):
+                raise RuntimeError(
+                    f"Captured frame is {actual_frame:g}, expected {requested_frame:g}"
                 )
         except Exception as exc:
             capture_error = exc
@@ -3395,10 +5739,34 @@ class HoudiniExecutor:
                     "restore_camera_lock",
                     lambda: viewport.lockCameraToView(original_camera_lock),
                 )
-            if original_frame is not None:
-                restore("restore_frame", lambda: self._hou.setFrame(original_frame))
+            restore("restore_frame", lambda: self._hou.setFrame(original_frame))
+            frame_lock_evidence["restored_frame"] = _json_value(
+                _safe_call(self._hou, "frame", None)
+            )
+            restored_frame = frame_lock_evidence["restored_frame"]
+            if (
+                not isinstance(restored_frame, (int, float))
+                or not math.isclose(
+                    float(restored_frame),
+                    original_frame,
+                    rel_tol=0.0,
+                    abs_tol=1.0e-6,
+                )
+            ):
+                restore_errors.append(
+                    {
+                        "operation": "verify_restored_frame",
+                        "message": (
+                            f"Restored frame {restored_frame!r} does not match "
+                            f"original frame {original_frame:g}"
+                        ),
+                    }
+                )
         if capture_error is not None:
-            details = {"restore_errors": restore_errors} if restore_errors else None
+            details = {
+                "frame_lock": frame_lock_evidence,
+                "restore_errors": restore_errors,
+            }
             raise HiaRuntimeError(
                 "VIEWPORT_CAPTURE_FAILED",
                 _bounded_text(_redact_text(str(capture_error)), 2048),
@@ -3418,38 +5786,19 @@ class HoudiniExecutor:
             )
         with output_path.open("rb") as stream:
             actual_width, actual_height = _png_dimensions(stream.read(24))
-        source_state.setdefault("resolution", {})["actual"] = [
-            actual_width,
-            actual_height,
-        ]
-        expected_resolution = (width, height)
-        require_exact_resolution = capture_api == "scene_viewer.flipbook"
-        resolution_state = source_state.get("resolution", {})
-        if resolution_state.get("crop_out_view_mask_overlay") is True:
-            masked_aspect = resolution_state.get("masked_view_aspect")
-            if isinstance(masked_aspect, (int, float)) and masked_aspect > 0:
-                expected_resolution = (
-                    max(1, int(round(float(masked_aspect) * 1000))),
-                    1000,
-                )
-            require_exact_resolution = False
-        elif capture_api != "scene_viewer.flipbook":
-            viewport_size = source_state.get("viewport", {}).get("size")
-            if (
-                isinstance(viewport_size, list)
-                and len(viewport_size) == 4
-                and all(isinstance(value, (int, float)) for value in viewport_size)
-                and viewport_size[2] > 0
-                and viewport_size[3] > 0
-            ):
-                expected_resolution = (
-                    int(round(viewport_size[2])),
-                    int(round(viewport_size[3])),
-                )
+        resolution_state = source_state.setdefault("resolution", {})
+        resolution_state.update(
+            {
+                "source": resolution_source,
+                "actual": [actual_width, actual_height],
+                "requested_aspect": round(width / height, 8),
+                "actual_aspect": round(actual_width / actual_height, 8),
+            }
+        )
         quality = analyze_png_quality(
             output_path,
-            expected_resolution=expected_resolution,
-            require_exact_resolution=require_exact_resolution,
+            expected_resolution=(width, height),
+            require_exact_resolution=True,
         )
         if camera_path:
             observed_camera_path = source_state.get("camera", {}).get("path")
@@ -3497,6 +5846,25 @@ class HoudiniExecutor:
             )
         elif quality_status == "failed":
             errors.extend(str(reason["message"]) for reason in quality["reasons"])
+        capture_cook_evidence: dict[str, Any]
+        if validation_paths:
+            capture_cook_evidence = self._summarize_cook_evidence(
+                per_frame_cook_records,
+                requested=True,
+            )
+        else:
+            capture_cook_evidence = {
+                "schema": "hia-cook-cache-evidence/1",
+                "cook_requested": False,
+                "assessment": "viewport_evaluation_only",
+                "target_count": 0,
+                "targets": [],
+                "limitations": (
+                    "The flipbook evaluates the viewer at the locked frame, "
+                    "but no node-specific recomputation is proven without "
+                    "validation_paths"
+                ),
+            }
         result: dict[str, Any] = {
             "ok": quality_status != "failed",
             "result": {
@@ -3506,7 +5874,17 @@ class HoudiniExecutor:
                 "mode": mode,
                 "width": actual_width,
                 "height": actual_height,
-                "quality_frame": validated_frame_range[0],
+                "aspect_ratio": round(actual_width / actual_height, 8),
+                "requested_width": width,
+                "requested_height": height,
+                "requested_aspect_ratio": round(width / height, 8),
+                "resolution_source": resolution_source,
+                "requested_frame": requested_frame,
+                "actual_frame": frame_lock_evidence["actual_frame"],
+                "cook_frame": frame_lock_evidence["cook_frame"],
+                "quality_frame": requested_frame,
+                "frame_lock": frame_lock_evidence,
+                "cook_cache_evidence": capture_cook_evidence,
                 "capture_api": capture_api,
                 "capture_ok": True,
                 "quality_status": quality_status,
@@ -4202,8 +6580,19 @@ class HoudiniExecutor:
                 break
         return related
 
+    def _dirty_observation(self) -> bool | None:
+        probe = getattr(self._hou.hipFile, "hasUnsavedChanges", None)
+        if not callable(probe):
+            return None
+        try:
+            value = probe()
+        except Exception:
+            return None
+        return value if isinstance(value, bool) else None
+
     def _dirty(self) -> bool:
-        return bool(_safe_call(self._hou.hipFile, "hasUnsavedChanges", False))
+        observed = self._dirty_observation()
+        return observed if observed is not None else False
 
     def _current_ui_nodes(self) -> tuple[Any | None, Any | None]:
         current_network = None
@@ -4291,7 +6680,220 @@ class HoudiniExecutor:
             record["geometry"] = self._geometry_record(node, include_attributes=True, sample_limit=0)
         if "children" in views or depth > 0:
             record["graph"] = self._graph_records(_safe_path(node), depth=depth, query=query, limit=limit)
+        if "evidence" in views:
+            record["network_evidence"] = self._local_network_evidence(
+                _safe_path(node)
+            )
         return record
+
+    def _local_network_evidence(self, path: str) -> dict[str, Any]:
+        try:
+            node = self._hou.node(path)
+        except Exception as exc:
+            return {
+                "path": path,
+                "exists": None,
+                "observation": "unavailable",
+                "error": _bounded_text(_redact_text(str(exc)), 1024),
+            }
+        if node is None:
+            return {"path": path, "exists": False}
+
+        inputs = list(_safe_call(node, "inputs", ()))
+        outputs = list(_safe_call(node, "outputs", ()))
+        upstream = []
+        queue = [
+            (value, 1)
+            for value in inputs
+            if value is not None
+        ]
+        visited = {path}
+        while queue and len(upstream) < 8:
+            upstream_node, depth = queue.pop(0)
+            upstream_path = _safe_path(upstream_node)
+            if not upstream_path or upstream_path in visited:
+                continue
+            visited.add(upstream_path)
+            upstream.append(
+                {
+                    "path": upstream_path,
+                    "depth": depth,
+                    "type": self._type_record(upstream_node),
+                }
+            )
+            if depth < 2:
+                queue.extend(
+                    (value, depth + 1)
+                    for value in _safe_call(upstream_node, "inputs", ())
+                    if value is not None
+                )
+
+        controls = []
+        material_entries = []
+        control_candidate_count = 0
+        control_terms = (
+            "material", "shop", "shader", "mtlx", "file", "path", "scale",
+            "size", "seed", "enable", "mode", "density", "color", "rough",
+            "metal", "output",
+        )
+        material_terms = ("material", "shop", "shader", "mtlx")
+        for parm in _safe_call(node, "parms", ()):
+            template = _safe_call(parm, "parmTemplate", None)
+            if bool(_safe_call(template, "isHidden", False)):
+                continue
+            name = str(_safe_call(parm, "name", ""))
+            label = str(_safe_call(template, "label", ""))
+            haystack = f"{name} {label}".casefold()
+            referenced = _safe_call(parm, "getReferencedParm", parm)
+            reference_path = (
+                _safe_path(referenced)
+                if referenced is not None and referenced is not parm
+                else ""
+            )
+            at_default = _safe_call(parm, "isAtDefault", None)
+            time_dependent = bool(_safe_call(parm, "isTimeDependent", False))
+            if not (
+                at_default is False
+                or reference_path
+                or time_dependent
+                or any(term in haystack for term in control_terms)
+            ):
+                continue
+            control_candidate_count += 1
+            control = {
+                "name": name,
+                "label": label,
+                "value": _json_value(_safe_parm_value(parm)),
+                "raw_value": _bounded_text(
+                    _redact_text(_safe_unexpanded_string(parm)), 512
+                ),
+                "at_default": at_default if isinstance(at_default, bool) else None,
+                "reference": reference_path or None,
+                "time_dependent": time_dependent,
+            }
+            if len(controls) < 8:
+                controls.append(control)
+            if (
+                len(material_entries) < 8
+                and any(term in haystack for term in material_terms)
+            ):
+                material_entries.append(control)
+
+        child_nodes = list(_safe_call(node, "children", ()))
+        assessed_nodes = [node, *child_nodes[:31]]
+        signals = []
+        type_counts: dict[str, int] = {}
+        box_count = 0
+        for candidate in assessed_nodes:
+            candidate_path = _safe_path(candidate)
+            type_info = self._type_record(candidate)
+            type_name = str(type_info.get("name") or "")
+            base_type = type_name.split("::", 1)[0].casefold()
+            category = str(type_info.get("category") or "").casefold()
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
+            candidate_inputs = list(_safe_call(candidate, "inputs", ()))
+            minimum = _safe_call(_safe_call(candidate, "type", None), "minNumInputs", 0)
+            connected = sum(value is not None for value in candidate_inputs)
+            if isinstance(minimum, int) and minimum > connected:
+                signals.append(
+                    {
+                        "code": "MISSING_REQUIRED_INPUT",
+                        "severity": "error",
+                        "path": candidate_path,
+                        "observed": {"minimum": minimum, "connected": connected},
+                    }
+                )
+            if category == "sop" and "python" in base_type:
+                signals.append(
+                    {
+                        "code": "PYTHON_GEOMETRY_AUTHORING",
+                        "severity": "warning",
+                        "path": candidate_path,
+                        "observed": {"type": type_name},
+                    }
+                )
+            if category == "sop" and base_type == "box":
+                box_count += 1
+        if box_count >= 8:
+            signals.append(
+                {
+                    "code": "BOX_PRIMITIVE_HEAVY",
+                    "severity": "notice",
+                    "path": path,
+                    "observed": {"box_nodes": box_count},
+                }
+            )
+        for type_name, count in sorted(type_counts.items()):
+            if type_name and count >= 8:
+                signals.append(
+                    {
+                        "code": "REPEATED_NODE_TYPE_CLUSTER",
+                        "severity": "notice",
+                        "path": path,
+                        "observed": {"type": type_name, "count": count},
+                    }
+                )
+
+        cook_state = self._cook_state(node)
+        node_type = self._type_record(node)
+        node_type_name = str(node_type.get("name") or "").casefold()
+        node_category = str(node_type.get("category") or "").casefold()
+        material_role = (
+            "material_network"
+            if (
+                node_category in {"vop", "shop"}
+                or any(
+                    term in node_type_name
+                    for term in ("material", "mtlx", "shader")
+                )
+            )
+            else ("binding_consumer" if material_entries else None)
+        )
+        return {
+            "path": path,
+            "exists": True,
+            "type": node_type,
+            "inputs": [
+                {"index": index, "path": _safe_path(value) if value else None}
+                for index, value in enumerate(inputs[:16])
+            ],
+            "outputs": [_safe_path(value) for value in outputs[:16]],
+            "upstream_chain": upstream,
+            "controls": controls,
+            "material_entries": material_entries,
+            "material_role": material_role,
+            "flags": {
+                "display": bool(_safe_call(node, "isDisplayFlagSet", False)),
+                "render": bool(_safe_call(node, "isRenderFlagSet", False)),
+                "bypassed": bool(_safe_call(node, "isBypassed", False)),
+            },
+            "cook_state": cook_state["values"],
+            "errors": [
+                _bounded_text(_redact_text(str(value)), 1024)
+                for value in list(_safe_call(node, "errors", ()))[:8]
+            ],
+            "warnings": [
+                _bounded_text(_redact_text(str(value)), 1024)
+                for value in list(_safe_call(node, "warnings", ()))[:8]
+            ],
+            "quality_evidence": {
+                "signals": signals[:16],
+                "assessed_nodes": len(assessed_nodes),
+                "subjective_quality_proven": False,
+                "limitations": [
+                    "Repeated node types are factual counts, not proof of poor design",
+                    "Hard-coded geometry is only identified when a Python SOP or script node is observable",
+                    "Geometry intersections are not inferred from bounding boxes",
+                ],
+            },
+            "truncated": {
+                "inputs": len(inputs) > 16,
+                "outputs": len(outputs) > 16,
+                "upstream": bool(queue),
+                "controls": control_candidate_count > 8,
+                "assessed_children": len(child_nodes) > 31,
+            },
+        }
 
     def _graph_records(self, root_path: str, *, depth: int, query: str, limit: int) -> dict[str, Any]:
         root = self._hou.node(root_path)
@@ -4390,7 +6992,47 @@ class HoudiniExecutor:
             if folded in json.dumps(record, ensure_ascii=False).casefold()
         ]
 
-    def _parameter_templates(self, node_type: Any, query: str) -> list[dict[str, Any]]:
+    def _parameter_templates(
+        self,
+        node_type: Any,
+        query: str,
+        *,
+        node: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        if node is not None:
+            records = []
+            for parm in list(_safe_call(node, "parms", ()))[:10_000]:
+                template = _safe_call(parm, "parmTemplate", None)
+                runtime_name = str(_safe_call(parm, "name", ""))
+                template_name = str(_safe_call(template, "name", ""))
+                record = {
+                    "name": runtime_name,
+                    "runtime_name": runtime_name,
+                    "template_name": template_name,
+                    "name_kind": "runtime_instance",
+                    "multiparm_instance": bool(
+                        _safe_call(parm, "isMultiParmInstance", False)
+                    ),
+                    "multiparm_indices": _json_value(
+                        _safe_call(parm, "multiParmInstanceIndices", ())
+                    ),
+                    "label": str(_safe_call(template, "label", "")),
+                    "type": _safe_name(_safe_call(template, "type", None)),
+                    "components": _json_value(
+                        _safe_call(template, "numComponents", None)
+                    ),
+                    "default": _json_value(
+                        _safe_call(template, "defaultValue", None)
+                    ),
+                    "tags": _json_value(_safe_call(template, "tags", {})),
+                    "hidden": bool(_safe_call(template, "isHidden", False)),
+                }
+                if query and query not in json.dumps(
+                    record, ensure_ascii=False
+                ).casefold():
+                    continue
+                records.append(record)
+            return records
         group = node_type.parmTemplateGroup()
         entries = list(_safe_call(group, "entries", ()))
         flattened = []
@@ -4402,6 +7044,11 @@ class HoudiniExecutor:
                 continue
             record = {
                 "name": str(_safe_call(template, "name", "")),
+                "runtime_name": None,
+                "template_name": str(_safe_call(template, "name", "")),
+                "name_kind": "template_pattern",
+                "multiparm_instance": None,
+                "multiparm_indices": [],
                 "label": str(_safe_call(template, "label", "")),
                 "type": _safe_name(_safe_call(template, "type", None)),
                 "components": _json_value(_safe_call(template, "numComponents", None)),
@@ -4835,13 +7482,20 @@ class HoudiniExecutor:
                 _safe_path(value) if value is not None else None
                 for value in _safe_call(node, "inputs", ())
             ],
+            "outputs": [
+                _safe_path(value)
+                for value in _safe_call(node, "outputs", ())
+            ],
             "flags": {
                 "display": bool(_safe_call(node, "isDisplayFlagSet", False)),
                 "render": bool(_safe_call(node, "isRenderFlagSet", False)),
                 "bypassed": bool(_safe_call(node, "isBypassed", False)),
             },
             "parameters": [
-                (str(_safe_call(parm, "name", "")), _safe_unexpanded_string(parm))
+                (
+                    str(_safe_call(parm, "name", "")),
+                    self._persistent_parm_digest_value(parm),
+                )
                 for parm in list(_safe_call(node, "parms", ()))[:256]
             ],
         }
@@ -4852,6 +7506,38 @@ class HoudiniExecutor:
             separators=(",", ":"),
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def _persistent_parm_digest_value(self, parm: Any) -> dict[str, Any]:
+        keyframes = list(_safe_call(parm, "keyframes", ()))
+        if keyframes:
+            return {
+                "kind": "keyframes",
+                "values": [
+                    self._keyframe_record(value)
+                    for value in keyframes[:256]
+                ],
+                "truncated": len(keyframes) > 256,
+            }
+        try:
+            return {
+                "kind": "raw_string",
+                "value": str(parm.unexpandedString()),
+            }
+        except Exception:
+            pass
+        expression = getattr(parm, "expression", None)
+        if callable(expression):
+            try:
+                return {
+                    "kind": "expression",
+                    "value": str(expression()),
+                }
+            except Exception:
+                pass
+        return {
+            "kind": "static_value",
+            "value": _json_value(_safe_parm_value(parm)),
+        }
 
     def _snapshot_map(self, root_path: str) -> tuple[dict[str, str], bool]:
         root = self._hou.node(root_path)
@@ -4905,6 +7591,27 @@ def _houdini_path_is_within(path: str, root: str) -> bool:
     if root == "/":
         return True
     return path == root or path.startswith(root + "/")
+
+
+def _temporal_image_evidence(
+    paths: Iterable[Path],
+) -> tuple[list[str], dict[str, Any]]:
+    hashes = [
+        hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in paths
+    ]
+    unique_count = len(set(hashes))
+    no_change = len(hashes) > 1 and unique_count == 1
+    return hashes, {
+        "sample_count": len(hashes),
+        "unique_hash_count": unique_count,
+        "no_change_detected": no_change,
+        "simulation_advancement": (
+            "observed_visual_change"
+            if unique_count > 1
+            else ("not_proven" if no_change else "unavailable")
+        ),
+    }
 
 
 def _png_dimensions(raw: bytes) -> tuple[int, int]:

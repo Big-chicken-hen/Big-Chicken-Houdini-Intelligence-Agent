@@ -2526,7 +2526,7 @@ function Start-HiaEmbeddingInstall {
             '0.##',
             [System.Globalization.CultureInfo]::InvariantCulture
         )
-        Show-InlineStatus -Kind 'neutral' -Text ("母鸡啄米中… 正在准备 {0}（官方模型文件约 {1} GB）和 {2} 计算环境；uv、依赖与缓存都留在项目 .runtime。" -f $choice.label, $size, $selectedDevice)
+        Show-InlineStatus -Kind 'neutral' -Text ("母鸡啄米中… 正在准备 {0}（官方模型文件约 {1} GB）和 {2} 计算环境；Python 依赖留在项目根 .venv，受管工具、模型与缓存留在 .runtime。" -f $choice.label, $size, $selectedDevice)
         $script:embeddingTimer.Start()
     } catch {
         if ($null -ne $script:embeddingProcess) {

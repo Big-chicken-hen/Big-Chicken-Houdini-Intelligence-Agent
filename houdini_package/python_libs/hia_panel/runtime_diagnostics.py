@@ -71,6 +71,7 @@ _SNAPSHOT_FIELDS = (
     ("Turn", ("turn_id", "turn"), "不可用"),
     ("Model", ("model",), "不可用"),
     ("Effort", ("effort",), "不可用"),
+    ("Service tier", ("service_tier", "serviceTier"), "default"),
     (
         "用户目标摘要",
         ("user_goal_summary", "goal_summary", "user_goal", "goal"),

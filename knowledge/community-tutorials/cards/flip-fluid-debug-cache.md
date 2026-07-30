@@ -27,6 +27,17 @@ Source/collider preparation → `FLIP Container SOP` or source-volume setup → 
 
 The source stage owns `P`, `v`, particle identity, and emission groups. The solver owns particle motion and any surface/viscosity attributes. Collision representation owns inside/outside and motion. Particle Fluid Surface owns VDB reconstruction and polygon conversion; it must not hide particle-level simulation faults.
 
+## Executable parameter and connection contract
+
+1. Connect source particles to input 1 (**Sources**) of `FLIP Solver SOP`, the `FLIP Container SOP` surface to input 2 (**Container**), and merged `FLIP Collide SOP` outputs to input 3 (**Collisions**). Input 4 is reserved for boundary flow; ordinary colliders do not belong there.
+2. Copy the `Particle Separation` value from `FLIP Container SOP` to the solver's `Particle Separation` exactly. Keep it positive and expose one shared quality parameter rather than typing two independent values. Record `Grid Scale` and preserve its default for the first volume-retention test; change it only after a force-free short solve demonstrates compression or expansion.
+3. Start with `Time Scale = 1`. Keep `Min Substeps` at its default and set `Max Substeps` only high enough to let the solver respond to the measured motion. For a controlled comparison, test ceilings `1`, `2`, then `4` on the same short frame window; do not simultaneously change particle separation, collider resolution, and substeps.
+4. For closed 3D collision volumes use `Particle Collisions = Move Outside Collision`; use **Particle** mode for open or 2D collision geometry when the prepared `FLIP Collide SOP` representation agrees. Keep `Surface Extrapolation > 0`. If sticky motion is intentional, `Stick Scale` is a blend where `0` contributes none and `1` fully matches collision velocity.
+5. Choose `Velocity Transfer = FLIP (Splashy)` for a noisy high-energy baseline or `APIC (Swirly)` when small-scale swirling motion and lower surface noise are the goal. Record the choice because it materially changes the result.
+6. If `Enable Particle Narrow Band` is on, retain reseeding: the solver requires it. Record `Velocity Band`, `Pressure Band`, and `Source Band`, and confirm that the particle band covers all exposed surfaces. Turn `Waterline` off when input 4 supplies boundary transfer. For a tank not touching boundaries, first validate with the simpler initial-surface/container contract.
+7. With `Apply Particle Separation` enabled, begin with `Separation Iterations = 1`; increase only if measured compression persists. Validate `Birth Threshold`, `Death Threshold`, and `Oversampling Bandwidth` through particle-count plots instead of judging only the mesh.
+8. Cache the solver's particle output before meshing. Feed the disk-loaded particles to `Particle Fluid Surface SOP`; preserve its default `Voxel Scale`, `Influence Scale`, and filter for the reference, then vary one control at a time. The surface branch must never read the live solver when **Load from Disk** is active.
+
 ## Data flow, cache, version, and performance
 
 Particle separation dominates particle count roughly cubically. Collision and surface voxel scales must be evaluated relative to it. Narrow band can reduce work when its assumptions fit the shot, but it needs coverage checks. Cache particles before meshing so surface settings can iterate without resimulation. Never combine frames from caches with different separation, source geometry, or solver settings.
@@ -38,6 +49,18 @@ Particle separation dominates particle count roughly cubically. Collision and su
 - **Explosive first frame:** particles overlap collider or begin with extreme velocity; visualize initial state.
 - **Mesh blobby/thin:** adjust surface influence/filter relative to separation; do not resimulate until particles are proven wrong.
 - **Cache changes midrange:** path version collision or missing frames. Verify filenames, frame count, and reload-only cook.
+
+## Checkpoints and observable evidence
+
+- **F0 — initial state:** source particle count is non-zero, `P`, `v`, and `pscale` are finite, no source point lies inside the collision SDF, and solver/container `Particle Separation` values are identical.
+- **F1 — collision contract:** `Show Collision` displays every collider at the expected transform and thickness. A short gravity-only solve shows no persistent points on the forbidden side; failures are grouped and counted rather than hidden by surfacing.
+- **F2 — particle solve:** on a ten-to-twenty-frame diagnostic window, record min/max particle count, maximum speed, and domain occupancy. Counts change only through declared sources, sinks, reseeding, or boundary behavior.
+- **F3 — disk independence:** first/middle/last particle cache files reload with the same point attributes and no solver recook. Changing `Particle Fluid Surface` parameters changes only the mesh cook.
+- **F4 — surface:** compare particle spheres and mesh silhouette on the same frame. Thin sheets, bubbles, and splash tips remain represented; polygon count, open-boundary count, and bounds stay within the shot contract.
+
+## When not to use this workflow
+
+Do not use FLIP for a dry granular material that Vellum grains handles more directly, a nearly rigid viscous blob that can be animated or deformed procedurally, a distant ocean surface that needs only a spectral representation, or a gas. Avoid narrow-band FLIP when the shot requires meaningful deep interior particles everywhere or when its boundary assumptions cannot be satisfied.
 
 ## Provenance boundary
 

@@ -28,6 +28,17 @@ Connect these vertically. Put debug visualization on a side branch from the post
 6. Wire the consumer and explicitly bind its attribute parameter. Examples: Copy to Points reads `orient`, `scale`/`pscale`, and `N`; Sweep reads curve frame and width attributes; material or simulation nodes read their named masks. Never assume the consumer will choose the intended field when multiple attributes exist.
 7. Add a diagnostic branch. Use `Attribute Visualize SOP` for scalar/vector range, or a detail wrangle that counts missing/non-finite values. Keep it bypassable. Finish the production trunk at `OUT_ATTR_CONTRACT`.
 
+## Executable parameter and connection contract
+
+Use this concrete mask-to-copy example as a template for other attribute contracts.
+
+1. Connect `IN_GEOMETRY` to a point `Attribute Wrangle SOP` named `MAKE_HEIGHT_MASK`. Set **Run Over = Points** and expose float parameters `low` and `high` with `high > low`. Author `f@height_mask = clamp(fit(@P.y, chf("low"), chf("high"), 0.0, 1.0), 0.0, 1.0);`. The result is point float tuple-size 1 in `0..1`.
+2. If a primitive consumer truly needs the mask, connect to `Attribute Promote SOP` immediately before that consumer. Set `Original Name = height_mask`, `Original Class = Point`, `New Class = Primitive`, and choose `Promotion Method = Maximum` for “any point activates” or **Average** for coverage. Rename the latter `height_coverage` because its meaning changed.
+3. On a separate point branch author orientation for `Copy to Points SOP`: finite normalized `v@N`, a non-parallel finite `v@up`, and optionally `p@orient`. If `orient` is present, treat it as the authoritative quaternion and remove ambiguous stale frame fields only when no other consumer needs them. Require `pscale > 0`, or use vector `scale` with positive components.
+4. Connect source geometry to input 1 and target points to input 2 of `Copy to Points SOP`. Preserve target attributes needed by the copies and verify that the node reads `orient` plus `pscale`/`scale`. The expected output copy count equals the selected target-point count unless packed/variant rules intentionally change it.
+5. Before `File Cache SOP`, use `Attribute Delete SOP` only with an explicit remove list. Keep identity (`name`/`id`), transform/frame, material, UV, and consumer-bound attributes. On reload compare owner, storage, tuple size, and representative values, not only attribute names.
+6. Values/guards: normalized masks must stay `0..1`; quaternions and vectors must be finite; normalized `N` length should be within a chosen tolerance such as `1 +/- 1e-3`; division/fit intervals require non-zero width; invalid elements go to named debug groups rather than silently becoming zero.
+
 ## Data flow, caching, and cost
 
 Attribute dependencies flow from owner creation to conversion to consumption. A cache boundary belongs after expensive deterministic derivation and before interactive consumers; cache only attributes that are needed to reconstruct the next stage. Point wrangles are parallel but can be wasteful when repeatedly calling broad searches. Detail wrangles serialize work and should not replace simple native SOPs without measurement.
@@ -39,6 +50,18 @@ Attribute dependencies flow from owner creation to conversion to consumption. A 
 - **Promoted result looks smeared:** the aggregation method destroyed discontinuities. Keep the attribute on vertices or use a non-averaging method.
 - **Copy orientation rolls:** distinguish `N`/`up` frame construction from a quaternion `orient`; inspect tuple size and normalize inputs.
 - **Cache reload changes behavior:** the cache omitted a string/name/id attribute or converted its class. Compare pre/post schemas and counts.
+
+## Checkpoints and observable evidence
+
+- **A0 — input schema:** element counts and all colliding attribute names/classes/types are recorded before writing.
+- **A1 — authoring:** `height_mask` exists only on points, is finite in `0..1`, and its visualizer moves predictably when `low`/`high` change.
+- **A2 — promotion:** the promoted primitive value matches the declared aggregation on a hand-checkable primitive; source and destination meanings have distinct names when needed.
+- **A3 — consumer:** copy count and orientations match selected targets; invalid-frame and non-positive-scale groups are empty.
+- **A4 — cache:** disk reload preserves required owner/type/tuple metadata and representative values, and the consumer result is unchanged with live derivation bypassed.
+
+## When not to use this workflow
+
+Do not author a custom VEX attribute when a native SOP already owns the exact semantic operation more clearly. Do not promote attributes merely to silence a warning, do not cache transient debug fields without a downstream need, and do not use point attributes for discontinuous per-face data that belongs on vertices or primitives.
 
 ## Provenance boundary
 

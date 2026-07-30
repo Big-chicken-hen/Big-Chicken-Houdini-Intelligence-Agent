@@ -27,6 +27,16 @@ Item generation → attribute normalization → partition/map/expand → work ex
 
 Generators own item cardinality; attributes own parameter contracts; dependency nodes own fan-in/fan-out; processors own side effects; scheduler owns execution placement; validators own artifact truth. Common fields include `work_item.index`, frame, wedge values, input/output file attributes, and custom stable IDs. Exact expression syntax varies by node and version.
 
+## Executable parameter and connection contract
+
+1. For a bounded frame task start with `Range Generate TOP`. Set `Specify Range As = Value Range`, explicit start/end/step, `Inclusive` policy, and `Store Value As = Work Item Frame` or a named custom attribute. Expected item count is computed before cooking and must match the generated table.
+2. For variants connect `Wedge TOP` next. Add one multiparm per variable with a stable `Attribute Name`, range/list values, and `Wedge Count`. Prefer pulling `@attribute` in the processor when that node is PDG-specific; use **Target Parameter** push only when the underlying ROP/HDA must remain independently runnable.
+3. Connect `Attribute Create TOP` to author a string stable key such as `asset_variant_frame` and a unique output file. Set `Scope = Work Item`, choose the exact type, enable type-mismatch error, and declare output paths as **Output File** when downstream caching depends on them.
+4. Connect to `ROP Geometry Output TOP` for SOP geometry. Set `Evaluate Using` consistently with upstream items—normally **Single Frame** when each item already owns `pdg_frame`—and bind output paths to the unique key. Never let two work items resolve to the same final file.
+5. Use the existing scheduler and set concurrency from the actual processor cost. For a CPU-saturating threaded geometry/simulation cook, begin with one such item at a time (for Local Scheduler, the node's single-job control) and raise concurrency only after memory/CPU evidence.
+6. Follow execution with an existing validation node/native processor that checks file existence, non-zero bytes, token/frame agreement, and format metadata. A zero exit code with a missing artifact is converted to a failed validation item.
+7. Dirty one wedge value or one input file and inspect the dependency closure. **Regenerate** is required only when work-item topology/attributes must be recreated; **Dirty and Cook** is sufficient for changed execution. Record clean/dirty/cooked/failed counts.
+
 ## Data flow, cache, version, and performance
 
 PDG caching is valid only when dependencies and output declarations are complete. Large dynamic graphs cost memory; generate bounded items and partition intentionally. Avoid recooking Houdini sessions when batch nodes can reuse them through existing supported mechanisms, but do not introduce a new worker. Store artifacts in versioned paths and never let two items overwrite the same file.
@@ -38,6 +48,18 @@ PDG caching is valid only when dependencies and output declarations are complete
 - **Duplicate overwrite:** unique key is not included in path; validate path uniqueness before execution.
 - **Graph stalls:** inspect dependency cycle, scheduler slots, and upstream failures.
 - **Different local/farm result:** environment/path assumptions are implicit; make them item attributes and approved scheduler configuration.
+
+## Checkpoints and observable evidence
+
+- **T0 — generation:** expected and actual work-item counts, unique-key count, frame range, and wedge combinations agree before any side effect.
+- **T1 — mapping:** inspect three representative task-table rows; each attribute resolves to the intended ROP parameter and one unique approved output path.
+- **T2 — dependencies:** fan-in/fan-out edge counts match the declared semantics and the graph contains no cycle.
+- **T3 — execution:** total equals success plus failed/canceled states; every success has a non-empty validated output and every validation failure identifies its item/path.
+- **T4 — incrementality:** changing one declared input dirties only its dependency closure; an unchanged second cook reports cache hits and does not rewrite artifacts.
+
+## When not to use this workflow
+
+Do not introduce PDG for one cheap deterministic cook, interactive node-by-node art direction, or a task whose outputs cannot be made unique and deterministic. Do not use Python Processor when native TOP nodes express the mapping, and do not create another scheduler/worker/service for this knowledge layer.
 
 ## Provenance boundary
 

@@ -67,12 +67,17 @@ class HiaMcpV2IsolationTests(unittest.TestCase):
             {
                 "HIA_MCP_V2_PORT": "45123",
                 "HIA_MCP_V2_TOKEN": "A" * 40,
+                "HIA_LAUNCHER_SESSION_ID": "1" * 32,
+                "HIA_MCP_V2_EXECUTOR_PATH": str(
+                    RUNTIME_PACKAGE_ROOT / "hia_mcp_runtime" / "executor.py"
+                ),
                 "FXHOUDINIMCP_PORT": "8100",
                 "FXHOUDINIMCP_TOKEN": "B" * 40,
             }
         )
         self.assertEqual(45123, config.port)
         self.assertEqual("A" * 40, config.token)
+        self.assertEqual("1" * 32, config.launcher_session_id)
 
     def test_production_packages_do_not_import_or_read_upstream_namespaces(self) -> None:
         product_roots = [SERVICE_ROOT / "hia_mcp_v2", RUNTIME_PACKAGE_ROOT / "hia_mcp_runtime"]

@@ -24,6 +24,14 @@ HOUDINI_MCP_TOKEN = "houdini_" + "m" * 40
 HOUDINI_MCP_PORT = "58123"
 HIA_MCP_V2_TOKEN = "hia_v2_" + "v" * 40
 HIA_MCP_V2_PORT = "58124"
+HIA_LAUNCHER_SESSION_ID = "1" * 32
+HIA_MCP_V2_EXECUTOR_PATH = (
+    REPOSITORY_ROOT
+    / "houdini_package"
+    / "python_libs"
+    / "hia_mcp_runtime"
+    / "executor.py"
+)
 BRIDGE_URL = "http://127.0.0.1:54321"
 
 
@@ -96,6 +104,10 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                     "HIA_MCP_V2_RUNTIME_DIR": str(
                         REPOSITORY_ROOT / ".runtime" / "hia-mcp-v2"
                     ),
+                    "HIA_MCP_V2_EXECUTOR_PATH": str(
+                        HIA_MCP_V2_EXECUTOR_PATH
+                    ),
+                    "HIA_LAUNCHER_SESSION_ID": HIA_LAUNCHER_SESSION_ID,
                     "HIA_CACHE_DIR": str(
                         REPOSITORY_ROOT / ".runtime" / "cache"
                     ),
@@ -404,6 +416,14 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             child_environment["HIA_MCP_V2_RUNTIME_DIR"],
         )
         self.assertEqual(
+            str(HIA_MCP_V2_EXECUTOR_PATH),
+            child_environment["HIA_MCP_V2_EXECUTOR_PATH"],
+        )
+        self.assertEqual(
+            HIA_LAUNCHER_SESSION_ID,
+            child_environment["HIA_LAUNCHER_SESSION_ID"],
+        )
+        self.assertEqual(
             str(REPOSITORY_ROOT / ".runtime" / "cache"),
             child_environment["HIA_CACHE_DIR"],
         )
@@ -414,6 +434,14 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertIn("HIA_CACHE_DIR", bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT)
         self.assertIn(
             "HIA_RENDER_OUTPUT_DIR",
+            bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT,
+        )
+        self.assertIn(
+            "HIA_MCP_V2_EXECUTOR_PATH",
+            bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT,
+        )
+        self.assertIn(
+            "HIA_LAUNCHER_SESSION_ID",
             bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT,
         )
         self.assertIn(
@@ -442,6 +470,16 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertEqual(
             "hia_v2",
             application_constructor.call_args.kwargs["houdini_mcp_backend"],
+        )
+        self.assertEqual(
+            HIA_LAUNCHER_SESSION_ID,
+            application_constructor.call_args.kwargs[
+                "houdini_launcher_session_id"
+            ],
+        )
+        self.assertEqual(
+            HIA_MCP_V2_EXECUTOR_PATH,
+            application_constructor.call_args.kwargs["houdini_executor_path"],
         )
         self.assertEqual("hia_v2", json.loads(stdout.getvalue())["mcp_backend"])
 
