@@ -14,12 +14,31 @@ param(
         'delete',
         'rescan',
         'index-status',
-        'index-build'
+        'index-build',
+        'assets'
     )]
     [string]$Action = 'status',
 
+    [Parameter(Position = 1)]
+    [ValidateSet(
+        'capabilities',
+        'import',
+        'list',
+        'status',
+        'resume',
+        'delete',
+        'repair'
+    )]
+    [string]$AssetAction = 'list',
+
     [AllowEmptyCollection()]
     [string[]]$Path = @(),
+
+    [AllowEmptyString()]
+    [string]$AssetId = '',
+
+    [AllowEmptyString()]
+    [string]$AsrModelPath = '',
 
     [AllowEmptyString()]
     [string]$SourceId = '',
@@ -44,6 +63,12 @@ param(
 
     [ValidateRange(1, 64)]
     [int]$BatchSize = 32,
+
+    [ValidateRange(0, 2147483647)]
+    [int]$Offset = 0,
+
+    [ValidateRange(1, 500)]
+    [int]$Limit = 100,
 
     [switch]$Json
 )
@@ -309,6 +334,89 @@ function Invoke-HiaKnowledgeProcess {
     }
 }
 
+function Invoke-HiaKnowledgeStreamingProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [hashtable]$Environment = @{},
+        [string[]]$RemoveEnvironment = @(),
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+    )
+
+    if (-not (Test-HiaKnowledgeOrdinaryFile -LiteralPath $FilePath)) {
+        throw 'The requested knowledge CLI executable is unavailable or unsafe.'
+    }
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = (
+        @(
+            $Arguments | ForEach-Object {
+                ConvertTo-HiaKnowledgeProcessArgument -Value ([string]$_)
+            }
+        ) -join ' '
+    )
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $savedEnvironment = @{}
+    $environmentNames = @(
+        @($RemoveEnvironment) +
+        @($Environment.Keys | ForEach-Object { [string]$_ })
+    ) | Sort-Object -Unique
+    foreach ($name in $environmentNames) {
+        $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable(
+            $name,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
+    foreach ($name in $RemoveEnvironment) {
+        [Environment]::SetEnvironmentVariable(
+            [string]$name,
+            $null,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
+    foreach ($entry in $Environment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable(
+            [string]$entry.Key,
+            [string]$entry.Value,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw 'Knowledge CLI child process did not start.'
+        }
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        while (-not $process.StandardOutput.EndOfStream) {
+            $line = $process.StandardOutput.ReadLine()
+            if ($null -ne $line) {
+                [Console]::Out.WriteLine([string]$line)
+                [Console]::Out.Flush()
+            }
+        }
+        $process.WaitForExit()
+        [void]$stderrTask.Wait()
+        return [pscustomobject]@{
+            exit_code = [int]$process.ExitCode
+            stderr = [string]$stderrTask.Result
+        }
+    } finally {
+        $process.Dispose()
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable(
+                [string]$name,
+                $savedEnvironment[$name],
+                [EnvironmentVariableTarget]::Process
+            )
+        }
+    }
+}
+
 function Write-HiaKnowledgeProcessResult {
     param([Parameter(Mandatory = $true)]$Result)
 
@@ -339,6 +447,32 @@ function Write-HiaKnowledgeError {
         error = [ordered]@{
             code = 'KNOWLEDGE_CLI_FAILED'
             message = $safe
+        }
+    } | ConvertTo-Json -Compress
+    [Console]::Out.WriteLine($payload)
+}
+
+function Write-HiaAssetCliError {
+    param(
+        [Parameter(Mandatory = $true)][string]$ActionName,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+
+    $safe = [regex]::Replace(
+        ([regex]::Replace([string]$Message, '[\r\n]+', ' ')).Trim(),
+        '(?i)\b(token|secret|password|authorization)\s*[:=]\s*\S+',
+        '$1=[REDACTED]'
+    )
+    $payload = [ordered]@{
+        protocol = 'hia-knowledge-index-jsonl/1'
+        event = 'error'
+        action = $ActionName
+        code = 'KNOWLEDGE_CLI_FAILED'
+        message = $safe
+        error = [ordered]@{
+            code = 'KNOWLEDGE_CLI_FAILED'
+            message = $safe
+            recoverable = $true
         }
     } | ConvertTo-Json -Compress
     [Console]::Out.WriteLine($payload)
@@ -653,6 +787,7 @@ try {
     $projectRoot = Get-HiaKnowledgeProjectRoot
     $script:HiaKnowledgeProjectRoot = $projectRoot
     $helperPath = Join-Path $projectRoot 'scripts\launcher\hia_knowledge_cli.py'
+    $assetRepairPath = Join-Path $projectRoot 'scripts\repair_hia_assets.py'
     $indexCliPath = Join-Path $projectRoot (
         'houdini_package\python_libs\hia_mcp_runtime\knowledge_index_cli.py'
     )
@@ -662,9 +797,16 @@ try {
         'VIRTUAL_ENV',
         'CONDA_PREFIX'
     )
+    $assetCapabilitiesAction = (
+        $Action -eq 'assets' -and
+        $AssetAction -eq 'capabilities'
+    )
     $childEnvironment = New-HiaKnowledgeChildEnvironment `
         -ProjectRoot $projectRoot `
-        -ReadOnly:($Action -in @('status', 'environment-status', 'list'))
+        -ReadOnly:(
+            $Action -in @('status', 'environment-status', 'list') -or
+            $assetCapabilitiesAction
+        )
 
     if ($Action -in @('environment-install', 'environment-repair')) {
         $installerPath = Join-Path $projectRoot (
@@ -778,14 +920,18 @@ try {
     }
     if (
         -not $canonicalAvailable -and
-        $Action -notin @('status', 'environment-status')
+        $Action -notin @('status', 'environment-status') -and
+        -not $assetCapabilitiesAction
     ) {
         throw (
             'This action requires the canonical project-local knowledge ' +
             'environment. Run environment-install first.'
         )
     }
-    $python = if ($Action -in @('status', 'environment-status')) {
+    $python = if (
+        $Action -in @('status', 'environment-status') -or
+        $assetCapabilitiesAction
+    ) {
         Get-HiaKnowledgePython `
             -ProjectRoot $projectRoot `
             -ExplicitBootstrap $BootstrapPython
@@ -800,7 +946,10 @@ try {
         $projectRoot
     )
     $verifiedEnvironment = $null
-    if ($Action -notin @('status', 'environment-status')) {
+    if (
+        $Action -notin @('status', 'environment-status') -and
+        -not $assetCapabilitiesAction
+    ) {
         $environmentProbe = Invoke-HiaKnowledgeProcess `
             -FilePath $python `
             -Arguments ($helperArguments + 'environment-status') `
@@ -821,7 +970,10 @@ try {
             -Payload $environmentPayload `
             -CanonicalPython $canonicalPython
     }
-    if ($Action -notin @('status', 'environment-status')) {
+    if (
+        $Action -notin @('status', 'environment-status') -and
+        -not $assetCapabilitiesAction
+    ) {
         $runtimeEnvironment = $verifiedEnvironment.embedding_runtime_environment
         foreach ($property in @($runtimeEnvironment.PSObject.Properties)) {
             $name = [string]$property.Name
@@ -892,6 +1044,114 @@ try {
     if (-not (Test-HiaKnowledgeOrdinaryFile -LiteralPath $indexCliPath)) {
         throw 'The stable HIA knowledge index CLI is unavailable.'
     }
+    if ($Action -eq 'assets' -and $AssetAction -eq 'repair') {
+        if (-not (
+            Test-HiaKnowledgeOrdinaryFile -LiteralPath $assetRepairPath
+        )) {
+            throw 'The project-local asset repair helper is unavailable.'
+        }
+        $repairArguments = @(
+            '-I',
+            '-B',
+            $assetRepairPath,
+            '--project-root',
+            $projectRoot
+        )
+        if (-not [string]::IsNullOrWhiteSpace($AsrModelPath)) {
+            $repairArguments += @(
+                '--asr-model-path',
+                $AsrModelPath
+            )
+        }
+        if ($Json) {
+            $repairResult = Invoke-HiaKnowledgeProcess `
+                -FilePath $python `
+                -Arguments $repairArguments `
+                -Environment $childEnvironment `
+                -RemoveEnvironment $removeEnvironment `
+                -WorkingDirectory $projectRoot
+            $terminal = $null
+            foreach ($line in @(
+                [string]$repairResult.stdout -split '\r?\n'
+            )) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                try {
+                    $event = $line | ConvertFrom-Json -ErrorAction Stop
+                } catch {
+                    throw 'Asset repair emitted invalid JSONL.'
+                }
+                if (
+                    [string]$event.action -eq 'assets.repair' -and
+                    [string]$event.event -in @('completed', 'error')
+                ) {
+                    $terminal = $event
+                }
+            }
+            if ($null -eq $terminal) {
+                throw 'Asset repair returned no terminal JSON event.'
+            }
+            [Console]::Out.WriteLine(
+                ($terminal | ConvertTo-Json -Compress -Depth 12)
+            )
+            if (-not [string]::IsNullOrEmpty([string]$repairResult.stderr)) {
+                [Console]::Error.Write([string]$repairResult.stderr)
+            }
+            exit ([int]$repairResult.exit_code)
+        }
+        $repairResult = Invoke-HiaKnowledgeStreamingProcess `
+            -FilePath $python `
+            -Arguments $repairArguments `
+            -Environment $childEnvironment `
+            -RemoveEnvironment $removeEnvironment `
+            -WorkingDirectory $projectRoot
+        if (-not [string]::IsNullOrEmpty([string]$repairResult.stderr)) {
+            [Console]::Error.Write([string]$repairResult.stderr)
+        }
+        exit ([int]$repairResult.exit_code)
+    }
+    if ($Action -eq 'assets') {
+        $assetArguments = @(
+            '-I',
+            '-B',
+            $indexCliPath,
+            '--project-root',
+            $projectRoot
+        )
+        if ($Json) {
+            $assetArguments += @('--format', 'json')
+        }
+        $assetArguments += @('assets', $AssetAction)
+        switch ($AssetAction) {
+            'import' {
+                if ($Path.Count -ne 1 -or [string]::IsNullOrWhiteSpace($Path[0])) {
+                    throw 'assets import requires exactly one -Path.'
+                }
+                $assetArguments += @('--path', [string]$Path[0])
+            }
+            'list' {
+                $assetArguments += @(
+                    '--offset', [string]$Offset,
+                    '--limit', [string]$Limit
+                )
+            }
+            { $_ -in @('status', 'resume', 'delete') } {
+                if ([string]::IsNullOrWhiteSpace($AssetId)) {
+                    throw "assets $AssetAction requires -AssetId."
+                }
+                $assetArguments += @('--asset-id', $AssetId)
+            }
+        }
+        $assetResult = Invoke-HiaKnowledgeStreamingProcess `
+            -FilePath $python `
+            -Arguments $assetArguments `
+            -Environment $childEnvironment `
+            -RemoveEnvironment $removeEnvironment `
+            -WorkingDirectory $projectRoot
+        if (-not [string]::IsNullOrEmpty([string]$assetResult.stderr)) {
+            [Console]::Error.Write([string]$assetResult.stderr)
+        }
+        exit ([int]$assetResult.exit_code)
+    }
     if ($Action -eq 'index-build') {
         $rescanResult = Invoke-HiaKnowledgeProcess `
             -FilePath $python `
@@ -935,8 +1195,14 @@ try {
     Write-HiaKnowledgeProcessResult -Result $indexResult
     exit ([int]$indexResult.exit_code)
 } catch {
-    Write-HiaKnowledgeError `
-        -ActionName $Action `
-        -Message ([string]$_.Exception.Message)
+    if ($Action -eq 'assets') {
+        Write-HiaAssetCliError `
+            -ActionName "assets.$AssetAction" `
+            -Message ([string]$_.Exception.Message)
+    } else {
+        Write-HiaKnowledgeError `
+            -ActionName $Action `
+            -Message ([string]$_.Exception.Message)
+    }
     exit 1
 }

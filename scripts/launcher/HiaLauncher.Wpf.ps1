@@ -101,6 +101,13 @@ $refreshKnowledgeSourcesButton = Get-RequiredControl -Name 'RefreshKnowledgeSour
 $knowledgeSourcesList = Get-RequiredControl -Name 'KnowledgeSourcesList'
 $deleteKnowledgeSourceButton = Get-RequiredControl -Name 'DeleteKnowledgeSourceButton'
 $rescanKnowledgeSourcesButton = Get-RequiredControl -Name 'RescanKnowledgeSourcesButton'
+$knowledgeAssetsPanel = Get-RequiredControl -Name 'KnowledgeAssetsPanel'
+$knowledgeAssetsSummaryText = Get-RequiredControl -Name 'KnowledgeAssetsSummaryText'
+$importKnowledgeAssetButton = Get-RequiredControl -Name 'ImportKnowledgeAssetButton'
+$knowledgeAssetsList = Get-RequiredControl -Name 'KnowledgeAssetsList'
+$knowledgeAssetProgressText = Get-RequiredControl -Name 'KnowledgeAssetProgressText'
+$knowledgeAssetActionButton = Get-RequiredControl -Name 'KnowledgeAssetActionButton'
+$deleteKnowledgeAssetButton = Get-RequiredControl -Name 'DeleteKnowledgeAssetButton'
 $cacheSummaryText = Get-RequiredControl -Name 'CacheSummaryText'
 $refreshCacheButton = Get-RequiredControl -Name 'RefreshCacheButton'
 $cacheCategoriesList = Get-RequiredControl -Name 'CacheCategoriesList'
@@ -219,6 +226,18 @@ $script:knowledgeEnvironmentProcessAction = ''
 $script:knowledgeEnvironmentLogPath = ''
 $script:knowledgeEnvironmentLastFailure = ''
 $script:knowledgeSources = @()
+$script:knowledgeAssetCapabilities = $null
+$script:knowledgeAssets = @()
+$script:knowledgeAssetProcess = $null
+$script:knowledgeAssetProcessAction = ''
+$script:knowledgeAssetProcessAssetId = ''
+$script:knowledgeAssetOutputTask = $null
+$script:knowledgeAssetErrorTask = $null
+$script:knowledgeAssetLastEvent = $null
+$script:knowledgeAssetProtocolError = ''
+$script:knowledgeAssetPauseRequested = $false
+$script:knowledgeAssetWindowClosing = $false
+$script:knowledgeAssetNextPollUtc = [DateTime]::MinValue
 $script:cachePreview = $null
 $renderOutputTextBox.Text = [string]$inputs.render_output
 $renderOutputTextBox.ToolTip = if ($renderOutputTextBox.Text) {
@@ -255,6 +274,10 @@ $script:knowledgeIndexTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:knowledgeIndexTimer.Interval = [TimeSpan]::FromMilliseconds(100)
 $script:knowledgeEnvironmentTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:knowledgeEnvironmentTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:knowledgeAssetProcessTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:knowledgeAssetProcessTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+$script:knowledgeAssetPollTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:knowledgeAssetPollTimer.Interval = [TimeSpan]::FromSeconds(3)
 
 function Get-HiaManagedVenvUiPath {
     param([AllowNull()]$Environment)
@@ -1910,6 +1933,7 @@ function Set-BusyState {
         }
     }
     Update-HiaKnowledgeSourceActions
+    Update-HiaAssetActions
     Update-HiaCacheActions
     Update-HiaKnowledgeIndexActionButton
     Update-HiaKnowledgeEnvironmentActions
@@ -2862,6 +2886,908 @@ function Stop-HiaKnowledgeIndexProcess {
     }
 }
 
+function Get-HiaAssetPropertyValue {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()]$Default = $null
+    )
+
+    if ($null -eq $Value) { return $Default }
+    $property = $Value.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $Default }
+    return $property.Value
+}
+
+function Format-HiaAssetIndexState {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory = $true)][string]$Fallback
+    )
+
+    if ($null -eq $Value) { return $Fallback }
+    if ($Value -is [string]) {
+        $text = [string]$Value
+        if (-not [string]::IsNullOrWhiteSpace($text)) { return $text }
+        return $Fallback
+    }
+    if ($Value -is [bool]) {
+        return $(if ([bool]$Value) { '完成' } else { '未完成' })
+    }
+    $status = [string](Get-HiaAssetPropertyValue `
+        -Value $Value `
+        -Name 'status' `
+        -Default '')
+    if (-not [string]::IsNullOrWhiteSpace($status)) { return $status }
+    $processed = Get-HiaAssetPropertyValue `
+        -Value $Value `
+        -Name 'processed' `
+        -Default (Get-HiaAssetPropertyValue `
+            -Value $Value `
+            -Name 'indexed' `
+            -Default $null)
+    $total = Get-HiaAssetPropertyValue `
+        -Value $Value `
+        -Name 'total' `
+        -Default $null
+    if ($null -ne $processed -and $null -ne $total) {
+        return "$([long]$processed) / $([long]$total)"
+    }
+    $complete = Get-HiaAssetPropertyValue `
+        -Value $Value `
+        -Name 'complete' `
+        -Default $null
+    if ($null -ne $complete) {
+        return $(if ([bool]$complete) { '完成' } else { '进行中' })
+    }
+    return $Fallback
+}
+
+function Get-HiaAssetStatusLabel {
+    param([AllowEmptyString()][string]$Status = '')
+
+    switch ($Status.ToLowerInvariant()) {
+        'queued' { return '等待' }
+        'running' { return '加工中' }
+        'paused' { return '已暂停' }
+        'ready' { return '已完成' }
+        'completed' { return '已完成' }
+        'succeeded' { return '已完成' }
+        'failed' { return '可重试' }
+        'interrupted' { return '可继续' }
+        default {
+            if ([string]::IsNullOrWhiteSpace($Status)) { return '未知' }
+            return $Status
+        }
+    }
+}
+
+function New-HiaAssetView {
+    param([Parameter(Mandatory = $true)]$Asset)
+
+    $processed = [long]$Asset.processed_units
+    $total = [long]$Asset.total_units
+    $fragments = [long]$Asset.fragments
+    $lexical = Format-HiaAssetIndexState `
+        -Value $Asset.lexical `
+        -Fallback '未知'
+    $vector = Format-HiaAssetIndexState `
+        -Value $Asset.vector `
+        -Fallback '未知'
+    $details = "{0} · {1} · {2}/{3} units · {4} 片段 · 词法 {5} · 向量 {6}" -f
+        [string]$Asset.kind,
+        [string]$Asset.stage,
+        $processed,
+        $total,
+        $fragments,
+        $lexical,
+        $vector
+    $errorText = [string]$Asset.error
+    $tooltipLines = @(
+        [string]$Asset.title,
+        "ID：$([string]$Asset.id)",
+        "阶段：$([string]$Asset.stage)",
+        "进度：$processed / $total units",
+        "片段：$fragments",
+        "词法：$lexical",
+        "向量：$vector"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($errorText)) {
+        $tooltipLines += "错误：$errorText"
+    }
+    return [pscustomobject]@{
+        asset_id = [string]$Asset.id
+        title = [string]$Asset.title
+        kind = [string]$Asset.kind
+        stage = [string]$Asset.stage
+        status = [string]$Asset.status
+        processed_units = $processed
+        total_units = $total
+        fragments = $fragments
+        lexical = $Asset.lexical
+        vector = $Asset.vector
+        error = $errorText
+        recoverable = [bool]$Asset.recoverable
+        details = $details
+        status_label = Get-HiaAssetStatusLabel -Status ([string]$Asset.status)
+        tooltip = $tooltipLines -join "`n"
+        asset = $Asset
+    }
+}
+
+function Get-HiaAssetCapabilityGroupLabel {
+    param([AllowEmptyCollection()]$Rows = @())
+
+    $items = @($Rows)
+    if ($items.Count -eq 0) { return '未知' }
+    $statuses = @($items | ForEach-Object {
+        ([string](Get-HiaAssetPropertyValue `
+            -Value $_ `
+            -Name 'status' `
+            -Default 'unknown')).ToLowerInvariant()
+    })
+    $ready = @($statuses | Where-Object {
+        $_ -in @('available', 'ready')
+    }).Count
+    if ($ready -eq $statuses.Count) { return '可用' }
+    if ($ready -gt 0) { return '部分' }
+    if (@($statuses | Where-Object {
+        $_ -in @('dependency_missing', 'missing', 'not_configured')
+    }).Count -gt 0) {
+        return '待安装'
+    }
+    return '不可用'
+}
+
+function Get-HiaAssetCapabilitySummary {
+    if ($null -eq $script:knowledgeAssetCapabilities) {
+        return '环境状态待 CLI 返回'
+    }
+    $extractors = @(
+        Get-HiaAssetPropertyValue `
+            -Value $script:knowledgeAssetCapabilities `
+            -Name 'extractors' `
+            -Default @()
+    )
+    $ocr = @($extractors | Where-Object {
+        [string](Get-HiaAssetPropertyValue `
+            -Value $_ `
+            -Name 'name' `
+            -Default '') -match '(?i)(rapidocr|image_ocr|ocr)'
+    })
+    $asr = @($extractors | Where-Object {
+        [string](Get-HiaAssetPropertyValue `
+            -Value $_ `
+            -Name 'name' `
+            -Default '') -match '(?i)(faster_whisper|media_asr|asr)'
+    })
+    $documents = @($extractors | Where-Object {
+        $name = [string](Get-HiaAssetPropertyValue `
+            -Value $_ `
+            -Name 'name' `
+            -Default '')
+        $name -notmatch '(?i)(rapidocr|image_ocr|ocr|faster_whisper|media_asr|asr)'
+    })
+    return (
+        '文档 {0} · OCR {1} · ASR {2}' -f
+            (Get-HiaAssetCapabilityGroupLabel -Rows $documents),
+            (Get-HiaAssetCapabilityGroupLabel -Rows $ocr),
+            (Get-HiaAssetCapabilityGroupLabel -Rows $asr)
+    )
+}
+
+function Test-HiaAssetRepairAvailable {
+    if ($null -eq $script:knowledgeAssetCapabilities) { return $false }
+    $repair = Get-HiaAssetPropertyValue `
+        -Value $script:knowledgeAssetCapabilities `
+        -Name 'repair' `
+        -Default $null
+    $action = [string](Get-HiaAssetPropertyValue `
+        -Value $repair `
+        -Name 'action' `
+        -Default '')
+    return $action.Trim() -match '(?i)assets\s+repair$'
+}
+
+function Test-HiaAssetRepairNeeded {
+    if ($null -eq $script:knowledgeAssetCapabilities) { return $false }
+    foreach ($extractor in @(
+        Get-HiaAssetPropertyValue `
+            -Value $script:knowledgeAssetCapabilities `
+            -Name 'extractors' `
+            -Default @()
+    )) {
+        $status = ([string](Get-HiaAssetPropertyValue `
+            -Value $extractor `
+            -Name 'status' `
+            -Default 'unknown')).ToLowerInvariant()
+        $estimatedBytes = [long](Get-HiaAssetPropertyValue `
+            -Value $extractor `
+            -Name 'estimated_bytes' `
+            -Default 0)
+        if (
+            $estimatedBytes -gt 0 -and
+            $status -notin @('available', 'ready')
+        ) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Set-HiaKnowledgeAssetsDisplay {
+    param([AllowNull()]$Assets)
+
+    $selectedId = if ($null -ne $knowledgeAssetsList.SelectedItem) {
+        [string]$knowledgeAssetsList.SelectedItem.asset_id
+    } else {
+        ''
+    }
+    $items = if ($null -eq $Assets) {
+        @()
+    } elseif ($null -ne $Assets.PSObject.Properties['items']) {
+        @($Assets.items)
+    } else {
+        @($Assets)
+    }
+    $knowledgeAssetsList.Items.Clear()
+    $script:knowledgeAssets = @()
+    foreach ($asset in $items) {
+        $view = New-HiaAssetView -Asset $asset
+        $script:knowledgeAssets += $view
+        [void]$knowledgeAssetsList.Items.Add($view)
+        if (
+            -not [string]::IsNullOrWhiteSpace($selectedId) -and
+            [System.StringComparer]::Ordinal.Equals(
+                $selectedId,
+                [string]$view.asset_id
+            )
+        ) {
+            $knowledgeAssetsList.SelectedItem = $view
+        }
+    }
+    $capabilitySummary = Get-HiaAssetCapabilitySummary
+    if ($script:knowledgeAssets.Count -eq 0) {
+        $knowledgeAssetsSummaryText.Text = "$capabilitySummary · 0 份资料"
+    } else {
+        $runningCount = @($script:knowledgeAssets | Where-Object {
+            [string]$_.status -eq 'running'
+        }).Count
+        $recoverableCount = @($script:knowledgeAssets | Where-Object {
+            [bool]$_.recoverable -and
+            [string]$_.status -notin @('ready', 'completed', 'succeeded')
+        }).Count
+        $knowledgeAssetsSummaryText.Text = (
+            "{0} · {1} 份 · 运行 {2} · 可继续 {3}" -f
+                $capabilitySummary,
+                $script:knowledgeAssets.Count,
+                $runningCount,
+                $recoverableCount
+        )
+    }
+    $knowledgeAssetsSummaryText.ToolTip = $knowledgeAssetsSummaryText.Text
+    Update-HiaAssetActions
+}
+
+function Set-HiaAssetProgressDisplay {
+    param([AllowNull()]$Asset)
+
+    if ($null -eq $Asset) {
+        $knowledgeAssetProgressText.Text = '选择资料可查看进度'
+    } else {
+        $lexical = Format-HiaAssetIndexState `
+            -Value $Asset.lexical `
+            -Fallback '未知'
+        $vector = Format-HiaAssetIndexState `
+            -Value $Asset.vector `
+            -Fallback '未知'
+        $knowledgeAssetProgressText.Text = (
+            "{0} · {1}/{2} units · {3} 片段 · 词法 {4} · 向量 {5}" -f
+                [string]$Asset.stage,
+                [long]$Asset.processed_units,
+                [long]$Asset.total_units,
+                [long]$Asset.fragments,
+                $lexical,
+                $vector
+        )
+    }
+    $knowledgeAssetProgressText.ToolTip = $knowledgeAssetProgressText.Text
+}
+
+function Update-HiaAssetActions {
+    $active = $null -ne $script:knowledgeAssetProcess
+    $selected = $knowledgeAssetsList.SelectedItem
+    $importKnowledgeAssetButton.IsEnabled = (
+        -not $script:isBusy -and
+        -not $active -and
+        $null -ne $script:knowledgeAssetCapabilities
+    )
+    $knowledgeAssetsList.IsEnabled = -not $script:isBusy
+    if (
+        $active -and
+        $script:knowledgeAssetProcessAction -in @('import', 'resume')
+    ) {
+        $knowledgeAssetActionButton.Content = if (
+            $script:knowledgeAssetPauseRequested
+        ) {
+            '正在暂停…'
+        } else {
+            '暂停'
+        }
+        $knowledgeAssetActionButton.IsEnabled = (
+            -not $script:knowledgeAssetPauseRequested
+        )
+        $deleteKnowledgeAssetButton.IsEnabled = $false
+        return
+    }
+    if ($active -and $script:knowledgeAssetProcessAction -eq 'repair') {
+        $knowledgeAssetActionButton.Content = '正在修复…'
+        $knowledgeAssetActionButton.IsEnabled = $false
+        $deleteKnowledgeAssetButton.IsEnabled = $false
+        return
+    }
+    if ($null -eq $selected) {
+        $repairAvailable = Test-HiaAssetRepairAvailable
+        $repairNeeded = Test-HiaAssetRepairNeeded
+        $knowledgeAssetActionButton.Content = if (
+            $repairAvailable -and
+            $repairNeeded
+        ) {
+            '安装/修复'
+        } else {
+            '选择资料'
+        }
+        $knowledgeAssetActionButton.IsEnabled = (
+            -not $script:isBusy -and
+            -not $active -and
+            $repairAvailable -and
+            $repairNeeded
+        )
+        $deleteKnowledgeAssetButton.IsEnabled = $false
+        if (-not ($repairAvailable -and $repairNeeded)) {
+            Set-HiaAssetProgressDisplay -Asset $null
+        } else {
+            $knowledgeAssetProgressText.Text = (
+                '缺少完整 OCR/ASR 能力；安装会写入项目 .venv 与 .runtime。'
+            )
+            $knowledgeAssetProgressText.ToolTip = (
+                $knowledgeAssetProgressText.Text
+            )
+        }
+        return
+    }
+    Set-HiaAssetProgressDisplay -Asset $selected.asset
+    $status = ([string]$selected.status).ToLowerInvariant()
+    $complete = $status -in @('ready', 'completed', 'succeeded')
+    if ($complete) {
+        $knowledgeAssetActionButton.Content = '已完成'
+        $knowledgeAssetActionButton.IsEnabled = $false
+    } elseif ([bool]$selected.recoverable -or $status -in @(
+        'paused',
+        'failed',
+        'interrupted',
+        'queued'
+    )) {
+        $knowledgeAssetActionButton.Content = if ($status -eq 'failed') {
+            '重试'
+        } else {
+            '继续'
+        }
+        $knowledgeAssetActionButton.IsEnabled = -not $script:isBusy
+    } else {
+        $knowledgeAssetActionButton.Content = '处理中'
+        $knowledgeAssetActionButton.IsEnabled = $false
+    }
+    $deleteKnowledgeAssetButton.IsEnabled = (
+        -not $script:isBusy -and
+        -not $active
+    )
+}
+
+function Get-HiaAssetFileDialogFilter {
+    if ($null -eq $script:knowledgeAssetCapabilities) { return '' }
+    $extensions = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $addExtension = {
+        param([AllowEmptyString()][string]$Value)
+        $extension = $Value.Trim().ToLowerInvariant()
+        if ($extension -match '^\.[a-z0-9][a-z0-9.+_-]{0,15}$') {
+            [void]$extensions.Add($extension)
+        }
+    }
+    foreach ($propertyName in @('extensions', 'supported_extensions')) {
+        $values = Get-HiaAssetPropertyValue `
+            -Value $script:knowledgeAssetCapabilities `
+            -Name $propertyName `
+            -Default @()
+        foreach ($value in @($values)) {
+            & $addExtension ([string]$value)
+        }
+    }
+    $formats = Get-HiaAssetPropertyValue `
+        -Value $script:knowledgeAssetCapabilities `
+        -Name 'formats' `
+        -Default $null
+    if ($null -ne $formats) {
+        foreach ($property in @($formats.PSObject.Properties)) {
+            & $addExtension ([string]$property.Name)
+        }
+    }
+    foreach ($format in @($formats)) {
+        foreach ($propertyName in @('extension', 'extensions', 'suffixes')) {
+            foreach ($value in @(
+                Get-HiaAssetPropertyValue `
+                    -Value $format `
+                    -Name $propertyName `
+                    -Default @()
+            )) {
+                & $addExtension ([string]$value)
+            }
+        }
+    }
+    $capabilityMap = Get-HiaAssetPropertyValue `
+        -Value $script:knowledgeAssetCapabilities `
+        -Name 'capabilities' `
+        -Default $null
+    if ($null -ne $capabilityMap) {
+        foreach ($property in @($capabilityMap.PSObject.Properties)) {
+            foreach ($value in @(
+                Get-HiaAssetPropertyValue `
+                    -Value $property.Value `
+                    -Name 'formats' `
+                    -Default (Get-HiaAssetPropertyValue `
+                        -Value $property.Value `
+                        -Name 'suffixes' `
+                        -Default @())
+            )) {
+                & $addExtension ([string]$value)
+            }
+        }
+    }
+    foreach ($extractor in @(
+        Get-HiaAssetPropertyValue `
+            -Value $script:knowledgeAssetCapabilities `
+            -Name 'extractors' `
+            -Default @()
+    )) {
+        foreach ($value in @(
+            Get-HiaAssetPropertyValue `
+                -Value $extractor `
+                -Name 'suffixes' `
+                -Default (Get-HiaAssetPropertyValue `
+                    -Value $extractor `
+                    -Name 'formats' `
+                    -Default @())
+        )) {
+            & $addExtension ([string]$value)
+        }
+    }
+    $patterns = @(
+        $extensions |
+            Sort-Object |
+            ForEach-Object { "*$_" }
+    )
+    if ($patterns.Count -eq 0) { return '' }
+    $joined = $patterns -join ';'
+    return "CLI 支持的资料 ($joined)|$joined"
+}
+
+function Update-HiaAssetFromEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $script:knowledgeAssetLastEvent = $Event
+    $result = Get-HiaAssetPropertyValue `
+        -Value $Event `
+        -Name 'result' `
+        -Default $null
+    if (
+        [string]$Event.action -eq 'assets.capabilities' -and
+        [string]$Event.event -eq 'completed' -and
+        $null -ne $result
+    ) {
+        $script:knowledgeAssetCapabilities = $result
+        Set-HiaKnowledgeAssetsDisplay -Assets @(
+            $script:knowledgeAssets | ForEach-Object { $_.asset }
+        )
+    }
+    if (
+        [string]$Event.action -eq 'assets.list' -and
+        [string]$Event.event -eq 'completed' -and
+        $null -ne $result
+    ) {
+        Set-HiaKnowledgeAssetsDisplay -Assets $result
+    }
+    $asset = Get-HiaAssetPropertyValue `
+        -Value $Event `
+        -Name 'asset' `
+        -Default (Get-HiaAssetPropertyValue `
+            -Value $result `
+            -Name 'asset' `
+            -Default $null)
+    if ($null -ne $asset) {
+        Set-HiaAssetProgressDisplay -Asset $asset
+    } elseif (
+        [string]$Event.action -eq 'assets.repair' -and
+        [string]$Event.event -eq 'progress'
+    ) {
+        $stage = [string](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'stage' `
+            -Default 'repair')
+        $component = [string](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'component' `
+            -Default 'asset_profile')
+        $status = [string](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'status' `
+            -Default 'running')
+        $bytes = [long](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'bytes' `
+            -Default 0)
+        $estimatedBytes = [long](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'estimated_bytes' `
+            -Default (Get-HiaAssetPropertyValue `
+                -Value $Event `
+                -Name 'estimated_download_bytes' `
+                -Default 0))
+        $detail = "$stage · $component · $status"
+        if ($bytes -gt 0 -and $estimatedBytes -gt 0) {
+            $doneMiB = [Math]::Round($bytes / 1MB, 1)
+            $totalMiB = [Math]::Round($estimatedBytes / 1MB, 1)
+            $detail += " · $doneMiB / $totalMiB MiB"
+        } elseif ($estimatedBytes -gt 0) {
+            $totalGiB = [Math]::Round($estimatedBytes / 1GB, 2)
+            $detail += " · 预计 $totalGiB GiB"
+        }
+        $knowledgeAssetProgressText.Text = $detail
+        $knowledgeAssetProgressText.ToolTip = $detail
+    } elseif ([string]$Event.event -eq 'progress') {
+        $stage = [string](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'stage' `
+            -Default 'processing')
+        $fragments = [long](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'fragments_committed' `
+            -Default (Get-HiaAssetPropertyValue `
+                -Value $Event `
+                -Name 'next_fragment' `
+                -Default 0))
+        $batch = [long](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'batch_fragments' `
+            -Default 0)
+        $knowledgeAssetProgressText.Text = (
+            "$stage · 已提交 $fragments 个片段"
+        )
+        if ($batch -gt 0) {
+            $knowledgeAssetProgressText.Text += " · 本批 $batch"
+        }
+        $knowledgeAssetProgressText.ToolTip = $knowledgeAssetProgressText.Text
+    }
+    if ([string]$Event.event -eq 'error') {
+        $errorObject = Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'error' `
+            -Default $null
+        $message = [string](Get-HiaAssetPropertyValue `
+            -Value $Event `
+            -Name 'message' `
+            -Default (Get-HiaAssetPropertyValue `
+                -Value $errorObject `
+                -Name 'message' `
+                -Default '资料加工命令失败'))
+        $knowledgeAssetProgressText.Text = $message
+        $knowledgeAssetProgressText.ToolTip = $message
+    }
+    Update-HiaAssetActions
+}
+
+function Read-HiaAssetProcessOutput {
+    while (
+        $null -ne $script:knowledgeAssetOutputTask -and
+        $script:knowledgeAssetOutputTask.IsCompleted
+    ) {
+        try {
+            $line = $script:knowledgeAssetOutputTask.Result
+        } catch {
+            $script:knowledgeAssetProtocolError = '无法读取资料加工 CLI 输出。'
+            $script:knowledgeAssetOutputTask = $null
+            break
+        }
+        if ($null -eq $line) {
+            $script:knowledgeAssetOutputTask = $null
+            break
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
+            try {
+                $event = ConvertFrom-HiaAssetJsonLine -Line ([string]$line)
+                $expectedAction = "assets.$($script:knowledgeAssetProcessAction)"
+                if (
+                    -not [System.StringComparer]::Ordinal.Equals(
+                        [string]$event.action,
+                        $expectedAction
+                    )
+                ) {
+                    throw '资料加工 CLI 返回了不匹配的 action。'
+                }
+                Update-HiaAssetFromEvent -Event $event
+            } catch {
+                $script:knowledgeAssetProtocolError = [string]$_.Exception.Message
+                try {
+                    if ($null -ne $script:knowledgeAssetProcess) {
+                        Stop-HiaKnowledgeIndexProcessTree `
+                            -Process $script:knowledgeAssetProcess
+                    }
+                } catch { }
+                $script:knowledgeAssetOutputTask = $null
+                break
+            }
+        }
+        if ($null -ne $script:knowledgeAssetProcess) {
+            $script:knowledgeAssetOutputTask = (
+                $script:knowledgeAssetProcess.StandardOutput.ReadLineAsync()
+            )
+        }
+    }
+}
+
+function Complete-HiaAssetProcess {
+    if ($null -eq $script:knowledgeAssetProcess) { return }
+
+    $process = $script:knowledgeAssetProcess
+    $action = $script:knowledgeAssetProcessAction
+    $exitCode = [int]$process.ExitCode
+    $paused = $script:knowledgeAssetPauseRequested
+    $protocolError = $script:knowledgeAssetProtocolError
+    $lastEvent = $script:knowledgeAssetLastEvent
+    $stderr = if (
+        $null -ne $script:knowledgeAssetErrorTask -and
+        $script:knowledgeAssetErrorTask.IsCompleted
+    ) {
+        [string]$script:knowledgeAssetErrorTask.Result
+    } else {
+        ''
+    }
+    $process.Dispose()
+    $script:knowledgeAssetProcess = $null
+    $script:knowledgeAssetProcessAction = ''
+    $script:knowledgeAssetProcessAssetId = ''
+    $script:knowledgeAssetOutputTask = $null
+    $script:knowledgeAssetErrorTask = $null
+    $script:knowledgeAssetLastEvent = $null
+    $script:knowledgeAssetProtocolError = ''
+    $script:knowledgeAssetPauseRequested = $false
+    if ($script:knowledgeAssetWindowClosing) { return }
+
+    $succeeded = (
+        -not $paused -and
+        [string]::IsNullOrWhiteSpace($protocolError) -and
+        $exitCode -eq 0 -and
+        $null -ne $lastEvent -and
+        [string]$lastEvent.event -eq 'completed'
+    )
+    if ($paused) {
+        Show-InlineStatus `
+            -Kind 'neutral' `
+            -Text '资料加工已暂停；已完成 unit 和 manifest 保留，可随时继续。'
+    } elseif ($protocolError) {
+        Show-InlineStatus -Kind 'error' -Text $protocolError
+    } elseif (
+        $exitCode -ne 0 -or
+        $null -eq $lastEvent -or
+        [string]$lastEvent.event -notin @('completed', 'error')
+    ) {
+        $detail = ($stderr -replace '[\r\n]+', ' ').Trim()
+        if ($detail.Length -gt 240) {
+            $detail = $detail.Substring(0, 240) + '…'
+        }
+        $message = "资料加工命令未完成（退出码 $exitCode）"
+        if ($detail) { $message += "：$detail" }
+        $message += '；已完成 unit 不会删除，可刷新后继续。'
+        Show-InlineStatus -Kind 'error' -Text $message
+    }
+    Update-HiaAssetActions
+    if ($action -eq 'repair') {
+        if ($succeeded) {
+            $script:knowledgeAssetCapabilities = $null
+            Show-InlineStatus `
+                -Kind 'success' `
+                -Text '资料环境安装/修复完成；正在重新读取 OCR、ASR、模型和 FFmpeg 能力。'
+            Start-HiaAssetProcess -Action 'capabilities'
+        } else {
+            $script:knowledgeAssetNextPollUtc = [DateTime]::UtcNow.AddSeconds(15)
+            Update-HiaAssetActions
+        }
+    } elseif ($action -eq 'capabilities') {
+        if ($succeeded) {
+            Start-HiaAssetProcess -Action 'list'
+        } else {
+            $script:knowledgeAssetNextPollUtc = [DateTime]::UtcNow.AddSeconds(15)
+        }
+    } elseif ($action -ne 'list') {
+        Start-HiaAssetProcess -Action 'list'
+    } else {
+        $script:knowledgeAssetNextPollUtc = [DateTime]::UtcNow.AddSeconds(3)
+    }
+}
+
+function Test-HiaAssetProcessComplete {
+    if ($null -eq $script:knowledgeAssetProcess) { return }
+    Read-HiaAssetProcessOutput
+    if (
+        $script:knowledgeAssetProcess.HasExited -and
+        $null -eq $script:knowledgeAssetOutputTask -and
+        $null -ne $script:knowledgeAssetErrorTask -and
+        $script:knowledgeAssetErrorTask.IsCompleted
+    ) {
+        Complete-HiaAssetProcess
+    }
+}
+
+function Start-HiaAssetProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            'capabilities',
+            'import',
+            'list',
+            'status',
+            'resume',
+            'delete',
+            'repair'
+        )]
+        [string]$Action,
+        [AllowEmptyString()][string]$Path = '',
+        [AllowEmptyString()][string]$AssetId = ''
+    )
+
+    if (
+        $null -ne $script:knowledgeAssetProcess -or
+        $script:knowledgeAssetWindowClosing
+    ) {
+        return
+    }
+    try {
+        $plan = New-HiaAssetCliProcessPlan `
+            -ProjectRoot $projectRoot `
+            -Action $Action `
+            -Path $Path `
+            -AssetId $AssetId
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = [string]$plan.file_path
+        $startInfo.Arguments = (@($plan.arguments | ForEach-Object {
+            ConvertTo-HiaProcessArgument -Value ([string]$_)
+        }) -join ' ')
+        $startInfo.WorkingDirectory = [string]$plan.working_directory
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+        if ($null -ne $startInfo.Environment) {
+            $processEnvironment = $startInfo.Environment
+        } else {
+            $processEnvironment = $startInfo.EnvironmentVariables
+        }
+        foreach ($name in @($plan.clear_environment_names)) {
+            [void]$processEnvironment.Remove([string]$name)
+        }
+        foreach ($entry in $plan.environment.GetEnumerator()) {
+            $processEnvironment[[string]$entry.Key] = [string]$entry.Value
+        }
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) {
+            throw '资料加工 CLI 进程未启动。'
+        }
+        $script:knowledgeAssetProcess = $process
+        $script:knowledgeAssetProcessAction = $Action
+        $script:knowledgeAssetProcessAssetId = $AssetId
+        $script:knowledgeAssetLastEvent = $null
+        $script:knowledgeAssetProtocolError = ''
+        $script:knowledgeAssetPauseRequested = $false
+        $script:knowledgeAssetOutputTask = $process.StandardOutput.ReadLineAsync()
+        $script:knowledgeAssetErrorTask = $process.StandardError.ReadToEndAsync()
+        $knowledgeAssetProgressText.Text = switch ($Action) {
+            'capabilities' { '正在读取资料能力…' }
+            'list' { '正在刷新 manifest 状态…' }
+            'import' { '正在创建资料 manifest 并开始加工…' }
+            'resume' { '正在从已完成 unit 继续…' }
+            'delete' { '正在删除项目内派生资料；原文件不会删除…' }
+            'repair' {
+                '正在安装项目本地 OCR、ASR、模型与 FFmpeg；可关闭后重试…'
+            }
+            default { '正在读取资料状态…' }
+        }
+        $knowledgeAssetProgressText.ToolTip = $knowledgeAssetProgressText.Text
+        Update-HiaAssetActions
+        $script:knowledgeAssetProcessTimer.Start()
+    } catch {
+        if ($null -ne $script:knowledgeAssetProcess) {
+            $script:knowledgeAssetProcess.Dispose()
+            $script:knowledgeAssetProcess = $null
+        }
+        $script:knowledgeAssetProcessAction = ''
+        $script:knowledgeAssetProcessAssetId = ''
+        $script:knowledgeAssetOutputTask = $null
+        $script:knowledgeAssetErrorTask = $null
+        $script:knowledgeAssetLastEvent = $null
+        $script:knowledgeAssetProtocolError = ''
+        $script:knowledgeAssetPauseRequested = $false
+        $detail = ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Trim()
+        Show-InlineStatus `
+            -Kind 'error' `
+            -Text "无法启动资料加工 CLI：$detail"
+        Update-HiaAssetActions
+    }
+}
+
+function Stop-HiaAssetProcess {
+    if (
+        $null -eq $script:knowledgeAssetProcess -or
+        $script:knowledgeAssetProcessAction -notin @('import', 'resume')
+    ) {
+        return
+    }
+    $script:knowledgeAssetProcess.Refresh()
+    if ($script:knowledgeAssetProcess.HasExited) {
+        Test-HiaAssetProcessComplete
+        return
+    }
+    $script:knowledgeAssetPauseRequested = $true
+    $knowledgeAssetProgressText.Text = (
+        '正在暂停当前子进程；已完成 unit 和 manifest 不会删除。'
+    )
+    $knowledgeAssetProgressText.ToolTip = $knowledgeAssetProgressText.Text
+    Update-HiaAssetActions
+    try {
+        Stop-HiaKnowledgeIndexProcessTree `
+            -Process $script:knowledgeAssetProcess
+    } catch {
+        $script:knowledgeAssetPauseRequested = $false
+        Show-InlineStatus `
+            -Kind 'error' `
+            -Text '无法暂停当前资料 CLI；进程退出后仍可从 manifest 继续。'
+        Update-HiaAssetActions
+    }
+}
+
+$script:knowledgeAssetProcessTimer.Add_Tick({
+    try {
+        Test-HiaAssetProcessComplete
+        if ($null -eq $script:knowledgeAssetProcess) {
+            $script:knowledgeAssetProcessTimer.Stop()
+        }
+    } catch {
+        $script:knowledgeAssetProtocolError = '资料加工进程状态无法读取。'
+        try {
+            if ($null -ne $script:knowledgeAssetProcess) {
+                Stop-HiaKnowledgeIndexProcessTree `
+                    -Process $script:knowledgeAssetProcess
+            }
+        } catch { }
+    }
+})
+
+$script:knowledgeAssetPollTimer.Add_Tick({
+    if (
+        $script:knowledgeAssetWindowClosing -or
+        $script:isBusy -or
+        $null -ne $script:knowledgeAssetProcess -or
+        $null -eq $script:knowledgeAssetCapabilities -or
+        [DateTime]::UtcNow -lt $script:knowledgeAssetNextPollUtc
+    ) {
+        return
+    }
+    Start-HiaAssetProcess -Action 'list'
+})
+
 function Get-PathIndex {
     param(
         [Parameter(Mandatory = $true)]$Combo,
@@ -3172,6 +4098,12 @@ $environmentNavButton.Add_Click({
     if ($null -eq $script:knowledgeEnvironmentStatus -and -not $script:isBusy) {
         Refresh-HiaKnowledgeDisplay -Quiet
     }
+    if (
+        $null -eq $script:knowledgeAssetCapabilities -and
+        $null -eq $script:knowledgeAssetProcess
+    ) {
+        Start-HiaAssetProcess -Action 'capabilities'
+    }
 })
 $preflightNavButton.Add_Click({ Set-HiaLauncherPage -Page 'preflight' })
 $reportsSettingsNavButton.Add_Click({
@@ -3187,6 +4119,9 @@ $reportsSettingsNavButton.Add_Click({
 $cacheCategoriesList.Add_SelectionChanged({ Update-HiaCacheActions })
 $knowledgeSourcesList.Add_SelectionChanged({
     Update-HiaKnowledgeSourceActions
+})
+$knowledgeAssetsList.Add_SelectionChanged({
+    Update-HiaAssetActions
 })
 $refreshCacheButton.Add_Click({
     if ($script:isBusy) { return }
@@ -3343,6 +4278,84 @@ $rescanKnowledgeSourcesButton.Add_Click({
     } finally {
         Set-BusyState -Busy $false
     }
+})
+
+$importKnowledgeAssetButton.Add_Click({
+    if (
+        $script:isBusy -or
+        $null -ne $script:knowledgeAssetProcess
+    ) {
+        return
+    }
+    $filter = Get-HiaAssetFileDialogFilter
+    if ([string]::IsNullOrWhiteSpace($filter)) {
+        Show-InlineStatus `
+            -Kind 'error' `
+            -Text '资料加工 CLI 没有返回可用文件能力；请先修复知识环境并刷新。'
+        return
+    }
+    $dialog = [Microsoft.Win32.OpenFileDialog]::new()
+    $dialog.Title = '选择要加工的资料'
+    $dialog.Filter = $filter
+    $dialog.CheckFileExists = $true
+    $dialog.Multiselect = $false
+    if ($dialog.ShowDialog($window) -ne $true) { return }
+    Start-HiaAssetProcess `
+        -Action 'import' `
+        -Path ([string]$dialog.FileName)
+})
+
+$knowledgeAssetActionButton.Add_Click({
+    if (
+        $null -ne $script:knowledgeAssetProcess -and
+        $script:knowledgeAssetProcessAction -in @('import', 'resume')
+    ) {
+        Stop-HiaAssetProcess
+        return
+    }
+    if ($null -ne $script:knowledgeAssetProcess) {
+        return
+    }
+    if ($null -eq $knowledgeAssetsList.SelectedItem) {
+        if (
+            (Test-HiaAssetRepairAvailable) -and
+            (Test-HiaAssetRepairNeeded)
+        ) {
+            Start-HiaAssetProcess -Action 'repair'
+        }
+        return
+    }
+    $selected = $knowledgeAssetsList.SelectedItem
+    Start-HiaAssetProcess `
+        -Action 'resume' `
+        -AssetId ([string]$selected.asset_id)
+})
+
+$deleteKnowledgeAssetButton.Add_Click({
+    if (
+        $null -ne $script:knowledgeAssetProcess -or
+        $null -eq $knowledgeAssetsList.SelectedItem
+    ) {
+        return
+    }
+    $selected = $knowledgeAssetsList.SelectedItem
+    $confirmation = [System.Windows.MessageBox]::Show(
+        $window,
+        (
+            "删除项目内资料加工结果：$([string]$selected.title)`n`n" +
+            '只删除项目内 manifest、派生资料和索引；原文件不会删除。'
+        ),
+        '确认删除加工资料',
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning,
+        [System.Windows.MessageBoxResult]::No
+    )
+    if ($confirmation -ne [System.Windows.MessageBoxResult]::Yes) {
+        return
+    }
+    Start-HiaAssetProcess `
+        -Action 'delete' `
+        -AssetId ([string]$selected.asset_id)
 })
 
 $rescanButton.Add_Click({
@@ -3790,6 +4803,9 @@ $window.Add_Closed({
     $script:knowledgeIndexWindowClosing = $true
     $script:knowledgeIndexTimer.Stop()
     $script:knowledgeEnvironmentTimer.Stop()
+    $script:knowledgeAssetWindowClosing = $true
+    $script:knowledgeAssetProcessTimer.Stop()
+    $script:knowledgeAssetPollTimer.Stop()
     if ($null -ne $script:knowledgeIndexProcess) {
         try {
             Stop-HiaKnowledgeIndexProcessTree `
@@ -3797,6 +4813,17 @@ $window.Add_Closed({
         } catch { }
         $script:knowledgeIndexProcess.Dispose()
         $script:knowledgeIndexProcess = $null
+    }
+    if ($null -ne $script:knowledgeAssetProcess) {
+        try {
+            $script:knowledgeAssetProcess.Refresh()
+            if (-not $script:knowledgeAssetProcess.HasExited) {
+                Stop-HiaKnowledgeIndexProcessTree `
+                    -Process $script:knowledgeAssetProcess
+            }
+        } catch { }
+        $script:knowledgeAssetProcess.Dispose()
+        $script:knowledgeAssetProcess = $null
     }
     if ($null -ne $script:bootstrapProcess) {
         # Disposing this wrapper does not terminate the user-started verified bootstrap.
@@ -3824,10 +4851,13 @@ $window.Add_ContentRendered({
         -PreferredBackend $inputs.backend `
         -PreferredEmbedding $inputs.embedding `
         -PreferredEmbeddingDevice $inputs.embedding_device
+    Start-HiaAssetProcess -Action 'capabilities'
+    $script:knowledgeAssetPollTimer.Start()
 })
 
 Set-HiaKnowledgeIndexDisplay -Reset
 Set-HiaKnowledgeEnvironmentDisplay -Environment $null
 Set-HiaKnowledgeSourcesDisplay -Sources $null
+Set-HiaKnowledgeAssetsDisplay -Assets $null
 Update-HiaCacheActions
 [void]$window.ShowDialog()

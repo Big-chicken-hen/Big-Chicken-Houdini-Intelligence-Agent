@@ -32,6 +32,8 @@ KNOWLEDGE_INDEX_PATH = (
 KNOWLEDGE_INDEX_CLI_PATH = KNOWLEDGE_INDEX_PATH.with_name(
     "knowledge_index_cli.py"
 )
+KNOWLEDGE_ASSETS_PATH = KNOWLEDGE_INDEX_PATH.with_name("knowledge_assets.py")
+LOCAL_EXTRACTORS_PATH = KNOWLEDGE_INDEX_PATH.with_name("local_extractors.py")
 HYBRID_KNOWLEDGE_PATH = KNOWLEDGE_INDEX_PATH.with_name("hybrid_knowledge.py")
 DETERMINISTIC_SOURCES_PATH = KNOWLEDGE_INDEX_PATH.with_name(
     "deterministic_sources.py"
@@ -87,6 +89,22 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
                 / "python_libs"
                 / "hia_mcp_runtime"
                 / "knowledge_index_cli.py",
+            ),
+            (
+                KNOWLEDGE_ASSETS_PATH,
+                root
+                / "houdini_package"
+                / "python_libs"
+                / "hia_mcp_runtime"
+                / "knowledge_assets.py",
+            ),
+            (
+                LOCAL_EXTRACTORS_PATH,
+                root
+                / "houdini_package"
+                / "python_libs"
+                / "hia_mcp_runtime"
+                / "local_extractors.py",
             ),
             (
                 HYBRID_KNOWLEDGE_PATH,
@@ -1149,10 +1167,12 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             self.assertTrue(directory.resolve().is_relative_to(wrapper_root))
 
         source = WRAPPER_PATH.read_text(encoding="utf-8")
+        self.assertIn("-ReadOnly:(", source)
         self.assertIn(
-            "-ReadOnly:($Action -in @('status', 'environment-status', 'list'))",
+            "$Action -in @('status', 'environment-status', 'list')",
             source,
         )
+        self.assertIn("$assetCapabilitiesAction", source)
 
     def test_wrapper_blocks_nonportable_environment_before_actions(self) -> None:
         canonical = (

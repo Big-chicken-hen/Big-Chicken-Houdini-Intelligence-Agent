@@ -1064,6 +1064,320 @@ function New-HiaKnowledgeCliProcessPlan {
     }
 }
 
+function New-HiaAssetCliProcessPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            'capabilities',
+            'import',
+            'list',
+            'status',
+            'resume',
+            'delete',
+            'repair'
+        )]
+        [string]$Action,
+        [AllowEmptyString()][string]$Path = '',
+        [AllowEmptyString()][string]$AssetId = '',
+        [ValidateRange(0, 2147483647)][int]$Offset = 0,
+        [ValidateRange(1, 500)][int]$Limit = 100
+    )
+
+    $root = Get-HiaProjectRoot -StartingPath $ProjectRoot
+    $cliPath = Join-Path $root 'scripts\hia-knowledge.ps1'
+    if (-not (
+        Test-HiaEmbeddingProjectPath `
+            -ProjectRoot $root `
+            -Path $cliPath `
+            -Kind file
+    )) {
+        throw 'The project-local knowledge CLI is unavailable or unsafe.'
+    }
+    $powershellExe = Join-Path $env:SystemRoot (
+        'System32\WindowsPowerShell\v1.0\powershell.exe'
+    )
+    if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) {
+        throw 'Windows PowerShell is unavailable for the project-local asset CLI.'
+    }
+    $arguments = @(
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $cliPath,
+        'assets', $Action
+    )
+    switch ($Action) {
+        'import' {
+            if ([string]::IsNullOrWhiteSpace($Path)) {
+                throw 'Asset import requires one file path.'
+            }
+            $arguments += @('-Path', $Path)
+        }
+        'list' {
+            $arguments += @(
+                '-Offset', [string]$Offset,
+                '-Limit', [string]$Limit
+            )
+        }
+        { $_ -in @('status', 'resume', 'delete') } {
+            if ([string]::IsNullOrWhiteSpace($AssetId)) {
+                throw "Asset $Action requires an asset id."
+            }
+            $arguments += @('-AssetId', $AssetId)
+        }
+    }
+    return [pscustomobject]@{
+        action = "assets.$Action"
+        file_path = $powershellExe
+        arguments = @($arguments)
+        working_directory = $root
+        environment = @{}
+        clear_environment_names = @()
+        protocol = if ($Action -eq 'repair') {
+            'hia-asset-repair-jsonl/1'
+        } else {
+            'hia-knowledge-index-jsonl/1'
+        }
+    }
+}
+
+function ConvertTo-HiaAssetState {
+    param([Parameter(Mandatory = $true)]$Asset)
+
+    $required = @(
+        'id',
+        'title',
+        'kind',
+        'stage',
+        'status',
+        'processed_units',
+        'total_units',
+        'fragments',
+        'lexical',
+        'vector',
+        'error',
+        'recoverable'
+    )
+    $completeContract = $true
+    foreach ($field in $required) {
+        if ($null -eq $Asset.PSObject.Properties[$field]) {
+            $completeContract = $false
+            break
+        }
+    }
+    if ($completeContract) { return $Asset }
+
+    # Compatibility with the first core asset implementation.  The public
+    # contract is normalized here for the WPF shell while the PowerShell CLI
+    # continues to forward the core JSONL byte-for-byte.
+    foreach ($field in @(
+        'asset_id',
+        'title',
+        'status',
+        'fragment_count',
+        'next_fragment',
+        'documents_indexed',
+        'chunks_indexed',
+        'vectors_indexed'
+    )) {
+        if ($null -eq $Asset.PSObject.Properties[$field]) {
+            throw "Asset JSONL field is missing: $field"
+        }
+    }
+    $fragments = [long]$Asset.fragment_count
+    $processed = [long]$Asset.next_fragment
+    $documents = [long]$Asset.documents_indexed
+    $chunks = [long]$Asset.chunks_indexed
+    $vectors = [long]$Asset.vectors_indexed
+    $status = [string]$Asset.status
+    $normalizedStatus = switch ($status.ToLowerInvariant()) {
+        'processing' { 'running' }
+        default { $status }
+    }
+    $suffix = [string]$Asset.source_suffix
+    $kind = $suffix.TrimStart('.')
+    if ([string]::IsNullOrWhiteSpace($kind)) {
+        $kind = [string]$Asset.extractor
+    }
+    $stage = [string]$Asset.checkpoint_state
+    if ([string]::IsNullOrWhiteSpace($stage)) { $stage = $normalizedStatus }
+    return [pscustomobject]@{
+        id = [string]$Asset.asset_id
+        title = [string]$Asset.title
+        kind = $kind
+        stage = $stage
+        status = $normalizedStatus
+        processed_units = $processed
+        total_units = [Math]::Max($processed, $fragments)
+        fragments = $fragments
+        lexical = [pscustomobject]@{
+            status = if ($documents -ge $fragments -and $fragments -gt 0) {
+                'ready'
+            } elseif ($documents -gt 0) {
+                'partial'
+            } else {
+                'pending'
+            }
+            processed = $documents
+            total = $fragments
+            complete = ($documents -ge $fragments -and $fragments -gt 0)
+        }
+        vector = [pscustomobject]@{
+            status = if ($vectors -ge $chunks -and $chunks -gt 0) {
+                'ready'
+            } elseif ($vectors -gt 0) {
+                'partial'
+            } else {
+                'pending'
+            }
+            processed = $vectors
+            total = $chunks
+            complete = ($vectors -ge $chunks -and $chunks -gt 0)
+        }
+        error = ''
+        recoverable = ($normalizedStatus -notin @(
+            'ready',
+            'completed',
+            'succeeded'
+        ))
+    }
+}
+
+function Assert-HiaAssetState {
+    param([Parameter(Mandatory = $true)]$Asset)
+
+    foreach ($field in @(
+        'id',
+        'title',
+        'kind',
+        'stage',
+        'status',
+        'processed_units',
+        'total_units',
+        'fragments',
+        'lexical',
+        'vector',
+        'error',
+        'recoverable'
+    )) {
+        if ($null -eq $Asset.PSObject.Properties[$field]) {
+            throw "Asset JSONL field is missing: $field"
+        }
+    }
+    foreach ($field in @('id', 'title', 'kind', 'stage', 'status')) {
+        if ([string]::IsNullOrWhiteSpace([string]$Asset.$field)) {
+            throw "Asset JSONL field is invalid: $field"
+        }
+    }
+    foreach ($field in @(
+        'processed_units',
+        'total_units',
+        'fragments'
+    )) {
+        if ([long]$Asset.$field -lt 0) {
+            throw "Asset JSONL field is invalid: $field"
+        }
+    }
+    if ([long]$Asset.processed_units -gt [long]$Asset.total_units) {
+        throw 'Asset JSONL progress exceeds its total units.'
+    }
+    return $Asset
+}
+
+function ConvertFrom-HiaAssetJsonLine {
+    param([Parameter(Mandatory = $true)][string]$Line)
+
+    try {
+        $payload = $Line | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw 'Asset CLI emitted invalid JSONL.'
+    }
+    if (
+        $null -ne $payload -and
+        [string]$payload.event -eq 'started'
+    ) {
+        $payload.event = 'start'
+    }
+    $protocol = if ($null -eq $payload) {
+        ''
+    } else {
+        [string]$payload.protocol
+    }
+    if (
+        $null -eq $payload -or
+        (
+            $protocol -notmatch (
+                '^hia-knowledge-(?:index-)?(?:cli|jsonl)/\d+$'
+            ) -and
+            $protocol -ne 'hia-asset-repair-jsonl/1'
+        ) -or
+        [string]$payload.event -notin @(
+            'start',
+            'progress',
+            'completed',
+            'error'
+        ) -or
+        [string]$payload.action -notin @(
+            'assets.capabilities',
+            'assets.import',
+            'assets.list',
+            'assets.status',
+            'assets.resume',
+            'assets.delete',
+            'assets.repair'
+        )
+    ) {
+        throw 'Asset CLI JSONL protocol is invalid.'
+    }
+    $assetProperty = $payload.PSObject.Properties['asset']
+    if ($null -ne $assetProperty -and $null -ne $assetProperty.Value) {
+        $payload.asset = ConvertTo-HiaAssetState -Asset $assetProperty.Value
+        [void](Assert-HiaAssetState -Asset $payload.asset)
+    }
+    $resultProperty = $payload.PSObject.Properties['result']
+    if ($null -ne $resultProperty -and $null -ne $resultProperty.Value) {
+        $itemsProperty = $resultProperty.Value.PSObject.Properties['items']
+        if ($null -ne $itemsProperty) {
+            $normalizedItems = @(
+                foreach ($asset in @($itemsProperty.Value)) {
+                    $normalized = ConvertTo-HiaAssetState -Asset $asset
+                    [void](Assert-HiaAssetState -Asset $normalized)
+                    $normalized
+                }
+            )
+            $resultProperty.Value.items = @($normalizedItems)
+        } elseif (
+            [string]$payload.action -in @(
+                'assets.import',
+                'assets.resume',
+                'assets.status'
+            )
+        ) {
+            $normalized = ConvertTo-HiaAssetState -Asset $resultProperty.Value
+            [void](Assert-HiaAssetState -Asset $normalized)
+            $payload.result = $normalized
+            $resultProperty = $payload.PSObject.Properties['result']
+        }
+        if ($null -ne $resultProperty -and $null -ne $resultProperty.Value) {
+            $resultAssetProperty = (
+                $resultProperty.Value.PSObject.Properties['asset']
+            )
+            if (
+                $null -ne $resultAssetProperty -and
+                $null -ne $resultAssetProperty.Value
+            ) {
+                $resultProperty.Value.asset = ConvertTo-HiaAssetState `
+                    -Asset $resultAssetProperty.Value
+                [void](Assert-HiaAssetState `
+                    -Asset $resultProperty.Value.asset)
+            }
+        }
+    }
+    return $payload
+}
+
 function ConvertFrom-HiaKnowledgeIndexJsonLine {
     param(
         [Parameter(Mandatory = $true)][string]$Line,
@@ -3745,6 +4059,7 @@ function Repair-HiaSafeProject {
 }
 
 Export-ModuleMember -Function @(
+    'ConvertFrom-HiaAssetJsonLine',
     'ConvertFrom-HiaKnowledgeIndexJsonLine',
     'ConvertTo-HiaProcessArgument',
     'ConvertTo-HiaRedactedJson',
@@ -3774,6 +4089,7 @@ Export-ModuleMember -Function @(
     'Invoke-HiaScreenshotCacheCleanup',
     'Invoke-HiaPreflight',
     'Invoke-HiaProcess',
+    'New-HiaAssetCliProcessPlan',
     'New-HiaKnowledgeCliProcessPlan',
     'New-HiaKnowledgeIndexProcessPlan',
     'Read-HiaLauncherSettings',

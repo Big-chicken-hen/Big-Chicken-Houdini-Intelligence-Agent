@@ -3197,6 +3197,13 @@ $fxResult = Invoke-HiaPreflight `
             "KnowledgeSourcesList": "System.Windows.Controls.ListBox",
             "DeleteKnowledgeSourceButton": "System.Windows.Controls.Button",
             "RescanKnowledgeSourcesButton": "System.Windows.Controls.Button",
+            "KnowledgeAssetsPanel": "System.Windows.Controls.Border",
+            "KnowledgeAssetsSummaryText": "System.Windows.Controls.TextBlock",
+            "ImportKnowledgeAssetButton": "System.Windows.Controls.Button",
+            "KnowledgeAssetsList": "System.Windows.Controls.ListBox",
+            "KnowledgeAssetProgressText": "System.Windows.Controls.TextBlock",
+            "KnowledgeAssetActionButton": "System.Windows.Controls.Button",
+            "DeleteKnowledgeAssetButton": "System.Windows.Controls.Button",
             "KnowledgeIndexPanel": "System.Windows.Controls.Border",
             "KnowledgeIndexModelText": "System.Windows.Controls.TextBlock",
             "KnowledgeIndexCountText": "System.Windows.Controls.TextBlock",
@@ -3796,6 +3803,7 @@ try {{
             {
                 "RecoveryCard",
                 "OverviewQuickActionsPanel",
+                "KnowledgeAssetsPanel",
                 "KnowledgeIndexPanel",
             },
             animated_cards,
@@ -4000,7 +4008,7 @@ try {{
             for element in root.iter()
             if "TabIndex" in element.attrib
         )
-        self.assertEqual(list(range(39)), tab_indices)
+        self.assertEqual(list(range(43)), tab_indices)
         expected_tab_order = {
             "OverviewNavButton": 0,
             "EnvironmentNavButton": 1,
@@ -4031,16 +4039,20 @@ try {{
             "KnowledgeSourcesList": 26,
             "DeleteKnowledgeSourceButton": 27,
             "RescanKnowledgeSourcesButton": 28,
-            "KnowledgeIndexActionButton": 29,
-            "RefreshCacheButton": 30,
-            "CacheCategoriesList": 31,
-            "CleanupScreenshotsButton": 32,
-            "ReportPathTextBox": 33,
-            "RescanButton": 34,
-            "RepairButton": 35,
-            "OpenReportButton": 36,
-            "CopyReportButton": 37,
-            "LaunchButton": 38,
+            "ImportKnowledgeAssetButton": 29,
+            "KnowledgeAssetsList": 30,
+            "KnowledgeAssetActionButton": 31,
+            "DeleteKnowledgeAssetButton": 32,
+            "KnowledgeIndexActionButton": 33,
+            "RefreshCacheButton": 34,
+            "CacheCategoriesList": 35,
+            "CleanupScreenshotsButton": 36,
+            "ReportPathTextBox": 37,
+            "RescanButton": 38,
+            "RepairButton": 39,
+            "OpenReportButton": 40,
+            "CopyReportButton": 41,
+            "LaunchButton": 42,
         }
         named_tab_order = {
             element.attrib[xaml_name]: int(element.attrib["TabIndex"])
@@ -4988,6 +5000,13 @@ Add-Type -TypeDefinition $source -Language CSharp
             "ImportKnowledgeFolderButton",
             "KnowledgeSourcesList",
             "DeleteKnowledgeSourceButton",
+            "KnowledgeAssetsPanel",
+            "KnowledgeAssetsSummaryText",
+            "ImportKnowledgeAssetButton",
+            "KnowledgeAssetsList",
+            "KnowledgeAssetProgressText",
+            "KnowledgeAssetActionButton",
+            "DeleteKnowledgeAssetButton",
             "CacheCategoriesList",
             "RefreshCacheButton",
         ):
