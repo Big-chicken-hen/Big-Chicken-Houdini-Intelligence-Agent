@@ -26,7 +26,10 @@ POWERSHELL_INSTALLER_PATH = (
     / "launcher"
     / "Install-HiaEmbedding.ps1"
 )
-RUNTIME_TEST_ROOT = REPOSITORY_ROOT
+RUNTIME_TEST_ROOT = (
+    REPOSITORY_ROOT / ".runtime" / "test-runs" / "hia-embedding-installer"
+)
+RUNTIME_TEST_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _load_installer() -> types.ModuleType:
@@ -42,6 +45,38 @@ def _load_installer() -> types.ModuleType:
 
 def _ps_literal(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _venv_transaction_root(project_root: Path, install_id: str) -> Path:
+    return (
+        project_root
+        / ".runtime"
+        / "v"
+        / install_id[:16]
+    )
+
+
+def _venv_transaction_path(
+    project_root: Path,
+    install_id: str,
+    leaf: str,
+) -> Path:
+    physical_leaf = {
+        "staging": "s",
+        "backup": "b",
+        "failed": "f",
+    }[leaf]
+    return _venv_transaction_root(project_root, install_id) / physical_leaf
+
+
+def _venv_transaction_paths(project_root: Path, leaf: str) -> list[Path]:
+    physical_leaf = {
+        "staging": "s",
+        "backup": "b",
+        "failed": "f",
+    }[leaf]
+    root = project_root / ".runtime" / "v"
+    return list(root.glob(f"*/{physical_leaf}")) if root.is_dir() else []
 
 
 installer = _load_installer()
@@ -123,6 +158,286 @@ class EmbeddingInstallerTransactionTests(unittest.TestCase):
                     "Windows file symlink creation requires elevated privilege"
                 )
             raise
+
+    def test_powershell_uv_download_is_bounded_and_model_log_is_formatted(
+        self,
+    ) -> None:
+        source = POWERSHELL_INSTALLER_PATH.read_text(encoding="utf-8")
+        for required in (
+            "$script:HiaUvDownloadTimeoutSeconds = 120",
+            "$script:HiaUvDownloadProcessTimeoutSeconds = 135",
+            "$script:HiaUvDownloadAttempts = 3",
+            "-TimeoutSeconds (",
+            "$script:HiaUvDownloadProcessTimeoutSeconds",
+            "Remove-HiaEmbeddingInstallerPartial -Path $installerPath",
+        ):
+            self.assertIn(required, source)
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(POWERSHELL_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'installer did not parse' }}
+$definitions = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -in @(
+        'Format-HiaEmbeddingModelSelectionLog',
+        'Format-HiaEmbeddingUvDownloadAttemptLog',
+        'Format-HiaEmbeddingUvDownloadRetryLog',
+        'Format-HiaEmbeddingUvDownloadFailure'
+    )
+}}, $true))
+if ($definitions.Count -ne 4) {{ throw 'installer log formatters are missing' }}
+foreach ($definition in $definitions) {{
+    Invoke-Expression $definition.Extent.Text
+}}
+[pscustomobject]@{{
+    model = Format-HiaEmbeddingModelSelectionLog `
+        -ModelId 'Qwen/Qwen3-Embedding-0.6B' `
+        -Revision 'main' `
+        -ModelDirectory 'E:\\项目 空格\\.runtime\\models\\qwen' `
+        -RepositorySize '1.21'
+    attempt = Format-HiaEmbeddingUvDownloadAttemptLog `
+        -Attempt 2 -Attempts 3 -TimeoutSeconds 120
+    retry = Format-HiaEmbeddingUvDownloadRetryLog `
+        -Attempt 2 -Failure 'connection closed' -DelaySeconds 4
+    failure = Format-HiaEmbeddingUvDownloadFailure `
+        -Attempts 3 `
+        -Failure 'connection closed' `
+        -InstallerUri 'https://astral.sh/uv/0.11.29/install.ps1' `
+        -InstallRoot 'E:\\项目 空格\\.runtime\\uv'
+}} | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        messages = json.loads(completed.stdout.strip())
+        for message in messages.values():
+            self.assertNotIn("{0}", message)
+            self.assertNotIn("{1}", message)
+            self.assertNotIn("{2}", message)
+            self.assertNotIn("{3}", message)
+        self.assertIn("Qwen/Qwen3-Embedding-0.6B", messages["model"])
+        self.assertIn("revision main", messages["model"])
+        self.assertIn("1.21 GB", messages["model"])
+        self.assertEqual(
+            "uv bootstrap download attempt 2/3; timeout 120s.",
+            messages["attempt"],
+        )
+        self.assertIn(
+            "attempt 2 failed: connection closed. Retrying in 4s.",
+            messages["retry"],
+        )
+        self.assertIn(
+            "failed after 3 bounded attempts: connection closed",
+            messages["failure"],
+        )
+
+    def test_python_and_powershell_share_short_transaction_paths(
+        self,
+    ) -> None:
+        install_id = "0123456789abcdef" * 2
+        project_root = (
+            REPOSITORY_ROOT
+            / ".runtime"
+            / ("事务 路径 " + ("x" * 40))
+        )
+        python_paths = installer._venv_transaction_paths(
+            project_root,
+            install_id,
+        )
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(POWERSHELL_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'installer did not parse' }}
+$definition = $ast.Find(
+    {{
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-HiaKnowledgeTransactionPaths'
+    }},
+    $true
+)
+Invoke-Expression $definition.Extent.Text
+Get-HiaKnowledgeTransactionPaths `
+    -ProjectRoot {_ps_literal(project_root)} `
+    -InstallId '{install_id}' |
+    ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+        powershell_paths = json.loads(completed.stdout.strip())
+        for name in ("transaction_root", "staging", "backup", "failed"):
+            self.assertEqual(
+                os.path.normcase(str(python_paths[name])),
+                os.path.normcase(powershell_paths[name]),
+            )
+
+        package_tail = Path(
+            "Lib/site-packages/transformers/models/"
+            "audio_spectrogram_transformer/"
+            "configuration_audio_spectrogram_transformer.py"
+        )
+        old_staging = (
+            project_root
+            / ".runtime"
+            / "toolchains"
+            / "hia-embedding"
+            / f".venv-staging-{install_id}"
+        )
+        self.assertGreaterEqual(
+            len(str(old_staging / package_tail)),
+            260,
+        )
+        self.assertLess(
+            len(str(python_paths["staging"] / package_tail)),
+            260,
+        )
+        cleanup_tail = Path(
+            "Lib/site-packages/torch/include/ATen/native/transformers/"
+            "cuda/mem_eff_attention/iterators/"
+            "predicated_tile_access_iterator_residual_last.h"
+        )
+        intermediate_backup = (
+            project_root
+            / ".runtime"
+            / "venv-txn"
+            / install_id[:16]
+            / "backup"
+        )
+        self.assertGreaterEqual(
+            len(str(intermediate_backup / cleanup_tail)),
+            260,
+        )
+        self.assertLess(
+            len(str(python_paths["backup"] / cleanup_tail)),
+            260,
+        )
+
+    def test_smoke_preserves_stable_worker_error_code_and_message(
+        self,
+    ) -> None:
+        worker_module = types.ModuleType("hia_embedding_worker.worker")
+
+        class FailingWorker:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle(
+                self,
+                _request: object,
+            ) -> tuple[dict[str, object], bool]:
+                self.calls += 1
+                if self.calls == 1:
+                    return {"ok": True, "result": {}}, False
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "MODEL_RUNTIME_UNAVAILABLE",
+                        "message": (
+                            "The local embedding runtime is unavailable"
+                        ),
+                    },
+                }, False
+
+        worker_module.EmbeddingWorker = FailingWorker
+        package = types.ModuleType("hia_embedding_worker")
+        package.__path__ = []  # type: ignore[attr-defined]
+        plan = {
+            "contract_version": 1,
+            "profile_id": "qwen3-embedding-0.6b",
+            "model_id": "Qwen/Qwen3-Embedding-0.6B",
+            "revision": "main",
+            "model_dir": str(self.model_dir),
+            "dimension": 1024,
+        }
+        with (
+            mock.patch.object(installer, "_assert_download_environment"),
+            mock.patch.object(
+                installer,
+                "_is_ordinary_directory",
+                return_value=True,
+            ),
+            mock.patch.object(
+                installer,
+                "_read_matching_manifest",
+                return_value=True,
+            ),
+            mock.patch.object(
+                installer,
+                "_model_payload_is_complete",
+                return_value=True,
+            ),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "hia_embedding_worker": package,
+                    "hia_embedding_worker.worker": worker_module,
+                },
+            ),
+        ):
+            with self.assertRaisesRegex(
+                installer.InstallerError,
+                (
+                    "MODEL_RUNTIME_UNAVAILABLE: The local embedding "
+                    "runtime is unavailable"
+                ),
+            ):
+                installer.smoke_selected_model(
+                    plan,
+                    staging_install_id="a" * 32,
+                    device="cuda",
+                )
 
     def test_failed_materialization_leaves_canonical_clean_and_retry_succeeds(
         self,
@@ -350,7 +665,12 @@ class EmbeddingInstallerTransactionTests(unittest.TestCase):
     ) -> None:
         install_id = uuid.uuid4().hex
         toolchain = self.sandbox / "toolchains" / "hia-embedding"
-        staging = toolchain / f".venv-staging-{install_id}"
+        toolchain.mkdir(parents=True)
+        staging = _venv_transaction_path(
+            self.sandbox,
+            install_id,
+            "staging",
+        )
         worker = staging / "Scripts" / "python.exe"
         worker.parent.mkdir(parents=True)
         worker.write_bytes(b"staged python")
@@ -370,6 +690,7 @@ class EmbeddingInstallerTransactionTests(unittest.TestCase):
         plan = {
             "layout": {
                 "toolchain_root": str(toolchain),
+                "venv_root": str(self.sandbox / ".venv"),
                 "worker_python": str(
                     self.sandbox / ".venv" / "Scripts" / "python.exe"
                 ),
@@ -403,7 +724,11 @@ class EmbeddingInstallerTransactionTests(unittest.TestCase):
         )
         canonical = project_root / ".venv"
         install_id = uuid.uuid4().hex
-        backup = toolchain / f".venv-backup-{install_id}"
+        backup = _venv_transaction_path(
+            project_root,
+            install_id,
+            "backup",
+        )
         canonical.mkdir(parents=True)
         backup.mkdir(parents=True)
         marker = {
@@ -509,10 +834,11 @@ $rollback = Undo-HiaKnowledgeManagedVenvPublication `
     ) -> None:
         project_root = self.sandbox / "cleanup-project"
         install_id = uuid.uuid4().hex
-        toolchain = (
-            project_root / ".runtime" / "toolchains" / "hia-embedding"
+        staging = _venv_transaction_path(
+            project_root,
+            install_id,
+            "staging",
         )
-        staging = toolchain / f".venv-staging-{install_id}"
         (staging / "nested").mkdir(parents=True)
         (staging / "nested" / "package.bin").write_bytes(b"managed")
         canonical = project_root / ".venv"
@@ -632,6 +958,96 @@ foreach ($candidate in @($denied)) {{
             (outside / "keep.txt").read_text(encoding="utf-8"),
         )
 
+    def test_managed_venv_tree_retries_a_vanished_child_race(
+        self,
+    ) -> None:
+        project_root = self.sandbox / "enumeration-race"
+        venv_root = project_root / ".runtime" / "venv-race"
+        nested = venv_root / "Lib" / "site-packages" / "package"
+        nested.mkdir(parents=True)
+        (nested / "module.py").write_text(
+            "VALUE = 1\n",
+            encoding="utf-8",
+        )
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(POWERSHELL_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+foreach ($name in @(
+    'Assert-HiaKnowledgeProjectDirectory',
+    'Assert-HiaKnowledgeManagedVenvTree'
+)) {{
+    $definition = $ast.Find(
+        {{
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $name
+        }},
+        $true
+    )
+    Invoke-Expression $definition.Extent.Text
+}}
+$script:InjectedMissingChild = $false
+function Get-ChildItem {{
+    [CmdletBinding()]
+    param(
+        [string]$LiteralPath,
+        [switch]$Force
+    )
+    if (-not $script:InjectedMissingChild) {{
+        $script:InjectedMissingChild = $true
+        throw [System.Management.Automation.ItemNotFoundException]::new(
+            'injected vanished package child'
+        )
+    }}
+    Microsoft.PowerShell.Management\Get-ChildItem `
+        -LiteralPath $LiteralPath `
+        -Force `
+        -ErrorAction Stop
+}}
+$validated = Assert-HiaKnowledgeManagedVenvTree `
+    -ProjectRoot {_ps_literal(project_root)} `
+    -Path {_ps_literal(venv_root)}
+[pscustomobject]@{{
+    retried = $script:InjectedMissingChild
+    validated = $validated
+}} | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+        result = json.loads(completed.stdout.strip())
+        self.assertTrue(result["retried"], result)
+        self.assertEqual(
+            os.path.normcase(str(venv_root.resolve())),
+            os.path.normcase(result["validated"]),
+        )
+
     def test_cleanup_rejects_reparse_ancestor_without_writes(self) -> None:
         project_root = self.sandbox / "reparse-cleanup-project"
         project_root.mkdir()
@@ -639,9 +1055,9 @@ foreach ($candidate in @($denied)) {{
         install_id = uuid.uuid4().hex
         staging = (
             outside_runtime
-            / "toolchains"
-            / "hia-embedding"
-            / f".venv-staging-{install_id}"
+            / "v"
+            / install_id[:16]
+            / "s"
         )
         staging.mkdir(parents=True)
         sentinel = staging / "keep.txt"
@@ -698,7 +1114,7 @@ $rejected = $false
 try {{
     Remove-HiaKnowledgeInstallerOwnedDirectory `
         -ProjectRoot {_ps_literal(project_root)} `
-        -Path {_ps_literal(project_root / '.runtime' / 'toolchains' / 'hia-embedding' / f'.venv-staging-{install_id}')} `
+        -Path {_ps_literal(_venv_transaction_path(project_root, install_id, 'staging'))} `
         -Kind 'staging' `
         -InstallId {_ps_literal(install_id)} | Out-Null
 }} catch {{
@@ -742,17 +1158,31 @@ $rejected | ConvertTo-Json -Compress
             "home = Z:\\python\nversion = 3.10.11\n",
             encoding="utf-8",
         )
-        backup = toolchain / f".venv-backup-{install_id}"
-        backup.mkdir()
+        backup = _venv_transaction_path(
+            project_root,
+            install_id,
+            "backup",
+        )
+        backup.mkdir(parents=True)
         sentinel = backup / "keep.txt"
         sentinel.write_text("backup", encoding="utf-8")
         transaction = {
             "install_id": install_id,
             "staging_root": str(
-                toolchain / f".venv-staging-{install_id}"
+                _venv_transaction_path(
+                    project_root,
+                    install_id,
+                    "staging",
+                )
             ),
             "backup_root": str(backup),
-            "failed_root": str(toolchain / f".venv-failed-{install_id}"),
+            "failed_root": str(
+                _venv_transaction_path(
+                    project_root,
+                    install_id,
+                    "failed",
+                )
+            ),
             "legacy_root": str(legacy),
         }
         script = f"""
@@ -889,13 +1319,15 @@ function Test-HiaKnowledgeManagedVenv {
     if (
         $RequireParser -and
         $script:HiaFlowFailureStage -eq 'pypdf' -and
-        $VenvRoot -match '\\.venv-staging-'
+        $VenvRoot -match '\\v\\[a-f0-9]{16}\\s$'
     ) {
         Add-HiaFlowCall -Name 'staging-pypdf-verify-failed'
         return $false
     }
     if ($RequireWorker) {
-        $runtimeVerifyName = if ($VenvRoot -match '\\.venv-staging-') {
+        $runtimeVerifyName = if (
+            $VenvRoot -match '\\v\\[a-f0-9]{16}\\s$'
+        ) {
             'staging-runtime-verify'
         } else {
             'published-runtime-verify'
@@ -903,7 +1335,7 @@ function Test-HiaKnowledgeManagedVenv {
         Add-HiaFlowCall -Name $runtimeVerifyName
         if (
             $script:HiaFlowFailureStage -eq 'publish-validation' -and
-            $VenvRoot -notmatch '\\.venv-staging-'
+            $VenvRoot -notmatch '\\v\\[a-f0-9]{16}\\s$'
         ) {
             return $false
         }
@@ -958,7 +1390,7 @@ function Get-HiaEmbeddingTorchProbe {
     )
     $installed = -not (
         $script:HiaFlowFailureStage -eq 'torch-worker' -and
-        $PythonExe -match '\\.venv-staging-'
+        $PythonExe -match '\\v\\[a-f0-9]{16}\\s\\'
     )
     $cuda = (
         $installed -and
@@ -1335,9 +1767,27 @@ function Invoke-HiaEmbeddingChildProcess {
             result["uv_cache_cleanup_candidate"],
         )
         self.assertTrue((canonical / ".hia-managed-venv.json").is_file())
-        self.assertEqual([], list(toolchain.glob(".venv-staging-*")))
-        self.assertEqual([], list(toolchain.glob(".venv-backup-*")))
-        self.assertEqual([], list(toolchain.glob(".venv-failed-*")))
+        self.assertEqual(
+            [],
+            _venv_transaction_paths(canonical.parent, "staging"),
+        )
+        self.assertEqual(
+            [],
+            _venv_transaction_paths(canonical.parent, "backup"),
+        )
+        self.assertEqual(
+            [],
+            _venv_transaction_paths(canonical.parent, "failed"),
+        )
+        transaction_base = (
+            canonical.parent / ".runtime" / "v"
+        )
+        self.assertEqual(
+            [],
+            list(transaction_base.iterdir())
+            if transaction_base.is_dir()
+            else [],
+        )
         first_model = calls.index("model-download")
         second_model = calls.index("model-download", first_model + 1)
         smoke = calls.index("model-smoke")
@@ -1428,7 +1878,10 @@ function Invoke-HiaEmbeddingChildProcess {
                 self.assertIn(diagnostic, completed.stderr.lower())
                 self.assertTrue(root_venv.is_dir())
                 self.assertNotIn("staging-venv-create", calls)
-                self.assertEqual([], list(toolchain.glob(".venv-staging-*")))
+                self.assertEqual(
+                    [],
+                    _venv_transaction_paths(root_venv.parent, "staging"),
+                )
 
     def test_post_publish_validation_failure_restores_and_preserves_backup(
         self,
@@ -1445,8 +1898,8 @@ function Invoke-HiaEmbeddingChildProcess {
             "healthy",
             (canonical / "old-environment.txt").read_text(encoding="utf-8"),
         )
-        backups = list(toolchain.glob(".venv-backup-*"))
-        failed = list(toolchain.glob(".venv-failed-*"))
+        backups = _venv_transaction_paths(canonical.parent, "backup")
+        failed = _venv_transaction_paths(canonical.parent, "failed")
         self.assertEqual(1, len(backups))
         self.assertEqual(1, len(failed))
         self.assertEqual(
@@ -1582,7 +2035,7 @@ function Invoke-HiaEmbeddingChildProcess {
         toolchain = (
             project_root / ".runtime" / "toolchains" / "hia-embedding"
         )
-        isolated = list(toolchain.glob(".venv-failed-*"))
+        isolated = _venv_transaction_paths(project_root, "failed")
         self.assertEqual(1, len(isolated))
         isolated_marker = json.loads(
             (
@@ -1591,13 +2044,20 @@ function Invoke-HiaEmbeddingChildProcess {
         )
         new_install_id = isolated_marker["install_id"]
         self.assertNotEqual(old_install_id, new_install_id)
-        self.assertEqual(f".venv-failed-{new_install_id}", isolated[0].name)
+        self.assertEqual("f", isolated[0].name)
+        self.assertEqual(new_install_id[:16], isolated[0].parent.name)
         self.assertEqual(
             stage,
             (isolated[0] / "new-install.txt").read_text(encoding="utf-8"),
         )
-        self.assertEqual([], list(toolchain.glob(".venv-backup-*")))
-        self.assertEqual([], list(toolchain.glob(".venv-staging-*")))
+        self.assertEqual(
+            [],
+            _venv_transaction_paths(project_root, "backup"),
+        )
+        self.assertEqual(
+            [],
+            _venv_transaction_paths(project_root, "staging"),
+        )
 
         calls = (
             project_root / "flow-child-calls.txt"

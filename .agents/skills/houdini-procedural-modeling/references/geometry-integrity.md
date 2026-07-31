@@ -1,6 +1,6 @@
 # Geometry Integrity
 
-Use this workflow only when penetration, overlap, or self-intersection could affect a substantial asset. Keep it bounded, evidence-driven, and subordinate to the asset's intended construction.
+Use this workflow only when contact, clearance, penetration, overlap, or self-intersection could affect an asset or multi-part assembly, including a small assembly whose correctness depends on those relationships. Keep it bounded, evidence-driven, and subordinate to the intended construction. An isolated primitive or unrelated parameter edit does not load this workflow.
 
 ## Bound the question
 
@@ -13,7 +13,8 @@ Use this workflow only when penetration, overlap, or self-intersection could aff
 
 1. Use AABB or packed bounds as a broad phase to reject non-overlapping candidates. Treat bound overlap as a candidate, not proof of penetration.
 2. For repeated instances, inspect source bounds and point or packed placement, orientation, and scale before unpacking detailed geometry. Narrow the suspect instance pairs first.
-3. Run precise checks only on the remaining region, object pair, primitive set, or frame interval. Use a bounded Houdini-node or HOM diagnostic through `hia_execute_hom` when existing summaries cannot establish the result.
+3. For an attached linear or path component, measure both endpoint-to-host relationships, its allowed span or bounding range, and the full segment or envelope against neighboring parts. Endpoint contact alone does not prove support or clearance along the component.
+4. Run precise checks only on the remaining region, object pair, primitive set, or frame interval. Use a bounded Houdini-node or demonstrably non-mutating HOM diagnostic through `hia_execute_hom` when existing summaries cannot establish the result.
 
 ## Match the detector to the geometry
 

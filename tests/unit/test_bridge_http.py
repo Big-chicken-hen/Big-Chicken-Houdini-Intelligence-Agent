@@ -267,10 +267,11 @@ class BridgeHTTPTests(unittest.TestCase):
             ),
         ):
             stale = application.houdini_mcp_status()
-        self.assertFalse(stale["available"])
-        self.assertEqual("STALE_HOUDINI_RUNTIME", stale["identity_error_code"])
+        self.assertTrue(stale["available"])
         self.assertEqual(stale_identity, stale["runtime_identity"])
-        self.assertTrue(stale["restart_required"])
+        self.assertEqual("source_update_available", stale["identity_status"])
+        self.assertNotIn("identity_error_code", stale)
+        self.assertFalse(stale["restart_required"])
 
         invalid_payload = {
             "protocol": "hia-mcp-v2/1",

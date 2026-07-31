@@ -9,6 +9,7 @@ generating HOM Python.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -33,6 +34,16 @@ def _object(
 STRING = {"type": "string", "maxLength": 4096}
 PATH = {"type": "string", "maxLength": 4096}
 PATHS = {"type": "array", "items": PATH, "maxItems": 64}
+CAPTURE_VALIDATION_PATHS = {
+    "type": "array",
+    "items": PATH,
+    "maxItems": 16,
+}
+EXPECTED_DELETION_PATHS = {
+    "type": "array",
+    "items": PATH,
+    "maxItems": 1_024,
+}
 QUERY = {"type": "string", "maxLength": 512}
 QUERIES = {"type": "array", "items": QUERY, "minItems": 1, "maxItems": 16}
 OFFSET = {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}
@@ -117,7 +128,14 @@ SEMANTIC_CHECKS = {
 
 EXPERIMENT_PARAMETERS = {
     "type": "object",
-    "additionalProperties": True,
+    "additionalProperties": {
+        "anyOf": [
+            {"type": "boolean"},
+            {"type": "integer"},
+            {"type": "number"},
+            {"type": "string", "maxLength": 4096},
+        ],
+    },
     "description": (
         "Expanded absolute hou.Parm paths mapped to temporary scalar values. "
         "baseline.parameters may be empty to use the current scene; candidate "
@@ -327,9 +345,10 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_inspect",
         "scene_perception",
-        "Inspect paths or the current selection in one bounded call: types, parameters, inputs/outputs, flags, errors, geometry hints, and a finite child graph. The evidence view adds compact upstream, public-control/reference, material-entry, cook/message, and high-confidence network-quality facts; its notices are evidence for Codex review, not proof of subjective quality. Use filters instead of dumping the scene.",
+        "Inspect one path, multiple paths, or the current selection in one bounded call: types, parameters, inputs/outputs, flags, errors, geometry hints, and a finite child graph. Use path for one target or paths for a batch, never both. Missing batch paths are returned as bounded evidence without discarding records for paths that still exist. The evidence view adds compact upstream, public-control/reference, material-entry, cook/message, and high-confidence network-quality facts; its notices are evidence for Codex review, not proof of subjective quality. Use filters instead of dumping the scene.",
         _object(
             {
+                "path": PATH,
                 "paths": PATHS,
                 "use_selection": {"type": "boolean", "default": True},
                 "depth": {"type": "integer", "minimum": 0, "maximum": 3, "default": 0},
@@ -339,7 +358,7 @@ TOOL_SPECS = (
                         "type": "string",
                         "enum": ["parameters", "connections", "flags", "errors", "geometry", "children", "evidence"],
                     },
-                    "maxItems": 6,
+                    "maxItems": 7,
                 },
                 "query": QUERY,
                 "offset": OFFSET,
@@ -396,7 +415,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_geometry_summary",
         "geometry_understanding",
-        "Summarize geometry for several nodes: bounds, point/vertex/primitive counts, groups, attributes, primitive kinds, packed data, volumes, instances, topology hints, and cook errors.",
+        "Summarize geometry for several nodes: bounds, point/vertex/primitive counts, groups, attributes, primitive kinds, packed data, volumes, instances, topology hints, and cook errors. Bounds and point samples are factual hints, not proof of intersection, endpoint clearance, or subjective shape; measure an explicit spatial constraint with one short read-only HOM batch over named outputs.",
         _object(
             {
                 "paths": PATHS,
@@ -406,6 +425,7 @@ TOOL_SPECS = (
                 "limit": LIMIT,
             }
         ),
+        aliases=("modeling", "model", "建模", "几何建模"),
     ),
     ToolSpec(
         "hia_material_render_summary",
@@ -473,7 +493,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_execute_hom",
         "hom_execution",
-        "Execute one Codex-generated Python/HOM batch in the current Houdini UI main thread. Prefer modifying suitable existing nodes, then installed native Houdini nodes and parameter networks, using short HOM batches to orchestrate them; use Python SOP/script or direct code-built geometry only when no reasonable native node solution exists, explaining that exception in task. Raw script remains the primary write interface; optional task/mutable_root/protected_paths/expected_outputs/checks form a lightweight evidence envelope, not an IR or security sandbox. The batch is precompiled and runs inside one Houdini undo group. The runtime requests Undo only for a HOM exception or an observed requested validation, scope, or deletion failure, and only undoes when it can prove the batch's own undo item; unknown or partial evidence and NO_OBSERVED_EFFECT do not trigger Undo. Read rollback.status and the failure's automatic_retry_safe flag: only a verified rolled-back batch permits one corrected bounded retry without first inspecting the scene. Verification requires both the Undo stack and the HIP dirty state to match their pre-batch values. Timeouts, unverified rollback, and external file/render side effects are not automatic-retry safe. expected_outputs adds only critical-path existence and node-error checks; empty-output, geometry-summary, semantic, and fresh-cook validation run only when explicitly requested. Default diffing is targeted: predeclare exact diff_paths or call hia_mark_changed(path) before the first edit; only an explicit diff_root_path expands to a bounded network scan. Results include compact before/after local-network facts, target/connection/control/material/cook/message/scope postconditions, requested fresh output validation, rollback evidence, and a machine-fact execution trace under .runtime. postconditions.status is passed only for explicitly requested, fully observed structural assertions; a bare successful script is not result validation, and visual/render requirements remain unproven until separately observed. Visual or render proof is never fabricated or captured automatically; use the existing capture/render inspection tools when the original request needs it. Scene writes are bound to the launcher session, Houdini process, and loaded executor source; a changed or stale runtime rejects the write before submission with restart_required while read-only tools remain available. Local knowledge remains an optional single batched lookup and is not an execution gate. timeout_seconds is a client wait budget, not a HOM kill deadline; a timeout after network I/O begins may have unknown execution state and must not be retried automatically. An optional checkpoint_label saves one Houdini backup only after a confirmed successful change, preferring the safely saved HIP's .hia/checkpoints directory and otherwise using the launcher-session fallback.",
+        "Execute one Codex-generated Python/HOM batch in the current Houdini UI main thread. Prefer modifying suitable existing nodes, then installed native Houdini nodes and parameter networks, using short HOM batches to orchestrate them; use Python SOP/script or direct code-built geometry only when no reasonable native node solution exists, explaining that exception in task. Raw script remains the primary write interface; optional task/mutable_root/protected_paths/expected_outputs/checks form a lightweight evidence envelope, not an IR or security sandbox. The batch is precompiled and uses one Houdini undo group when available; missing or disabled undo is reported and does not block execution. The runtime requests Undo only for a HOM exception, an observed scope violation, or an undeclared deletion, and only undoes when it can prove the batch's own undo item. Declaring a parent in expected_deletions also covers its automatically deleted descendants; do not enumerate internal child nodes. Requested validation failures, a missing expected deletion, unknown or partial evidence, and NO_OBSERVED_EFFECT remain postcondition evidence; they do not become tool errors or trigger Undo. Read rollback.status and the failure's automatic_retry_safe flag, but never repeat the identical failing batch automatically. Only a verified rolled-back batch permits one corrected bounded retry without first inspecting the scene; otherwise inspect or diff and then submit a corrected batch. Dirty mismatch or unavailability leaves rollback not_proven but is advisory for subsequent Goal work; never save or reload the HIP to fake a clean state. Timeouts, unverified rollback, and external file/render side effects are not automatic-retry safe. expected_outputs adds only critical-path existence and node-error checks; empty-output, geometry-summary, semantic, and fresh-cook validation run only when explicitly requested. Default diffing is targeted: predeclare exact diff_paths or call hia_mark_changed(path) before the first edit; only an explicit diff_root_path expands to a bounded network scan. Results include compact before/after local-network facts, target/connection/control/material/cook/message/scope postconditions, requested fresh output validation, rollback evidence, and a machine-fact execution trace under .runtime. postconditions.status is passed only for explicitly requested, fully observed structural assertions; a bare successful script is not result validation, and visual/render requirements remain unproven until separately observed. Visual or render proof is never fabricated or captured automatically; use the existing capture/render inspection tools when the original request needs it. Scene writes remain bound to the launcher session, Houdini process, and executor module path so a different runtime is rejected before submission. A newer executor source file on disk is only advisory: the write continues against the version already loaded in the same Houdini session, and restart is needed only to validate the newer disk source. Local knowledge remains an optional single batched lookup and is not an execution gate. timeout_seconds is a client wait budget, not a HOM kill deadline; a timeout after network I/O begins may have unknown execution state and must not be retried automatically. An optional checkpoint_label saves one Houdini backup only after a confirmed successful change, preferring the safely saved HIP's .hia/checkpoints directory and otherwise using the launcher-session fallback.",
         _object(
             {
                 "script": {"type": "string", "minLength": 1, "maxLength": 524_288},
@@ -481,7 +501,7 @@ TOOL_SPECS = (
                 "mutable_root": PATH,
                 "protected_paths": PATHS,
                 "expected_outputs": PATHS,
-                "expected_deletions": PATHS,
+                "expected_deletions": EXPECTED_DELETION_PATHS,
                 "checks": VALIDATION_CHECKS,
                 "semantic_checks": SEMANTIC_CHECKS,
                 "fresh_validation": {"type": "boolean", "default": True},
@@ -498,12 +518,20 @@ TOOL_SPECS = (
             required=("script",),
         ),
         read_only=False,
-        aliases=("checkpoint", "检查点", "备份"),
+        aliases=(
+            "checkpoint",
+            "检查点",
+            "备份",
+            "modeling",
+            "model",
+            "建模",
+            "几何建模",
+        ),
     ),
     ToolSpec(
         "hia_run_effect_experiment",
         "effect_experiment",
-        "Run one bounded, temporary, domain-neutral effect comparison in the current Houdini UI session. Preflight a target network and every expanded scalar parameter path before any write, then evaluate one baseline plus two or three named candidates from the same baseline over an inclusive frame range. Explicit cache-reset button parameters are the only cache-clear evidence; force cooking alone is never reported as a reset. Each candidate advances frames sequentially, captures every requested sample with one locked camera/display/framing signature and one derived or requested preview resolution, and returns actual parameter readback, per-frame cook/messages/metrics, embedded-PNG contact-sheet evidence, expected-versus-unexpected deletions, and explicit restoration proof. It never scores candidates, builds EffectSpec, uses PDG/Wedge, or performs knowledge search.",
+        "Run one bounded, temporary, domain-neutral effect comparison in the current Houdini UI session. Preflight a target network and every expanded scalar parameter path before any write, then evaluate one baseline plus two or three named candidates from the same baseline over an inclusive frame range. Explicit cache-reset button parameters are the only cache-clear evidence; force cooking alone is never reported as a reset. Each candidate advances frames sequentially, captures every requested sample with one locked camera/display/framing signature and one derived or requested preview resolution, and returns actual parameter readback, per-frame cook/messages/metrics, embedded-PNG contact-sheet evidence, expected-versus-unexpected deletions, and explicit restoration proof. timeout_seconds is the same 1-300 second client wait budget used by batch HOM; it does not kill work already running on Houdini's UI thread. It never scores candidates, builds EffectSpec, uses PDG/Wedge, or performs knowledge search.",
         _object(
             {
                 "target_network": PATH,
@@ -598,6 +626,12 @@ TOOL_SPECS = (
                     "items": PATH,
                     "maxItems": 16,
                 },
+                "timeout_seconds": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "default": 60,
+                },
             },
             required=(
                 "target_network",
@@ -612,13 +646,13 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_scene_diff",
         "debug_validation",
-        "Capture, compare, list, or forget bounded scene snapshots to verify execution effects. Compare can classify expected deletions separately from unexpected deletions. Snapshots contain structural fingerprints, not HIP copies.",
+        "Capture, compare, list, or forget bounded scene snapshots to verify execution effects. Compare classifies expected deletions separately from unexpected deletions; a declared parent covers its deleted descendants. Snapshots contain structural fingerprints, not HIP copies.",
         _object(
             {
                 "action": {"type": "string", "enum": ["capture", "compare", "list", "forget"]},
                 "snapshot_id": {"type": "string", "maxLength": 128},
                 "root_path": PATH,
-                "expected_deletions": PATHS,
+                "expected_deletions": EXPECTED_DELETION_PATHS,
                 "limit": LIMIT,
             },
             required=("action",),
@@ -652,7 +686,7 @@ TOOL_SPECS = (
                     "maximum": 240,
                     "default": 1,
                 },
-                "validation_paths": PATHS,
+                "validation_paths": CAPTURE_VALIDATION_PATHS,
                 "expect_change": {
                     "type": "boolean",
                     "description": "For a multi-frame sequence, treat identical captured frames as a failed temporal validation. Defaults true for sequences.",
@@ -803,12 +837,38 @@ def validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
                     "INVALID_ARGUMENTS",
                     "Provide query, queries, card_id, or canonical_id",
                 )
+    if tool_name == "hia_inspect" and "path" in arguments and "paths" in arguments:
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            "Provide path or paths, not both",
+        )
     if tool_name == "hia_node_help" and "requests" in arguments:
         if set(arguments) != {"requests"}:
             raise InputError(
                 "INVALID_ARGUMENTS",
                 "Batch node help options belong inside each requests item",
             )
+    elif tool_name == "hia_node_help" and not (
+        str(arguments.get("node_path") or "").strip()
+        or str(arguments.get("node_type") or "").strip()
+    ):
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            "Provide node_path, category plus node_type, or node_type as Category/name",
+        )
+    if (
+        tool_name == "hia_scene_diff"
+        and arguments.get("action") in {"compare", "forget"}
+        and not str(arguments.get("snapshot_id") or "").strip()
+    ):
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            "snapshot_id is required for compare or forget",
+        )
+    if tool_name == "hia_capture_viewport":
+        _validate_capture_viewport(arguments)
+    if tool_name == "hia_run_effect_experiment":
+        _validate_effect_experiment(arguments)
     if tool_name == "hia_project_memory":
         _validate_project_memory(arguments)
     if tool_name in {"hia_validate", "hia_execute_hom"} and "semantic_checks" in arguments:
@@ -884,6 +944,81 @@ def _validate_semantic_checks(value: Any) -> None:
             )
 
 
+def _validate_capture_viewport(arguments: Mapping[str, Any]) -> None:
+    selectors = [
+        name for name in ("frame", "frames", "frame_range") if name in arguments
+    ]
+    if len(selectors) > 1:
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            "Provide only one of frame, frames, or frame_range",
+            {"fields": selectors},
+        )
+    if "frame_step" in arguments and "frame_range" not in arguments:
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            "frame_step is valid only with frame_range",
+        )
+
+
+def _validate_effect_experiment(arguments: Mapping[str, Any]) -> None:
+    baseline = arguments.get("baseline")
+    candidates = arguments.get("candidates")
+    variants = [
+        ("baseline", baseline, True),
+        *[
+            (f"candidates[{index}]", value, False)
+            for index, value in enumerate(candidates or [])
+        ],
+    ]
+    names: list[str] = []
+    paths: set[str] = set()
+    for field, raw, allow_empty in variants:
+        if not isinstance(raw, Mapping):
+            continue
+        name = str(raw.get("name") or ("baseline" if field == "baseline" else ""))
+        names.append(name.casefold())
+        parameters = raw.get("parameters")
+        if not isinstance(parameters, Mapping):
+            continue
+        if not parameters and not allow_empty:
+            raise InputError(
+                "INVALID_ARGUMENTS",
+                f"{field}.parameters must not be empty",
+            )
+        for path, value in parameters.items():
+            if (
+                not isinstance(path, str)
+                or not path.startswith("/")
+                or path == "/"
+                or "\x00" in path
+            ):
+                raise InputError(
+                    "INVALID_ARGUMENTS",
+                    f"{field}.parameters requires expanded absolute hou.Parm paths",
+                )
+            if (
+                value is None
+                or not isinstance(value, (str, bool, int, float))
+                or isinstance(value, float)
+                and not math.isfinite(value)
+                or isinstance(value, str)
+                and (len(value) > 4096 or "\x00" in value)
+            ):
+                raise InputError(
+                    "INVALID_ARGUMENTS",
+                    f"{field}.parameters[{path}] must be a scalar bool, int, finite float, or string",
+                )
+            paths.add(path)
+    if len(names) != len(set(names)):
+        raise InputError("INVALID_ARGUMENTS", "Variant names must be unique")
+    if not 1 <= len(paths) <= 16:
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            "The experiment must touch 1-16 parameters",
+        )
+
+
 def _validate_schema(value: Any, schema: Mapping[str, Any], *, path: str) -> None:
     expected = schema.get("type")
     if expected == "object":
@@ -943,6 +1078,8 @@ def _validate_length(value: Any, schema: Mapping[str, Any], path: str) -> None:
 
 
 def _validate_number(value: int | float, schema: Mapping[str, Any], path: str) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise InputError("INVALID_ARGUMENTS", f"{path} must be finite")
     if "minimum" in schema and value < schema["minimum"]:
         raise InputError("INVALID_ARGUMENTS", f"{path} is below its minimum")
     if "maximum" in schema and value > schema["maximum"]:

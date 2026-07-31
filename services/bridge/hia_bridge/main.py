@@ -354,7 +354,7 @@ def _codex_app_server_command(
             f"{server}.enabled=true",
             f"{server}.required=true",
             f"{server}.startup_timeout_sec=15",
-            f"{server}.tool_timeout_sec=65",
+            f"{server}.tool_timeout_sec=305",
             f"{server}.default_tools_approval_mode="
             + _toml_basic_string("approve"),
         ]

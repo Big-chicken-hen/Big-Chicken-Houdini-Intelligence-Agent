@@ -1,6 +1,6 @@
 ---
 name: houdini-procedural-modeling
-description: Procedural construction, substantial restructuring, and structural repair of complete, recognizable, editable Houdini assets. Use for nontrivial products, buildings, machines, props, environment modules, organic structures, parameterized asset families, converting a tangled model into a maintainable procedural network, or repairing substantial construction, host/dependency, sweep, geometry-integrity, or UV/coordinate failures in such assets. Pair with visual research for reference-driven construction. Do not use for one primitive, one parameter or connection, routine inspection, ordinary HOM errors, material-only or animation-only work, read-only review, or an explicitly requested blockout, proxy, placeholder, or technical test.
+description: Procedural construction, substantial restructuring, and structural repair of complete, recognizable, editable Houdini assets. Use for nontrivial products, buildings, machines, props, environment modules, organic structures, parameterized asset families, converting a tangled model into a maintainable procedural network, repairing substantial construction, host/dependency, sweep, geometry-integrity, or UV/coordinate failures, and a small multi-part assembly whose endpoints, support, contact, spacing, clearance, or nonintersection must be correct. Pair with visual research for reference-driven construction. Do not use for one primitive, one parameter or connection, routine inspection, ordinary HOM errors, material-only or animation-only work, read-only review, or an explicitly requested blockout, proxy, placeholder, or technical test.
 ---
 
 # Houdini Procedural Modeling
@@ -9,9 +9,9 @@ Build complete assets as readable procedural systems. More nodes do not make a m
 
 ## Route the request
 
-1. Interpret a request to generate a nontrivial named asset as a complete, structurally resolved, editable deliverable unless the user explicitly asks for a blockout, proxy, placeholder, or technical test. A stylized or low-poly final asset can still be complete.
+1. Interpret a request to generate a nontrivial named asset as a complete, structurally resolved, editable deliverable unless the user explicitly asks for a blockout, proxy, placeholder, or technical test. A stylized or low-poly final asset can still be complete. Treat every explicit negative constraint as a hard acceptance requirement on the resulting geometry and semantic role: changing the node, script, or construction method must not recreate a forbidden form as an equivalent stand-in, and only the user may relax that constraint or permit an approximation.
 2. Keep a single primitive, known parameter or connection change, routine inspection, and an ordinary HOM error Direct: execute without knowledge retrieval and run one necessary targeted validation. Do not require a Brief, external research, capture, or artifact review, and do not load this workflow for material-only, animation-only, or read-only review work.
-3. Treat a bounded familiar repair or restructuring as Focused and load only the one or two references or evidence steps that address its real uncertainty.
+3. Treat a bounded familiar repair or restructuring as Focused and load only the one or two references or evidence steps that address its real uncertainty. A small multi-part assembly whose completion depends on endpoints, hosts, support, contact, spacing, clearance, or nonintersection also needs relation-aware validation even when its construction is simple; this does not by itself require knowledge retrieval or external research.
 4. Treat a complete multi-subsystem asset, substantial dependency/UV/integrity rebuild, version-sensitive technique, high-cost construction, or simulation/cache handoff as Full and use the shared Brief and acceptance evidence selectively.
 5. When running as the Architect role, return the construction plan, HOM draft, risks, and validation advice only. Keep the Director as the sole writer of the current HIP.
 
@@ -22,7 +22,7 @@ Build complete assets as readable procedural systems. More nodes do not make a m
 - Read [modeling-judgment.md](references/modeling-judgment.md) to define identity, structural hierarchy, and the difference between a blockout and a complete asset.
 - Read [procedural-architecture.md](references/procedural-architecture.md) when choosing subsystems, representations, continuous paths, host dependencies, controls, repetition, performance strategy, or graph layout.
 - Read [modeling-validation.md](references/modeling-validation.md) before a substantial handoff or when deciding whether the model is genuinely complete.
-- Read [geometry-integrity.md](references/geometry-integrity.md) only when a scoped assembly, repeated placement, thin surface, self-intersection, animation, or simulation needs penetration diagnosis. Do not load it for a simple primitive, one parameter edit, or an ordinary API error.
+- Read [geometry-integrity.md](references/geometry-integrity.md) when a scoped assembly, including a small one, repeated placement, thin surface, self-intersection, animation, or simulation needs contact, clearance, penetration, or endpoint-envelope diagnosis. Do not load it for an isolated primitive, one parameter edit, or an ordinary API error.
 - Read [uv-and-surface-coordinates.md](references/uv-and-surface-coordinates.md) when image textures, decals, directional patterns, baking, or external delivery require validated UVs or an explicit alternative coordinate system.
 
 Keep references one level deep and do not load guidance unrelated to the current asset.
@@ -54,6 +54,8 @@ Require both relevant technical evidence and task-specific visual evidence befor
 
 Turn retrieved topology, attribute, dependency, placement, range, and version rules into explicit semantic expectations before a Focused or Full write. After execution, ask the current `hia_validate` semantic-expectation capability to test them through its live contract, then use only the other evidence needed by the claim. Node existence and an error-free cook do not prove the expected host relationship, group/attribute contract, placement range, or dependency update; report an unknown or not-proven result once as an unverified risk.
 
+When an assembly claim depends on attachment or fit, turn both endpoints, intended hosts, span or bounds, contact tolerance, minimum clearance, and forbidden intersection into task-specific numeric expectations. Use bounds only to narrow candidates, then a bounded native Houdini or demonstrably non-mutating HOM check for any precise spatial claim that the current validator does not observe. A clean cook or viewport image cannot prove nonintersection. Keep tolerances relative to the asset and feature scale, and mark the claim unverified when the required measurement is unavailable.
+
 For a complex visual asset, follow the stage-preview contract in `$houdini-visual-research`: use its risk-appropriate static or temporal preview evidence at meaningful milestones rather than capturing after every small edit, route the applicable modeling, network, or performance evidence to read-only `$houdini-artifact-review`, and let the Director apply only the selected highest-impact fix serially before the final completion claim.
 
 When geometry integrity is relevant, bound the check as described in [geometry-integrity.md](references/geometry-integrity.md) and recheck the same scope after any repair before claiming completion.
@@ -70,6 +72,7 @@ Report the asset root and outputs, subsystems, principal controls, construction 
 
 ## Guardrails
 
-- Do not finish a complex asset as a generic primitive assembly unless the user asked for a blockout.
+- Do not finish any requested final construction as a forbidden or generic primitive equivalent merely by changing its node type or authoring method; use a primitive blockout only when the user requested one.
+- Do not claim a multi-part assembly complete from appearance alone when endpoints, support, contact, clearance, or intersection are part of acceptance.
 - Do not add MCP tools, an Agent backend, planner, summarizer, chat database, second knowledge or memory system, service, scoring system, fixed gate, approval chain, node allowlist, or one-shot apply mechanism.
 - Do not prescribe asset-specific recipes, fixed node counts, tool counts, capture counts, stage counts, iteration counts, or coordinate tables.

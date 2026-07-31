@@ -26,13 +26,55 @@ from typing import Any, Mapping, Sequence
 SUPPORTED_CONTRACT_VERSION = 1
 MODEL_MANIFEST_NAME = ".hia-embedding-model.json"
 STAGING_DIRECTORY_PREFIX = ".hia-embedding-staging-"
-VENV_STAGING_DIRECTORY_PREFIX = ".venv-staging-"
+VENV_TRANSACTION_DIRECTORY = "v"
+VENV_TRANSACTION_KEY_CHARACTERS = 16
+VENV_STAGING_DIRECTORY_NAME = "s"
+VENV_BACKUP_DIRECTORY_NAME = "b"
+VENV_FAILED_DIRECTORY_NAME = "f"
 VENV_MARKER_NAME = ".hia-managed-venv.json"
 VENV_MARKER_SCHEMA = "hia-managed-python-venv/1"
 
 
 class InstallerError(RuntimeError):
     """A safe, user-facing installer failure."""
+
+
+def _stable_worker_error(response: Mapping[str, Any]) -> str:
+    error = response.get("error")
+    if not isinstance(error, Mapping):
+        return ""
+    code = error.get("code")
+    message = error.get("message")
+    if (
+        not isinstance(code, str)
+        or re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code) is None
+        or not isinstance(message, str)
+    ):
+        return ""
+    stable_message = " ".join(message.split())
+    if not stable_message:
+        return ""
+    return f"{code}: {stable_message[:240]}"
+
+
+def _venv_transaction_paths(
+    project_root: Path,
+    install_id: str,
+) -> dict[str, Path]:
+    if re.fullmatch(r"[0-9a-f]{32}", install_id) is None:
+        raise InstallerError("staged embedding venv install id is invalid")
+    transaction_root = (
+        project_root
+        / ".runtime"
+        / VENV_TRANSACTION_DIRECTORY
+        / install_id[:VENV_TRANSACTION_KEY_CHARACTERS]
+    )
+    return {
+        "transaction_root": transaction_root,
+        "staging": transaction_root / VENV_STAGING_DIRECTORY_NAME,
+        "backup": transaction_root / VENV_BACKUP_DIRECTORY_NAME,
+        "failed": transaction_root / VENV_FAILED_DIRECTORY_NAME,
+    }
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -416,7 +458,11 @@ def smoke_selected_model(
         }
     )
     if initialized.get("ok") is not True:
-        raise InstallerError("embedding worker smoke initialization failed")
+        detail = _stable_worker_error(initialized)
+        suffix = f": {detail}" if detail else ""
+        raise InstallerError(
+            f"embedding worker smoke initialization failed{suffix}"
+        )
     encoded, _stop = worker.handle(
         {
             "id": "installer-smoke-embed",
@@ -428,7 +474,9 @@ def smoke_selected_model(
         }
     )
     if encoded.get("ok") is not True:
-        raise InstallerError("embedding worker smoke encode failed")
+        detail = _stable_worker_error(encoded)
+        suffix = f": {detail}" if detail else ""
+        raise InstallerError(f"embedding worker smoke encode failed{suffix}")
     result = encoded.get("result")
     if not isinstance(result, Mapping):
         raise InstallerError("embedding worker smoke result is invalid")
@@ -476,31 +524,47 @@ def _validated_staging_worker(
     plan: Mapping[str, Any],
     install_id: str,
 ) -> Path:
-    if re.fullmatch(r"[0-9a-f]{32}", install_id) is None:
-        raise InstallerError("staged embedding venv install id is invalid")
     layout = plan.get("layout")
     if not isinstance(layout, Mapping):
         raise InstallerError("embedding runtime layout is invalid")
+    venv_root = _required_layout_path(layout, "venv_root")
+    if venv_root.name.lower() != ".venv":
+        raise InstallerError("embedding venv root is not canonical")
+    project_root = venv_root.parent
     toolchain_root = _required_layout_path(layout, "toolchain_root")
     try:
+        resolved_project = project_root.resolve(strict=True)
         resolved_toolchain = toolchain_root.resolve(strict=True)
     except OSError as exc:
         raise InstallerError("embedding toolchain root is unavailable") from exc
-    if not _is_ordinary_directory(resolved_toolchain):
+    if (
+        not _is_ordinary_directory(resolved_project)
+        or not _is_ordinary_directory(resolved_toolchain)
+        or not _is_within(resolved_toolchain, resolved_project)
+    ):
         raise InstallerError("embedding toolchain root is unsafe")
 
-    staging_root = toolchain_root / (
-        f"{VENV_STAGING_DIRECTORY_PREFIX}{install_id}"
-    )
+    transaction_paths = _venv_transaction_paths(project_root, install_id)
+    transaction_root = transaction_paths["transaction_root"]
+    staging_root = transaction_paths["staging"]
     try:
+        resolved_transaction = transaction_root.resolve(strict=True)
         resolved_staging = staging_root.resolve(strict=True)
     except OSError as exc:
         raise InstallerError("staged embedding venv is unavailable") from exc
+    lexical_transaction = Path(
+        os.path.abspath(os.fspath(transaction_root))
+    )
     lexical_staging = Path(os.path.abspath(os.fspath(staging_root)))
     if (
-        os.path.normcase(str(lexical_staging))
+        os.path.normcase(str(lexical_transaction))
+        != os.path.normcase(str(resolved_transaction))
+        or not _is_ordinary_directory(resolved_transaction)
+        or resolved_transaction.parent.parent
+        != (resolved_project / ".runtime")
+        or os.path.normcase(str(lexical_staging))
         != os.path.normcase(str(resolved_staging))
-        or resolved_staging.parent != resolved_toolchain
+        or resolved_staging.parent != resolved_transaction
         or not _is_ordinary_directory(resolved_staging)
     ):
         raise InstallerError("staged embedding venv is unsafe")

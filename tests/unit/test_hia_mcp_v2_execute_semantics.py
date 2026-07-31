@@ -131,8 +131,13 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         self.assertEqual([], response["created_or_changed_paths"])
         self.assertEqual(["/obj/late-marker"], response["diff"]["unverified_paths"])
-        self.assertFalse(response["ok"])
-        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
+        self.assertTrue(response["ok"])
+        self.assertEqual([], response["errors"])
+        self.assertTrue(any("did not prove a change" in item for item in response["warnings"]))
+        self.assertEqual(
+            "not_proven",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
         self.assertEqual("unknown", response["scene_change_status"])
         self.assertEqual("not_needed", response["rollback"]["status"])
         self.assertFalse(response["rollback"]["requested"])
@@ -149,14 +154,18 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         self.assertEqual([], response["created_or_changed_paths"])
         self.assertEqual(["/obj/no-change"], response["diff"]["unverified_paths"])
-        self.assertFalse(response["ok"])
-        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
+        self.assertTrue(response["ok"])
+        self.assertEqual([], response["errors"])
+        self.assertEqual(
+            "not_proven",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
         self.assertEqual("unknown", response["scene_change_status"])
         self.assertEqual("not_needed", response["rollback"]["status"])
         self.assertEqual(0, self.hou.undos.undo_calls)
         self.assertEqual(0, response["revision"])
 
-    def test_unproven_postcondition_rejects_task_without_undo(self) -> None:
+    def test_unproven_postcondition_is_advisory_without_undo(self) -> None:
         self.executor._node_digest = mock.Mock(return_value="same")  # type: ignore[method-assign]
 
         response = self.executor.dispatch(
@@ -168,8 +177,8 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
             },
         )
 
-        self.assertFalse(response["ok"])
-        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
+        self.assertTrue(response["ok"])
+        self.assertEqual([], response["errors"])
         self.assertEqual(
             "not_proven",
             response["execution_evidence"]["postconditions"]["status"],
@@ -187,8 +196,12 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         self.assertEqual([], response["created_or_changed_paths"])
         self.assertEqual(["/obj/unreadable"], response["diff"]["unverified_paths"])
-        self.assertFalse(response["ok"])
-        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
+        self.assertTrue(response["ok"])
+        self.assertEqual([], response["errors"])
+        self.assertEqual(
+            "not_proven",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
         self.assertEqual("unknown", response["scene_change_status"])
         self.assertEqual("not_needed", response["rollback"]["status"])
         self.assertEqual(0, self.hou.undos.undo_calls)
@@ -216,6 +229,42 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         self.assertEqual("/obj", response["diff"]["root_path"])
         self.assertEqual(["/obj/new"], response["diff"]["created"])
         self.assertTrue(response["diff"]["truncated"])
+        self.assertEqual(2, self.executor._snapshot_map.call_count)
+
+    def test_full_diff_root_may_be_created_by_the_batch(self) -> None:
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                HiaRuntimeError(
+                    "NODE_NOT_FOUND",
+                    "Snapshot root does not exist",
+                    {"path": "/obj/new_asset"},
+                ),
+                (
+                    {
+                        "/obj/new_asset": "root",
+                        "/obj/new_asset/OUT_MODEL": "output",
+                    },
+                    False,
+                ),
+            ]
+        )
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "hia_result = 'created'",
+                "diff_root_path": "/obj/new_asset",
+            },
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual("created", response["result"])
+        self.assertEqual(
+            ["/obj/new_asset", "/obj/new_asset/OUT_MODEL"],
+            response["diff"]["created"],
+        )
+        self.assertEqual("changed", response["scene_change_status"])
+        self.assertEqual(1, response["revision"])
         self.assertEqual(2, self.executor._snapshot_map.call_count)
 
     def test_deleted_full_diff_root_is_reported_as_an_observed_change(self) -> None:
@@ -258,6 +307,46 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         )
         self.assertEqual("changed", response["scene_change_status"])
         self.assertEqual(1, response["revision"])
+
+    def test_declared_deleted_paths_are_not_revalidated_as_missing_nodes(self) -> None:
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                (
+                    {
+                        "/obj/branch": "root",
+                        "/obj/branch/child": "child",
+                    },
+                    False,
+                ),
+                HiaRuntimeError(
+                    "NODE_NOT_FOUND",
+                    "Snapshot root does not exist",
+                    {"path": "/obj/branch"},
+                ),
+            ]
+        )
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "diff_root_path": "/obj/branch",
+                "expected_deletions": ["/obj/branch"],
+                "checks": ["node_errors"],
+            },
+        )
+
+        self.assertTrue(response["ok"])
+        node_errors = next(
+            item
+            for item in response["execution_evidence"]["validation"]["check_results"]
+            if item["check"] == "node_errors"
+        )
+        self.assertEqual("skipped", node_errors["status"])
+        self.assertEqual([], node_errors["findings"])
+        self.assertFalse(
+            any("NODE_ERRORS_FAILED" in item for item in response["warnings"])
+        )
 
     def test_checkpoint_is_created_once_only_after_a_verified_change(self) -> None:
         checkpoint_directory = self.checkpoint_directory()
@@ -594,7 +683,10 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual("NO_OBSERVED_EFFECT", unchanged["checkpoint"]["skipped_reason"])
+        self.assertEqual(
+            "NO_CONFIRMED_SCENE_CHANGE",
+            unchanged["checkpoint"]["skipped_reason"],
+        )
         self.assertEqual("HOM_EXECUTION_FAILED", failed["checkpoint"]["skipped_reason"])
         self.hou.hipFile.saveAsBackup.assert_not_called()
 
@@ -625,6 +717,30 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
             response["errors"][0]["partial_scene_changes_possible"]
         )
         self.assertTrue(response["errors"][0]["automatic_retry_safe"])
+
+    def test_hom_failure_remains_primary_over_derived_validation_failures(
+        self,
+    ) -> None:
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "raise RuntimeError('primary HOM failure')",
+                "expected_outputs": ["/obj/missing_output"],
+                "checks": ["empty_output", "geometry_summary"],
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(
+            ["HOM_EXECUTION_FAILED"],
+            [item["code"] for item in response["errors"]],
+        )
+        self.assertFalse(response["execution_evidence"]["validation"]["valid"])
+        self.assertEqual(
+            "failed",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
+        self.assertNotIn("VALIDATION_FAILED", str(response["errors"]))
 
     def test_rollback_is_not_verified_when_undo_leaves_clean_hip_dirty(
         self,
@@ -669,6 +785,16 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         self.assertFalse(response["errors"][0]["automatic_retry_safe"])
         self.assertEqual("changed", response["scene_change_status"])
 
+        followup = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "hia_result = 'diagnostic follow-up'",
+                "capture_diff": False,
+            },
+        )
+        self.assertTrue(followup["ok"])
+        self.assertEqual("diagnostic follow-up", followup["result"])
+
     def test_rollback_is_not_verified_when_dirty_probe_is_unavailable(
         self,
     ) -> None:
@@ -703,6 +829,16 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         )
         self.assertFalse(response["errors"][0]["automatic_retry_safe"])
 
+        followup = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "hia_result = 'inspection still allowed'",
+                "capture_diff": False,
+            },
+        )
+        self.assertTrue(followup["ok"])
+        self.assertEqual("inspection still allowed", followup["result"])
+
     def test_unverified_rollback_is_not_automatic_retry_safe(self) -> None:
         @contextmanager
         def interleaved_group(label: str) -> object:
@@ -731,7 +867,7 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         )
         self.assertFalse(response["errors"][0]["automatic_retry_safe"])
 
-    def test_syntax_and_undo_capability_are_preflighted_before_execution(
+    def test_syntax_is_preflighted_but_missing_undo_does_not_block_execution(
         self,
     ) -> None:
         with self.assertRaises(HiaRuntimeError) as syntax_error:
@@ -743,16 +879,38 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         self.assertEqual([], self.hou.undos.labels)
 
         self.hou.undos.areEnabled = lambda: False  # type: ignore[method-assign]
-        with self.assertRaises(HiaRuntimeError) as undo_error:
-            self.executor.dispatch(
-                "hia_execute_hom",
-                {"script": "hou.should_not_exist = True"},
-            )
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {"script": "hou.executed_without_undo = True"},
+        )
+        self.assertTrue(response["ok"])
+        self.assertTrue(self.hou.executed_without_undo)
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertTrue(
+            any("undo recording is disabled" in item for item in response["warnings"])
+        )
+
+        failed = self.executor.dispatch(
+            "hia_execute_hom",
+            {"script": "raise RuntimeError('failure without undo')"},
+        )
+        self.assertFalse(failed["ok"])
+        self.assertEqual("HOM_EXECUTION_FAILED", failed["errors"][0]["code"])
+        self.assertEqual("not_proven", failed["rollback"]["status"])
         self.assertEqual(
             "UNDO_ROLLBACK_UNAVAILABLE",
-            undo_error.exception.code,
+            failed["rollback"]["error"]["code"],
         )
-        self.assertFalse(hasattr(self.hou, "should_not_exist"))
+
+        followup = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "hia_result = 'follow-up remains available'",
+                "capture_diff": False,
+            },
+        )
+        self.assertTrue(followup["ok"])
+        self.assertEqual("follow-up remains available", followup["result"])
 
     def test_unexpected_deletion_fails_and_expected_deletion_does_not(
         self,
@@ -794,6 +952,38 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
 
         self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
             side_effect=[
+                (
+                    {
+                        "/obj": "root",
+                        "/obj/branch": "branch",
+                        "/obj/branch/internal_a": "a",
+                        "/obj/branch/internal_b": "b",
+                    },
+                    False,
+                ),
+                ({"/obj": "root"}, False),
+            ]
+        )
+        parent_expected = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "diff_root_path": "/obj",
+                "expected_deletions": ["/obj/branch"],
+            },
+        )
+        self.assertTrue(parent_expected["ok"])
+        self.assertEqual(
+            ["/obj/branch"],
+            parent_expected["diff"]["expected_deletions"],
+        )
+        self.assertEqual(
+            [],
+            parent_expected["diff"]["unexpected_deletions"],
+        )
+
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
                 ({"/obj": "root", "/obj/a": "a"}, False),
                 ({"/obj": "root", "/obj/a": "a"}, False),
             ]
@@ -806,15 +996,47 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
                 "expected_deletions": ["/obj/a"],
             },
         )
-        self.assertFalse(missing["ok"])
-        self.assertEqual(
-            "EXPECTED_DELETION_NOT_OBSERVED",
-            missing["errors"][0]["code"],
+        self.assertTrue(missing["ok"])
+        self.assertEqual([], missing["errors"])
+        self.assertEqual("not_needed", missing["rollback"]["status"])
+        self.assertTrue(
+            any("Expected deletion was not observed" in item for item in missing["warnings"])
         )
         self.assertEqual(
             "failed",
             missing["execution_evidence"]["postconditions"]["status"],
         )
+
+    def test_expected_deletion_manifest_is_not_limited_to_sixty_four_paths(
+        self,
+    ) -> None:
+        expected = [f"/obj/delete_{index}" for index in range(65)]
+        before = {
+            "/obj": "root",
+            **{path: f"node-{index}" for index, path in enumerate(expected)},
+        }
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                (before, False),
+                ({"/obj": "root"}, False),
+            ]
+        )
+
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "pass",
+                "diff_root_path": "/obj",
+                "expected_deletions": expected,
+            },
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(
+            sorted(expected),
+            response["diff"]["expected_deletions"],
+        )
+        self.assertEqual([], response["diff"]["unexpected_deletions"])
 
     def test_scene_diff_classifies_expected_and_unexpected_deletions(
         self,
@@ -825,6 +1047,7 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
                     {
                         "/obj": "root",
                         "/obj/expected": "a",
+                        "/obj/expected/internal": "internal",
                         "/obj/surprise": "b",
                     },
                     False,
@@ -849,6 +1072,45 @@ class HiaMcpV2ExecuteSemanticsTests(unittest.TestCase):
         self.assertEqual(["/obj/expected"], compared["expected_deletions"])
         self.assertEqual(["/obj/surprise"], compared["unexpected_deletions"])
         self.assertEqual([], compared["missing_expected_deletions"])
+
+    def test_scene_diff_can_capture_an_absent_root_before_creation(
+        self,
+    ) -> None:
+        self.executor._snapshot_map = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                HiaRuntimeError(
+                    "NODE_NOT_FOUND",
+                    "Snapshot root does not exist",
+                    {"path": "/obj/new_asset"},
+                ),
+                (
+                    {
+                        "/obj/new_asset": "root",
+                        "/obj/new_asset/OUT": "output",
+                    },
+                    False,
+                ),
+            ]
+        )
+
+        captured = self.executor.dispatch(
+            "hia_scene_diff",
+            {"action": "capture", "root_path": "/obj/new_asset"},
+        )["result"]
+        compared = self.executor.dispatch(
+            "hia_scene_diff",
+            {
+                "action": "compare",
+                "snapshot_id": captured["snapshot_id"],
+            },
+        )["result"]
+
+        self.assertFalse(captured["root_exists"])
+        self.assertTrue(compared["root_exists"])
+        self.assertEqual(
+            ["/obj/new_asset", "/obj/new_asset/OUT"],
+            compared["diff"]["created"],
+        )
 
     def test_checkpoint_failure_is_nonfatal_and_must_not_trigger_write_retry(self) -> None:
         checkpoint_directory = self.checkpoint_directory()

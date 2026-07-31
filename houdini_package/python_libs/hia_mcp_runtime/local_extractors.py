@@ -55,8 +55,18 @@ CTRANSLATE2_PACKAGE_RELATIVE = ".venv/Lib/site-packages/ctranslate2"
 FFMPEG_EXECUTABLE_RELATIVE = ".runtime/dependencies/ffmpeg/bin/ffmpeg.exe"
 FFPROBE_EXECUTABLE_RELATIVE = ".runtime/dependencies/ffmpeg/bin/ffprobe.exe"
 ASR_MODEL_RELATIVE = ".runtime/models/asr/faster-whisper"
+ASR_MODEL_REQUIRED_FILES = (
+    "config.json",
+    "model.bin",
+    "preprocessor_config.json",
+    "tokenizer.json",
+)
 EXTRACTOR_TEMP_RELATIVE = ".runtime/tmp/extractors"
 EXTRACTOR_OUTPUT_RELATIVE = ".runtime/cache/extractors"
+KNOWLEDGE_ENVIRONMENT_REPAIR_ACTION = (
+    r".\scripts\hia-knowledge.ps1 environment-repair"
+)
+ASSET_REPAIR_ACTION = r".\scripts\hia-knowledge.ps1 assets repair"
 EXTRACTION_CHECKPOINT_SCHEMA = "hia-local-extractor-checkpoint/1"
 EXTRACTION_STATUS_READY = "ready"
 EXTRACTION_STATUS_PARTIAL = "partial"
@@ -571,8 +581,8 @@ class PypdfAdapter:
                 self.name,
                 self.suffixes,
                 "Python package 'pypdf' is not installed.",
-                "Install it into the project .venv: "
-                ".venv/Scripts/python.exe -m pip install pypdf",
+                "Use Launcher Knowledge Environment repair, or run "
+                f"{KNOWLEDGE_ENVIRONMENT_REPAIR_ACTION}.",
                 dependencies=("pypdf",),
             )
         return {
@@ -700,9 +710,8 @@ class RapidOcrBackend:
                 IMAGE_SUFFIXES,
                 "Local OCR Python dependencies are missing: "
                 + ", ".join(missing),
-                "Install the single OCR stack into the project .venv: "
-                ".venv/Scripts/python.exe -m pip install "
-                "rapidocr onnxruntime pypdfium2",
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION}.",
                 dependencies=tuple(missing),
             )
         package_roots = {
@@ -723,8 +732,8 @@ class RapidOcrBackend:
                 IMAGE_SUFFIXES,
                 "OCR packages are outside the project .venv: "
                 + ", ".join(outside_venv),
-                "Use Launcher repair to reinstall rapidocr and onnxruntime "
-                "inside the project .venv.",
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION}.",
                 status="invalid_configuration",
                 dependencies=outside_venv,
             )
@@ -740,8 +749,8 @@ class RapidOcrBackend:
                 self.name,
                 IMAGE_SUFFIXES,
                 "RapidOCR wheel models are missing: " + ", ".join(missing_models),
-                "Use Launcher repair to reinstall the rapidocr wheel; runtime "
-                "model downloads are disabled.",
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION}.",
                 dependencies=missing_models,
             )
         return {
@@ -852,9 +861,8 @@ class FasterWhisperBackend:
                 MEDIA_SUFFIXES,
                 "Local ASR Python dependencies are missing: "
                 + ", ".join(missing),
-                "Install them into the project .venv: "
-                ".venv/Scripts/python.exe -m pip install "
-                "faster-whisper ctranslate2 numpy",
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION}.",
                 dependencies=tuple(missing),
             )
         project_venv = (
@@ -874,8 +882,8 @@ class FasterWhisperBackend:
                 MEDIA_SUFFIXES,
                 "ASR packages are outside the project .venv: "
                 + ", ".join(outside_venv),
-                "Use Launcher repair to reinstall faster-whisper, "
-                "ctranslate2, and numpy inside the project .venv.",
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION}.",
                 status="invalid_configuration",
                 dependencies=outside_venv,
             )
@@ -888,10 +896,31 @@ class FasterWhisperBackend:
                 self.name,
                 MEDIA_SUFFIXES,
                 "A local faster-whisper model directory is not configured.",
-                f"Place one converted model at {ASR_MODEL_RELATIVE}. "
-                "Remote downloads are never attempted.",
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION}.",
                 status="not_configured",
                 dependencies=("local faster-whisper model",),
+            )
+        missing_model_files = [
+            name
+            for name in ASR_MODEL_REQUIRED_FILES
+            if not (model_path / name).is_file()
+        ]
+        if not any(
+            (model_path / name).is_file()
+            for name in ("vocabulary.json", "vocabulary.txt")
+        ):
+            missing_model_files.append("vocabulary.json|vocabulary.txt")
+        if missing_model_files:
+            return _missing_capability(
+                self.name,
+                MEDIA_SUFFIXES,
+                "The local faster-whisper model is incomplete: "
+                + ", ".join(missing_model_files),
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION} to resume the model download.",
+                status="not_configured",
+                dependencies=tuple(missing_model_files),
             )
         runtime_root = self.config.resolved_project_root / ".runtime"
         if not _is_within(model_path, runtime_root):
@@ -899,8 +928,9 @@ class FasterWhisperBackend:
                 self.name,
                 MEDIA_SUFFIXES,
                 "The ASR model is outside the project .runtime directory.",
-                "Copy the model below .runtime and update "
-                "ExtractionConfig(asr_model_path='...').",
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION}; clear an unsupported custom "
+                "asr_model_path to select the managed project model.",
                 status="invalid_configuration",
                 dependencies=("project-runtime faster-whisper model",),
             )
@@ -931,8 +961,8 @@ class FasterWhisperBackend:
                 MEDIA_SUFFIXES,
                 "Project-local media tools are missing: "
                 + ", ".join(missing_tools),
-                "Install FFmpeg below .runtime/dependencies/ffmpeg and set "
-                "ffmpeg_path/ffprobe_path when using a different local layout.",
+                "Use Launcher Knowledge Assets repair, or run "
+                f"{ASSET_REPAIR_ACTION}.",
                 status="not_configured",
                 dependencies=tuple(missing_tools),
             )
@@ -1481,10 +1511,7 @@ def dependency_contract(
                         "relative_path": PDFIUM_PACKAGE_RELATIVE,
                     },
                 ],
-                "install_command": (
-                    ".venv/Scripts/python.exe -m pip install "
-                    "rapidocr onnxruntime pypdfium2"
-                ),
+                "install_command": ASSET_REPAIR_ACTION,
                 "model_family": "PP-OCRv6 small",
                 "model_directory": RAPIDOCR_MODEL_RELATIVE,
                 "languages": ["Chinese", "English"],
@@ -1520,10 +1547,7 @@ def dependency_contract(
                         "relative_path": CTRANSLATE2_PACKAGE_RELATIVE,
                     },
                 ],
-                "install_command": (
-                    ".venv/Scripts/python.exe -m pip install "
-                    "faster-whisper ctranslate2 numpy"
-                ),
+                "install_command": ASSET_REPAIR_ACTION,
                 "executables": {
                     "ffmpeg": FFMPEG_EXECUTABLE_RELATIVE,
                     "ffprobe": FFPROBE_EXECUTABLE_RELATIVE,
@@ -1722,8 +1746,8 @@ def _pdf_page_ocr_capability(
             "pdf_page_ocr",
             PDF_SUFFIXES,
             "No local OCR backend accepts PDF page images.",
-            "Configure the single RapidOCR backend before importing "
-            "scanned PDFs.",
+            "Use Launcher Knowledge Assets repair, or run "
+            f"{ASSET_REPAIR_ACTION}.",
             status="not_configured",
             dependencies=("RapidOCR backend",),
         )
@@ -1737,7 +1761,10 @@ def _pdf_page_ocr_capability(
                 + str(backend_report.get("message") or ""),
                 str(
                     backend_report.get("action")
-                    or "Repair RapidOCR in the project .venv."
+                    or (
+                        "Use Launcher Knowledge Assets repair, or run "
+                        f"{ASSET_REPAIR_ACTION}."
+                    )
                 ),
                 status=str(
                     backend_report.get("status") or "dependency_missing"
@@ -1754,7 +1781,8 @@ def _pdf_page_ocr_capability(
             "pdf_page_ocr",
             PDF_SUFFIXES,
             "The pypdfium2 page renderer is missing from the project .venv.",
-            "Use Launcher repair to install pypdfium2 in the project .venv.",
+            "Use Launcher Knowledge Assets repair, or run "
+            f"{ASSET_REPAIR_ACTION}.",
             dependencies=("pypdfium2",),
         )
     package_root = _module_root("pypdfium2")
@@ -1766,7 +1794,8 @@ def _pdf_page_ocr_capability(
             "pdf_page_ocr",
             PDF_SUFFIXES,
             "pypdfium2 is not installed in the project .venv.",
-            "Use Launcher repair to reinstall pypdfium2 in the project .venv.",
+            "Use Launcher Knowledge Assets repair, or run "
+            f"{ASSET_REPAIR_ACTION}.",
             status="invalid_configuration",
             dependencies=("project .venv pypdfium2",),
         )

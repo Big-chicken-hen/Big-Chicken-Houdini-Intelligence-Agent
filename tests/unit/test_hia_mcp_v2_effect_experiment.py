@@ -396,6 +396,7 @@ class HiaMcpV2EffectExperimentTests(unittest.TestCase):
             "cache_reset_parms": ["/obj/fx/control/reset"],
             "cook_targets": ["/obj/fx/OUT"],
             "metric_targets": ["/obj/fx/OUT"],
+            "timeout_seconds": 300,
         }
 
     def test_success_is_multiframe_locked_and_fully_restored(self) -> None:
@@ -409,6 +410,16 @@ class HiaMcpV2EffectExperimentTests(unittest.TestCase):
         self.assertTrue(response["ok"], response)
         result = response["result"]
         self.assertEqual("completed", result["status"])
+        self.assertEqual(
+            {
+                "requested_timeout_seconds": 300.0,
+                "timeout_kind": "client_wait_budget",
+                "interruptible_after_main_thread_entry": False,
+                "hom_may_continue_after_client_timeout": True,
+                "automatic_retry_after_timeout": False,
+            },
+            response["execution_limit"],
+        )
         self.assertEqual([200, 100], [
             result["preview"]["width"],
             result["preview"]["height"],
@@ -536,6 +547,13 @@ class HiaMcpV2EffectExperimentTests(unittest.TestCase):
         with self.assertRaises(HiaRuntimeError) as empty:
             executor.dispatch("hia_run_effect_experiment", arguments)
         self.assertEqual("INVALID_ARGUMENTS", empty.exception.code)
+        self.assertEqual([], hou_module.actions)
+
+        arguments = self.arguments()
+        arguments["timeout_seconds"] = 301
+        with self.assertRaises(HiaRuntimeError) as timeout:
+            executor.dispatch("hia_run_effect_experiment", arguments)
+        self.assertEqual("INVALID_ARGUMENTS", timeout.exception.code)
         self.assertEqual([], hou_module.actions)
 
     def test_parameter_values_reject_non_round_trip_shapes(self) -> None:

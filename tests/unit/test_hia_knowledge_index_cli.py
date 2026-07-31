@@ -307,11 +307,11 @@ class KnowledgeIndexCliTests(unittest.TestCase):
             direct.stdout + direct.stderr,
         )
         self.assertIn(
-            "{bootstrap,status,build,sources,thread,memory}",
+            "{bootstrap,status,build,sources,assets,thread,memory}",
             module.stdout,
         )
         self.assertIn(
-            "{bootstrap,status,build,sources,thread,memory}",
+            "{bootstrap,status,build,sources,assets,thread,memory}",
             direct.stdout,
         )
 

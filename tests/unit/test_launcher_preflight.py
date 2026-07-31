@@ -36,6 +36,7 @@ EXE_BUILD_SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "build-launcher.ps1"
 UI_READY_PATHS = (
     REPOSITORY_ROOT / "houdini_package" / "python3.10libs" / "uiready.py",
     REPOSITORY_ROOT / "houdini_package" / "python3.11libs" / "uiready.py",
+    REPOSITORY_ROOT / "houdini_package" / "python3.13libs" / "uiready.py",
 )
 
 
@@ -1481,6 +1482,7 @@ $duplicate = New-TestResult @(
         }
         missing = json.loads(json.dumps(base))
         missing["state"] = "missing"
+        missing["requested_profile"] = "qwen3-embedding-0.6b"
         missing_with_model = json.loads(json.dumps(missing))
         missing_with_model["models"]["items"][0]["installed"] = True
         legacy = json.loads(json.dumps(base))
@@ -1518,6 +1520,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 )
 if ($errors.Count -gt 0) {{ throw 'HiaLauncher.Wpf.ps1 did not parse.' }}
 foreach ($name in @(
+    'Get-ComboEmbeddingProfile',
     'Get-HiaKnowledgeEnvironmentAction',
     'Get-HiaKnowledgeEnvironmentReason',
     'Get-HiaKnowledgeEnvironmentStageFromLog'
@@ -1540,13 +1543,21 @@ $existing = {_ps_literal(json.dumps(existing_model))} | ConvertFrom-Json
 $readyModel = {_ps_literal(json.dumps(ready_model))} | ConvertFrom-Json
 $fts = {_ps_literal(json.dumps(base))} | ConvertFrom-Json
 $profile = 'qwen3-embedding-0.6b'
+$embeddingProfileCombo = [pscustomobject]@{{ SelectedItem = $null }}
+$script:embeddingData = $null
+$script:knowledgeEnvironmentStatus = $missing
 [pscustomobject]@{{
+    fresh_clone_profile = Get-ComboEmbeddingProfile
     missing_action = Get-HiaKnowledgeEnvironmentAction `
         -Environment $missing -SelectedProfile $profile
+    missing_no_profile_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $missing -SelectedProfile ''
     missing_model_action = Get-HiaKnowledgeEnvironmentAction `
         -Environment $missingWithModel -SelectedProfile $profile
     legacy_action = Get-HiaKnowledgeEnvironmentAction `
         -Environment $legacy -SelectedProfile $profile
+    legacy_no_profile_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $legacy -SelectedProfile ''
     legacy_model_action = Get-HiaKnowledgeEnvironmentAction `
         -Environment $legacyWithModel -SelectedProfile $profile
     repair_model_action = Get-HiaKnowledgeEnvironmentAction `
@@ -1559,6 +1570,8 @@ $profile = 'qwen3-embedding-0.6b'
         -Environment $readyModel -SelectedProfile $profile
     fts_action = Get-HiaKnowledgeEnvironmentAction `
         -Environment $fts -SelectedProfile $profile
+    fts_no_profile_action = Get-HiaKnowledgeEnvironmentAction `
+        -Environment $fts -SelectedProfile ''
     legacy_reason = Get-HiaKnowledgeEnvironmentReason `
         -Environment $legacy -SelectedProfile $profile
     legacy_model_reason = Get-HiaKnowledgeEnvironmentReason `
@@ -1571,12 +1584,30 @@ $profile = 'qwen3-embedding-0.6b'
 """
         )
         payload = json.loads(output)
-        self.assertEqual("environment-install", payload["missing_action"])
+        self.assertEqual(
+            "qwen3-embedding-0.6b",
+            payload["fresh_clone_profile"],
+        )
+        self.assertEqual(
+            "environment-install-embedding",
+            payload["missing_action"],
+        )
+        self.assertEqual(
+            "environment-install",
+            payload["missing_no_profile_action"],
+        )
         self.assertEqual(
             "environment-install-embedding",
             payload["missing_model_action"],
         )
-        self.assertEqual("environment-repair", payload["legacy_action"])
+        self.assertEqual(
+            "environment-repair-embedding",
+            payload["legacy_action"],
+        )
+        self.assertEqual(
+            "environment-repair",
+            payload["legacy_no_profile_action"],
+        )
         self.assertEqual(
             "environment-repair-embedding",
             payload["legacy_model_action"],
@@ -1585,19 +1616,26 @@ $profile = 'qwen3-embedding-0.6b'
             "environment-repair-embedding",
             payload["repair_model_action"],
         )
-        self.assertEqual("environment-repair", payload["unsafe_action"])
+        self.assertEqual(
+            "environment-repair-embedding",
+            payload["unsafe_action"],
+        )
         self.assertEqual(
             "environment-repair-embedding",
             payload["existing_model_action"],
         )
         self.assertEqual("", payload["ready_model_action"])
-        self.assertEqual("", payload["fts_action"])
+        self.assertEqual(
+            "environment-repair-embedding",
+            payload["fts_action"],
+        )
+        self.assertEqual("", payload["fts_no_profile_action"])
         self.assertIn("项目外 Python", payload["legacy_reason"])
         self.assertIn("受管标记", payload["legacy_reason"])
         self.assertIn("一次修复", payload["legacy_model_reason"])
-        self.assertIn("复用现有模型和项目缓存", payload["legacy_model_reason"])
+        self.assertIn("下载或复用所选模型和项目缓存", payload["legacy_model_reason"])
         self.assertIn("PyTorch", payload["existing_model_reason"])
-        self.assertIn("复用模型和项目缓存", payload["existing_model_reason"])
+        self.assertIn("下载或复用模型和项目缓存", payload["existing_model_reason"])
         self.assertIn("pypdf", payload["parser_stage"])
 
     def test_gui_knowledge_environment_repair_is_async_logged_and_retryable(
@@ -1703,6 +1741,51 @@ $profile = 'qwen3-embedding-0.6b'
         ):
             self.assertIn(f'x:Name="{control}"', xaml)
         self.assertIn("正在准备项目本地工具链", xaml)
+
+    def test_gui_knowledge_mutations_refresh_the_real_vector_index_state(
+        self,
+    ) -> None:
+        wpf = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        refresh = wpf[
+            wpf.index("function Refresh-HiaKnowledgeDisplay"):
+            wpf.index("function Invoke-HiaKnowledgeAction")
+        ]
+        asset_complete = wpf[
+            wpf.index("function Complete-HiaAssetProcess"):
+            wpf.index("function Test-HiaAssetProcessComplete")
+        ]
+        source_actions = wpf[
+            wpf.index("$importKnowledgeFileButton.Add_Click"):
+            wpf.index("$importKnowledgeAssetButton.Add_Click")
+        ]
+
+        self.assertIn(
+            "Start-HiaKnowledgeIndexProcess -Action 'status'",
+            refresh,
+        )
+        self.assertIn(
+            "$null -eq $script:knowledgeIndexProcess",
+            refresh,
+        )
+        for mutation in (
+            "$importKnowledgeFileButton.Add_Click",
+            "$importKnowledgeFolderButton.Add_Click",
+            "$deleteKnowledgeSourceButton.Add_Click",
+            "$rescanKnowledgeSourcesButton.Add_Click",
+        ):
+            self.assertIn(mutation, source_actions)
+        self.assertGreaterEqual(
+            source_actions.count("Refresh-HiaKnowledgeDisplay -Quiet"),
+            4,
+        )
+        self.assertIn(
+            "$action -in @('import', 'resume', 'delete')",
+            asset_complete,
+        )
+        self.assertIn(
+            "Start-HiaKnowledgeIndexProcess -Action 'status'",
+            asset_complete,
+        )
 
     def test_embedding_install_lock_blocks_second_launcher_and_releases(
         self,

@@ -90,6 +90,16 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("capture quality", description)
         self.assertIn("unverified os hdr", description)
 
+    def test_geometry_summary_does_not_claim_spatial_acceptance(self) -> None:
+        geometry = next(
+            spec for spec in TOOL_SPECS if spec.name == "hia_geometry_summary"
+        )
+        description = geometry.description.casefold()
+
+        self.assertIn("not proof of intersection", description)
+        self.assertIn("endpoint clearance", description)
+        self.assertIn("short read-only hom batch", description)
+
     def test_effect_experiment_is_one_bounded_domain_neutral_tool(self) -> None:
         experiment = next(
             spec
@@ -106,6 +116,13 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertEqual(
             ["contact_sheet"],
             properties["capture_mode"]["enum"],
+        )
+        self.assertEqual(300, properties["timeout_seconds"]["maximum"])
+        self.assertIsInstance(
+            properties["baseline"]["properties"]["parameters"][
+                "additionalProperties"
+            ],
+            dict,
         )
         self.assertIn("cache-reset button", experiment.description)
         self.assertIn("never scores", experiment.description)
@@ -309,6 +326,10 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("protected_paths", execute_properties)
         self.assertIn("expected_outputs", execute_properties)
         self.assertIn("expected_deletions", execute_properties)
+        self.assertEqual(
+            1_024,
+            execute_properties["expected_deletions"]["maxItems"],
+        )
         self.assertIn("fresh_validation", execute_properties)
         self.assertIn("require_scene_change", execute_properties)
         self.assertIn("checks", execute_properties)
@@ -317,13 +338,20 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("native houdini nodes", execute_description)
         self.assertIn("suitable existing nodes", execute_description)
         self.assertIn("undo group", execute_description)
+        self.assertIn("does not block execution", execute_description)
+        self.assertIn("parent in expected_deletions", execute_description)
+        self.assertIn("do not enumerate internal child nodes", execute_description)
         self.assertIn("external file/render", execute_description)
-        self.assertIn("unknown or partial evidence", execute_description)
-        self.assertIn("no_observed_effect do not trigger undo", execute_description)
+        self.assertIn("requested validation failures", execute_description)
+        self.assertIn("do not become tool errors or trigger undo", execute_description)
         self.assertIn("only a verified rolled-back batch", execute_description)
+        self.assertIn("never repeat the identical failing batch", execute_description)
+        self.assertIn("dirty mismatch or unavailability", execute_description)
+        self.assertIn("advisory for subsequent goal work", execute_description)
         self.assertIn("critical-path existence and node-error checks", execute_description)
-        self.assertIn("changed or stale runtime rejects the write", execute_description)
-        self.assertIn("read-only tools remain available", execute_description)
+        self.assertIn("different runtime is rejected before submission", execute_description)
+        self.assertIn("newer executor source file on disk is only advisory", execute_description)
+        self.assertIn("write continues", execute_description)
         self.assertNotIn(
             "failed requested postconditions are undone",
             execute_description,
@@ -336,10 +364,12 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         inspect_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_inspect"
         )
+        inspect_views = inspect_tool["inputSchema"]["properties"]["views"]
         self.assertIn(
             "evidence",
-            inspect_tool["inputSchema"]["properties"]["views"]["items"]["enum"],
+            inspect_views["items"]["enum"],
         )
+        self.assertEqual(len(inspect_views["items"]["enum"]), inspect_views["maxItems"])
         self.assertIn(
             "subjective quality",
             inspect_tool["description"].casefold(),
@@ -433,9 +463,22 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         transport = FakeTransport()
         adapter = HiaMcpAdapter(transport)
         initialize(adapter)
+        all_inspect_views = [
+            "parameters",
+            "connections",
+            "flags",
+            "errors",
+            "geometry",
+            "children",
+            "evidence",
+        ]
         for request_id, name, arguments in (
             (2, "hia_context", {"include_graph": True}),
-            (3, "hia_inspect", {"paths": ["/obj/geo1"], "views": ["parameters", "errors"]}),
+            (
+                3,
+                "hia_inspect",
+                {"paths": ["/obj/geo1"], "views": all_inspect_views},
+            ),
             (4, "hia_node_help", {"category": "Sop", "node_type": "anything-installed"}),
             (5, "hia_capture_viewport", {"mode": "viewport"}),
         ):
@@ -446,6 +489,61 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             if name == "hia_capture_viewport":
                 self.assertEqual("image", response["result"]["content"][1]["type"])
         self.assertEqual(4, len(transport.calls))
+
+    def test_inspect_accepts_singular_path_but_rejects_ambiguous_targets(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+
+        response = adapter.handle_message(
+            rpc(
+                2,
+                "tools/call",
+                {"name": "hia_inspect", "arguments": {"path": "/obj"}},
+            )
+        )
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual(
+            {"path": "/obj"},
+            transport.calls[0][1],
+        )
+
+        ambiguous = adapter.handle_message(
+            rpc(
+                3,
+                "tools/call",
+                {
+                    "name": "hia_inspect",
+                    "arguments": {"path": "/obj", "paths": ["/obj"]},
+                },
+            )
+        )
+        self.assertEqual(-32602, ambiguous["error"]["code"])
+        self.assertEqual("INVALID_ARGUMENTS", ambiguous["error"]["data"]["code"])
+        self.assertEqual(1, len(transport.calls))
+
+    def test_execute_accepts_more_than_sixty_four_expected_deletions(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        expected = [f"/mat/delete_{index}" for index in range(65)]
+
+        response = adapter.handle_message(
+            rpc(
+                2,
+                "tools/call",
+                {
+                    "name": "hia_execute_hom",
+                    "arguments": {
+                        "script": "pass",
+                        "expected_deletions": expected,
+                    },
+                },
+            )
+        )
+
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual(expected, transport.calls[0][1]["expected_deletions"])
 
     def test_batch_query_forms_remain_one_transport_dispatch_each(self) -> None:
         transport = FakeTransport()
@@ -702,6 +800,18 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             scene_tools,
         )
 
+        for query in ("modeling", "model", "建模", "几何建模"):
+            with self.subTest(query=query):
+                names = {
+                    name
+                    for item in search(query)["result"]["capabilities"]
+                    for name in item["tools"]
+                }
+                self.assertEqual(
+                    {"hia_geometry_summary", "hia_execute_hom"},
+                    names,
+                )
+
         for query in ("checkpoint", "检查点", "备份", "checkpoint_label"):
             with self.subTest(query=query):
                 names = {
@@ -954,6 +1064,161 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertEqual(-32602, response["error"]["code"])
         self.assertEqual("INVALID_ARGUMENTS", response["error"]["data"]["code"])
         self.assertEqual([], transport.calls)
+
+    def test_runtime_parameter_contracts_are_rejected_before_transport(
+        self,
+    ) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        cases = (
+            (
+                "hia_capture_viewport",
+                {
+                    "validation_paths": [
+                        f"/obj/target_{index}" for index in range(17)
+                    ]
+                },
+            ),
+            (
+                "hia_capture_viewport",
+                {"frame": 1, "frames": [1, 2]},
+            ),
+            (
+                "hia_capture_viewport",
+                {"frame_step": 2},
+            ),
+            (
+                "hia_capture_viewport",
+                {"frame": float("nan")},
+            ),
+            (
+                "hia_run_effect_experiment",
+                {
+                    "target_network": "/obj/effect",
+                    "baseline": {"parameters": {}},
+                    "candidates": [
+                        {
+                            "name": "low",
+                            "parameters": {
+                                f"/obj/effect/low_{index}": index
+                                for index in range(9)
+                            },
+                        },
+                        {
+                            "name": "high",
+                            "parameters": {
+                                f"/obj/effect/high_{index}": index
+                                for index in range(9)
+                            },
+                        },
+                    ],
+                    "frame_range": [1, 48],
+                    "sample_frames": [1, 24, 44],
+                },
+            ),
+            (
+                "hia_run_effect_experiment",
+                {
+                    "target_network": "/obj/effect",
+                    "baseline": {"parameters": {}},
+                    "candidates": [
+                        {
+                            "name": "low",
+                            "parameters": {"/obj/effect/scale": 0.5},
+                        },
+                        {
+                            "name": "high",
+                            "parameters": {"/obj/effect/scale": 1.5},
+                        },
+                    ],
+                    "frame_range": [1, 48],
+                    "sample_frames": [1, 24, 44],
+                    "timeout_seconds": 301,
+                },
+            ),
+            (
+                "hia_run_effect_experiment",
+                {
+                    "target_network": "/obj/effect",
+                    "baseline": {"parameters": {}},
+                    "candidates": [
+                        {
+                            "name": "low",
+                            "parameters": {"/obj/effect/scale": [0.5]},
+                        },
+                        {
+                            "name": "high",
+                            "parameters": {"/obj/effect/scale": 1.5},
+                        },
+                    ],
+                    "frame_range": [1, 48],
+                    "sample_frames": [1, 24, 44],
+                },
+            ),
+            (
+                "hia_node_help",
+                {},
+            ),
+            (
+                "hia_scene_diff",
+                {"action": "compare"},
+            ),
+        )
+        for request_id, (name, arguments) in enumerate(cases, start=30):
+            with self.subTest(name=name, arguments=arguments):
+                response = adapter.handle_message(
+                    rpc(
+                        request_id,
+                        "tools/call",
+                        {"name": name, "arguments": arguments},
+                    )
+                )
+                self.assertEqual(-32602, response["error"]["code"])
+                self.assertEqual(
+                    "INVALID_ARGUMENTS",
+                    response["error"]["data"]["code"],
+                )
+        self.assertEqual([], transport.calls)
+
+    def test_valid_effect_experiment_contract_dispatches_once(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        arguments = {
+            "target_network": "/obj/effect",
+            "baseline": {"parameters": {}},
+            "candidates": [
+                {
+                    "name": "low",
+                    "parameters": {"/obj/effect/scale": 0.5},
+                },
+                {
+                    "name": "high",
+                    "parameters": {"/obj/effect/scale": 1.5},
+                },
+            ],
+            "frame_range": [1, 48],
+            "sample_frames": [1, 24, 44],
+            "timeout_seconds": 300,
+        }
+
+        response = adapter.handle_message(
+            rpc(
+                30,
+                "tools/call",
+                {
+                    "name": "hia_run_effect_experiment",
+                    "arguments": arguments,
+                },
+            )
+        )
+
+        self.assertNotIn("error", response)
+        self.assertEqual(
+            [("hia_run_effect_experiment", arguments, 30)],
+            transport.calls,
+        )
 
     def test_stdio_initialize_list_and_call(self) -> None:
         transport = FakeTransport()

@@ -433,7 +433,7 @@ def _core_knowledge_action(
 
     contract = _load_project_module(project_root, "contract")
     layout = dict(contract.runtime_layout(project_root))
-    python_options = ["-I"]
+    python_options = ["-I", "-X", "utf8"]
     if not _current_interpreter_is_project_managed(project_root):
         python_options.append("-S")
     python_options.append("-B")
@@ -875,7 +875,7 @@ try:
         payload["gpu_name"] = str(torch.cuda.get_device_name(0))
 except Exception as exc:
     payload["torch_error"] = type(exc).__name__
-print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+print(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
 """
 
 
@@ -893,7 +893,15 @@ def _python_probe(
     _assert_managed_chain(project_root, python_path)
     try:
         completed = subprocess.run(
-            [str(python_path), "-I", "-B", "-c", _PYTHON_PROBE],
+            [
+                str(python_path),
+                "-I",
+                "-X",
+                "utf8",
+                "-B",
+                "-c",
+                _PYTHON_PROBE,
+            ],
             cwd=project_root,
             env=_safe_child_environment(project_root, layout),
             capture_output=True,
@@ -1542,7 +1550,7 @@ def _emit(
     sys.stdout.write(
         json.dumps(
             payload,
-            ensure_ascii=False,
+            ensure_ascii=True,
             allow_nan=False,
             separators=(",", ":"),
         )

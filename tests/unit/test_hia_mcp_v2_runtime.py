@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import struct
@@ -298,14 +299,21 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
                 "capture_diff": True,
             },
         )
-        self.assertFalse(response["ok"])
+        self.assertTrue(response["ok"])
         self.assertEqual({"frame": 12.0}, response["result"])
         self.assertEqual("hello\n", response["stdout"])
         self.assertEqual([], response["created_or_changed_paths"])
         self.assertEqual(["/obj/test"], response["diff"]["unverified_paths"])
         self.assertEqual("unknown", response["scene_change_status"])
         self.assertEqual(0, response["revision"])
-        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
+        self.assertEqual([], response["errors"])
+        self.assertEqual(
+            "not_proven",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
+        self.assertTrue(
+            any("did not prove a change" in item for item in response["warnings"])
+        )
         self.assertEqual("not_needed", response["rollback"]["status"])
         self.assertEqual(0, self.hou.undos.undo_calls)
         self.assertIn("interruptible_after_main_thread_entry", response["execution_limit"])
@@ -321,6 +329,88 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
         self.assertIn("Traceback", response["errors"][0]["traceback"])
         self.assertNotIn("SUPERSECRETVALUE", str(response))
         self.assertIn("[REDACTED]", str(response))
+
+    def test_execute_hom_nonfinite_result_remains_json_serializable(self) -> None:
+        response = self.executor.dispatch(
+            "hia_execute_hom",
+            {
+                "script": "hia_result = {'nan': float('nan'), 'inf': float('inf')}",
+                "capture_diff": False,
+                "fresh_validation": False,
+            },
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(
+            {
+                "nan": "<non-finite float: nan>",
+                "inf": "<non-finite float: infinity>",
+            },
+            response["result"],
+        )
+        json.dumps(response, ensure_ascii=False, allow_nan=False)
+
+    def test_inspect_accepts_one_path_and_keeps_existing_batch_records(self) -> None:
+        single = self.executor.dispatch(
+            "hia_inspect",
+            {"path": "/", "views": ["connections"]},
+        )
+        self.assertTrue(single["ok"])
+        self.assertEqual(["/"], [item["path"] for item in single["result"]["nodes"]])
+        self.assertEqual([], single["result"]["missing_paths"])
+
+        partial = self.executor.dispatch(
+            "hia_inspect",
+            {"paths": ["/", "/stale"], "views": ["connections"]},
+        )
+        self.assertTrue(partial["ok"])
+        self.assertEqual(["/"], [item["path"] for item in partial["result"]["nodes"]])
+        self.assertEqual(["/stale"], partial["result"]["missing_paths"])
+        self.assertEqual([], partial["errors"])
+        self.assertEqual(1, len(partial["warnings"]))
+
+        missing = self.executor.dispatch(
+            "hia_inspect",
+            {"path": "/stale", "views": ["connections"]},
+        )
+        self.assertTrue(missing["ok"])
+        self.assertEqual([], missing["result"]["nodes"])
+        self.assertEqual(["/stale"], missing["result"]["missing_paths"])
+
+        with self.assertRaises(HiaRuntimeError) as raised:
+            self.executor.dispatch(
+                "hia_inspect",
+                {"path": "/", "paths": ["/"]},
+            )
+        self.assertEqual("INVALID_ARGUMENTS", raised.exception.code)
+
+    def test_batch_summaries_keep_existing_nodes_when_one_path_is_stale(
+        self,
+    ) -> None:
+        geometry = self.executor.dispatch(
+            "hia_geometry_summary",
+            {"paths": ["/", "/stale"]},
+        )
+        animation = self.executor.dispatch(
+            "hia_animation_summary",
+            {"paths": ["/", "/stale"], "include_static": True},
+        )
+
+        self.assertTrue(geometry["ok"])
+        self.assertEqual(["/stale"], geometry["result"]["missing_paths"])
+        self.assertEqual(1, geometry["result"]["total"])
+        self.assertEqual(1, len(geometry["result"]["geometry"]))
+        self.assertEqual(1, len(geometry["warnings"]))
+        self.assertTrue(animation["ok"])
+        self.assertEqual(["/stale"], animation["result"]["missing_paths"])
+        self.assertEqual(1, len(animation["warnings"]))
+
+        for tool_name in ("hia_geometry_summary", "hia_animation_summary"):
+            with self.subTest(tool_name=tool_name), self.assertRaises(
+                HiaRuntimeError
+            ) as raised:
+                self.executor.dispatch(tool_name, {"paths": ["/stale"]})
+            self.assertEqual("NODE_NOT_FOUND", raised.exception.code)
 
     def test_unknown_tool_has_a_stable_error(self) -> None:
         with self.assertRaises(HiaRuntimeError) as raised:
@@ -360,6 +450,38 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
         self.assertEqual(separated, redundant_prefix)
         self.assertEqual("Cop", qualified["result"]["category"])
         self.assertEqual("wrangle", qualified["result"]["name"])
+
+    def test_houdini_22_uses_live_build_node_types_and_help_without_a_gate(
+        self,
+    ) -> None:
+        installed_type = FakeHelpNodeType()
+        self.hou.applicationVersionString = lambda: "22.0.101"  # type: ignore[method-assign]
+        self.hou.nodeTypeCategories = lambda: {
+            "Cop": FakeNodeTypeCategory(installed_type)
+        }
+        live_node = FakeHelpNode()
+        original_node = self.hou.node
+        self.hou.node = lambda path: (  # type: ignore[method-assign]
+            live_node if path == "/obj/help22" else original_node(path)
+        )
+
+        context = self.executor.dispatch("hia_context", {})
+        search = self.executor.dispatch(
+            "hia_search_node_types",
+            {"query": "wrangle"},
+        )
+        help_result = self.executor.dispatch(
+            "hia_node_help",
+            {
+                "node_path": "/obj/help22",
+                "include_parameters": True,
+            },
+        )
+
+        self.assertEqual("22.0.101", context["result"]["houdini_build"])
+        self.assertEqual("wrangle", search["result"]["node_types"][0]["name"])
+        self.assertEqual("wrangle", help_result["result"]["name"])
+        self.assertEqual(1, help_result["result"]["parameter_total"])
 
     def test_node_type_batch_scans_catalog_once_and_merges_results(self) -> None:
         installed_type = FakeHelpNodeType()
@@ -457,6 +579,104 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
         self.assertEqual("layer#name", parm["template_name"])
         self.assertTrue(parm["multiparm_instance"])
         self.assertEqual([0], parm["multiparm_indices"])
+
+    def test_solaris_summary_walks_only_the_requested_prim_subtree(self) -> None:
+        class FakeVariantSets:
+            @staticmethod
+            def GetNames() -> tuple[str, ...]:  # noqa: N802
+                return ()
+
+        class FakeUsdPrim:
+            def __init__(
+                self,
+                path: str,
+                *children: "FakeUsdPrim",
+            ) -> None:
+                self._path = path
+                self._children = children
+
+            def GetChildren(self) -> tuple["FakeUsdPrim", ...]:  # noqa: N802
+                return self._children
+
+            def GetPath(self) -> str:  # noqa: N802
+                return self._path
+
+            def GetTypeName(self) -> str:  # noqa: N802
+                return "Xform"
+
+            def IsActive(self) -> bool:  # noqa: N802
+                return True
+
+            def IsLoaded(self) -> bool:  # noqa: N802
+                return True
+
+            def IsInstance(self) -> bool:  # noqa: N802
+                return False
+
+            def IsInstanceProxy(self) -> bool:  # noqa: N802
+                return False
+
+            def GetVariantSets(self) -> FakeVariantSets:  # noqa: N802
+                return FakeVariantSets()
+
+            def GetRelationships(self) -> tuple[Any, ...]:  # noqa: N802
+                return ()
+
+        grandchild = FakeUsdPrim("/World/Asset/Child/Grandchild")
+        child = FakeUsdPrim("/World/Asset/Child", grandchild)
+        sibling = FakeUsdPrim("/World/Asset/Sibling")
+        root_prim = FakeUsdPrim("/World/Asset", child, sibling)
+        outside = FakeUsdPrim("/World/Outside")
+
+        class FakeStage:
+            @staticmethod
+            def GetPrimAtPath(path: str) -> FakeUsdPrim | None:  # noqa: N802
+                return root_prim if path == "/World/Asset" else None
+
+            @staticmethod
+            def Traverse() -> tuple[FakeUsdPrim, ...]:  # noqa: N802
+                return (root_prim, outside)
+
+            @staticmethod
+            def GetLayerStack() -> tuple[Any, ...]:  # noqa: N802
+                return ()
+
+        class FakeLopNode:
+            @staticmethod
+            def stage() -> FakeStage:
+                return FakeStage()
+
+            @staticmethod
+            def errors() -> tuple[str, ...]:
+                return ()
+
+            @staticmethod
+            def warnings() -> tuple[str, ...]:
+                return ()
+
+        original_node = self.hou.node
+        self.hou.node = lambda path: (  # type: ignore[method-assign]
+            FakeLopNode() if path == "/stage/summary" else original_node(path)
+        )
+
+        result = self.executor.dispatch(
+            "hia_solaris_summary",
+            {
+                "lop_path": "/stage/summary",
+                "prim_path": "/World/Asset",
+            },
+        )["result"]
+
+        self.assertEqual(
+            [
+                "/World/Asset",
+                "/World/Asset/Child",
+                "/World/Asset/Child/Grandchild",
+                "/World/Asset/Sibling",
+            ],
+            [prim["path"] for prim in result["prims"]],
+        )
+        self.assertNotIn("/World/Outside", [prim["path"] for prim in result["prims"]])
 
     def test_viewport_defaults_to_portable_timestamped_screenshot_cache(self) -> None:
         with tempfile.TemporaryDirectory(dir=REPOSITORY_ROOT / "tests") as temporary:

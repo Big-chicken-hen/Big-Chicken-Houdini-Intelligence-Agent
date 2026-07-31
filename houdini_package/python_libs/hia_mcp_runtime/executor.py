@@ -590,7 +590,27 @@ class HoudiniExecutor:
         return response
 
     def _inspect(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        nodes = self._resolve_nodes(arguments)
+        if "path" in arguments and "paths" in arguments:
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "Provide path or paths, not both",
+            )
+        requested_paths = (
+            [str(arguments["path"])]
+            if "path" in arguments
+            else [str(value) for value in arguments.get("paths", [])]
+        )
+        missing_paths: list[str] = []
+        if requested_paths:
+            nodes = []
+            for path in requested_paths:
+                node = self._hou.node(path)
+                if node is None:
+                    missing_paths.append(path)
+                else:
+                    nodes.append(node)
+        else:
+            nodes = self._resolve_nodes(arguments)
         views = set(arguments.get("views") or ["parameters", "connections", "flags", "errors"])
         query = str(arguments.get("query", "")).casefold()
         depth = _bounded_int(arguments.get("depth", 0), 0, 3)
@@ -601,7 +621,23 @@ class HoudiniExecutor:
             record = self._node_record(node, views=views, query=query, depth=depth, limit=limit)
             records.append(record)
         page = records[offset : offset + limit]
-        return self._success({"nodes": page, "total": len(records), "offset": offset, "limit": limit})
+        return self._success(
+            {
+                "nodes": page,
+                "total": len(records),
+                "missing_paths": missing_paths[:64],
+                "offset": offset,
+                "limit": limit,
+            },
+            warnings=(
+                [
+                    "Some requested inspect paths do not exist; existing paths "
+                    "were still returned"
+                ]
+                if missing_paths
+                else None
+            ),
+        )
 
     def _scene_graph(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         root_path = str(arguments.get("root_path") or self._current_network_path() or "/")
@@ -826,7 +862,7 @@ class HoudiniExecutor:
         return result
 
     def _geometry_summary(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        nodes = self._resolve_nodes(arguments)
+        nodes, missing_paths = self._resolve_nodes_with_missing(arguments)
         limit = _limit(arguments)
         include_attributes = bool(arguments.get("include_attributes", True))
         sample_limit = _bounded_int(arguments.get("sample_limit", 0), 0, 100)
@@ -834,7 +870,22 @@ class HoudiniExecutor:
             self._geometry_record(node, include_attributes=include_attributes, sample_limit=sample_limit)
             for node in nodes[:limit]
         ]
-        return self._success({"geometry": records, "total": len(nodes), "limit": limit})
+        return self._success(
+            {
+                "geometry": records,
+                "total": len(nodes),
+                "missing_paths": missing_paths,
+                "limit": limit,
+            },
+            warnings=(
+                [
+                    "Some requested geometry paths do not exist; existing "
+                    "paths were still summarized"
+                ]
+                if missing_paths
+                else None
+            ),
+        )
 
     def _material_render_summary(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         roots = arguments.get("root_paths") or ["/mat", "/shop", "/out", "/stage"]
@@ -885,9 +936,9 @@ class HoudiniExecutor:
         limit = _limit(arguments)
         if prim_path:
             root_prim = stage.GetPrimAtPath(prim_path)
-            iterator: Iterable[Any] = [root_prim] if root_prim else []
-            if root_prim:
-                iterator = [root_prim, *list(root_prim.GetDescendants())]
+            iterator: Iterable[Any] = (
+                _usd_prim_subtree(root_prim) if root_prim else ()
+            )
         else:
             iterator = stage.Traverse()
         prims = []
@@ -934,7 +985,7 @@ class HoudiniExecutor:
         )
 
     def _animation_summary(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        nodes = self._resolve_nodes(arguments)
+        nodes, missing_paths = self._resolve_nodes_with_missing(arguments)
         include_static = bool(arguments.get("include_static", False))
         offset = _bounded_int(arguments.get("offset", 0), 0, 1_000_000)
         limit = _limit(arguments)
@@ -966,13 +1017,22 @@ class HoudiniExecutor:
             {
                 "channels": channels[offset : offset + limit],
                 "total": len(channels),
+                "missing_paths": missing_paths,
                 "offset": offset,
                 "limit": limit,
                 "frame": _json_value(_safe_call(self._hou, "frame", 0.0)),
                 "frame_range": _json_value(frame_range),
                 "playbar_range": _json_value(playback_range),
                 "take": _safe_name(take),
-            }
+            },
+            warnings=(
+                [
+                    "Some requested animation paths do not exist; existing "
+                    "paths were still summarized"
+                ]
+                if missing_paths
+                else None
+            ),
         )
 
     def _simulation_summary(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -2810,7 +2870,7 @@ class HoudiniExecutor:
         expected_deletions = self._absolute_node_paths(
             arguments.get("expected_deletions") or [],
             field_name="expected_deletions",
-            maximum=64,
+            maximum=1_024,
         )
         requested_checks = self._validation_check_names(
             arguments.get("checks"),
@@ -2884,29 +2944,49 @@ class HoudiniExecutor:
         undo_labels = getattr(undos, "undoLabels", None)
         perform_undo = getattr(undos, "performUndo", None)
         undos_enabled = getattr(undos, "areEnabled", None)
-        if not all(
+        undo_available = all(
             callable(value)
             for value in (undo_group, undo_labels, perform_undo, undos_enabled)
-        ):
-            raise HiaRuntimeError(
-                "UNDO_ROLLBACK_UNAVAILABLE",
-                "The current Houdini runtime does not expose the required undo-group API",
-            )
-        try:
-            if not bool(undos_enabled()):
-                raise HiaRuntimeError(
-                    "UNDO_ROLLBACK_UNAVAILABLE",
-                    "Houdini undo recording is disabled, so the batch cannot be safely rolled back on failure",
-                )
-            undo_labels_before = tuple(str(value) for value in undo_labels())
-        except HiaRuntimeError:
-            raise
-        except Exception as exc:
-            raise HiaRuntimeError(
-                "UNDO_ROLLBACK_UNAVAILABLE",
-                "The Houdini undo stack could not be inspected before execution",
-                {"reason": _bounded_text(_redact_text(str(exc)), 1024)},
-            ) from exc
+        )
+        undo_unavailable_error: dict[str, Any] | None = None
+        undo_labels_before: tuple[str, ...] = ()
+        if not undo_available:
+            undo_unavailable_error = {
+                "code": "UNDO_ROLLBACK_UNAVAILABLE",
+                "message": (
+                    "The current Houdini runtime does not expose the undo-group "
+                    "API; the HOM batch may still run, but an execution failure "
+                    "cannot be rolled back automatically"
+                ),
+            }
+        else:
+            try:
+                if not bool(undos_enabled()):
+                    undo_available = False
+                    undo_unavailable_error = {
+                        "code": "UNDO_ROLLBACK_UNAVAILABLE",
+                        "message": (
+                            "Houdini undo recording is disabled; the HOM batch "
+                            "may still run, but an execution failure cannot be "
+                            "rolled back automatically"
+                        ),
+                    }
+                else:
+                    undo_labels_before = tuple(
+                        str(value) for value in undo_labels()
+                    )
+            except Exception as exc:
+                undo_available = False
+                undo_unavailable_error = {
+                    "code": "UNDO_ROLLBACK_UNAVAILABLE",
+                    "message": (
+                        "The Houdini undo stack could not be inspected before "
+                        "execution; the HOM batch may still run"
+                    ),
+                    "details": {
+                        "reason": _bounded_text(_redact_text(str(exc)), 1024)
+                    },
+                }
         undo_label = f"HIA MCP V2 {execution_id}"
 
         revision_before = self.scene_revision
@@ -2949,7 +3029,12 @@ class HoudiniExecutor:
                 marker_only_baselines.add(path)
 
         if full_diff:
-            before_nodes, before_truncated = self._snapshot_map(diff_root)
+            try:
+                before_nodes, before_truncated = self._snapshot_map(diff_root)
+            except HiaRuntimeError as exc:
+                if exc.code != "NODE_NOT_FOUND":
+                    raise
+                before_nodes, before_truncated = {}, False
         elif capture_diff:
             for value in requested_diff_paths:
                 if not isinstance(value, str) or not value.startswith("/") or len(value) > 4096:
@@ -3014,6 +3099,8 @@ class HoudiniExecutor:
         stdout = io.StringIO()
         stderr = io.StringIO()
         warning_records: list[str] = []
+        if undo_unavailable_error is not None:
+            warning_records.append(str(undo_unavailable_error["message"]))
         hom_started = time.monotonic()
         failure: dict[str, Any] | None = None
         rollback: dict[str, Any] = {
@@ -3026,7 +3113,12 @@ class HoudiniExecutor:
             "error": None,
         }
         try:
-            with undo_group(undo_label):
+            undo_context = (
+                undo_group(undo_label)
+                if undo_available
+                else contextlib.nullcontext()
+            )
+            with undo_context:
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), python_warnings.catch_warnings(record=True) as caught:
                     python_warnings.simplefilter("always")
                     exec(compiled_script, namespace, namespace)
@@ -3060,6 +3152,15 @@ class HoudiniExecutor:
                     "status": "not_proven",
                 }
             )
+            if not undo_available:
+                rollback["error"] = dict(
+                    undo_unavailable_error
+                    or {
+                        "code": "UNDO_ROLLBACK_UNAVAILABLE",
+                        "message": "Houdini undo rollback is unavailable",
+                    }
+                )
+                return
             try:
                 current_labels = tuple(str(value) for value in undo_labels())
                 if not current_labels or current_labels[0] != undo_label:
@@ -3258,15 +3359,13 @@ class HoudiniExecutor:
             )
         if isinstance(diff, dict):
             observed_deleted = set(str(path) for path in diff["deleted"])
-            expected_deleted = set(expected_deletions)
-            diff["expected_deletions"] = sorted(
-                observed_deleted.intersection(expected_deleted)
-            )
-            diff["missing_expected_deletions"] = sorted(
-                expected_deleted.difference(observed_deleted)
-            )
-            diff["unexpected_deletions"] = sorted(
-                observed_deleted.difference(expected_deleted)
+            (
+                diff["expected_deletions"],
+                diff["missing_expected_deletions"],
+                diff["unexpected_deletions"],
+            ) = _classify_expected_deletions(
+                observed_deleted,
+                expected_deletions,
             )
 
         verified_diff_paths = (
@@ -3326,9 +3425,25 @@ class HoudiniExecutor:
             effective_checks.append("node_errors")
         if (mutable_root or protected_paths) and "changed_scope" not in effective_checks:
             effective_checks.append("changed_scope")
-        validation_paths = list(
-            dict.fromkeys([*expected_outputs, *changed_paths, *semantic_paths])
-        )[:64]
+        observed_expected_deletions = {
+            str(path)
+            for path in (
+                diff.get("deleted", [])
+                if isinstance(diff, Mapping)
+                else []
+            )
+            if any(
+                _houdini_path_is_within(str(path), expected_root)
+                for expected_root in expected_deletions
+            )
+        }
+        validation_paths = [
+            path
+            for path in dict.fromkeys(
+                [*expected_outputs, *changed_paths, *semantic_paths]
+            )
+            if path not in observed_expected_deletions
+        ][:64]
         if not validation_paths and any(
             name in {"node_errors", "empty_output", "geometry_summary"}
             for name in effective_checks
@@ -3424,10 +3539,40 @@ class HoudiniExecutor:
                 or explicitly_changed
             )
         )
-        if failure is None and not validation["valid"]:
+        scope_check = next(
+            (
+                item
+                for item in validation["check_results"]
+                if item["check"] == "changed_scope"
+            ),
+            None,
+        )
+        scope_findings = (
+            list(scope_check.get("findings") or [])
+            if isinstance(scope_check, Mapping)
+            else []
+        )
+        scope_violation = bool(
+            isinstance(scope_check, Mapping)
+            and scope_check.get("status") == "fail"
+            and scope_findings
+        )
+        if failure is None and scope_violation:
             failure = {
-                "code": "VALIDATION_FAILED",
-                "message": "One or more requested postconditions failed",
+                "code": "PATH_SCOPE_VIOLATION",
+                "message": (
+                    "The batch made an observed change outside its mutable "
+                    "scope or inside a protected path"
+                ),
+                "details": {
+                    "paths": list(
+                        dict.fromkeys(
+                            str(item.get("path") or "")
+                            for item in scope_findings
+                            if str(item.get("path") or "").startswith("/")
+                        )
+                    )[:64],
+                },
                 "partial_scene_changes_possible": observed_change,
                 "automatic_retry_safe": False,
             }
@@ -3450,39 +3595,25 @@ class HoudiniExecutor:
             and isinstance(diff, Mapping)
             and diff.get("missing_expected_deletions")
         ):
-            failure = {
-                "code": "EXPECTED_DELETION_NOT_OBSERVED",
-                "message": "One or more expected node deletions were not observed",
-                "details": {
-                    "paths": list(diff["missing_expected_deletions"])[:64],
-                },
-                "partial_scene_changes_possible": observed_change,
-                "automatic_retry_safe": False,
-            }
+            warning_records.append(
+                "Expected deletion was not observed for: "
+                + ", ".join(
+                    str(path)
+                    for path in list(diff["missing_expected_deletions"])[:64]
+                )
+            )
         if failure is None and require_scene_change and not observed_change:
-            failure = {
-                "code": "NO_OBSERVED_EFFECT",
-                "message": (
-                    "The batch required a scene change, but no created, "
-                    "deleted, changed, or dirty-state evidence was observed"
-                ),
-                "partial_scene_changes_possible": bool(unverified_paths),
-                "automatic_retry_safe": False,
-            }
-        not_proven_failure_codes = {
-            "NO_OBSERVED_EFFECT",
-            "POSTCONDITION_NOT_PROVEN",
-            "FRESH_OUTPUT_NOT_PROVEN",
-        }
-        failure_code = (
-            str(failure.get("code") or "")
-            if failure is not None
-            else ""
+            warning_records.append(
+                "The batch requested scene-change evidence, but the observed "
+                "diff and dirty state did not prove a change; the HOM result "
+                "is retained for Codex to inspect rather than rolled back"
+            )
+        no_observed_effect = bool(require_scene_change and not observed_change)
+        missing_expected_deletions = bool(
+            isinstance(diff, Mapping)
+            and diff.get("missing_expected_deletions")
         )
-        rollback_required = bool(
-            failure is not None
-            and failure_code not in not_proven_failure_codes
-        )
+        rollback_required = failure is not None
         if rollback_required and not rollback["requested"]:
             rollback_batch("postcondition_failed")
         attempted_changed_paths = list(changed_paths)
@@ -3516,14 +3647,6 @@ class HoudiniExecutor:
             ),
             None,
         )
-        scope_check = next(
-            (
-                item
-                for item in validation["check_results"]
-                if item["check"] == "changed_scope"
-            ),
-            None,
-        )
         node_findings = (
             list(node_error_check.get("findings") or [])
             if isinstance(node_error_check, Mapping)
@@ -3540,6 +3663,7 @@ class HoudiniExecutor:
             or semantic_checks
             or mutable_root
             or protected_paths
+            or require_scene_change
         )
         postcondition_evidence_observed = bool(
             any(
@@ -3590,11 +3714,15 @@ class HoudiniExecutor:
                     "not_requested"
                     if not postconditions_requested
                     else (
-                        "not_proven"
-                        if failure_code in not_proven_failure_codes
+                        "failed"
+                        if (
+                            failure is not None
+                            or not validation["valid"]
+                            or missing_expected_deletions
+                        )
                         else (
-                            "failed"
-                            if failure is not None
+                            "not_proven"
+                            if no_observed_effect
                             else (
                                 "partial"
                                 if not validation["complete"]
@@ -3899,6 +4027,19 @@ class HoudiniExecutor:
         self,
         arguments: Mapping[str, Any],
     ) -> dict[str, Any]:
+        raw_timeout = arguments.get("timeout_seconds", 60.0)
+        if (
+            isinstance(raw_timeout, bool)
+            or not isinstance(raw_timeout, (int, float))
+            or not math.isfinite(float(raw_timeout))
+            or not 1 <= float(raw_timeout) <= 300
+        ):
+            raise HiaRuntimeError(
+                "INVALID_ARGUMENTS",
+                "timeout_seconds must be between 1 and 300",
+            )
+        timeout_seconds = float(raw_timeout)
+
         def scalar(value: Any, field: str) -> Any:
             if value is None or not isinstance(value, (str, bool, int, float)):
                 raise HiaRuntimeError(
@@ -4310,6 +4451,7 @@ class HoudiniExecutor:
         )
         return {
             "target": target,
+            "timeout_seconds": timeout_seconds,
             "baseline_name": baseline["name"],
             "candidates": [
                 {"name": value["name"], "parameters": parameters}
@@ -4648,7 +4790,14 @@ class HoudiniExecutor:
                             snapshot, truncated = self._snapshot_map(cfg["target"])
                             structural = self._diff_maps(cfg["initial_snapshot"], snapshot)
                             deleted = set(structural["deleted"])
-                            expected = set(cfg["expected_deletions"])
+                            (
+                                expected_observed,
+                                expected_missing,
+                                unexpected_deleted,
+                            ) = _classify_expected_deletions(
+                                deleted,
+                                cfg["expected_deletions"],
+                            )
                             (
                                 ignored_locked_asset_internal,
                                 unexpected_creations,
@@ -4657,9 +4806,9 @@ class HoudiniExecutor:
                             )
                             structural.update(
                                 {
-                                    "expected_deletions": sorted(deleted & expected),
-                                    "missing_expected_deletions": sorted(expected - deleted),
-                                    "unexpected_deletions": sorted(deleted - expected),
+                                    "expected_deletions": expected_observed,
+                                    "missing_expected_deletions": expected_missing,
+                                    "unexpected_deletions": unexpected_deleted,
                                     "unexpected_creations": unexpected_creations,
                                     "ignored_locked_asset_internal": (
                                         ignored_locked_asset_internal
@@ -4968,6 +5117,13 @@ class HoudiniExecutor:
             "errors": errors[:32],
             "revision": self.scene_revision,
             "dirty": dirty_after,
+            "execution_limit": {
+                "requested_timeout_seconds": cfg["timeout_seconds"],
+                "timeout_kind": "client_wait_budget",
+                "interruptible_after_main_thread_entry": False,
+                "hom_may_continue_after_client_timeout": True,
+                "automatic_retry_after_timeout": False,
+            },
         }
 
     def _write_effect_contact_sheet(
@@ -5103,7 +5259,14 @@ class HoudiniExecutor:
         root_path = str(arguments.get("root_path", "/"))
         limit = _limit(arguments)
         if action == "capture":
-            nodes, truncated = self._snapshot_map(root_path)
+            try:
+                nodes, truncated = self._snapshot_map(root_path)
+                root_exists = True
+            except HiaRuntimeError as exc:
+                if exc.code != "NODE_NOT_FOUND":
+                    raise
+                nodes, truncated = {}, False
+                root_exists = False
             snapshot_id = snapshot_id or f"snapshot-{uuid.uuid4().hex}"
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", snapshot_id):
                 raise HiaRuntimeError("INVALID_ARGUMENTS", "snapshot_id has an invalid format")
@@ -5120,7 +5283,13 @@ class HoudiniExecutor:
                     created_at=time.time(),
                 )
             return self._success(
-                {"snapshot_id": snapshot_id, "root_path": root_path, "node_count": len(nodes), "truncated": truncated}
+                {
+                    "snapshot_id": snapshot_id,
+                    "root_path": root_path,
+                    "root_exists": root_exists,
+                    "node_count": len(nodes),
+                    "truncated": truncated,
+                }
             )
         if action == "list":
             with self._state_lock:
@@ -5150,20 +5319,25 @@ class HoudiniExecutor:
         expected_deletions = self._absolute_node_paths(
             arguments.get("expected_deletions") or [],
             field_name="expected_deletions",
-            maximum=64,
+            maximum=1_024,
         )
-        current, truncated = self._snapshot_map(snapshot.root_path)
+        try:
+            current, truncated = self._snapshot_map(snapshot.root_path)
+            root_exists = True
+        except HiaRuntimeError as exc:
+            if exc.code != "NODE_NOT_FOUND":
+                raise
+            current, truncated = {}, False
+            root_exists = False
         diff = self._diff_maps(snapshot.nodes, current)
         observed_deleted = set(diff["deleted"])
-        expected_deleted = set(expected_deletions)
-        diff["expected_deletions"] = sorted(
-            observed_deleted.intersection(expected_deleted)
-        )
-        diff["missing_expected_deletions"] = sorted(
-            expected_deleted.difference(observed_deleted)
-        )
-        diff["unexpected_deletions"] = sorted(
-            observed_deleted.difference(expected_deleted)
+        (
+            diff["expected_deletions"],
+            diff["missing_expected_deletions"],
+            diff["unexpected_deletions"],
+        ) = _classify_expected_deletions(
+            observed_deleted,
+            expected_deletions,
         )
         for key in (
             "created",
@@ -5178,6 +5352,7 @@ class HoudiniExecutor:
             {
                 "snapshot_id": snapshot_id,
                 "root_path": snapshot.root_path,
+                "root_exists": root_exists,
                 "diff": diff,
                 "truncated": snapshot.truncated or truncated,
                 "snapshot_revision": snapshot.scene_revision,
@@ -5464,8 +5639,8 @@ class HoudiniExecutor:
         if missing_frames:
             temporal_status = "failed"
         elif no_change and expect_change:
-            temporal_status = "failed"
-            errors.append(
+            temporal_status = "not_proven"
+            warnings.append(
                 "All captured frames are byte-identical; temporal change or simulation advancement was not proven"
             )
         else:
@@ -5511,7 +5686,7 @@ class HoudiniExecutor:
             }
         )
         result: dict[str, Any] = {
-            "ok": bool(successful) and temporal_status != "failed",
+            "ok": bool(successful) and not missing_frames,
             "result": first_result,
             "warnings": list(dict.fromkeys(warnings))[:32],
             "errors": list(dict.fromkeys(errors))[:32],
@@ -6641,6 +6816,29 @@ class HoudiniExecutor:
             raise HiaRuntimeError("NO_TARGET_NODES", "No paths, selection, or current node are available")
         return nodes[:64]
 
+    def _resolve_nodes_with_missing(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> tuple[list[Any], list[str]]:
+        paths = [str(value) for value in arguments.get("paths", [])]
+        if not paths:
+            return self._resolve_nodes(arguments), []
+        nodes = []
+        missing = []
+        for path in paths:
+            node = self._hou.node(path)
+            if node is None:
+                missing.append(path)
+            else:
+                nodes.append(node)
+        if not nodes:
+            raise HiaRuntimeError(
+                "NODE_NOT_FOUND",
+                "None of the requested nodes exist",
+                {"paths": missing[:64]},
+            )
+        return nodes[:64], missing[:64]
+
     def _node_record(
         self,
         node: Any,
@@ -7593,6 +7791,25 @@ def _houdini_path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root + "/")
 
 
+def _classify_expected_deletions(
+    observed_paths: Iterable[str],
+    expected_roots: Iterable[str],
+) -> tuple[list[str], list[str], list[str]]:
+    observed = {str(path) for path in observed_paths}
+    expected = {str(path) for path in expected_roots}
+    expected_observed = sorted(expected.intersection(observed))
+    expected_missing = sorted(expected.difference(observed))
+    unexpected = sorted(
+        path
+        for path in observed
+        if not any(
+            _houdini_path_is_within(path, expected_root)
+            for expected_root in expected
+        )
+    )
+    return expected_observed, expected_missing, unexpected
+
+
 def _temporal_image_evidence(
     paths: Iterable[Path],
 ) -> tuple[list[str], dict[str, Any]]:
@@ -7835,6 +8052,17 @@ def _viewport_capture_source_state(
     }
 
 
+def _usd_prim_subtree(root_prim: Any) -> Iterable[Any]:
+    """Yield one USD prim subtree in stable depth-first order, including root."""
+
+    pending = [root_prim]
+    while pending:
+        prim = pending.pop()
+        yield prim
+        children = list(prim.GetChildren())
+        pending.extend(reversed(children))
+
+
 def _safe_call(value: Any, name: str, default: Any, *args: Any) -> Any:
     if value is None:
         return default
@@ -7882,6 +8110,11 @@ def _safe_unexpanded_string(parm: Any) -> str:
 def _json_value(value: Any, *, _depth: int = 0) -> Any:
     if _depth > 8:
         return "<max depth>"
+    if isinstance(value, float) and not math.isfinite(value):
+        label = "nan" if math.isnan(value) else (
+            "infinity" if value > 0 else "-infinity"
+        )
+        return f"<non-finite float: {label}>"
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if isinstance(value, bytes):

@@ -574,7 +574,7 @@ function Get-HiaCacheTreeSnapshot {
                     -Kind 'directory' `
                     -Bytes 0 `
                     -CreationTicks $child.CreationTimeUtc.Ticks `
-                    -LastWriteTicks $child.LastWriteTimeUtc.Ticks `
+                    -LastWriteTicks 0 `
                     -Attributes ([int]$child.Attributes) `
                     -Depth $depth))
                 $stack.Push([pscustomobject]@{
@@ -882,8 +882,6 @@ function Assert-HiaCacheDeletionPlan {
                 $item -isnot [System.IO.DirectoryInfo] -or
                 $item.CreationTimeUtc.Ticks -ne
                     [long]$entry.creation_utc_ticks -or
-                $item.LastWriteTimeUtc.Ticks -ne
-                    [long]$entry.last_write_utc_ticks -or
                 [int]$item.Attributes -ne [int]$entry.attributes
             ) {
                 throw "Cache directory changed after preview: $($entry.relative)"

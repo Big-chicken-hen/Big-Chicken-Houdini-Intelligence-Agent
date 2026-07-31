@@ -587,6 +587,57 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
                 )
                 self.assertTrue(provenance["url"].startswith("https://"))
 
+    def test_unicode61_punctuation_and_chinese_queries_recall_pyro(self) -> None:
+        _copy_pack(COMMUNITY_PACK, self.project_root)
+        index = LocalKnowledgeIndex(self.project_root)
+        _refresh(index, force=True)
+        with closing(index._connect()) as connection:  # noqa: SLF001
+            connection.execute("DROP TABLE knowledge_fts")
+            connection.execute(
+                "CREATE VIRTUAL TABLE knowledge_fts "
+                "USING fts5(title, body, tokenize='unicode61')"
+            )
+            connection.execute(
+                "INSERT INTO knowledge_fts(rowid, title, body) "
+                "SELECT c.id, d.title, c.body FROM chunks c "
+                "JOIN documents d ON d.id = c.document_id"
+            )
+            connection.execute(
+                "UPDATE metadata SET value = 'unicode61' "
+                "WHERE key = 'fts_tokenizer'"
+            )
+            connection.commit()
+
+        queries = (
+            "Pyro source/solver noise: smooth pillar mushroom",
+            "Pyro (disturbance + shredding + turbulence) multi-scale breakup",
+            "H21 Pyro 火焰柱/蘑菇状 source temporal breakup",
+        )
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=FakeEmbedder(),
+        )
+        results = store.search_many(
+            queries,
+            {"project"},
+            current_houdini_version="21.0.440",
+            offset=0,
+            limit=10,
+            mode="lexical",
+            source_kinds={COMMUNITY_TUTORIAL_SOURCE},
+        )
+
+        for query, result in zip(queries, results):
+            self.assertEqual("unicode61", result["tokenizer"])
+            self.assertTrue(result["matches"], query)
+            self.assertEqual(
+                "pyro-fields-cache-contract",
+                result["matches"][0]["metadata"]["card_id"],
+                query,
+            )
+        store.close()
+
     def test_fake_vector_partial_full_and_provenance_filters(self) -> None:
         _copy_pack(COMMUNITY_PACK, self.project_root)
         index = LocalKnowledgeIndex(self.project_root)

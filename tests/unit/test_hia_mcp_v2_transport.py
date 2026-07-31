@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import http.client
 import io
 import json
 import os
@@ -344,7 +345,7 @@ class HiaMcpV2TransportTests(unittest.TestCase):
             executor.calls,
         )
 
-    def test_changed_executor_source_is_reported_stale_before_dispatch(
+    def test_changed_executor_source_is_advisory_and_dispatches_loaded_runtime(
         self,
     ) -> None:
         token = "S" * 48
@@ -360,23 +361,29 @@ class HiaMcpV2TransportTests(unittest.TestCase):
         transport.health()
         session.server.executor_loaded_mtime_ns += 1
 
-        with self.assertRaises(TransportError) as raised:
-            transport.call(
-                "hia_execute_hom",
-                {"script": "pass"},
-                request_id=25,
-                cancellation=CancellationToken(),
-            )
-
-        self.assertEqual("STALE_HOUDINI_RUNTIME", raised.exception.code)
+        executed = transport.call(
+            "hia_execute_hom",
+            {"script": "pass"},
+            request_id=25,
+            cancellation=CancellationToken(),
+        )
         self.assertEqual(
             "stale",
-            raised.exception.details["runtime_identity"][
-                "executor_source_status"
-            ],
+            executed["runtime_identity"]["executor_source_status"],
         )
-        self.assertFalse(raised.exception.details["request_submitted"])
-        self.assertEqual([], executor.calls)
+        self.assertFalse(executed["restart_required"])
+        self.assertEqual(
+            "STALE_HOUDINI_RUNTIME",
+            executed["identity_warning"]["code"],
+        )
+        self.assertIn(
+            "already loaded",
+            executed["identity_warning"]["message"],
+        )
+        self.assertEqual(
+            [("hia_execute_hom", {"script": "pass"})],
+            executor.calls,
+        )
 
         inspected = transport.call(
             "hia_inspect",
@@ -384,10 +391,17 @@ class HiaMcpV2TransportTests(unittest.TestCase):
             request_id=26,
             cancellation=CancellationToken(),
         )
-        self.assertTrue(inspected["restart_required"])
+        self.assertFalse(inspected["restart_required"])
         self.assertEqual(
             "STALE_HOUDINI_RUNTIME",
             inspected["identity_warning"]["code"],
+        )
+        self.assertEqual(
+            [
+                ("hia_execute_hom", {"script": "pass"}),
+                ("hia_inspect", {"paths": ["/obj"]}),
+            ],
+            executor.calls,
         )
 
     def test_old_runtime_health_contract_requires_restart(self) -> None:
@@ -441,6 +455,24 @@ class HiaMcpV2TransportTests(unittest.TestCase):
 
         self.assertEqual("HOUDINI_SESSION_CHANGED", raised.exception.code)
         self.assertFalse(raised.exception.details["request_submitted"])
+        self.assertTrue(raised.exception.details["automatic_retry_safe"])
+
+    def test_health_connection_interrupt_is_structured_as_not_submitted(
+        self,
+    ) -> None:
+        transport = LoopbackTransport(transport_config(45123, "N" * 48))
+
+        with mock.patch(
+            "hia_mcp_v2.transport.urllib.request.urlopen",
+            side_effect=http.client.RemoteDisconnected("closed"),
+        ), self.assertRaises(TransportError) as raised:
+            transport.health()
+
+        self.assertEqual("HOUDINI_UNAVAILABLE", raised.exception.code)
+        self.assertEqual("identity_preflight", raised.exception.details["stage"])
+        self.assertEqual("not_submitted", raised.exception.details["submission_state"])
+        self.assertFalse(raised.exception.details["request_submitted"])
+        self.assertFalse(raised.exception.details["hom_may_still_execute"])
         self.assertTrue(raised.exception.details["automatic_retry_safe"])
 
     def test_health_rejects_wrong_launcher_session_or_executor_source(self) -> None:
@@ -578,6 +610,50 @@ class HiaMcpV2TransportTests(unittest.TestCase):
         self.assertFalse(raised.exception.details["hom_may_still_execute"])
         self.assertFalse(cancellation.accepted)
 
+    def test_effect_experiment_budget_expired_in_stdio_queue_never_submits(
+        self,
+    ) -> None:
+        transport = LoopbackTransport(
+            transport_config(9, "Q" * 48, timeout_seconds=300)
+        )
+        cancellation = CancellationToken(stdio_queue_seconds=1.25)
+
+        with mock.patch(
+            "hia_mcp_v2.transport.urllib.request.urlopen"
+        ) as urlopen, self.assertRaises(TransportError) as raised:
+            transport.call(
+                "hia_run_effect_experiment",
+                {
+                    "target_network": "/obj/fx",
+                    "timeout_seconds": 1,
+                },
+                request_id=14,
+                cancellation=cancellation,
+            )
+
+        self.assertEqual("TIMEOUT_BEFORE_EXECUTION", raised.exception.code)
+        self.assertEqual("stdio_queue", raised.exception.details["stage"])
+        self.assertEqual("not_submitted", raised.exception.details["submission_state"])
+        self.assertFalse(raised.exception.details["request_submitted"])
+        self.assertFalse(raised.exception.details["hom_may_still_execute"])
+        self.assertFalse(cancellation.accepted)
+        urlopen.assert_not_called()
+
+    def test_effect_experiment_uses_its_explicit_client_wait_budget(
+        self,
+    ) -> None:
+        transport = LoopbackTransport(
+            transport_config(9, "Q" * 48, timeout_seconds=60)
+        )
+
+        self.assertEqual(
+            300.0,
+            transport._wait_budget(  # noqa: SLF001
+                "hia_run_effect_experiment",
+                {"timeout_seconds": 300},
+            ),
+        )
+
     def test_timeout_before_response_reports_unknown_submission_state(self) -> None:
         token = "V" * 48
         session = start_test_runtime(
@@ -659,6 +735,70 @@ class HiaMcpV2TransportTests(unittest.TestCase):
                 cancellation=cancellation,
             )
 
+        self.assertEqual("accepted", raised.exception.details["submission_state"])
+        self.assertTrue(raised.exception.details["request_submitted"])
+        self.assertFalse(raised.exception.details["hom_may_still_execute"])
+        self.assertFalse(raised.exception.details["automatic_retry_safe"])
+        self.assertTrue(cancellation.accepted)
+
+    def test_connection_reset_before_response_has_unknown_submission_state(
+        self,
+    ) -> None:
+        transport = LoopbackTransport(
+            transport_config(45123, "A" * 48, timeout_seconds=1)
+        )
+        latch_transport(transport)
+        cancellation = CancellationToken()
+
+        with mock.patch(
+            "hia_mcp_v2.transport.urllib.request.urlopen",
+            side_effect=ConnectionResetError("connection reset"),
+        ), self.assertRaises(TransportError) as raised:
+            transport.call(
+                "hia_execute_hom",
+                {"script": "pass"},
+                request_id=15,
+                cancellation=cancellation,
+            )
+
+        self.assertEqual("CONNECTION_INTERRUPTED", raised.exception.code)
+        self.assertEqual("unknown", raised.exception.details["submission_state"])
+        self.assertIsNone(raised.exception.details["request_submitted"])
+        self.assertTrue(raised.exception.details["hom_may_still_execute"])
+        self.assertFalse(raised.exception.details["automatic_retry_safe"])
+        self.assertFalse(cancellation.accepted)
+
+    def test_incomplete_response_after_headers_is_accepted_not_retry_safe(
+        self,
+    ) -> None:
+        class IncompleteResponse:
+            def __enter__(self) -> "IncompleteResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                raise http.client.IncompleteRead(b"{", 100)
+
+        transport = LoopbackTransport(
+            transport_config(45123, "A" * 48, timeout_seconds=1)
+        )
+        latch_transport(transport)
+        cancellation = CancellationToken()
+
+        with mock.patch(
+            "hia_mcp_v2.transport.urllib.request.urlopen",
+            return_value=IncompleteResponse(),
+        ), self.assertRaises(TransportError) as raised:
+            transport.call(
+                "hia_execute_hom",
+                {"script": "pass"},
+                request_id=16,
+                cancellation=cancellation,
+            )
+
+        self.assertEqual("CONNECTION_INTERRUPTED", raised.exception.code)
         self.assertEqual("accepted", raised.exception.details["submission_state"])
         self.assertTrue(raised.exception.details["request_submitted"])
         self.assertFalse(raised.exception.details["hom_may_still_execute"])

@@ -6951,6 +6951,24 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertEqual(1, panel._client.model_requests)
 
+    def test_late_capacity_error_from_old_turn_or_other_thread_is_ignored(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._on_action_completed("models", {"models": _public_model_catalog()})
+        _context, first_turn_id = _start_active_turn(panel, 1)
+        panel._render_event(_completed_notification(first_turn_id))
+        _context, second_turn_id = _start_active_turn(panel, 2)
+
+        panel._render_event(_capacity_notification(first_turn_id))
+        other_thread = _capacity_notification(second_turn_id, sequence=2)
+        other_thread["params"]["threadId"] = "thread-2"
+        panel._render_event(other_thread)
+
+        self.assertNotIn("模型容量不足", panel.conversation.toPlainText())
+        self.assertEqual(0, panel._client.model_requests)
+        self.assertFalse(panel._runtime_settings_expanded)
+
     def test_new_thread_uses_catalog_model_and_effort_updates_per_model(self) -> None:
         panel = _make_panel()
         panel._on_action_completed(
@@ -7357,7 +7375,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("structuredContent", panel.goal_acceptance_label.text())
         self.assertFalse(panel._goal_completion_is_evidenced())
 
-    def test_failed_live_validation_stays_on_stage_without_auto_continue(
+    def test_failed_live_validation_stays_on_stage_and_continues_to_repair(
         self,
     ) -> None:
         panel = _make_panel()
@@ -7411,7 +7429,7 @@ class PanelWiringTests(unittest.TestCase):
         ]
         panel._on_events({"events": events, "gap": False})
 
-        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual(2, len(panel._client.turn_requests))
         self.assertEqual(
             "failed",
             panel._goal_stage_snapshot["acceptance_status"],
@@ -7420,6 +7438,95 @@ class PanelWiringTests(unittest.TestCase):
             "修复并重新验收当前阶段",
             panel._goal_stage_snapshot["next_stage"],
         )
+        self.assertIn(
+            "必须停留并优先修复当前阶段",
+            panel._client.turn_requests[-1][0],
+        )
+
+    def test_hom_failure_and_dirty_mismatch_continue_to_diagnosis_without_retry(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {"threadId": "thread-1", "objective": "完成木屋", "status": "active"},
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        events = [
+            _houdini_item_notification(
+                "item/started",
+                turn_id,
+                item_id="hom-failed",
+                tool="hia_execute_hom",
+                status="inProgress",
+                sequence=1,
+            ),
+            _houdini_item_notification(
+                "item/completed",
+                turn_id,
+                item_id="hom-failed",
+                tool="hia_execute_hom",
+                status="failed",
+                structured={
+                    "ok": False,
+                    "dirty": True,
+                    "errors": [
+                        {
+                            "code": "HOM_EXECUTION_FAILED",
+                            "automatic_retry_safe": False,
+                        }
+                    ],
+                    "structured_error": {
+                        "code": "HOM_EXECUTION_FAILED",
+                        "message": "'NoneType' object has no attribute 'set'",
+                    },
+                    "rollback": {
+                        "status": "not_proven",
+                        "error": {"code": "DIRTY_STATE_NOT_RESTORED"},
+                    },
+                    "execution_evidence": {
+                        "postconditions": {
+                            "status": "failed",
+                            "node_errors": 0,
+                            "node_warnings": 0,
+                        },
+                        "validation": {
+                            "valid": False,
+                            "complete": False,
+                            "check_results": [
+                                {
+                                    "check": "critical_paths",
+                                    "status": "fail",
+                                },
+                                {
+                                    "check": "changed_scope",
+                                    "status": "unknown",
+                                },
+                            ],
+                        },
+                    },
+                },
+                sequence=2,
+            ),
+            _completed_notification(turn_id, sequence=3),
+        ]
+
+        panel._on_events({"events": events, "gap": False})
+
+        self.assertEqual(
+            "failed",
+            panel._goal_stage_snapshot["acceptance_status"],
+        )
+        self.assertIn(
+            "HOM_EXECUTION_FAILED",
+            panel._goal_stage_snapshot["acceptance"],
+        )
+        self.assertEqual(2, len(panel._client.turn_requests))
+        continuation = panel._client.turn_requests[-1][0]
+        self.assertIn("HOM_EXECUTION_FAILED", continuation)
+        self.assertIn("必须停留并优先修复当前阶段", continuation)
+        self.assertFalse(panel._goal_continuation_paused)
 
     def test_passed_live_validation_auto_continues_exactly_once(self) -> None:
         panel = _make_panel()
@@ -7687,6 +7794,102 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual(["pending"] * 4, pending_postcondition_statuses)
         self.assertEqual("failed", failed_without_evidence)
 
+    def test_supporting_tool_errors_and_nonproof_codes_do_not_fail_a_stage(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        for tool in (
+            "hia_context",
+            "hia_inspect",
+            "hia_local_help_search",
+            "hia_capture_viewport",
+            "hia_run_effect_experiment",
+        ):
+            with self.subTest(tool=tool):
+                outcome, _message = panel._structured_houdini_acceptance(
+                    {
+                        "type": "mcpToolCall",
+                        "tool": tool,
+                        "status": "failed",
+                        "error": {"message": "read failed"},
+                    }
+                )
+                self.assertEqual("pending", outcome)
+
+        for code in (
+            "NO_OBSERVED_EFFECT",
+            "POSTCONDITION_NOT_PROVEN",
+            "FRESH_OUTPUT_NOT_PROVEN",
+        ):
+            with self.subTest(code=code):
+                outcome, _message = panel._structured_houdini_acceptance(
+                    {
+                        "type": "mcpToolCall",
+                        "tool": "hia_execute_hom",
+                        "status": "failed",
+                        "result": {
+                            "structuredContent": {
+                                "ok": False,
+                                "errors": [{"code": code}],
+                                "structured_error": {"code": code},
+                                "execution_evidence": {
+                                    "postconditions": {
+                                        "status": "failed",
+                                        "node_errors": 0,
+                                        "node_warnings": 0,
+                                    },
+                                    "validation": {
+                                        "valid": False,
+                                        "complete": False,
+                                        "check_results": [
+                                            {
+                                                "check": "geometry_summary",
+                                                "status": "unknown",
+                                            }
+                                        ],
+                                    },
+                                },
+                            }
+                        },
+                    }
+                )
+                self.assertEqual("pending", outcome)
+
+        scope_failure, _message = panel._structured_houdini_acceptance(
+            {
+                "type": "mcpToolCall",
+                "tool": "hia_execute_hom",
+                "status": "failed",
+                "result": {
+                    "structuredContent": {
+                        "ok": False,
+                        "errors": [{"code": "POSTCONDITION_NOT_PROVEN"}],
+                        "structured_error": {
+                            "code": "POSTCONDITION_NOT_PROVEN"
+                        },
+                        "execution_evidence": {
+                            "postconditions": {
+                                "status": "failed",
+                                "node_errors": 0,
+                                "node_warnings": 0,
+                            },
+                            "validation": {
+                                "valid": False,
+                                "complete": True,
+                                "check_results": [
+                                    {
+                                        "check": "changed_scope",
+                                        "status": "fail",
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                },
+            }
+        )
+        self.assertEqual("failed", scope_failure)
+
     def test_required_visual_evidence_stays_pending(self) -> None:
         panel = _make_panel()
         outcome, message = panel._structured_houdini_acceptance(
@@ -7910,6 +8113,99 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn(
             "操作仍在执行",
             panel.conversation.toPlainText(),
+        )
+
+    def test_unknown_hom_outcome_waits_for_a_live_context_barrier(self) -> None:
+        panel = _make_panel()
+        panel._apply_goal(
+            "thread-1",
+            {
+                "threadId": "thread-1",
+                "objective": "完成隔离节点",
+                "status": "active",
+            },
+        )
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        panel._render_event(
+            _houdini_item_notification(
+                "item/started",
+                turn_id,
+                item_id="hom-unknown",
+                tool="hia_execute_hom",
+                status="inProgress",
+            )
+        )
+        panel._render_event(
+            _houdini_item_notification(
+                "item/completed",
+                turn_id,
+                item_id="hom-unknown",
+                tool="hia_execute_hom",
+                status="failed",
+                structured={
+                    "ok": False,
+                    "structured_error": {
+                        "code": "TIMEOUT",
+                        "details": {
+                            "submission_state": "unknown",
+                            "hom_may_still_execute": True,
+                            "automatic_retry_safe": False,
+                        },
+                    },
+                },
+            )
+        )
+
+        self.assertTrue(panel._goal_houdini_busy())
+        self.assertEqual(
+            "unknown",
+            panel._goal_stage_snapshot["execution_status"],
+        )
+        self.assertFalse(panel.goal_continue_button.isEnabled())
+
+        for method, status in (
+            ("item/started", "inProgress"),
+            ("item/completed", "completed"),
+        ):
+            panel._render_event(
+                _houdini_item_notification(
+                    method,
+                    turn_id,
+                    item_id="local-capability",
+                    tool="hia_search_capabilities",
+                    status=status,
+                    structured=(
+                        {"ok": True, "result": {}}
+                        if method == "item/completed"
+                        else None
+                    ),
+                )
+            )
+        self.assertTrue(panel._goal_houdini_busy())
+
+        for method, status in (
+            ("item/started", "inProgress"),
+            ("item/completed", "completed"),
+        ):
+            panel._render_event(
+                _houdini_item_notification(
+                    method,
+                    turn_id,
+                    item_id="runtime-barrier",
+                    tool="hia_context",
+                    status=status,
+                    structured=(
+                        {"ok": True, "result": {"scene_revision": 1}}
+                        if method == "item/completed"
+                        else None
+                    ),
+                )
+            )
+        self.assertFalse(panel._goal_houdini_busy())
+        self.assertEqual(
+            "pending",
+            panel._goal_stage_snapshot["acceptance_status"],
         )
 
     def test_focused_goal_completion_continues_without_fake_user_message(self) -> None:
@@ -8245,8 +8541,6 @@ class PanelWiringTests(unittest.TestCase):
             "session-action",
             "steer",
             "reconciliation",
-            "scene-capability",
-            "scene-work",
         )
         for case in cases:
             with self.subTest(case=case):
@@ -8283,10 +8577,6 @@ class PanelWiringTests(unittest.TestCase):
                     panel._reconciliation_tokens["session_reconcile:test"] = (
                         panel._turn_state.capture_token()
                     )
-                elif case == "scene-capability":
-                    panel._scene_capability_pending = True
-                elif case == "scene-work":
-                    panel._scene_work_pending = True
 
                 events = [_completed_notification(turn_id)]
                 if case == "goal-completes-same-batch":
@@ -8303,6 +8593,34 @@ class PanelWiringTests(unittest.TestCase):
                     )
                 panel._on_events({"events": events, "gap": False})
                 self.assertEqual(1, len(panel._client.turn_requests))
+
+    def test_legacy_scene_catalog_poll_does_not_block_hia_goal_continuation(
+        self,
+    ) -> None:
+        for pending_name in (
+            "_scene_capability_pending",
+            "_scene_work_pending",
+        ):
+            with self.subTest(pending_name=pending_name):
+                panel = _make_panel()
+                panel._apply_goal(
+                    "thread-1",
+                    {
+                        "threadId": "thread-1",
+                        "objective": "完成木屋",
+                        "status": "active",
+                    },
+                )
+                panel._apply_focus_mode("thread-1", True)
+                _context, turn_id = _start_active_turn(panel, 1)
+                setattr(panel, pending_name, True)
+
+                panel._on_events(
+                    {"events": [_completed_notification(turn_id)], "gap": False}
+                )
+
+                self.assertEqual(2, len(panel._client.turn_requests))
+                self.assertFalse(panel._goal_continuation_paused)
 
     def test_empty_auto_continuation_pauses_without_a_fast_loop(self) -> None:
         panel = _make_panel()

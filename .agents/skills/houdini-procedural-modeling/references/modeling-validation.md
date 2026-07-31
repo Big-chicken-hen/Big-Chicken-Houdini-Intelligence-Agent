@@ -20,6 +20,14 @@ Verify only the relevant items:
 
 Use `hia_validate`, `hia_scene_diff`, inspection, or a bounded read-only HOM query only when it contributes evidence. Do not call every available tool.
 
+## Prove assembly relationships numerically
+
+Whenever completion depends on attachment or fit, including in a small multi-part assembly, define only the relevant numeric invariants before authoring: both endpoints resolve to their intended hosts, the component stays within its intended span or bounds, required contact is within a scale-relative tolerance, required clearance has a measured minimum, and forbidden intersection has an appropriate precise result. Recheck the same invariants after the write and after any upstream control change that can move the parts.
+
+Use AABB or packed bounds as a broad phase: disjoint bounds can reject a pair, while overlapping bounds identify a candidate rather than prove penetration. Neither a viewport image, an error-free cook, nor generic validation silently proves precise nonintersection. Use a bounded native Houdini diagnostic or demonstrably non-mutating HOM calculation when the claim requires endpoint distance, closest distance, or surface intersection evidence. If the measurement cannot be observed reliably, keep that narrow completion claim unverified.
+
+Apply explicit negative constraints to the observed result, not merely to node names or implementation. A semantically equivalent substitute for a forbidden form fails acceptance even if it was produced by a different node, script, or geometry representation.
+
 ## Prove retrieved semantics
 
 For a Focused or Full change, translate only implementation-relevant knowledge into explicit expectations before authoring: the target path, group or attribute, ownership/type, mapping, relationship, range or tolerance, affected dependency, and representative control change. After the write, ask the current `hia_validate` semantic-expectation capability to test those claims through its live contract. Do not copy its payload schema into this reference. A clean cook or nonempty mesh is insufficient when the researched claim concerns a host relationship, stable material region, expected placement range, or dependency update.

@@ -787,6 +787,17 @@ function Get-ComboEmbeddingProfile {
     if ($null -ne $script:embeddingData) {
         return [string]$script:embeddingData.contract.default_profile
     }
+    if ($null -ne $script:knowledgeEnvironmentStatus) {
+        $requested = $script:knowledgeEnvironmentStatus.PSObject.Properties[
+            'requested_profile'
+        ]
+        if (
+            $null -ne $requested -and
+            -not [string]::IsNullOrWhiteSpace([string]$requested.Value)
+        ) {
+            return [string]$requested.Value
+        }
+    }
     return ''
 }
 
@@ -1104,32 +1115,48 @@ function Get-HiaKnowledgeEnvironmentAction {
         [AllowEmptyString()][string]$SelectedProfile = ''
     )
 
-    $modelInstalled = $false
+    $modelItems = @()
     if ($null -ne $Environment) {
-        $modelInstalled = @($Environment.models.items | Where-Object {
-            $_.installed -eq $true
+        $modelItems = @($Environment.models.items)
+    }
+    $modelInstalled = @($modelItems | Where-Object {
+        $_.installed -eq $true
+    }).Count -gt 0
+    $profileSelected = -not [string]::IsNullOrWhiteSpace($SelectedProfile)
+    $selectedModelInstalled = $false
+    if ($profileSelected) {
+        $selectedModelInstalled = @($modelItems | Where-Object {
+            $_.installed -eq $true -and
+            [string]$_.profile_id -eq $SelectedProfile
         }).Count -gt 0
     }
+    $embeddingRequested = $profileSelected -or $modelInstalled
     if (
         $null -eq $Environment -or
         [string]$Environment.state -eq 'missing'
     ) {
-        if ($modelInstalled) {
+        if ($embeddingRequested) {
             return 'environment-install-embedding'
         }
         return 'environment-install'
     }
     if ([string]$Environment.state -ne 'ready') {
-        if ($modelInstalled) {
+        if ($embeddingRequested) {
             return 'environment-repair-embedding'
         }
         return 'environment-repair'
     }
     if (
-        $modelInstalled -and
         (
-            -not [bool]$Environment.torch.installed -or
-            -not [bool]$Environment.embedding_worker.installed
+            $profileSelected -and
+            -not $selectedModelInstalled
+        ) -or
+        (
+            ($profileSelected -or $modelInstalled) -and
+            (
+                -not [bool]$Environment.torch.installed -or
+                -not [bool]$Environment.embedding_worker.installed
+            )
         )
     ) {
         return 'environment-repair-embedding'
@@ -1153,7 +1180,7 @@ function Get-HiaKnowledgeEnvironmentReason {
                 -SelectedProfile $SelectedProfile) -like
                     'environment-*-embedding'
         ) {
-            return '项目本地 venv 尚未安装，但所选模型完整存在；一次修复会准备解析器与 CPU/CUDA 向量运行时并复用模型。'
+            return '项目本地 venv 尚未安装；一次安装会准备解析器与 CPU/CUDA 向量运行时，并下载或复用所选模型。'
         }
         return 'HIA Python 环境位于项目根目录 .venv；受管 CPython、uv、模型与缓存位于 .runtime。点击一次即可完成基础环境准备。'
     }
@@ -1180,7 +1207,7 @@ function Get-HiaKnowledgeEnvironmentReason {
                 -SelectedProfile $SelectedProfile) -like
                     'environment-*-embedding'
         ) {
-            '。一次修复会重建 managed venv、pypdf、PyTorch 与 worker，并复用现有模型和项目缓存；旧 venv 会保存在项目 .runtime 内。'
+            '。一次修复会重建 managed venv、pypdf、PyTorch 与 worker，并下载或复用所选模型和项目缓存；旧 venv 会保存在项目 .runtime 内。'
         } else {
             '。点击修复后会先验证新环境，再把旧 venv 保存在项目 .runtime 内。'
         }
@@ -1195,8 +1222,8 @@ function Get-HiaKnowledgeEnvironmentReason {
         -SelectedProfile $SelectedProfile
     if ($action -like 'environment-*-embedding') {
         return (
-            '所选模型已存在；这次修复会一次准备 managed Python、共享 venv、pypdf、' +
-            'PyTorch 与 embedding worker，并按当前 CPU/CUDA 选择复用模型和项目缓存。'
+            '所选模型或其运行时尚未就绪；这次修复会一次准备 managed Python、共享 venv、pypdf、' +
+            'PyTorch 与 embedding worker，并下载或复用模型和项目缓存。'
         )
     }
     if ([string]$Environment.embedding_mode -eq 'fts5') {
@@ -1395,6 +1422,9 @@ function Refresh-HiaKnowledgeDisplay {
         Set-HiaKnowledgeEnvironmentDisplay `
             -Environment $payload.result.environment
         Set-HiaKnowledgeSourcesDisplay -Sources $payload.result.sources
+        if ($null -eq $script:knowledgeIndexProcess) {
+            Start-HiaKnowledgeIndexProcess -Action 'status'
+        }
         if (-not $Quiet) {
             Show-InlineStatus -Kind 'success' -Transient -Text '本地知识状态已刷新。'
         }
@@ -1759,6 +1789,8 @@ function Start-HiaKnowledgeEnvironmentRepair {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
     try {
         $script:knowledgeEnvironmentLastFailure = ''
         $script:knowledgeEnvironmentProcessAction = $action
@@ -3571,6 +3603,13 @@ function Complete-HiaAssetProcess {
         $null -ne $lastEvent -and
         [string]$lastEvent.event -eq 'completed'
     )
+    if (
+        $succeeded -and
+        $action -in @('import', 'resume', 'delete') -and
+        $null -eq $script:knowledgeIndexProcess
+    ) {
+        Start-HiaKnowledgeIndexProcess -Action 'status'
+    }
     if ($paused) {
         Show-InlineStatus `
             -Kind 'neutral' `

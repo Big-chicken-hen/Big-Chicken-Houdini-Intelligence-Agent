@@ -840,6 +840,190 @@ class HybridKnowledgeTests(unittest.TestCase):
                 result["retrieval"]["vector"]["index"]["ranking_scope"],
             )
 
+    def test_long_query_keeps_community_and_user_in_all_retrieval_modes(
+        self,
+    ) -> None:
+        index = LocalKnowledgeIndex(self.project_root)
+        query = (
+            "Pyro source solver disturbance shredding turbulence "
+            "cache validation"
+        )
+        shared_body = (
+            "Artist notes for Pyro source breakup use solver disturbance, "
+            "shredding, and turbulence before cache validation."
+        )
+        for number in range(240):
+            _seed_document(
+                index,
+                source_key=f"installed-help-{number:03d}",
+                title=f"Installed Pyro help {number:03d}",
+                bodies=((query + " ") * 6 + f"installed reference {number}",),
+                collection="houdini",
+                source_group="houdini",
+                source="houdini_help",
+            )
+        _seed_document(
+            index,
+            source_key="community-pyro-playbook",
+            title="Community Pyro playbook",
+            bodies=(shared_body,),
+            collection="community",
+            source_group="project",
+            source="community_tutorial",
+            attributes={
+                "card_id": "community-pyro",
+                "canonical_id": "community-pyro",
+                "pack_version": "1",
+            },
+        )
+        _seed_document(
+            index,
+            source_key="user-pyro-notes",
+            title="Imported user Pyro notes",
+            bodies=(shared_body,),
+        )
+        with closing(index._connect()) as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE documents SET houdini_version = ? "
+                "WHERE source_key = ?",
+                ("H20-H21; verify current", "community-pyro-playbook"),
+            )
+            connection.execute(
+                "UPDATE documents SET houdini_version = ? "
+                "WHERE source_key = ?",
+                ("unknown; verify current", "user-pyro-notes"),
+            )
+            connection.commit()
+
+        unbalanced = index.search(
+            query,
+            {"houdini", "project", "user"},
+            current_houdini_version="22.0.100",
+            offset=0,
+            limit=200,
+        )
+        self.assertEqual(
+            {"houdini_help"},
+            {match["source"] for match in unbalanced["matches"]},
+        )
+
+        embedder = MappedEmbedder({query: 0, shared_body: 0})
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=embedder,
+        )
+
+        def source_keys(result: Mapping[str, Any]) -> set[str]:
+            return {
+                str(match["metadata"]["source_key"])
+                for match in result["matches"]
+            }
+
+        expected = {"community-pyro-playbook", "user-pyro-notes"}
+        lexical = store.search_many(
+            (query,),
+            {"houdini", "project", "user"},
+            current_houdini_version="22.0.100",
+            offset=0,
+            limit=10,
+            mode="lexical",
+        )[0]
+        self.assertTrue(expected.issubset(source_keys(lexical)))
+        by_key = {
+            match["metadata"]["source_key"]: match
+            for match in lexical["matches"]
+        }
+        self.assertEqual(
+            by_key["community-pyro-playbook"]["metadata"]["sha256"],
+            by_key["user-pyro-notes"]["metadata"]["sha256"],
+        )
+        self.assertEqual(
+            "mismatch",
+            by_key["community-pyro-playbook"]["metadata"][
+                "current_version_status"
+            ],
+        )
+        self.assertEqual(
+            "unknown",
+            by_key["user-pyro-notes"]["metadata"]["current_version_status"],
+        )
+
+        partial = store.search_many(
+            (query,),
+            {"houdini", "project", "user"},
+            current_houdini_version="22.0.100",
+            offset=0,
+            limit=10,
+            mode="hybrid",
+            allow_index_updates=True,
+        )[0]
+        self.assertTrue(expected.issubset(source_keys(partial)))
+        self.assertTrue(partial["retrieval"]["vector"]["index"]["partial"])
+        self.assertEqual(
+            "lexical_candidates",
+            partial["retrieval"]["vector"]["index"]["ranking_scope"],
+        )
+
+        self.assertTrue(_build_all_vectors(store)["complete"])
+        for mode in ("vector", "hybrid"):
+            with self.subTest(mode=mode):
+                complete = store.search_many(
+                    (query,),
+                    {"houdini", "project", "user"},
+                    current_houdini_version="22.0.100",
+                    offset=0,
+                    limit=10,
+                    mode=mode,
+                )[0]
+                self.assertTrue(expected.issubset(source_keys(complete)))
+                self.assertEqual(mode, complete["retrieval"]["mode_used"])
+                self.assertEqual(
+                    "global",
+                    complete["retrieval"]["vector"]["index"][
+                        "ranking_scope"
+                    ],
+                )
+                kinds = {
+                    match["source_kind"]
+                    for match in complete["matches"]
+                    if match["metadata"]["source_key"] in expected
+                }
+                self.assertEqual(
+                    {"community_tutorial", "user_document"},
+                    kinds,
+                )
+
+        exact = store.search_many(
+            ("ignored identity query",),
+            {"project"},
+            current_houdini_version="22.0.100",
+            offset=0,
+            limit=10,
+            mode="hybrid",
+            source_kinds={"community_tutorial"},
+            card_id="community-pyro",
+            canonical_id="community-pyro",
+        )[0]
+        self.assertEqual(
+            ["community-pyro-playbook"],
+            [
+                match["metadata"]["source_key"]
+                for match in exact["matches"]
+            ],
+        )
+        official_only = store.search_many(
+            (query,),
+            {"project"},
+            current_houdini_version="22.0.100",
+            offset=0,
+            limit=10,
+            mode="lexical",
+            source_kinds={"builtin_official_workflow"},
+        )[0]
+        self.assertEqual([], official_only["matches"])
+        store.close()
+
     def test_vector_ranking_streams_one_cursor_with_bounded_top_k(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)
         for number in range(120):

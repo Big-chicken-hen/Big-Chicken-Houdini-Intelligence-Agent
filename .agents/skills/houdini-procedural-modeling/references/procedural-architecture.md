@@ -10,7 +10,7 @@ Pass a subsystem only the values it consumes. Avoid global parameters that make 
 
 ## Choose representations by behavior
 
-Choose generators from component semantics. Do not disguise a pile of unrelated primitives as a procedural design by emitting the same construction from Python, VEX, copied meshes, or custom point arrays.
+Choose generators from component semantics. Judge an explicit negative constraint by the resulting geometry and component role, not the node type or label. Do not recreate a forbidden form as an equivalent stand-in by swapping a primitive generator for Python, VEX, copied meshes, custom point arrays, or another authoring method. Likewise, do not disguise a pile of unrelated primitives as a procedural design by emitting the same construction through a different mechanism.
 
 - Use polygonal or subdivision construction for controlled manufactured surfaces.
 - Use curves and profiles for directional, swept, rail, trim, cable, or path-driven forms.
@@ -22,7 +22,7 @@ Choose generators from component semantics. Do not disguise a pile of unrelated 
 
 ## Keep paths and sweeps stable
 
-Generate a genuinely continuous linear component from a continuous path and a stable profile. Keep path position and direction separate from profile shape; do not approximate a bend with intersecting straight pieces or conceal it with oversized connectors.
+Generate a genuinely continuous linear component from a continuous path and a stable profile. Keep path position and direction separate from profile shape; do not approximate a bend with intersecting straight pieces or conceal it with oversized connectors. For an attached linear or path component, derive both endpoints and the full path or envelope from its intended hosts and allowed span; one valid endpoint does not prove the rest of the component is supported or clear.
 
 Before sweeping, remove duplicate and near-zero segments and establish stable direction, tangent, normal, reference frame, and seam behavior. Treat necking, bulging, profile flipping, unintended scale change, or uncontrolled twist as path, frame, or profile failures. Repair that upstream system instead of smoothing or decorating the symptom.
 

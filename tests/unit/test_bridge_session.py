@@ -2204,6 +2204,79 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertEqual("hia_execute_hom", snapshot["last_tool_name"])
         self.assertEqual("inProgress", snapshot["last_tool_status"])
 
+    def test_unknown_hom_submission_is_not_misreported_as_finished(self) -> None:
+        client = _RecordingClient()
+        session = self.make_session(client)
+        turn_id = session.start_turn("build")["turn_id"]
+
+        client.emit_notification(
+            "item/completed",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "tool": "hia_execute_hom",
+                    "status": "failed",
+                    "result": {
+                        "structuredContent": {
+                            "ok": False,
+                            "structured_error": {
+                                "code": "CONNECTION_INTERRUPTED",
+                                "details": {
+                                    "submission_state": "unknown",
+                                    "hom_may_still_execute": True,
+                                    "automatic_retry_safe": False,
+                                },
+                            },
+                        }
+                    },
+                },
+            },
+        )
+
+        snapshot = session.snapshot()
+        self.assertEqual("outcomeUnknown", snapshot["last_tool_status"])
+        with session._lock:
+            self.assertTrue(session._tool_may_still_be_running_locked())
+
+        client.emit_notification(
+            "item/completed",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "tool": "hia_search_capabilities",
+                    "status": "completed",
+                },
+            },
+        )
+        self.assertEqual(
+            "outcomeUnknown",
+            session.snapshot()["last_tool_status"],
+        )
+
+        client.emit_notification(
+            "item/completed",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "tool": "hia_context",
+                    "status": "completed",
+                    "result": {
+                        "structuredContent": {
+                            "ok": True,
+                            "result": {"scene_revision": 1},
+                        }
+                    },
+                },
+            },
+        )
+        self.assertEqual("completed", session.snapshot()["last_tool_status"])
+
     def test_interrupt_completion_within_grace_does_not_restart_codex(self) -> None:
         client = _StopRecoveryClient(complete_during_interrupt=True)
         events = EventBuffer()
@@ -2639,11 +2712,12 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         session.start_thread()
 
         instructions = client.requests[0][1]["developerInstructions"]
-        self.assertLessEqual(len(instructions), 1_320)
+        self.assertLessEqual(len(instructions), 1_550)
         for required_text in (
             "HIA MCP V2 与 HOM",
-            "明确小改只读目标值后直接执行",
-            "修改既有网络先用 hia_context/hia_inspect",
+            "已知小改回读目标值/连接后直改",
+            "include_context_pack=false",
+            "仅非平凡或不确定改动用 hia_context/hia_inspect",
             "输入输出、两层上游",
             "公共控制、材质入口、引用和允许 scope",
             "优先现有节点和标准原生节点网络",
@@ -2651,29 +2725,38 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "同一 scope 内一次 hia_execute_hom",
             "fresh cook、hia_scene_diff/hia_validate",
             "plan/revision/tool completed 不算通过",
+            "用户负约束必须原样保留并进入验收",
+            "禁止用语义等价或换皮替代绕过",
+            "禁 Box 也禁盒状代用品",
+            "节点存在/tool success 不能证明几何要求通过",
+            "小型多部件装配也要量端点、宿主、接触、净空和穿插",
+            "截图/AABB/clean cook 不算精确证明",
             "hia_capture_viewport，不固定尺寸",
             "动画/模拟用代表帧或短序列",
             "材质验收读取绑定、MaterialX 连接和正确输入",
             "Stop 后已发 HOM 仍可能收尾",
-            "失败读 rollback.status/automatic_retry_safe",
-            "仅 rolled_back+true 可修正重试一次",
-            "unknown/partial/NO_OBSERVED_EFFECT 不 Undo 也不算完成",
-            "session/source drift 停写并正常重启，不热加载",
-            "仅主任务串行调用 hia_*/HOM 并写 HIP",
+            "失败先读主错误和 rollback.status，禁止原样自动重试",
+            "真实 HOM 异常仅失败本次",
+            "当前或下一 Goal 轮检查并用修正批次继续",
+            "验收证据中的 dirty、automatic_retry_safe=false、unknown/partial/NO_OBSERVED_EFFECT",
+            "只报告，不Undo、不终止Goal",
+            "submission_state=unknown 且 hom_may_still_execute=true",
+            "必须保持串行 barrier",
+            "当前或重连后的实时 hia_context 完成",
+            "源码更新提示，用加载版本",
+            "仅主任务串行调用 hia_*/HOM 写 HIP",
             "子任务只研究、草拟、只读审阅",
-            "MCP 无 caller lineage",
-            "非代码级隔离",
-            "多个关键词合并为一次批量查询",
-            "同类读取不并发扇出",
+            "查询合批串行",
             "QUEUE_FULL 不立即重试",
-            "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label",
-            "聊天、关闭专注和逐参数操作不设",
+            "checkpoint_label 仅用于 Goal 的有意义成功阶段",
+            "不确定时，受影响写入前用 hia_local_help_search 一次合批并复用",
             "主任务只保留原生 Goal、决定和子任务短摘要",
             "子任务详情按需查看",
             "不塞入主上下文",
             "安全已存 HIP 截图写同级 .hia/screenshots",
             "否则用 HIA_CACHE_DIR/screenshots",
             "附件/知识/模型/索引留 .runtime",
+            "检索/Context Pack 不可用只报告，不阻断",
         ):
             self.assertIn(required_text, instructions)
         for forbidden_text in (
@@ -2688,7 +2771,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             self.assertNotIn(forbidden_text, instructions)
         self.assertEqual("hia_v2", session.snapshot()["mcp_backend"])
 
-    def test_complex_scene_writes_require_research_but_small_edits_do_not(
+    def test_uncertain_scene_writes_use_research_but_small_edits_do_not(
         self,
     ) -> None:
         for backend in ("fxhoudini", "hia_v2"):
@@ -2697,12 +2780,11 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                 session.start_thread()
                 instructions = client.requests[0][1]["developerInstructions"]
                 for required_text in (
-                    "复杂创建、修改或修复在首次场景写入前先",
-                    "一次相关",
-                    "批量检索并复用结果",
-                    "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务",
-                    "必须先用原生 web/search",
-                    "当前 SideFX 官方与原始来源",
+                    "节点、参数、版本、复杂流程或失败原因不确定时",
+                    "受影响写入前",
+                    "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定且资料会影响决定时",
+                    "web/search",
+                    "SideFX 与原始来源",
                     "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究",
                 ):
                     self.assertIn(required_text, instructions)
@@ -2711,17 +2793,16 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                     instructions,
                 )
                 if backend == "hia_v2":
-                    self.assertIn("hia_local_help_search", instructions)
-                    self.assertIn("检索不可用时明确说明，禁止静默跳过", instructions)
                     self.assertIn(
-                        "多个关键词合并为一次批量查询",
+                        "hia_local_help_search 一次合批并复用",
                         instructions,
                     )
                     self.assertIn(
-                        "仅主任务串行调用 hia_*/HOM 并写 HIP",
+                        "检索/Context Pack 不可用只报告，不阻断",
                         instructions,
                     )
-                    self.assertIn("不并发扇出", instructions)
+                    self.assertIn("查询合批串行", instructions)
+                    self.assertIn("仅主任务串行调用 hia_*/HOM 写 HIP", instructions)
                     self.assertIn(
                         "子任务只研究、草拟、只读审阅",
                         instructions,

@@ -75,6 +75,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 $script:HiaKnowledgeSchema = 'hia-knowledge-powershell-cli/1'
 $script:HiaKnowledgeProjectRoot = ''
@@ -280,6 +281,8 @@ function Invoke-HiaKnowledgeProcess {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.WorkingDirectory = $WorkingDirectory
     $savedEnvironment = @{}
     $environmentNames = @(
@@ -359,6 +362,8 @@ function Invoke-HiaKnowledgeStreamingProcess {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.WorkingDirectory = $WorkingDirectory
     $savedEnvironment = @{}
     $environmentNames = @(
@@ -560,7 +565,9 @@ function Write-HiaKnowledgeMissingEnvironment {
             items = @()
             installed_profiles = @()
         }
+        requested_profile = 'qwen3-embedding-0.6b'
         active_profile = ''
+        profile_source = 'installer_contract'
         embedding_mode = 'fts5'
         embedding_runtime_environment = [ordered]@{}
         fallback_non_blocking = $true
@@ -703,6 +710,14 @@ function Get-HiaKnowledgeEnvironmentInstallPlan {
         [string]$RequestedDevice = 'auto'
     )
 
+    # Keep this launcher boundary aligned with PROFILE_REGISTRY in
+    # src/hia_core/embedding_contract.py.  An omitted Revision is normalized
+    # to "main" by install_hia_embedding.py, so clean installs must not try to
+    # discover it from an installed-model record that cannot exist yet.
+    $profileCatalog = @{
+        'qwen3-embedding-0.6b' = 'main'
+        'qwen3-embedding-8b' = 'main'
+    }
     $installedProfiles = @()
     if ($null -ne $Environment -and $null -ne $Environment.models) {
         $installedProfiles = @(
@@ -712,19 +727,37 @@ function Get-HiaKnowledgeEnvironmentInstallPlan {
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
         )
     }
+    $requestedProfileName = $RequestedProfile.Trim()
     $selectedModel = $null
-    if (
-        -not [string]::IsNullOrWhiteSpace($RequestedProfile) -and
-        $RequestedProfile -in $installedProfiles
-    ) {
-        $selectedModel = @(
-            $Environment.models.items |
-                Where-Object {
-                    $_.installed -eq $true -and
-                    [string]$_.profile_id -eq $RequestedProfile
-                } |
-                Select-Object -First 1
-        )[0]
+    $selectedProfile = ''
+    $selectedRevision = ''
+    if (-not [string]::IsNullOrWhiteSpace($requestedProfileName)) {
+        if (-not $profileCatalog.ContainsKey($requestedProfileName)) {
+            throw (
+                "Unsupported embedding profile '$requestedProfileName'. " +
+                'Choose a profile declared by the embedding installer contract.'
+            )
+        }
+        $selectedProfile = $requestedProfileName
+        $selectedRevision = [string]$profileCatalog[$requestedProfileName]
+        if ($requestedProfileName -in $installedProfiles) {
+            $selectedModel = @(
+                $Environment.models.items |
+                    Where-Object {
+                        $_.installed -eq $true -and
+                        [string]$_.profile_id -eq $requestedProfileName
+                    } |
+                    Select-Object -First 1
+            )[0]
+            if (
+                $null -ne $selectedModel -and
+                -not [string]::IsNullOrWhiteSpace(
+                    [string]$selectedModel.revision
+                )
+            ) {
+                $selectedRevision = [string]$selectedModel.revision
+            }
+        }
     } elseif (
         $null -ne $Environment -and
         -not [string]::IsNullOrWhiteSpace([string]$Environment.active_profile) -and
@@ -750,10 +783,15 @@ function Get-HiaKnowledgeEnvironmentInstallPlan {
                 Select-Object -First 1
         )[0]
     }
-    $selectedProfile = if ($null -ne $selectedModel) {
-        [string]$selectedModel.profile_id
-    } else {
-        ''
+    if ([string]::IsNullOrWhiteSpace($selectedProfile) -and $null -ne $selectedModel) {
+        $selectedProfile = [string]$selectedModel.profile_id
+        if (
+            -not [string]::IsNullOrWhiteSpace([string]$selectedModel.revision)
+        ) {
+            $selectedRevision = [string]$selectedModel.revision
+        } elseif ($profileCatalog.ContainsKey($selectedProfile)) {
+            $selectedRevision = [string]$profileCatalog[$selectedProfile]
+        }
     }
     $selectedDevice = $RequestedDevice
     if (
@@ -774,11 +812,7 @@ function Get-HiaKnowledgeEnvironmentInstallPlan {
         repair = $ActionName -eq 'environment-repair'
         parser_only = [string]::IsNullOrWhiteSpace($selectedProfile)
         profile = $selectedProfile
-        revision = if ($null -ne $selectedModel) {
-            [string]$selectedModel.revision
-        } else {
-            ''
-        }
+        revision = $selectedRevision
         device = $selectedDevice
     }
 }
@@ -831,6 +865,7 @@ try {
                     -FilePath $statusPython `
                     -Arguments @(
                         '-I',
+                        '-X', 'utf8',
                         '-B',
                         $helperPath,
                         '--project-root',
@@ -940,6 +975,7 @@ try {
     }
     $helperArguments = @(
         '-I',
+        '-X', 'utf8',
         '-B',
         $helperPath,
         '--project-root',
@@ -1052,6 +1088,7 @@ try {
         }
         $repairArguments = @(
             '-I',
+            '-X', 'utf8',
             '-B',
             $assetRepairPath,
             '--project-root',
@@ -1112,6 +1149,7 @@ try {
     if ($Action -eq 'assets') {
         $assetArguments = @(
             '-I',
+            '-X', 'utf8',
             '-B',
             $indexCliPath,
             '--project-root',
@@ -1157,6 +1195,7 @@ try {
             -FilePath $python `
             -Arguments @(
                 '-I',
+                '-X', 'utf8',
                 '-B',
                 $helperPath,
                 '--project-root',
@@ -1173,6 +1212,7 @@ try {
     }
     $indexArguments = @(
         '-I',
+        '-X', 'utf8',
         '-B',
         $indexCliPath,
         '--project-root',

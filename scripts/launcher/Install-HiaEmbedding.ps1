@@ -25,8 +25,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $script:HiaUvVersion = '0.11.29'
 $script:HiaUvInstallerUri = 'https://astral.sh/uv/0.11.29/install.ps1'
+$script:HiaUvDownloadTimeoutSeconds = 120
+$script:HiaUvDownloadProcessTimeoutSeconds = 135
+$script:HiaUvDownloadAttempts = 3
 $script:HiaPyPiIndex = 'https://pypi.org/simple'
 $script:HiaKnowledgePythonVersion = '3.10.11'
 $script:HiaKnowledgeParserRequirement = 'pypdf==6.14.2'
@@ -104,6 +108,82 @@ function ConvertTo-HiaEmbeddingSafeLogText {
         '$1[REDACTED]'
     )
     return ([regex]::Replace($safe, '[\r\n]+', ' | ')).Trim()
+}
+
+function Format-HiaEmbeddingModelSelectionLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$ModelId,
+        [Parameter(Mandatory = $true)][string]$Revision,
+        [Parameter(Mandatory = $true)][string]$ModelDirectory,
+        [Parameter(Mandatory = $true)][string]$RepositorySize
+    )
+
+    return (
+        (
+            'Selected model source: https://huggingface.co/{0} revision {1}; ' +
+            'target: {2}; official model files are about {3} GB. ' +
+            'Interrupted downloads reuse the project-local Hugging Face cache ' +
+            'when the repair action is retried.'
+        ) -f $ModelId, $Revision, $ModelDirectory, $RepositorySize
+    )
+}
+
+function Format-HiaEmbeddingUvDownloadAttemptLog {
+    param(
+        [Parameter(Mandatory = $true)][int]$Attempt,
+        [Parameter(Mandatory = $true)][int]$Attempts,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    return (
+        'uv bootstrap download attempt {0}/{1}; timeout {2}s.' -f
+            $Attempt,
+            $Attempts,
+            $TimeoutSeconds
+    )
+}
+
+function Format-HiaEmbeddingUvDownloadRetryLog {
+    param(
+        [Parameter(Mandatory = $true)][int]$Attempt,
+        [Parameter(Mandatory = $true)][string]$Failure,
+        [Parameter(Mandatory = $true)][int]$DelaySeconds
+    )
+
+    return (
+        (
+            'uv bootstrap download attempt {0} failed: {1}. ' +
+            'Retrying in {2}s.'
+        ) -f $Attempt, $Failure, $DelaySeconds
+    )
+}
+
+function Format-HiaEmbeddingUvDownloadFailure {
+    param(
+        [Parameter(Mandatory = $true)][int]$Attempts,
+        [Parameter(Mandatory = $true)][string]$Failure,
+        [Parameter(Mandatory = $true)][string]$InstallerUri,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    return (
+        (
+            'Project-local uv bootstrap download failed after {0} bounded ' +
+            'attempts: {1}. Retry the launcher repair button, or download ' +
+            '{2} and run it with UV_UNMANAGED_INSTALL={3}.'
+        ) -f $Attempts, $Failure, $InstallerUri, $InstallRoot
+    )
+}
+
+function Remove-HiaEmbeddingInstallerPartial {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return }
+    if (-not (Test-HiaEmbeddingOrdinaryFile -Path $Path)) {
+        throw 'The uv bootstrap partial path is not an ordinary file.'
+    }
+    [System.IO.File]::Delete([System.IO.Path]::GetFullPath($Path))
 }
 
 function Resolve-HiaEmbeddingLauncherDirectory {
@@ -374,6 +454,8 @@ function Invoke-HiaEmbeddingChildProcess {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.WorkingDirectory = $WorkingDirectory
 
     $savedEnvironment = @{}
@@ -536,19 +618,99 @@ function Get-HiaProjectLocalUv {
                 'Downloading official Astral uv {0} bootstrap to project runtime.' -f
                     $script:HiaUvVersion
             )
-        try {
-            Invoke-WebRequest `
-                -UseBasicParsing `
-                -Uri $installerUri `
-                -OutFile $installerPath
-        } catch {
-            $downloadFailure = ConvertTo-HiaEmbeddingSafeLogText `
-                -Text ([string]$_.Exception.Message)
-            throw (
-                "Project-local uv bootstrap download failed: $downloadFailure. " +
-                'Retry the launcher repair button, ' +
-                "or download $installerUri and run it with UV_UNMANAGED_INSTALL=$uvInstallRoot."
-            )
+        $powershellExe = Join-Path $env:SystemRoot (
+            'System32\WindowsPowerShell\v1.0\powershell.exe'
+        )
+        $downloadEnvironment = @{}
+        foreach ($entry in $Environment.GetEnumerator()) {
+            $downloadEnvironment[[string]$entry.Key] = [string]$entry.Value
+        }
+        $downloadEnvironment['HIA_UV_BOOTSTRAP_URI'] = $installerUri
+        $downloadEnvironment['HIA_UV_BOOTSTRAP_PATH'] = $installerPath
+        $downloadScript = @"
+`$ErrorActionPreference = 'Stop'
+`$ProgressPreference = 'SilentlyContinue'
+Invoke-WebRequest ``
+    -UseBasicParsing ``
+    -TimeoutSec $($script:HiaUvDownloadTimeoutSeconds) ``
+    -Uri ([string]`$env:HIA_UV_BOOTSTRAP_URI) ``
+    -OutFile ([string]`$env:HIA_UV_BOOTSTRAP_PATH)
+"@
+        $downloadCommand = [Convert]::ToBase64String(
+            [System.Text.Encoding]::Unicode.GetBytes($downloadScript)
+        )
+        $downloadFailures = [System.Collections.Generic.List[string]]::new()
+        $downloaded = $false
+        for (
+            $attempt = 1;
+            $attempt -le $script:HiaUvDownloadAttempts;
+            $attempt++
+        ) {
+            Remove-HiaEmbeddingInstallerPartial -Path $installerPath
+            Write-HiaEmbeddingInstallLog `
+                -Level 'INFO' `
+                -Message (Format-HiaEmbeddingUvDownloadAttemptLog `
+                    -Attempt $attempt `
+                    -Attempts $script:HiaUvDownloadAttempts `
+                    -TimeoutSeconds $script:HiaUvDownloadTimeoutSeconds)
+            try {
+                $uvDownloadResult = Invoke-HiaEmbeddingChildProcess `
+                    -FilePath $powershellExe `
+                    -Arguments @(
+                        '-NoProfile',
+                        '-NonInteractive',
+                        '-ExecutionPolicy', 'Bypass',
+                        '-EncodedCommand', $downloadCommand
+                    ) `
+                    -Environment $downloadEnvironment `
+                    -RemoveEnvironment $RemoveEnvironment `
+                    -WorkingDirectory $ProjectRoot `
+                    -TimeoutSeconds (
+                        $script:HiaUvDownloadProcessTimeoutSeconds
+                    )
+                if ([int]$uvDownloadResult.exit_code -ne 0) {
+                    $detail = ([string]$uvDownloadResult.stderr).Trim()
+                    if ([string]::IsNullOrWhiteSpace($detail)) {
+                        $detail = ([string]$uvDownloadResult.stdout).Trim()
+                    }
+                    throw "download process exited with code $($uvDownloadResult.exit_code): $detail"
+                }
+                if (
+                    -not (Test-HiaEmbeddingOrdinaryFile -Path $installerPath) -or
+                    (Get-Item -LiteralPath $installerPath -Force).Length -le 0
+                ) {
+                    throw 'download completed without a usable installer file'
+                }
+                $downloaded = $true
+                break
+            } catch {
+                $downloadFailure = ConvertTo-HiaEmbeddingSafeLogText `
+                    -Text ([string]$_.Exception.Message)
+                [void]$downloadFailures.Add($downloadFailure)
+                Remove-HiaEmbeddingInstallerPartial -Path $installerPath
+                if ($attempt -lt $script:HiaUvDownloadAttempts) {
+                    $delay = 2 * $attempt
+                    Write-HiaEmbeddingInstallLog `
+                        -Level 'WARN' `
+                        -Message (Format-HiaEmbeddingUvDownloadRetryLog `
+                            -Attempt $attempt `
+                            -Failure $downloadFailure `
+                            -DelaySeconds $delay)
+                    Start-Sleep -Seconds $delay
+                }
+            }
+        }
+        if (-not $downloaded) {
+            $lastFailure = if ($downloadFailures.Count -gt 0) {
+                [string]$downloadFailures[$downloadFailures.Count - 1]
+            } else {
+                'unknown download failure'
+            }
+            throw (Format-HiaEmbeddingUvDownloadFailure `
+                -Attempts $script:HiaUvDownloadAttempts `
+                -Failure $lastFailure `
+                -InstallerUri $installerUri `
+                -InstallRoot $uvInstallRoot)
         }
         if (-not (Test-HiaEmbeddingOrdinaryFile -Path $installerPath)) {
             throw 'The downloaded project-local uv bootstrap is unavailable.'
@@ -561,9 +723,6 @@ function Get-HiaProjectLocalUv {
         $bootstrapEnvironment['UV_CACHE_DIR'] = $uvCacheRoot
         $bootstrapEnvironment['UV_NO_MODIFY_PATH'] = '1'
         $bootstrapEnvironment['UV_UNMANAGED_INSTALL'] = $uvInstallRoot
-        $powershellExe = Join-Path $env:SystemRoot (
-            'System32\WindowsPowerShell\v1.0\powershell.exe'
-        )
         $bootstrapResult = Invoke-HiaEmbeddingChildProcess `
             -FilePath $powershellExe `
             -Arguments @(
@@ -655,7 +814,7 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 '@
     $result = Invoke-HiaEmbeddingChildProcess `
         -FilePath $PythonExe `
-        -Arguments @('-I', '-B', '-c', $probeCode) `
+        -Arguments @('-I', '-X', 'utf8', '-B', '-c', $probeCode) `
         -Environment $Environment `
         -RemoveEnvironment $RemoveEnvironment `
         -WorkingDirectory $WorkingDirectory
@@ -966,7 +1125,9 @@ print(json.dumps({
 '@
     $result = Invoke-HiaEmbeddingChildProcess `
         -FilePath $PythonExe `
-        -Arguments @('-I', '-B', '-c', $probeCode, $WorkingDirectory) `
+        -Arguments @(
+            '-I', '-X', 'utf8', '-B', '-c', $probeCode, $WorkingDirectory
+        ) `
         -Environment $Environment `
         -RemoveEnvironment $RemoveEnvironment `
         -WorkingDirectory $WorkingDirectory
@@ -1201,16 +1362,105 @@ function Assert-HiaKnowledgeManagedVenvTree {
     if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
         throw 'Managed venv directory is unavailable.'
     }
-    foreach ($item in @(
-        Get-ChildItem -LiteralPath $resolved -Force -Recurse -ErrorAction Stop
-    )) {
-        if (
-            ([int]$item.Attributes -band
-                [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            ($item -isnot [System.IO.DirectoryInfo] -and
-                $item -isnot [System.IO.FileInfo])
-        ) {
-            throw 'Managed venv tree contains a reparse point or unknown object.'
+
+    # Walk one directory at a time so a package test fixture that disappears
+    # between enumeration calls can be retried without skipping validation of
+    # the surviving siblings.  The root and every surviving directory still
+    # have to be ordinary project-local directories.
+    $root = [System.IO.Path]::GetFullPath($resolved).TrimEnd('\')
+    $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($root)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $items = $null
+        $vanished = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                $currentItem = Get-Item `
+                    -LiteralPath $current `
+                    -Force `
+                    -ErrorAction Stop
+                if (
+                    $currentItem -isnot [System.IO.DirectoryInfo] -or
+                    ([int]$currentItem.Attributes -band
+                        [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+                ) {
+                    throw (
+                        'Managed venv tree contains a reparse point or ' +
+                        'unknown object.'
+                    )
+                }
+                $items = @(
+                    Get-ChildItem `
+                        -LiteralPath $current `
+                        -Force `
+                        -ErrorAction Stop
+                )
+                break
+            } catch {
+                $exception = $_.Exception
+                $missing = $false
+                while ($null -ne $exception) {
+                    if (
+                        $exception -is
+                            [System.Management.Automation.ItemNotFoundException] -or
+                        $exception -is [System.IO.DirectoryNotFoundException] -or
+                        $exception -is [System.IO.FileNotFoundException]
+                    ) {
+                        $missing = $true
+                        break
+                    }
+                    $exception = $exception.InnerException
+                }
+                if (-not $missing) {
+                    throw
+                }
+                if (
+                    -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                        $current,
+                        $root
+                    ) -and
+                    -not (
+                        Test-Path `
+                            -LiteralPath $current `
+                            -PathType Container `
+                            -ErrorAction SilentlyContinue
+                    )
+                ) {
+                    $vanished = $true
+                    break
+                }
+                if ($attempt -eq 3) {
+                    throw
+                }
+            }
+        }
+        if ($vanished) {
+            continue
+        }
+        foreach ($item in @($items)) {
+            $fullName = [System.IO.Path]::GetFullPath(
+                [string]$item.FullName
+            )
+            if (
+                -not $fullName.StartsWith(
+                    $prefix,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                ) -or
+                ([int]$item.Attributes -band
+                    [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                ($item -isnot [System.IO.DirectoryInfo] -and
+                    $item -isnot [System.IO.FileInfo])
+            ) {
+                throw (
+                    'Managed venv tree contains a reparse point or ' +
+                    'unknown object.'
+                )
+            }
+            if ($item -is [System.IO.DirectoryInfo]) {
+                $pending.Push($fullName)
+            }
         }
     }
     return $resolved
@@ -1225,14 +1475,21 @@ function Get-HiaKnowledgeTransactionPaths {
     )
 
     $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
-    $transactionRoot = Join-Path $root '.runtime\toolchains\hia-embedding'
+    $toolchainRoot = Join-Path $root '.runtime\toolchains\hia-embedding'
+    # Keep both dependency extraction and WinPS 5.1 recursive cleanup below the
+    # legacy Win32 MAX_PATH boundary, including long Torch header names.  The
+    # full install id remains in the marker; the lock permits only one active
+    # transaction and the marker rejects any stale 64-bit path-key collision.
+    $transactionRoot = Join-Path $root (
+        '.runtime\v\{0}' -f $InstallId.Substring(0, 16)
+    )
     return [pscustomobject]@{
         canonical = Join-Path $root '.venv'
-        legacy = Join-Path $transactionRoot 'venv'
+        legacy = Join-Path $toolchainRoot 'venv'
         transaction_root = $transactionRoot
-        staging = Join-Path $transactionRoot ('.venv-staging-{0}' -f $InstallId)
-        backup = Join-Path $transactionRoot ('.venv-backup-{0}' -f $InstallId)
-        failed = Join-Path $transactionRoot ('.venv-failed-{0}' -f $InstallId)
+        staging = Join-Path $transactionRoot 's'
+        backup = Join-Path $transactionRoot 'b'
+        failed = Join-Path $transactionRoot 'f'
     }
 }
 
@@ -1384,6 +1641,10 @@ function New-HiaKnowledgeManagedVenv {
     $paths = Get-HiaKnowledgeTransactionPaths `
         -ProjectRoot $ProjectRoot `
         -InstallId $installId
+    Assert-HiaKnowledgeProjectDirectory `
+        -ProjectRoot $ProjectRoot `
+        -Path ([string]$paths.transaction_root) `
+        -Create | Out-Null
     foreach ($path in @($paths.staging, $paths.backup, $paths.failed)) {
         Assert-HiaKnowledgeProjectDirectory `
             -ProjectRoot $ProjectRoot `
@@ -1392,6 +1653,14 @@ function New-HiaKnowledgeManagedVenv {
             throw 'Knowledge environment transaction path already exists.'
         }
     }
+    $stagingPath = [string]$paths.staging
+    Write-HiaEmbeddingInstallLog `
+        -Level 'INFO' `
+        -Message (
+            'Staged managed venv transaction path: {0}; length={1}.' -f
+                $stagingPath,
+                $stagingPath.Length
+        )
 
     Write-HiaEmbeddingInstallLog `
         -Level 'INFO' `
@@ -1775,18 +2044,54 @@ function Complete-HiaKnowledgeManagedVenvTransaction {
                 -Kind 'backup' `
                 -InstallId $installId)
         } catch {
+            $cleanupDetail = ConvertTo-HiaEmbeddingSafeLogText `
+                -Text ([string]$_.Exception.Message)
             $backupCleanupWarning = (
-                'The verified root .venv is active, but its transaction backup ' +
-                'could not be removed safely and was left for diagnosis.'
+                (
+                    'The verified root .venv is active, but its transaction ' +
+                    'backup could not be removed safely and was left for ' +
+                    'diagnosis. Cleanup detail: {0}'
+                ) -f $cleanupDetail
             )
             Write-HiaEmbeddingInstallLog `
                 -Level 'WARNING' `
                 -Message $backupCleanupWarning
         }
     }
+    $transactionCleanupWarning = ''
+    $paths = Get-HiaKnowledgeTransactionPaths `
+        -ProjectRoot $ProjectRoot `
+        -InstallId $installId
+    $transactionRoot = [string]$paths.transaction_root
+    if (Test-Path -LiteralPath $transactionRoot -PathType Container) {
+        $validatedTransactionRoot = Assert-HiaKnowledgeProjectDirectory `
+            -ProjectRoot $ProjectRoot `
+            -Path $transactionRoot
+        $remaining = @(
+            Get-ChildItem `
+                -LiteralPath $validatedTransactionRoot `
+                -Force `
+                -ErrorAction Stop
+        )
+        if ($remaining.Count -eq 0) {
+            [System.IO.Directory]::Delete(
+                $validatedTransactionRoot,
+                $false
+            )
+        } else {
+            $transactionCleanupWarning = (
+                'The exact managed venv transaction root contains an ' +
+                'unexpected surviving item and was preserved for diagnosis.'
+            )
+            Write-HiaEmbeddingInstallLog `
+                -Level 'WARNING' `
+                -Message $transactionCleanupWarning
+        }
+    }
     return [pscustomobject]@{
         legacy_cleanup_candidate = $legacyCleanupCandidate
         backup_cleanup_warning = $backupCleanupWarning
+        transaction_cleanup_warning = $transactionCleanupWarning
     }
 }
 
@@ -2140,6 +2445,7 @@ if (-not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
 # child-process environment value needed by the mutating installation steps.
 $planArguments = @(
     '-I',
+    '-X', 'utf8',
     '-B',
     $helperPath,
     '--action',
@@ -2188,16 +2494,11 @@ $repositorySize = ([double]$plan.repository_size_gb).ToString(
 )
 Write-HiaEmbeddingInstallLog `
     -Level 'INFO' `
-    -Message (
-        'Selected model source: https://huggingface.co/{0} revision {1}; ' +
-        'target: {2}; official model files are about {3} GB. ' +
-        'Interrupted downloads reuse the project-local Hugging Face cache ' +
-        'when the repair action is retried.' -f
-            [string]$plan.model_id,
-            [string]$plan.revision,
-            [string]$plan.model_dir,
-            $repositorySize
-    )
+    -Message (Format-HiaEmbeddingModelSelectionLog `
+        -ModelId ([string]$plan.model_id) `
+        -Revision ([string]$plan.revision) `
+        -ModelDirectory ([string]$plan.model_dir) `
+        -RepositorySize $repositorySize)
 
 $childEnvironment = ConvertTo-HiaEmbeddingHashtable `
     -Value $plan.child_environment
@@ -2391,6 +2692,7 @@ $downloadResult = Invoke-HiaEmbeddingChildProcess `
     -FilePath $workerPython `
     -Arguments @(
         '-I',
+        '-X', 'utf8',
         '-B',
         $helperPath,
         '--action',
@@ -2438,6 +2740,7 @@ $smokeResult = Invoke-HiaEmbeddingChildProcess `
     -FilePath $workerPython `
     -Arguments @(
         '-I',
+        '-X', 'utf8',
         '-B',
         $helperPath,
         '--action',
@@ -2479,6 +2782,22 @@ if (
 ) {
     throw 'Staged embedding model encode smoke did not satisfy its contract.'
 }
+$smokeNorm = ([double]$smokePayload.norm).ToString(
+    '0.000000',
+    [System.Globalization.CultureInfo]::InvariantCulture
+)
+Write-HiaEmbeddingInstallLog `
+    -Level 'INFO' `
+    -Message (
+        (
+            'Embedding smoke encode result: profile={0}; device={1}; ' +
+            'dimension={2}; vector_count=1; norm={3}.'
+        ) -f
+            [string]$smokePayload.profile_id,
+            [string]$smokePayload.device,
+            [int]$smokePayload.dimension,
+            $smokeNorm
+    )
 
 $publish = Publish-HiaKnowledgeManagedVenv `
     -ProjectRoot $resolvedRoot `
@@ -2518,6 +2837,7 @@ $publishedModelResult = Invoke-HiaEmbeddingChildProcess `
     -FilePath $canonicalWorkerPython `
     -Arguments @(
         '-I',
+        '-X', 'utf8',
         '-B',
         $helperPath,
         '--action',

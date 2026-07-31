@@ -50,6 +50,12 @@ if __package__:
         HybridKnowledgeError,
         HybridKnowledgeStore,
     )
+    from .knowledge_assets import (  # noqa: E402
+        DEFAULT_ASSET_BATCH_SIZE,
+        MAX_ASSET_BATCH_SIZE,
+        KnowledgeAssetError,
+        KnowledgeAssetManager,
+    )
     from .knowledge_index import (  # noqa: E402
         KnowledgeIndexError,
         LocalKnowledgeIndex,
@@ -71,6 +77,12 @@ else:
     from hia_mcp_runtime.hybrid_knowledge import (  # noqa: E402
         HybridKnowledgeError,
         HybridKnowledgeStore,
+    )
+    from hia_mcp_runtime.knowledge_assets import (  # noqa: E402
+        DEFAULT_ASSET_BATCH_SIZE,
+        MAX_ASSET_BATCH_SIZE,
+        KnowledgeAssetError,
+        KnowledgeAssetManager,
     )
     from hia_mcp_runtime.knowledge_index import (  # noqa: E402
         KnowledgeIndexError,
@@ -199,6 +211,61 @@ def _parser() -> argparse.ArgumentParser:
     source_commands.add_parser(
         "refresh",
         help="Refresh only the managed user-source corpus",
+    )
+
+    assets = commands.add_parser(
+        "assets",
+        help="Process resumable long-form knowledge assets",
+    )
+    asset_commands = assets.add_subparsers(
+        dest="asset_command",
+        required=True,
+    )
+    asset_import = asset_commands.add_parser(
+        "import",
+        help="Copy, fragment, and index one supported long asset",
+    )
+    asset_import.add_argument("--path", required=True)
+    asset_import.add_argument("--asset-id", default="")
+    asset_import.add_argument("--title", default="")
+    asset_import.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_ASSET_BATCH_SIZE,
+        help=(
+            "Committed fragment documents per resumable batch "
+            f"(1-{MAX_ASSET_BATCH_SIZE})"
+        ),
+    )
+    asset_list = asset_commands.add_parser("list", help="List managed assets")
+    _pagination(asset_list)
+    asset_status = asset_commands.add_parser(
+        "status",
+        help="Report one asset or the managed asset inventory",
+    )
+    asset_status.add_argument("--asset-id", default="")
+    asset_resume = asset_commands.add_parser(
+        "resume",
+        help="Resume one interrupted asset from its committed checkpoint",
+    )
+    asset_resume.add_argument("--asset-id", required=True)
+    asset_resume.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_ASSET_BATCH_SIZE,
+        help=(
+            "Committed fragment documents per resumable batch "
+            f"(1-{MAX_ASSET_BATCH_SIZE})"
+        ),
+    )
+    asset_delete = asset_commands.add_parser(
+        "delete",
+        help="Delete one exact asset, its fragments, chunks, and vectors",
+    )
+    asset_delete.add_argument("--asset-id", required=True)
+    asset_commands.add_parser(
+        "capabilities",
+        help="Describe built-in and injectable extractor capabilities",
     )
 
     thread = commands.add_parser(
@@ -344,6 +411,8 @@ def _action(arguments: argparse.Namespace) -> str:
     command = str(arguments.command)
     if command == "sources":
         return f"sources.{arguments.source_command}"
+    if command == "assets":
+        return f"assets.{arguments.asset_command}"
     if command == "thread":
         return f"thread.{arguments.thread_command}"
     if command == "memory":
@@ -1156,9 +1225,21 @@ def _sources_refresh(store: Any) -> dict[str, Any]:
     )
     refresh_result = dict(refresh)
     refresh_result.setdefault("groups", ["user"])
-    document_ids = index.filtered_document_ids(
-        source_kinds={"user_document", "user_transcript"},
-    ) or ()
+    # ``sources refresh`` owns only the legacy copied-source collection.
+    # Asset fragments intentionally reuse the same source kinds in the same
+    # database, so a source-kind-only selector would synchronously vectorize an
+    # entire long asset as an accidental side effect of refreshing one ordinary
+    # source.
+    with closing(index._connect(read_only=True)) as connection:  # noqa: SLF001
+        document_ids = tuple(
+            int(row[0])
+            for row in connection.execute(
+                "SELECT id FROM documents "
+                "WHERE collection = 'user' "
+                "AND source IN ('user_document', 'user_transcript') "
+                "ORDER BY id"
+            ).fetchall()
+        )
     vector = (
         store.vectorize_documents(document_ids)
         if document_ids
@@ -1168,6 +1249,99 @@ def _sources_refresh(store: Any) -> dict[str, Any]:
         "refresh": refresh_result,
         "vector": vector,
         "warnings": list(warnings),
+    }
+
+
+def _asset_cli_state(
+    value: Mapping[str, Any],
+    *,
+    stage: str = "",
+) -> dict[str, Any]:
+    """Project one internal asset status onto the stable CLI/UI contract."""
+
+    fragments = max(0, int(value.get("fragment_count") or 0))
+    processed = max(
+        0,
+        int(value.get("processed_units") or value.get("next_fragment") or 0),
+    )
+    total_units = max(
+        processed,
+        int(value.get("total_units") or fragments),
+    )
+    documents = max(0, int(value.get("documents_indexed") or 0))
+    chunks = max(0, int(value.get("chunks_indexed") or 0))
+    vectors = max(0, int(value.get("vectors_indexed") or 0))
+    internal_status = str(value.get("status") or "unknown").casefold()
+    normalized_status = {
+        "complete": "ready",
+        "processing": "running",
+    }.get(internal_status, internal_status)
+    suffix = str(value.get("source_suffix") or "").lstrip(".")
+    kind = str(value.get("kind") or "") or suffix or str(
+        value.get("extractor") or "asset"
+    )
+    effective_stage = (
+        str(stage or "").strip()
+        or str(value.get("checkpoint_state") or "").strip()
+        or normalized_status
+    )
+    lexical_complete = fragments > 0 and documents >= fragments
+    vector_complete = chunks > 0 and vectors >= chunks
+    return {
+        "id": str(value.get("asset_id") or ""),
+        "title": str(value.get("title") or ""),
+        "kind": kind,
+        "stage": effective_stage,
+        "status": normalized_status,
+        "processed_units": processed,
+        "total_units": total_units,
+        "fragments": fragments,
+        "lexical": {
+            "status": (
+                "ready"
+                if lexical_complete
+                else "partial"
+                if documents > 0
+                else "pending"
+            ),
+            "processed": documents,
+            "total": fragments,
+            "complete": lexical_complete,
+        },
+        "vector": {
+            "status": (
+                "ready"
+                if vector_complete
+                else "partial"
+                if vectors > 0
+                else "pending"
+            ),
+            "processed": vectors,
+            "total": chunks,
+            "complete": vector_complete,
+        },
+        "error": str(value.get("error") or ""),
+        "recoverable": bool(
+            value.get(
+                "recoverable",
+                normalized_status not in {"ready", "succeeded"},
+            )
+        ),
+    }
+
+
+def _asset_cli_list(value: Mapping[str, Any]) -> dict[str, Any]:
+    raw_items = value.get("items")
+    items = raw_items if isinstance(raw_items, list) else []
+    return {
+        "items": [
+            _asset_cli_state(item)
+            for item in items
+            if isinstance(item, Mapping)
+        ],
+        "total": max(0, int(value.get("total") or 0)),
+        "offset": max(0, int(value.get("offset") or 0)),
+        "limit": max(1, int(value.get("limit") or DEFAULT_LIST_LIMIT)),
     }
 
 
@@ -1408,6 +1582,16 @@ def main(
         arguments = _parser().parse_args(argv)
         action = _action(arguments)
         root = _project_root(str(arguments.project_root or ""))
+        if action == "assets.capabilities":
+            emitter.emit("start", action, project_root=str(root))
+            emitter.emit(
+                "completed",
+                action,
+                result=KnowledgeAssetManager.capabilities(
+                    project_root=root,
+                ),
+            )
+            return 0
         batch_size = (
             _batch_size(int(arguments.batch_size))
             if action == "build"
@@ -1416,7 +1600,13 @@ def main(
         try:
             store = _open_store(
                 root,
-                read_only=action in {"status", "sources.list"},
+                read_only=action
+                in {
+                    "status",
+                    "sources.list",
+                    "assets.list",
+                    "assets.status",
+                },
             )
         except KnowledgeIndexError:
             database_path = Path(runtime_layout(root)["knowledge_database"])
@@ -1449,6 +1639,68 @@ def main(
             else:
                 result = _sources_refresh(store)
             emitter.emit("completed", action, result=result)
+            return 0
+
+        if action.startswith("assets."):
+            emitter.emit("start", action, project_root=str(root))
+            manager = KnowledgeAssetManager(root, store=store)
+
+            def asset_progress(fields: Mapping[str, Any]) -> None:
+                payload = dict(fields)
+                asset_id = str(payload.get("asset_id") or "")
+                if asset_id:
+                    payload["asset"] = _asset_cli_state(
+                        manager.status_asset(asset_id),
+                        stage=str(payload.get("stage") or ""),
+                    )
+                emitter.emit("progress", action, **payload)
+
+            if action == "assets.import":
+                result = _asset_cli_state(
+                    manager.import_asset(
+                        str(arguments.path),
+                        asset_id=str(arguments.asset_id),
+                        title=str(arguments.title),
+                        batch_size=int(arguments.batch_size),
+                        progress=asset_progress,
+                    )
+                )
+            elif action == "assets.resume":
+                result = _asset_cli_state(
+                    manager.resume_asset(
+                        str(arguments.asset_id),
+                        batch_size=int(arguments.batch_size),
+                        progress=asset_progress,
+                    )
+                )
+            elif action == "assets.delete":
+                result = manager.delete_asset(str(arguments.asset_id))
+            elif action == "assets.status":
+                result = (
+                    _asset_cli_state(
+                        manager.status_asset(str(arguments.asset_id))
+                    )
+                    if str(arguments.asset_id).strip()
+                    else _asset_cli_list(
+                        manager.list_assets(offset=0, limit=500)
+                    )
+                )
+            else:
+                offset, limit = _validated_pagination(arguments)
+                result = _asset_cli_list(
+                    manager.list_assets(offset=offset, limit=limit)
+                )
+            emitter.emit(
+                "completed",
+                action,
+                result=result,
+                **(
+                    {"asset": result}
+                    if action == "assets.status"
+                    and str(arguments.asset_id).strip()
+                    else {}
+                ),
+            )
             return 0
 
         if action.startswith("thread."):
@@ -1578,6 +1830,16 @@ def main(
             index=dict(last_status),
         )
         return exc.exit_code
+    except KnowledgeAssetError as exc:
+        emitter.emit(
+            "error",
+            action,
+            code=exc.code,
+            message=exc.message,
+            recoverable=exc.recoverable,
+            index=dict(last_status),
+        )
+        return EXIT_NOT_FOUND if exc.not_found else EXIT_INVALID_ARGUMENTS
     except Exception as exc:
         emitter.emit(
             "error",

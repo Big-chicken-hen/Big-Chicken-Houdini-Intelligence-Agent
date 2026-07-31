@@ -1205,13 +1205,21 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
                 "return_image": False,
             },
         )
-        self.assertFalse(unchanged["ok"])
+        self.assertTrue(unchanged["ok"])
+        self.assertEqual(
+            "not_proven",
+            unchanged["result"]["sequence"]["status"],
+        )
         self.assertTrue(
             unchanged["result"]["sequence"]["no_change_detected"]
         )
         self.assertEqual(
             "not_proven",
             unchanged["result"]["sequence"]["simulation_advancement"],
+        )
+        self.assertEqual([], unchanged["errors"])
+        self.assertTrue(
+            any("not proven" in warning for warning in unchanged["warnings"])
         )
         self.assertEqual(12.0, hou_module.frame())
 

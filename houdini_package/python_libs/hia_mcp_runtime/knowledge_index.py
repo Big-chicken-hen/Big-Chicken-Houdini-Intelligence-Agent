@@ -541,10 +541,20 @@ class LocalKnowledgeIndex:
         *,
         remove_source_keys: Iterable[str] = (),
         replace_thread_id: str = "",
+        collection: str = "explicit_user",
     ) -> dict[str, Any]:
         """Transactionally upsert or remove explicitly supplied user records."""
 
+        collection_name = str(collection or "").strip()
+        if collection_name not in {"explicit_user", "asset"}:
+            raise KnowledgeIndexError(
+                "Explicit records require the explicit_user or asset collection"
+            )
         thread_id = str(replace_thread_id or "").strip()
+        if thread_id and collection_name != "explicit_user":
+            raise KnowledgeIndexError(
+                "Thread replacement requires the explicit_user collection"
+            )
         if thread_id and (
             len(thread_id) > 256
             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", thread_id)
@@ -575,7 +585,10 @@ class LocalKnowledgeIndex:
                 raise KnowledgeIndexError(
                     "Thread replacement records must belong to replace_thread_id"
                 )
-            candidate = self._normalized_user_candidate(record)
+            candidate = self._normalized_user_candidate(
+                record,
+                collection=collection_name,
+            )
             if candidate.source_key in by_key:
                 raise KnowledgeIndexError(
                     "Explicit source batch contains duplicate source keys"
@@ -597,6 +610,7 @@ class LocalKnowledgeIndex:
                 "thread_replace" if thread_id else "explicit_records"
             ),
             "records_received": len(prepared),
+            "collection": collection_name,
             "documents_added": 0,
             "documents_updated": 0,
             "documents_removed": 0,
@@ -717,6 +731,9 @@ class LocalKnowledgeIndex:
             matches: list[int] = []
             for document_id, source, attributes_json in rows:
                 if kinds and str(source) not in kinds:
+                    continue
+                if not card_key and not canonical_key:
+                    matches.append(int(document_id))
                     continue
                 if (
                     (card_key or canonical_key)
@@ -1278,9 +1295,8 @@ class LocalKnowledgeIndex:
         search_started = time.monotonic()
         tokenizer = self._tokenizer(read_only=True)
         search_query = "" if exact_identity else query
-        use_fts = len(search_query) >= 3 and (
-            tokenizer == "trigram" or _is_ascii_word_query(search_query)
-        )
+        query_tokens = _fts_tokens(search_query)
+        use_fts = len(search_query) >= 3 and bool(query_tokens)
         version = current_houdini_version or "unknown"
         version_parameters = _version_order_parameters(version)
         if offset >= MAX_LEXICAL_RANK_CANDIDATES:
@@ -1302,6 +1318,8 @@ class LocalKnowledgeIndex:
                     search_query,
                     tokenizer,
                 )
+                if len(query_tokens) >= 4 and relaxed_expression:
+                    expression = relaxed_expression
                 where = (
                     "knowledge_fts MATCH ? "
                     f"AND d.source_group IN ({placeholders})"
@@ -1447,6 +1465,10 @@ class LocalKnowledgeIndex:
             except (TypeError, ValueError, json.JSONDecodeError):
                 attributes = {}
             metadata = dict(attributes) if isinstance(attributes, Mapping) else {}
+            version_status = _houdini_version_status(
+                str(row["houdini_version"]),
+                version,
+            )
             metadata.update(
                 {
                     "path": row["source_path"],
@@ -1475,6 +1497,8 @@ class LocalKnowledgeIndex:
                     "lexical_score": float(row["lexical_score"]),
                 }
             )
+            if version_status != "match":
+                metadata["current_version_status"] = version_status
             matches.append(
                 {
                     "source": row["source"],
@@ -3604,11 +3628,16 @@ def _lexical_rank_key(
         if version in {"", "any", "current"}
         else 3
     )
+    lexical_score = float(row["lexical_score"])
+    rank_tiers = (
+        (lexical_score, version_tier)
+        if len(_fts_tokens(query)) >= 4
+        else (version_tier, lexical_score)
+    )
     return (
         _exact_identity_tier(row, query),
         source_tier,
-        version_tier,
-        float(row["lexical_score"]),
+        *rank_tiers,
         0 if str(row["verification"]) == "verified" else 1,
         str(row["title"]).casefold(),
     )
@@ -3638,18 +3667,59 @@ def _exact_identity_tier(row: Mapping[str, Any], query: str) -> int:
     return 0 if query_key in values else 1
 
 
-def _houdini_version_major(value: str) -> str:
+def _houdini_version_majors(value: str) -> tuple[str, ...]:
     folded = str(value or "").strip().casefold()
     if folded in {"", "any", "current", "unknown"}:
-        return ""
-    match = re.match(r"(\d+)(?:\.|$)", folded)
-    return match.group(1) if match else ""
+        return ()
+
+    majors: set[int] = set()
+    ranges: list[tuple[int, int]] = []
+    range_pattern = re.compile(
+        r"(?<![a-z0-9])h?\s*(\d{1,2})(?:\.\d+){0,2}\s*"
+        r"[-\N{EN DASH}\N{EM DASH}]\s*h?\s*"
+        r"(\d{1,2})(?:\.\d+){0,2}(?!\d)",
+        flags=re.IGNORECASE,
+    )
+    for match in range_pattern.finditer(folded):
+        start = int(match.group(1))
+        end = int(match.group(2))
+        if start <= end and end - start <= 50:
+            majors.update(range(start, end + 1))
+        else:
+            majors.update((start, end))
+        ranges.append(match.span())
+
+    remainder = list(folded)
+    for start, end in ranges:
+        remainder[start:end] = " " * (end - start)
+    token_pattern = re.compile(
+        r"(?<![a-z0-9])h?\s*(\d{1,2})(?:\.\d+){0,2}(?!\d)",
+        flags=re.IGNORECASE,
+    )
+    majors.update(
+        int(match.group(1))
+        for match in token_pattern.finditer("".join(remainder))
+    )
+    return tuple(str(value) for value in sorted(majors))
+
+
+def _houdini_version_major(value: str) -> str:
+    majors = _houdini_version_majors(value)
+    return majors[0] if majors else ""
 
 
 def _houdini_versions_match(left: str, right: str) -> bool:
-    left_major = _houdini_version_major(left)
-    right_major = _houdini_version_major(right)
-    return bool(left_major and left_major == right_major)
+    left_majors = set(_houdini_version_majors(left))
+    right_majors = set(_houdini_version_majors(right))
+    return bool(left_majors.intersection(right_majors))
+
+
+def _houdini_version_status(declared: str, current: str) -> str:
+    declared_majors = set(_houdini_version_majors(declared))
+    current_majors = set(_houdini_version_majors(current))
+    if not declared_majors or not current_majors:
+        return "unknown"
+    return "match" if declared_majors.intersection(current_majors) else "mismatch"
 
 
 def _version_order_parameters(version: str) -> tuple[str, str, str, str]:

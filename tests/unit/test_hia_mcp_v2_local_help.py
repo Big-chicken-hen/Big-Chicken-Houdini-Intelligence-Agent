@@ -1554,7 +1554,11 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
         versions = {
             "major.md": "21",
             "build.md": "21.0.440",
+            "range.md": "H20-H21; verify current",
+            "prefixed.md": "H21 and unknown; verify current",
             "older.md": "20.5.999",
+            "future.md": "H22-H23; verify current",
+            "unknown.md": "unknown; verify current",
         }
         for name, version in versions.items():
             path = sources_root / name
@@ -1584,7 +1588,19 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
         self.assertEqual("build.md", build_current["matches"][0]["title"])
         self.assertTrue(by_title["major.md"]["current_version_match"])
         self.assertTrue(by_title["build.md"]["current_version_match"])
+        self.assertTrue(by_title["range.md"]["current_version_match"])
+        self.assertTrue(by_title["prefixed.md"]["current_version_match"])
         self.assertFalse(by_title["older.md"]["current_version_match"])
+        self.assertFalse(by_title["future.md"]["current_version_match"])
+        self.assertNotIn("current_version_status", by_title["range.md"])
+        self.assertEqual(
+            "mismatch",
+            by_title["future.md"]["current_version_status"],
+        )
+        self.assertEqual(
+            "unknown",
+            by_title["unknown.md"]["current_version_status"],
+        )
 
         major_current = index.search(
             "MajorVersionNeedle",
@@ -1599,6 +1615,47 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
             for match in major_current["matches"]
         }
         self.assertTrue(by_title["build.md"]["current_version_match"])
+
+        houdini_22 = index.search(
+            "MajorVersionNeedle",
+            {"user"},
+            current_houdini_version="H22",
+            offset=0,
+            limit=10,
+        )
+        self.assertEqual(len(versions), houdini_22["total"])
+        by_title = {
+            match["title"]: match["metadata"]
+            for match in houdini_22["matches"]
+        }
+        self.assertTrue(by_title["future.md"]["current_version_match"])
+        self.assertNotIn("current_version_status", by_title["future.md"])
+        self.assertFalse(by_title["range.md"]["current_version_match"])
+        self.assertEqual(
+            "mismatch",
+            by_title["range.md"]["current_version_status"],
+        )
+        self.assertEqual(
+            "unknown",
+            by_title["unknown.md"]["current_version_status"],
+        )
+        self.assertEqual(set(versions), set(by_title))
+
+        unknown_current = index.search(
+            "MajorVersionNeedle",
+            {"user"},
+            current_houdini_version="unknown",
+            offset=0,
+            limit=10,
+        )
+        self.assertEqual(len(versions), unknown_current["total"])
+        self.assertEqual(
+            {"unknown"},
+            {
+                match["metadata"]["current_version_status"]
+                for match in unknown_current["matches"]
+            },
+        )
 
     def test_release_knowledge_manifest_matches_archive_policy(self) -> None:
         manifest_path = (

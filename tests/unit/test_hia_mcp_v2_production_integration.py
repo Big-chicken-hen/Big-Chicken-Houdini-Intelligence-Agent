@@ -335,6 +335,7 @@ class BridgeBackendIntegrationTests(unittest.TestCase):
         self.assertIn(f'{server}.args=["-B", "-m", "hia_mcp_v2"]', overrides)
         self.assertIn(f"{server}.enabled=true", overrides)
         self.assertIn(f"{server}.required=true", overrides)
+        self.assertIn(f"{server}.tool_timeout_sec=305", overrides)
         self.assertIn(f'{server}.default_tools_approval_mode="approve"', overrides)
 
         env_override = next(value for value in overrides if value.startswith(f"{server}.env_vars="))
@@ -445,7 +446,11 @@ class BridgeBackendIntegrationTests(unittest.TestCase):
 
 class HoudiniRuntimeIntegrationTests(unittest.TestCase):
     def test_uiready_starts_exactly_the_selected_backend(self) -> None:
-        for python_version in ("python3.10libs", "python3.11libs"):
+        for python_version in (
+            "python3.10libs",
+            "python3.11libs",
+            "python3.13libs",
+        ):
             path = REPOSITORY_ROOT / "houdini_package" / python_version / "uiready.py"
             with self.subTest(python_version=python_version, backend="hia_v2"):
                 hia_start = mock.Mock()

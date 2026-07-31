@@ -442,7 +442,12 @@ class BridgeApplication:
             status["available"] = True
             status["scene_revision"] = identity["scene_revision"]
             status["runtime_identity"] = identity
-            status["identity_status"] = "verified"
+            status["identity_status"] = (
+                "source_update_available"
+                if identity.get("executor_source_status") == "stale"
+                else "verified"
+            )
+            status["restart_required"] = False
             return status
 
         body = urllib_parse.urlencode(

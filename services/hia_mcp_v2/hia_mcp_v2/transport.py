@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
@@ -189,11 +190,20 @@ class LoopbackTransport:
                     "http_status": exc.code,
                 },
             ) from exc
-        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        except (
+            TimeoutError,
+            socket.timeout,
+            urllib.error.URLError,
+            ConnectionError,
+            http.client.HTTPException,
+        ) as exc:
             raise TransportError(
                 "HOUDINI_UNAVAILABLE",
                 "The live HIA MCP V2 Houdini runtime identity is unavailable",
-                {"stage": "identity_preflight", "request_submitted": False},
+                _before_submission_details(
+                    stage="identity_preflight",
+                    queue_seconds=0.0,
+                ),
             ) from exc
         if len(raw) > MAX_RESPONSE_BYTES:
             raise TransportError(
@@ -223,6 +233,7 @@ class LoopbackTransport:
         call_started = time.monotonic()
         queue_seconds = cancellation.stdio_queue_seconds
         wait_budget = self._wait_budget(tool_name, arguments)
+        scene_write = tool_name in _SCENE_WRITE_TOOLS
         if cancellation.cancelled:
             raise TransportError(
                 "CANCELLED_BEFORE_EXECUTION",
@@ -237,10 +248,10 @@ class LoopbackTransport:
                 raise TransportError("TRANSPORT_CLOSED", "The HIA MCP V2 transport is closed")
             self._active[request_id] = cancellation
         try:
-            if tool_name == "hia_execute_hom" and queue_seconds >= wait_budget:
+            if scene_write and queue_seconds >= wait_budget:
                 raise TransportError(
                     "TIMEOUT_BEFORE_EXECUTION",
-                    "The hia_execute_hom wait budget expired in the stdio queue before Houdini execution began",
+                    f"The {tool_name} wait budget expired in the stdio queue before Houdini execution began",
                     _before_submission_details(
                         stage="stdio_queue",
                         queue_seconds=queue_seconds,
@@ -260,7 +271,6 @@ class LoopbackTransport:
                     {"limit_bytes": MAX_REQUEST_BYTES},
                 )
             identity_started = time.monotonic()
-            scene_write = tool_name in _SCENE_WRITE_TOOLS
             try:
                 identity = self._runtime_identity()
             except TransportError as exc:
@@ -315,7 +325,7 @@ class LoopbackTransport:
                     ),
                 )
             remaining_timeout = wait_budget
-            if tool_name == "hia_execute_hom":
+            if scene_write:
                 remaining_timeout -= (
                     queue_seconds
                     + identity_seconds
@@ -324,7 +334,7 @@ class LoopbackTransport:
                 if remaining_timeout <= 0:
                     raise TransportError(
                         "TIMEOUT_BEFORE_EXECUTION",
-                        "The hia_execute_hom wait budget expired before the request was submitted to Houdini",
+                        f"The {tool_name} wait budget expired before the request was submitted to Houdini",
                         _before_submission_details(
                             stage="request_serialization",
                             queue_seconds=queue_seconds,
@@ -375,9 +385,42 @@ class LoopbackTransport:
                         request_serialization_seconds,
                         accepted=cancellation.accepted,
                     ) from exc
+                if isinstance(
+                    reason,
+                    (
+                        ConnectionResetError,
+                        ConnectionAbortedError,
+                        BrokenPipeError,
+                        http.client.HTTPException,
+                    ),
+                ):
+                    raise _runtime_connection_interrupted(
+                        queue_seconds,
+                        request_serialization_seconds,
+                        accepted=cancellation.accepted,
+                    ) from exc
                 raise TransportError(
                     "HOUDINI_UNAVAILABLE",
                     "The live HIA MCP V2 Houdini runtime is unavailable",
+                    _before_submission_details(
+                        stage="runtime_connect",
+                        queue_seconds=queue_seconds,
+                    ),
+                ) from exc
+            except ConnectionRefusedError as exc:
+                raise TransportError(
+                    "HOUDINI_UNAVAILABLE",
+                    "The live HIA MCP V2 Houdini runtime is unavailable",
+                    _before_submission_details(
+                        stage="runtime_connect",
+                        queue_seconds=queue_seconds,
+                    ),
+                ) from exc
+            except (ConnectionError, http.client.HTTPException) as exc:
+                raise _runtime_connection_interrupted(
+                    queue_seconds,
+                    request_serialization_seconds,
+                    accepted=cancellation.accepted,
                 ) from exc
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise TransportError(
@@ -415,7 +458,10 @@ class LoopbackTransport:
                     },
                 )
             if scene_write:
-                self._accept_identity(response_identity, request_submitted=True)
+                observed_identity = self._accept_identity(
+                    response_identity,
+                    request_submitted=True,
+                )
             else:
                 observed_identity = _validated_identity(
                     response_identity,
@@ -423,17 +469,19 @@ class LoopbackTransport:
                     request_submitted=True,
                     enforce_expected=False,
                 )
-                warning = self._identity_warning(observed_identity)
-                if warning is None:
+                if self._identity_warning(observed_identity) is None:
                     self._accept_identity(
                         observed_identity,
                         request_submitted=True,
                     )
-                else:
-                    result = dict(result)
-                    result["runtime_identity"] = observed_identity
-                    result["restart_required"] = True
-                    result["identity_warning"] = warning
+            warning = self._identity_warning(observed_identity)
+            if warning is not None:
+                result = dict(result)
+                result["runtime_identity"] = observed_identity
+                result["restart_required"] = (
+                    warning["code"] != "STALE_HOUDINI_RUNTIME"
+                )
+                result["identity_warning"] = warning
             if tool_name == "hia_execute_hom":
                 result = dict(result)
                 phase_timings = result.get("phase_timings")
@@ -471,13 +519,20 @@ class LoopbackTransport:
                 self._active.pop(request_id, None)
 
     def _wait_budget(self, tool_name: str, arguments: Mapping[str, Any]) -> float:
-        if tool_name != "hia_execute_hom" or "timeout_seconds" not in arguments:
+        if (
+            tool_name not in _SCENE_WRITE_TOOLS
+            or "timeout_seconds" not in arguments
+        ):
             return float(self.config.timeout_seconds)
         value = arguments.get("timeout_seconds")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return float(self.config.timeout_seconds)
         timeout = float(value)
-        return timeout if math.isfinite(timeout) and timeout > 0 else float(self.config.timeout_seconds)
+        return (
+            timeout
+            if math.isfinite(timeout) and 1 <= timeout <= 300
+            else float(self.config.timeout_seconds)
+        )
 
     def cancel(self, request_id: int | str) -> None:
         with self._active_lock:
@@ -538,9 +593,7 @@ class LoopbackTransport:
         self,
         identity: Mapping[str, Any],
     ) -> dict[str, str] | None:
-        if identity.get("executor_source_status") != "current":
-            code = "STALE_HOUDINI_RUNTIME"
-        elif identity.get("launcher_session_id") != self.config.launcher_session_id:
+        if identity.get("launcher_session_id") != self.config.launcher_session_id:
             code = "HOUDINI_SESSION_CHANGED"
         elif os.path.normcase(str(identity.get("executor_module_path"))) != os.path.normcase(
             self.config.executor_module_path
@@ -555,13 +608,20 @@ class LoopbackTransport:
                     != _runtime_binding(identity)
                 )
             code = "HOUDINI_SESSION_CHANGED" if changed else ""
+        if not code and identity.get("executor_source_status") != "current":
+            code = "STALE_HOUDINI_RUNTIME"
         if not code:
             return None
         return {
             "code": code,
             "message": (
-                "The read completed against the observed Houdini runtime; "
-                "reconnect before any scene write"
+                "The operation completed against the executor already loaded "
+                "in Houdini; restart only to load newer source changes from disk"
+                if code == "STALE_HOUDINI_RUNTIME"
+                else (
+                    "The read completed against the observed Houdini runtime; "
+                    "reconnect before any scene write"
+                )
             ),
         }
 
@@ -771,17 +831,6 @@ def _validated_identity(
                 "automatic_retry_safe": not request_submitted,
             },
         )
-    if enforce_expected and source_status != "current":
-        raise TransportError(
-            "STALE_HOUDINI_RUNTIME",
-            "The executor source changed after Houdini loaded it; restart the launcher",
-            {
-                "runtime_identity": identity,
-                "restart_required": True,
-                "request_submitted": request_submitted,
-                "automatic_retry_safe": not request_submitted,
-            },
-        )
     return identity
 
 
@@ -854,6 +903,43 @@ def _runtime_timeout(
         {
             "stage": stage,
             "timeout_seconds": float(timeout_seconds),
+            "stdio_queue_seconds": _rounded_seconds(queue_seconds),
+            "request_serialization_seconds": _rounded_seconds(
+                request_serialization_seconds
+            ),
+            "submission_state": submission_state,
+            "request_submitted": request_submitted,
+            "hom_may_still_execute": hom_may_still_execute,
+            "automatic_retry_safe": False,
+            "interruptible_after_submission": False,
+        },
+    )
+
+
+def _runtime_connection_interrupted(
+    queue_seconds: float,
+    request_serialization_seconds: float,
+    *,
+    accepted: bool,
+) -> TransportError:
+    if accepted:
+        stage = "runtime_response_interrupted"
+        submission_state = "accepted"
+        request_submitted: bool | None = True
+        hom_may_still_execute = False
+    else:
+        stage = "runtime_request_outcome_unknown"
+        submission_state = "unknown"
+        request_submitted = None
+        hom_may_still_execute = True
+    return TransportError(
+        "CONNECTION_INTERRUPTED",
+        (
+            "The Houdini connection ended before a complete response was "
+            "received. The result is unknown; do not automatically retry."
+        ),
+        {
+            "stage": stage,
             "stdio_queue_seconds": _rounded_seconds(queue_seconds),
             "request_serialization_seconds": _rounded_seconds(
                 request_serialization_seconds

@@ -143,23 +143,10 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
             tool_name = payload["tool"]
             scene_write = tool_name in _SCENE_WRITE_TOOLS
             current_identity = self.server.runtime_identity()
-            source_current = (
-                current_identity["executor_source_status"] == "current"
-            )
             binding_matches = _same_runtime_binding(
                 payload["expected_runtime"],
                 current_identity,
             )
-            if scene_write and not source_current:
-                raise HiaRuntimeError(
-                    "STALE_HOUDINI_RUNTIME",
-                    "The executor source changed after Houdini loaded it; restart the launcher",
-                    {
-                        "runtime_identity": current_identity,
-                        "restart_required": True,
-                        "request_submitted": False,
-                    },
-                )
             if scene_write and not binding_matches:
                 raise HiaRuntimeError(
                     "HOUDINI_SESSION_CHANGED",
@@ -177,22 +164,30 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
             result_identity = self.server.runtime_identity()
             result["runtime_identity"] = result_identity
             warning_code = (
-                "STALE_HOUDINI_RUNTIME"
-                if result_identity["executor_source_status"] != "current"
-                else "HOUDINI_SESSION_CHANGED"
+                "HOUDINI_SESSION_CHANGED"
                 if not _same_runtime_binding(
                     payload["expected_runtime"],
                     result_identity,
                 )
+                else "STALE_HOUDINI_RUNTIME"
+                if result_identity["executor_source_status"] != "current"
                 else None
             )
             if warning_code is not None:
-                result["restart_required"] = True
+                result["restart_required"] = (
+                    warning_code != "STALE_HOUDINI_RUNTIME"
+                )
                 result["identity_warning"] = {
                     "code": warning_code,
                     "message": (
-                        "The read completed against the observed Houdini runtime; "
-                        "reconnect before any scene write"
+                        "The operation completed against the executor already "
+                        "loaded in Houdini; restart only to load newer source "
+                        "changes from disk"
+                        if warning_code == "STALE_HOUDINI_RUNTIME"
+                        else (
+                            "The operation completed against a changed Houdini "
+                            "runtime binding; reconnect before another scene write"
+                        )
                     ),
                 }
             self._send_json(

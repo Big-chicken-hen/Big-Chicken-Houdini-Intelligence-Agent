@@ -1,6 +1,6 @@
 # Installation and first run
 
-Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The tested configuration is Houdini 21.0.440 with its Python 3.11 runtime, a project-managed CPython 3.10.11 Bridge/local-knowledge environment, and Codex 0.144.3. The published v0.1.1 Preview ZIP is the historical 2026-07-24 snapshot and does not represent later source changes. Use that ZIP only to reproduce its published version; use a source checkout to inspect current development until a newer Preview is published.
+Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The launcher discovers the selected Houdini installation dynamically rather than pinning a Houdini major version. The source package includes UI startup adapters for Python 3.10, 3.11, and 3.13, covering Houdini 22's standard Python 3.13 build and its separate Python 3.11 build. Houdini 21.0.440/Python 3.11 remains the configuration with completed live-GUI evidence on this machine. The Bridge/local-knowledge environment uses project-managed CPython 3.10.11 and Codex 0.144.3. The published v0.1.1 Preview ZIP is the historical 2026-07-24 snapshot and does not represent later source changes. Use that ZIP only to reproduce its published version; use a source checkout to inspect current development until a newer Preview is published.
 
 ## 1. Download and fully extract the historical Preview ZIP
 
@@ -31,7 +31,7 @@ intentionally omits those maintainer scripts.
 
 Install separately:
 
-- SideFX Houdini. Houdini 21.0.440 is the currently verified build.
+- SideFX Houdini. Installed builds are discovered dynamically; Houdini 21.0.440 is the currently live-verified build, while the bundled Python 3.13 adapter covers the standard Houdini 22 startup path without treating version metadata as a gate.
 - A valid Codex/ChatGPT sign-in and network access to the OpenAI service.
 
 Normal installation does not require global Python, a PATH Python, administrator
@@ -63,7 +63,9 @@ environment; it is not merged into HIA's `.venv`.
 Big-Chicken Houdini Intelligence Agent does not redistribute Houdini. Houdini
 must already be installed and licensed. Other Houdini versions may be discovered,
 but only Houdini 21.0.440 with Python 3.11 has completed the current real-GUI
-acceptance path.
+acceptance path. Houdini 22's Python 3.13 and separate Python 3.11 startup
+paths are bundled and are reported as unverified rather than rejected when no
+matching live-GUI evidence is available.
 
 ## 3. Install or repair the project-local runtimes
 
@@ -250,14 +252,35 @@ powershell -File .\scripts\hia-knowledge.ps1 delete -SourceId "<source-id>"
 powershell -File .\scripts\hia-knowledge.ps1 rescan
 powershell -File .\scripts\hia-knowledge.ps1 index-status
 powershell -File .\scripts\hia-knowledge.ps1 index-build -BatchSize 32
+powershell -File .\scripts\hia-knowledge.ps1 assets capabilities
+powershell -File .\scripts\hia-knowledge.ps1 assets repair
+powershell -File .\scripts\hia-knowledge.ps1 assets import -Path "<path-to-document-or-media>"
+powershell -File .\scripts\hia-knowledge.ps1 assets status -AssetId "<asset-id>"
+powershell -File .\scripts\hia-knowledge.ps1 assets resume -AssetId "<asset-id>"
 ```
 
 `index-build` commits bounded batches, so the same command continues missing or
-changed chunks after interruption. The supported formats are `.md`, `.txt`,
-`.html`, `.htm`, `.srt`, `.vtt`, and text-based `.pdf`. The first release does
-not claim video ingestion, scanned-PDF OCR, or image OCR. Import creates a
-managed copy under `.runtime\knowledge\sources`; deleting that copy never
-deletes or changes the original file.
+changed chunks after interruption. Ordinary source import supports `.md`,
+`.txt`, `.html`, `.htm`, `.srt`, `.vtt`, and text-based `.pdf`. The asset
+pipeline adds deterministic CSV, DOCX, PPTX, XLSX, image OCR, scanned-PDF page
+OCR, and local audio/video transcription adapters. Run `assets capabilities`
+before import: it reports each adapter as available, dependency-missing, or
+not-configured without downloading anything. `assets repair` is the explicit
+project-local dependency/model/FFmpeg repair action; `assets import` creates
+the managed asset and initial extraction checkpoint; `assets status` inspects
+one asset; and `assets resume` continues bounded OCR/transcription work.
+Extracted `user_document` and `user_transcript` fragments enter the same SQLite
+FTS5 and optional Qwen vector index rather than a second knowledge store.
+
+Current source-tree acceptance is intentionally explicit: the clean-clone
+fixture reports RapidOCR/ONNX Runtime image OCR and scanned-PDF page OCR ready,
+and a real Markdown asset reaches the shared FTS5/Qwen index. The
+media-transcription code path is present, but this machine could not finish the
+external faster-whisper model or FFmpeg downloads because both endpoints
+returned `WinError 10060`; no real no-sidecar video-ASR acceptance is claimed
+yet. Ordinary imports are managed under `.runtime\knowledge\sources`, asset
+state stays under `.runtime\knowledge\assets`, and deletion never changes the
+original selected file.
 
 The WPF page maps these actions to **导入文件**, **导入文件夹**, managed-source
 rows showing origin/format/size/index state, **删除所选**, **重新扫描**, and
@@ -465,7 +488,7 @@ or changed after confirmation.
 
 ### Several Houdini versions were found
 
-Select the desired `houdini.exe` explicitly. Discovery of a version is not a compatibility guarantee; Houdini 21.0.440 is the current verified build.
+Select the desired `houdini.exe` explicitly. Discovery is dynamic and is not itself a compatibility guarantee; Houdini 21.0.440 is the current live-verified build, and Houdini 22's Python 3.13/3.11 UI startup paths are included pending a live H22 run.
 
 ### HIA MCP V2 is unavailable
 

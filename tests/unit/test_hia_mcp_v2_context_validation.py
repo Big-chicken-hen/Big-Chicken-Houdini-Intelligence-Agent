@@ -1037,7 +1037,9 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         self.assertEqual("unknown", checks["empty_output"]["status"])
         self.assertEqual("unknown", checks["geometry_summary"]["status"])
 
-    def test_active_locked_asset_upstream_error_still_blocks_output(self) -> None:
+    def test_active_locked_asset_upstream_error_is_reported_without_rollback(
+        self,
+    ) -> None:
         active = FakeValidationNode(
             "/obj/fx/locked_asset/active_vop",
             category="Vop",
@@ -1081,8 +1083,13 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
             },
         )
 
-        self.assertFalse(response["ok"])
-        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertTrue(response["ok"])
+        self.assertEqual([], response["errors"])
+        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertEqual(
+            "failed",
+            response["execution_evidence"]["postconditions"]["status"],
+        )
         node_errors = next(
             item
             for item in response["execution_evidence"]["validation"][
@@ -1204,7 +1211,7 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         )
 
         self.assertFalse(response["ok"])
-        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertEqual("PATH_SCOPE_VIOLATION", response["errors"][0]["code"])
         self.assertIn(protected_path, response["diff"]["changed"])
         self.assertEqual("rolled_back", response["rollback"]["status"])
 
@@ -1237,7 +1244,7 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         )
 
         self.assertFalse(response["ok"])
-        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertEqual("PATH_SCOPE_VIOLATION", response["errors"][0]["code"])
         self.assertIn(protected_path, response["diff"]["changed"])
         self.assertEqual("rolled_back", response["rollback"]["status"])
 
@@ -1285,7 +1292,7 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         )
 
         self.assertFalse(response["ok"])
-        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertEqual("PATH_SCOPE_VIOLATION", response["errors"][0]["code"])
         self.assertIn(child_path, response["diff"]["changed"])
         self.assertEqual("rolled_back", response["rollback"]["status"])
         self.assertTrue(response["errors"][0]["automatic_retry_safe"])
@@ -1376,21 +1383,28 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
             fresh_validation=True,
             checks=["empty_output"],
         )
-        self.assertFalse(fresh["ok"])
-        self.assertEqual("VALIDATION_FAILED", fresh["errors"][0]["code"])
+        self.assertTrue(fresh["ok"])
+        self.assertEqual([], fresh["errors"])
         self.assertEqual(1, fresh_output.cook_calls)
-        self.assertEqual("rolled_back", fresh["rollback"]["status"])
-        self.assertTrue(fresh["errors"][0]["automatic_retry_safe"])
+        self.assertEqual("not_needed", fresh["rollback"]["status"])
+        self.assertEqual(
+            "failed",
+            fresh["execution_evidence"]["postconditions"]["status"],
+        )
 
         erroneous, error_output = run_created_output(
             "REAL_ERROR",
             fresh_validation=False,
             errors=("Output connection is invalid",),
         )
-        self.assertFalse(erroneous["ok"])
-        self.assertEqual("VALIDATION_FAILED", erroneous["errors"][0]["code"])
+        self.assertTrue(erroneous["ok"])
+        self.assertEqual([], erroneous["errors"])
         self.assertEqual(0, error_output.cook_calls)
-        self.assertEqual("rolled_back", erroneous["rollback"]["status"])
+        self.assertEqual("not_needed", erroneous["rollback"]["status"])
+        self.assertEqual(
+            "failed",
+            erroneous["execution_evidence"]["postconditions"]["status"],
+        )
 
     def test_validation_scope_is_bounded_for_paths_and_root(self) -> None:
         target = FakeValidationNode("/obj/target")
@@ -1575,7 +1589,7 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
             )
 
         self.assertFalse(response["ok"])
-        self.assertEqual("VALIDATION_FAILED", response["errors"][0]["code"])
+        self.assertEqual("PATH_SCOPE_VIOLATION", response["errors"][0]["code"])
         self.assertEqual("rolled_back", response["rollback"]["status"])
         self.assertEqual([False], trace_runner_states)
         evidence = response["execution_evidence"]

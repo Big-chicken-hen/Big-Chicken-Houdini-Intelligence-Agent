@@ -29,11 +29,14 @@ from .deterministic_sources import (
     normalize_project_memory,
 )
 from .knowledge_index import (
+    COMMUNITY_TUTORIAL_SOURCE,
     FILTERABLE_SOURCE_KINDS,
     SEARCH_SOURCE_GROUPS,
     KnowledgeIndexError,
     LocalKnowledgeIndex,
     _Candidate,
+    _fts_tokens,
+    _houdini_version_status,
     _houdini_versions_match,
     _matching_snippet,
     _utc_now,
@@ -61,6 +64,8 @@ PARTIAL_NO_CANDIDATES_REASON = (
 )
 RRF_K = 60.0
 SOURCE_INTENT_BONUS = 0.001
+MAX_SUPPLEMENTAL_LEXICAL_MATCHES = 32
+PRIMARY_LEXICAL_BURST = 4
 
 _SOURCE_KINDS = {
     "builtin_official_workflow": "builtin_official_workflow",
@@ -76,6 +81,9 @@ _SOURCE_KINDS = {
     "project_docs": "project_reference",
     "project_skill": "project_reference",
 }
+_DISTINCT_USER_CONTENT_KINDS = frozenset(
+    {"user_document", "user_transcript", "thread_export", "project_memory"}
+)
 _WORKFLOW_INTENT_TERMS = frozenset(
     {
         "how",
@@ -349,6 +357,17 @@ class HybridKnowledgeStore:
             canonical_id=canonical_id,
         )
         exact_identity = bool(str(card_id).strip() or str(canonical_id).strip())
+        community_document_ids = (
+            self.index.filtered_document_ids(
+                source_kinds={COMMUNITY_TUTORIAL_SOURCE},
+            )
+            if (
+                filtered_document_ids is None
+                and len(groups) > 1
+                and "project" in groups
+            )
+            else None
+        )
 
         lexical_limit = min(
             MAX_VECTOR_CANDIDATES,
@@ -358,8 +377,9 @@ class HybridKnowledgeStore:
         )
         lexical_offset = 0
         fts_started = time.perf_counter()
-        lexical_results = [
-            self.index.search(
+        lexical_results: list[dict[str, Any]] = []
+        for query in queries:
+            primary = self.index.search(
                 query,
                 groups,
                 current_houdini_version=current_houdini_version,
@@ -370,8 +390,52 @@ class HybridKnowledgeStore:
                 document_ids=filtered_document_ids,
                 exact_identity=exact_identity,
             )
-            for query in queries
-        ]
+            supplements: list[Sequence[Mapping[str, Any]]] = []
+            if (
+                filtered_document_ids is None
+                and len(groups) > 1
+                and len(_fts_tokens(query)) >= 4
+            ):
+                supplement_limit = min(
+                    MAX_SUPPLEMENTAL_LEXICAL_MATCHES,
+                    lexical_limit,
+                )
+                if community_document_ids:
+                    community = self.index.search(
+                        query,
+                        {"project"},
+                        current_houdini_version=current_houdini_version,
+                        offset=0,
+                        limit=supplement_limit,
+                        memory_scope=memory_scope,
+                        include_superseded=include_superseded,
+                        document_ids=community_document_ids,
+                    )
+                    supplements.append(community.get("matches", ()))
+                if "user" in groups:
+                    user = self.index.search(
+                        query,
+                        {"user"},
+                        current_houdini_version=current_houdini_version,
+                        offset=0,
+                        limit=supplement_limit,
+                        memory_scope=memory_scope,
+                        include_superseded=include_superseded,
+                    )
+                    supplements.append(user.get("matches", ()))
+            if supplements:
+                primary = dict(primary)
+                primary_matches = primary.get("matches", ())
+                primary["matches"] = _merge_lexical_candidates(
+                    (
+                        primary_matches
+                        if isinstance(primary_matches, (list, tuple))
+                        else ()
+                    ),
+                    supplements,
+                    limit=MAX_VECTOR_CANDIDATES,
+                )
+            lexical_results.append(primary)
         for query, result in zip(queries, lexical_results):
             raw_matches = [
                 _with_source_kind(match)
@@ -1062,17 +1126,34 @@ class HybridKnowledgeStore:
                 sql = (
                     "SELECT c.id, c.body, c.content_hash FROM chunks c WHERE "
                 )
-            sql += " AND ".join(filters or ("1 = 1",)) + " ORDER BY c.id"
-            if max_chunks is not None:
+            sql += " AND ".join(filters or ("1 = 1",))
+            preserve_chunk_order = bool(chunk_ids)
+            if max_chunks is not None and not preserve_chunk_order:
                 if max_chunks <= 0:
                     rows = []
                 else:
                     rows = connection.execute(
-                        sql + " LIMIT ?",
+                        sql + " ORDER BY c.id LIMIT ?",
                         [*parameters, int(max_chunks)],
                     ).fetchall()
             else:
-                rows = connection.execute(sql, parameters).fetchall()
+                rows = connection.execute(
+                    sql + ("" if preserve_chunk_order else " ORDER BY c.id"),
+                    parameters,
+                ).fetchall()
+        if chunk_ids:
+            requested_order = {
+                int(chunk_id): position
+                for position, chunk_id in enumerate(chunk_ids)
+            }
+            rows.sort(
+                key=lambda row: requested_order.get(
+                    int(row[0]),
+                    len(requested_order),
+                )
+            )
+            if max_chunks is not None:
+                rows = rows[: max(0, int(max_chunks))]
         return list(rows)
 
     def _sync_missing_vectors(
@@ -1487,6 +1568,10 @@ class HybridKnowledgeStore:
         except (TypeError, ValueError, json.JSONDecodeError):
             attributes = {}
         metadata = dict(attributes) if isinstance(attributes, Mapping) else {}
+        version_status = _houdini_version_status(
+            str(row["houdini_version"]),
+            current_houdini_version,
+        )
         metadata.update(
             {
                 "path": row["source_path"],
@@ -1512,6 +1597,8 @@ class HybridKnowledgeStore:
                 "vector_score": score,
             }
         )
+        if version_status != "match":
+            metadata["current_version_status"] = version_status
         return _with_source_kind({
             "source": row["source"],
             "title": row["title"],
@@ -1595,10 +1682,26 @@ class HybridKnowledgeStore:
         folded: list[dict[str, Any]] = []
         seen_canonical: set[tuple[str, str]] = set()
         seen_content_hashes: set[str] = set()
+        seen_asset_fragments: set[tuple[str, str]] = set()
         for value in combined:
             metadata = value["metadata"]
+            asset_fragment = _asset_fragment_identity(metadata)
+            source_kind = str(value.get("source_kind") or "").casefold()
+            preserves_user_content = (
+                source_kind in _DISTINCT_USER_CONTENT_KINDS
+            )
             content_sha256 = str(metadata.get("sha256") or "").casefold()
-            if content_sha256 and content_sha256 in seen_content_hashes:
+            if (
+                asset_fragment is not None
+                and asset_fragment in seen_asset_fragments
+            ):
+                continue
+            if (
+                asset_fragment is None
+                and not preserves_user_content
+                and content_sha256
+                and content_sha256 in seen_content_hashes
+            ):
                 continue
             canonical_id = str(metadata.get("canonical_id") or "").strip()
             if canonical_id:
@@ -1609,7 +1712,9 @@ class HybridKnowledgeStore:
                 if canonical_key in seen_canonical:
                     continue
                 seen_canonical.add(canonical_key)
-            if content_sha256:
+            if asset_fragment is not None:
+                seen_asset_fragments.add(asset_fragment)
+            elif content_sha256 and not preserves_user_content:
                 seen_content_hashes.add(content_sha256)
             score = float(value.pop("_rank_score"))
             value.pop("_score", None)
@@ -1949,6 +2054,52 @@ def _interleave_unique(
     return output
 
 
+def _merge_lexical_candidates(
+    primary: Sequence[Mapping[str, Any]],
+    supplements: Sequence[Sequence[Mapping[str, Any]]],
+    *,
+    limit: int,
+) -> list[Mapping[str, Any]]:
+    """Keep global rank while preventing bounded source lanes from starving."""
+
+    values = [list(primary), *(list(group) for group in supplements)]
+    positions = [0 for _values in values]
+    output: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+
+    def take(group_index: int) -> bool:
+        group = values[group_index]
+        while positions[group_index] < len(group):
+            value = group[positions[group_index]]
+            positions[group_index] += 1
+            metadata = value.get("metadata")
+            details = metadata if isinstance(metadata, Mapping) else {}
+            key = str(
+                details.get("source_key")
+                or f"{value.get('source')}:{value.get('title')}"
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(value)
+            return True
+        return False
+
+    while len(output) < limit:
+        progressed = False
+        for _unused in range(PRIMARY_LEXICAL_BURST):
+            if len(output) >= limit:
+                break
+            progressed = take(0) or progressed
+        for group_index in range(1, len(values)):
+            if len(output) >= limit:
+                break
+            progressed = take(group_index) or progressed
+        if not progressed:
+            break
+    return output
+
+
 def _vector_blob(vector: Sequence[float]) -> bytes:
     values = array("f", (float(value) for value in vector))
     if sys.byteorder != "little":
@@ -2122,12 +2273,26 @@ def _fold_canonical_matches(
     output: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     seen_content_hashes: set[str] = set()
+    seen_asset_fragments: set[tuple[str, str]] = set()
     for raw in matches:
         value = dict(raw)
         metadata = value.get("metadata")
         details = metadata if isinstance(metadata, Mapping) else {}
+        asset_fragment = _asset_fragment_identity(details)
+        source_kind = str(value.get("source_kind") or "").casefold()
+        preserves_user_content = source_kind in _DISTINCT_USER_CONTENT_KINDS
         content_sha256 = str(details.get("sha256") or "").casefold()
-        if content_sha256 and content_sha256 in seen_content_hashes:
+        if (
+            asset_fragment is not None
+            and asset_fragment in seen_asset_fragments
+        ):
+            continue
+        if (
+            asset_fragment is None
+            and not preserves_user_content
+            and content_sha256
+            and content_sha256 in seen_content_hashes
+        ):
             continue
         canonical_id = str(details.get("canonical_id") or "").strip()
         if canonical_id:
@@ -2138,8 +2303,15 @@ def _fold_canonical_matches(
             if key in seen:
                 continue
             seen.add(key)
-        if content_sha256:
+        if asset_fragment is not None:
+            seen_asset_fragments.add(asset_fragment)
+        elif content_sha256 and not preserves_user_content:
             seen_content_hashes.add(content_sha256)
+        if asset_fragment is not None and "provenance" not in value:
+            value["provenance"] = _provenance(
+                details,
+                source_kind=str(value.get("source_kind") or ""),
+            )
         output.append(value)
     return output
 
@@ -2274,20 +2446,52 @@ def _provenance(
     *,
     source_kind: str = "",
 ) -> dict[str, Any]:
+    nested = metadata.get("provenance")
+    source_provenance = nested if isinstance(nested, Mapping) else {}
+
+    def field(name: str, maximum: int = 1024) -> str:
+        value = metadata.get(name)
+        if value is None or value == "":
+            value = source_provenance.get(name)
+        return _bounded_provenance(value, maximum)
+
     return {
-        "source_kind": source_kind,
-        "source_key": str(metadata.get("source_key") or ""),
-        "canonical_id": str(metadata.get("canonical_id") or ""),
-        "pack_version": str(metadata.get("pack_version") or ""),
-        "path": str(metadata.get("path") or ""),
-        "url": str(metadata.get("url") or ""),
-        "author": str(metadata.get("author") or ""),
-        "accessed_at": str(metadata.get("accessed_at") or ""),
-        "license": str(metadata.get("license") or ""),
-        "verification": str(metadata.get("verification") or ""),
-        "houdini_version": str(metadata.get("houdini_version") or ""),
-        "content_hash": str(metadata.get("content_hash") or ""),
+        "source_kind": _bounded_provenance(source_kind, 128),
+        "source_key": field("source_key"),
+        "canonical_id": field("canonical_id", 256),
+        "pack_version": field("pack_version", 128),
+        "path": field("path"),
+        "url": field("url", 2048),
+        "author": field("author", 512),
+        "accessed_at": field("accessed_at", 128),
+        "license": field("license", 256),
+        "verification": field("verification", 128),
+        "houdini_version": field("houdini_version", 128),
+        "content_hash": field("content_hash", 128),
+        "asset_id": field("asset_id", 128),
+        "fragment_id": field("fragment_id", 256),
+        "locator": field("locator", 1024),
     }
+
+
+def _asset_fragment_identity(
+    metadata: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    nested = metadata.get("provenance")
+    provenance = nested if isinstance(nested, Mapping) else {}
+    asset_id = str(
+        metadata.get("asset_id") or provenance.get("asset_id") or ""
+    ).strip()
+    fragment_id = str(
+        metadata.get("fragment_id") or provenance.get("fragment_id") or ""
+    ).strip()
+    if not asset_id or not fragment_id:
+        return None
+    return asset_id.casefold(), fragment_id.casefold()
+
+
+def _bounded_provenance(value: Any, maximum: int) -> str:
+    return " ".join(str(value or "").split())[:maximum]
 
 
 def _bounded_reason(exc: Exception) -> str:

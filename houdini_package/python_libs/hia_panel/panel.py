@@ -4948,6 +4948,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _goal_houdini_busy(self) -> bool:
         return bool(self._goal_houdini_inflight)
 
+    def _release_unknown_hom_barriers(self) -> bool:
+        barrier_ids = [
+            item_id
+            for item_id, record in self._goal_houdini_inflight.items()
+            if record.get("awaiting_runtime_barrier") is True
+        ]
+        for item_id in barrier_ids:
+            self._goal_houdini_inflight.pop(item_id, None)
+        return bool(barrier_ids)
+
     def _current_scene_revision(self) -> int | None:
         report = self._last_houdini_report
         revision = report.get("scene_revision") if isinstance(report, dict) else None
@@ -5246,6 +5256,30 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         return structured if isinstance(structured, dict) else None
 
+    @classmethod
+    def _hom_may_still_execute(cls, item: dict[str, Any]) -> bool:
+        if item.get("tool") not in {
+            "hia_execute_hom",
+            "hia_run_effect_experiment",
+        }:
+            return False
+        structured = cls._structured_mcp_result(item)
+        structured_error = (
+            structured.get("structured_error")
+            if isinstance(structured, dict)
+            else None
+        )
+        details = (
+            structured_error.get("details")
+            if isinstance(structured_error, dict)
+            else None
+        )
+        return bool(
+            isinstance(details, dict)
+            and details.get("submission_state") == "unknown"
+            and details.get("hom_may_still_execute") is True
+        )
+
     @staticmethod
     def _check_results_outcome(
         value: Any,
@@ -5275,12 +5309,21 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         item: dict[str, Any],
     ) -> tuple[str, str]:
         tool = str(item.get("tool") or "")
-        if item.get("status") == "failed" or item.get("error") is not None:
-            return "failed", f"{tool or 'Houdini'} 调用失败"
+        item_failed = (
+            item.get("status") == "failed"
+            or item.get("error") is not None
+        )
         if tool not in {"hia_execute_hom", "hia_validate"}:
+            if item_failed:
+                return (
+                    "pending",
+                    f"{tool or 'Houdini'} 调用失败；该辅助工具结果不能单独判定阶段验收失败",
+                )
             return "pending", "该工具结果不是阶段验收契约"
         payload = self._structured_mcp_result(item)
         if payload is None:
+            if item_failed:
+                return "failed", f"{tool or 'Houdini'} 调用失败"
             return "pending", "缺少可见 structuredContent，不能猜测验收"
         structured_error = payload.get("structured_error")
         structured_error_code = (
@@ -5289,8 +5332,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             else None
         )
         nonproof_error = structured_error_code in {
+            "NO_OBSERVED_EFFECT",
             "POSTCONDITION_NOT_PROVEN",
             "FRESH_OUTPUT_NOT_PROVEN",
+        }
+        soft_postcondition_error = structured_error_code in {
+            "VALIDATION_FAILED",
+            "EXPECTED_DELETION_NOT_OBSERVED",
         }
         payload_failed = (
             payload.get("ok") is False
@@ -5312,12 +5360,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 result.get("check_results"),
                 requested=requested,
             )
+            if payload_failed or item_failed:
+                return "failed", "hia_validate 返回执行错误"
             if check_outcome == "failed" or result.get("valid") is False:
                 return "failed", "hia_validate 存在明确失败的检查"
-            if (
-                payload_failed
-            ):
-                return "failed", "hia_validate 返回执行错误"
             if (
                 payload.get("ok") is not True
                 or result.get("valid") is not True
@@ -5342,23 +5388,67 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             else None
         )
         if not isinstance(postconditions, dict) or not isinstance(validation, dict):
-            if payload_failed and not nonproof_error:
-                return "failed", "hia_execute_hom 返回执行错误"
+            if payload_failed and not (
+                nonproof_error or soft_postcondition_error
+            ):
+                error_label = (
+                    f"（{structured_error_code}）"
+                    if isinstance(structured_error_code, str)
+                    and structured_error_code
+                    else ""
+                )
+                return (
+                    "failed",
+                    f"hia_execute_hom 返回执行错误{error_label}",
+                )
+            if soft_postcondition_error:
+                return "failed", "hia_execute_hom 的派生验收明确失败"
             return "pending", "hia_execute_hom 缺少完整 execution_evidence"
+        check_results = validation.get("check_results")
         check_outcome = self._check_results_outcome(
-            validation.get("check_results")
+            check_results
         )
         postcondition_status = postconditions.get("status")
+        scope_violation = bool(
+            isinstance(check_results, list)
+            and any(
+                isinstance(check, dict)
+                and check.get("check") == "changed_scope"
+                and check.get("status") == "fail"
+                for check in check_results
+            )
+        )
+        if payload_failed and not (
+            nonproof_error or soft_postcondition_error
+        ):
+            error_label = (
+                f"（{structured_error_code}）"
+                if isinstance(structured_error_code, str)
+                and structured_error_code
+                else ""
+            )
+            return (
+                "failed",
+                f"hia_execute_hom 返回执行错误{error_label}",
+            )
+        if item_failed and structured_error_code is None:
+            return "failed", "hia_execute_hom 调用失败"
+        if scope_violation:
+            return "failed", "hia_execute_hom 明确写入了受保护或越界路径"
         if (
             check_outcome == "failed"
-            or validation.get("valid") is False
+            or (
+                validation.get("valid") is False
+                and not nonproof_error
+            )
             or postconditions.get("node_errors") not in {0, None}
             or postcondition_status == "failed"
-            and not nonproof_error
+            and not (nonproof_error or soft_postcondition_error)
         ):
-            return "failed", "hia_execute_hom 的结构化检查明确失败"
-        if payload_failed and not nonproof_error:
-            return "failed", "hia_execute_hom 返回执行错误"
+            return (
+                "failed",
+                "hia_execute_hom 的派生验收未通过；保留当前结果并修正该阶段",
+            )
         if (
             nonproof_error
             or postcondition_status
@@ -5455,13 +5545,45 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 thread_id, turn_id
             ):
                 return
-            self._goal_houdini_inflight.pop(item_id, None)
             snapshot = self._goal_stage_snapshot
             tool = (
                 tracked.get("tool")
                 if isinstance(tracked, dict)
                 else bounded_public_text(item.get("tool"), 160)
             ) or "Houdini"
+            if self._hom_may_still_execute(item):
+                record = dict(tracked or {})
+                record.update(
+                    {
+                        "thread_id": str(thread_id),
+                        "turn_id": str(turn_id),
+                        "tool": tool,
+                        "awaiting_runtime_barrier": True,
+                    }
+                )
+                self._goal_houdini_inflight[item_id] = record
+                snapshot["execution_status"] = "unknown"
+                snapshot["execution"] = (
+                    f"Houdini 操作返回状态未知：{tool}；等待实时 hia_context 串行确认"
+                )
+                snapshot["acceptance_status"] = "pending"
+                snapshot["acceptance"] = (
+                    "HOM 仍可能执行，尚不能进入下一阶段或提交重叠写入"
+                )
+                self._refresh_goal_stage_summary()
+                self._refresh_controls()
+                return
+            self._goal_houdini_inflight.pop(item_id, None)
+            structured = self._structured_mcp_result(item)
+            runtime_barrier_completed = bool(
+                tool == "hia_context"
+                and item.get("status") == "completed"
+                and item.get("error") is None
+                and isinstance(structured, dict)
+                and structured.get("ok") is True
+            )
+            if runtime_barrier_completed:
+                self._release_unknown_hom_barriers()
             snapshot["scene_revision"] = self._current_scene_revision()
             outcome, evidence_text = self._structured_houdini_acceptance(item)
             if outcome == "failed":
@@ -5867,10 +5989,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and self._goal_action_context is None
             and self._current_approval is None
             and not self._pending_approvals
-            and not self._scene_capability_pending
-            and not self._scene_work_pending
             and not self._goal_houdini_busy()
-            and self._goal_stage_snapshot.get("acceptance_status") != "failed"
         )
 
     def _maybe_start_goal_continuation(
@@ -8378,6 +8497,37 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 # authorize a request, remote control, or a new MCP tool.
                 pass
             elif method in {"error", "warning", "guardianWarning", "configWarning"}:
+                notice_thread_id = params.get("threadId")
+                notice_turn_id = params.get("turnId")
+                if method == "error" and self._is_model_capacity_error(
+                    params,
+                    self._notice_text(params),
+                ):
+                    if (
+                        isinstance(notice_thread_id, str)
+                        and notice_thread_id != self._selected_thread_id
+                    ):
+                        return
+                    if self._event_is_stale_source_turn(
+                        notice_thread_id,
+                        notice_turn_id,
+                    ):
+                        return
+                    current_turn_ids = {
+                        value
+                        for value in (
+                            self._turn_state.turn_id,
+                            self._goal_turn_id,
+                            self._stream_turn_id,
+                        )
+                        if isinstance(value, str)
+                    }
+                    if (
+                        isinstance(notice_turn_id, str)
+                        and current_turn_ids
+                        and notice_turn_id not in current_turn_ids
+                    ):
+                        return
                 self._show_codex_notice(method, params)
         elif event_type == "server_request":
             self._pending_approvals.append(event)

@@ -654,22 +654,28 @@ class BridgeSession:
     def _developer_instructions(self) -> str:
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             backend_instructions = (
-                "场景默认用 HIA MCP V2 与 HOM。明确小改只读目标值后直接执行；"
-                "修改既有网络先用 hia_context/hia_inspect 读取目标、输入输出、两层上游、"
+                "用 HIA MCP V2 与 HOM。已知小改回读目标值/连接后直改；"
+                "hia_context 设 include_context_pack=false。"
+                "仅非平凡或不确定改动用 hia_context/hia_inspect 读目标、输入输出、两层上游、"
                 "公共控制、材质入口、引用和允许 scope。优先现有节点和标准原生节点网络；"
-                "HOM 只做短批量编排，场景内 Python SOP 或直接几何须说明必要性。"
+                "HOM 只做批量编排，场景内 Python SOP 或直接几何须说明必要性。"
                 "同一 scope 内一次 hia_execute_hom，随后 fresh cook、hia_scene_diff/hia_validate；"
-                "Goal 阶段只按完整结构化场景证据验收，plan/revision/tool completed 不算通过。"
+                "Goal 按与用户完成声明和风险相称的场景证据验收；简单操作可用目标值或连接回读，"
+                "plan/revision/tool completed 不算通过。"
+                "用户负约束必须原样保留并进入验收；禁止用语义等价或换皮替代绕过（如禁 Box 也禁盒状代用品），"
+                "节点存在/tool success 不能证明几何要求通过。"
+                "小型多部件装配也要量端点、宿主、接触、净空和穿插；截图/AABB/clean cook 不算精确证明。"
                 "视觉任务只在里程碑用 hia_capture_viewport，不固定尺寸；"
-                "静态一帧，动画/模拟用代表帧或短序列；材质验收读取绑定、MaterialX 连接和正确输入。"
-                "Stop 后已发 HOM 仍可能收尾；失败读 rollback.status/automatic_retry_safe，"
-                "仅 rolled_back+true 可修正重试一次；unknown/partial/NO_OBSERVED_EFFECT "
-                "不 Undo 也不算完成；session/source drift 停写并正常重启，不热加载。"
-                "仅主任务串行调用 hia_*/HOM 并写 HIP；子任务只研究、草拟、只读审阅；"
-                "MCP 无 caller lineage，非代码级隔离；同类读取不并发扇出，"
-                "多个关键词合并为一次批量查询；QUEUE_FULL 不立即重试。"
-                "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label；"
-                "聊天、关闭专注和逐参数操作不设。"
+                "动画/模拟用代表帧或短序列；材质验收读取绑定、MaterialX 连接和正确输入。"
+                "Stop 后已发 HOM 仍可能收尾；失败先读主错误和 rollback.status，禁止原样自动重试；"
+                "真实 HOM 异常仅失败本次；按回滚证据在当前或下一 Goal 轮检查并用修正批次继续。"
+                "验收证据中的 dirty、automatic_retry_safe=false、unknown/partial/NO_OBSERVED_EFFECT "
+                "只报告，不Undo、不终止Goal；但 submission_state=unknown 且 hom_may_still_execute=true "
+                "必须保持串行 barrier，直到当前或重连后的实时 hia_context 完成。"
+                "源码更新提示，用加载版本；验新源码再重启。"
+                "仅主任务串行调用 hia_*/HOM 写 HIP；子任务只研究、草拟、只读审阅；"
+                "查询合批串行，QUEUE_FULL 不立即重试。"
+                "checkpoint_label 仅用于 Goal 的有意义成功阶段。"
             )
         else:
             backend_instructions = (
@@ -681,10 +687,10 @@ class BridgeSession:
                 "FX fallback 同样非代码级隔离。"
             )
         common_instructions = (
-            "复杂创建、修改或修复在首次场景写入前先做一次相关本地知识批量检索并复用结果；"
-            "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务还必须先用原生 web/search "
-            "查当前 SideFX 官方与原始来源；没有网页工具时才批量只读抓取公开页。"
-            "本地检索不可用时明确说明，禁止静默跳过；"
+            "节点、参数、版本、复杂流程或失败原因不确定时，受影响写入前做一次本地知识批量检索并复用；"
+            "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定且资料会影响决定时，"
+            "用 web/search 查当前 SideFX 与原始来源；没有网页工具时才批量只读抓取公开页。"
+            "本地检索或 Context Pack 不可用只报告并继续，不得作为阻断；"
             "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
             "只有用户明确要求离线、独立 HIP、批处理或后台渲染时才用 PATH 中的 hython.exe。"
@@ -702,10 +708,10 @@ class BridgeSession:
         )
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             common_instructions = (
-                "复杂创建、修改或修复在首次场景写入前先用 hia_local_help_search 做一次相关批量检索并复用结果；"
-                "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务必须先用原生 web/search "
-                "查当前 SideFX 官方与原始来源；"
-                "检索不可用时明确说明，禁止静默跳过；"
+                "节点、参数、版本、复杂流程或失败原因不确定时，受影响写入前用 hia_local_help_search 一次合批并复用；"
+                "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定且资料会影响决定时，"
+                "用 web/search 查当前 SideFX 与原始来源；"
+                "检索/Context Pack 不可用只报告，不阻断；"
                 "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
                 "MCP 不可用就说明，不转离线 HIP；hython 仅用于用户明确的离线/独立 HIP/批处理/后台渲染。"
                 "普通场景不查项目源码。"
@@ -2601,9 +2607,11 @@ class BridgeSession:
                     ):
                         tool_name = item.get("tool")
                         if isinstance(tool_name, str) and tool_name:
-                            self._last_tool_name = " ".join(tool_name.split())[:128]
+                            normalized_tool_name = " ".join(
+                                tool_name.split()
+                            )[:128]
                             status = item.get("status")
-                            self._last_tool_status = (
+                            normalized_status = (
                                 " ".join(status.split())[:64]
                                 if isinstance(status, str) and status
                                 else (
@@ -2612,6 +2620,51 @@ class BridgeSession:
                                     else "completed"
                                 )
                             )
+                            result = item.get("result")
+                            structured = (
+                                result.get("structuredContent")
+                                if isinstance(result, dict)
+                                else None
+                            )
+                            if (
+                                method == "item/completed"
+                                and normalized_status == "failed"
+                            ):
+                                structured_error = (
+                                    structured.get("structured_error")
+                                    if isinstance(structured, dict)
+                                    else None
+                                )
+                                details = (
+                                    structured_error.get("details")
+                                    if isinstance(structured_error, dict)
+                                    else None
+                                )
+                                if (
+                                    normalized_tool_name
+                                    in {
+                                        "hia_execute_hom",
+                                        "hia_run_effect_experiment",
+                                    }
+                                    and
+                                    isinstance(details, dict)
+                                    and details.get("hom_may_still_execute")
+                                    is True
+                                ):
+                                    normalized_status = "outcomeUnknown"
+                            runtime_barrier_completed = (
+                                normalized_tool_name == "hia_context"
+                                and normalized_status == "completed"
+                                and isinstance(structured, dict)
+                                and structured.get("ok") is True
+                            )
+                            if (
+                                self._last_tool_status != "outcomeUnknown"
+                                or normalized_status == "outcomeUnknown"
+                                or runtime_barrier_completed
+                            ):
+                                self._last_tool_name = normalized_tool_name
+                                self._last_tool_status = normalized_status
                 elif method in {"thread/goal/updated", "thread/goal/cleared"}:
                     thread_id = params.get("threadId")
                     goal = params.get("goal")

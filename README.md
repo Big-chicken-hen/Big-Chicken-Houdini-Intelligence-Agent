@@ -26,8 +26,8 @@ Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It emb
 | Component | Preview status |
 |---|---|
 | Operating system | Windows x64 only |
-| Houdini | **21.0.440 with Python 3.11 is the tested configuration** |
-| Other Houdini versions | The launcher can discover them, but they are not yet claimed as verified |
+| Houdini | Dynamically discovered from the selected installation; bundled UI startup adapters cover Python 3.10, 3.11, and 3.13, including Houdini 22's default Python 3.13 and separate Python 3.11 builds |
+| Real-GUI evidence | Houdini 21.0.440/Python 3.11 is the currently completed live acceptance configuration; untested builds are reported as unverified, not rejected by version |
 | Bridge and local knowledge Python | One project-managed CPython 3.10.11 virtual environment at `<project-root>\.venv` |
 | Codex | Project-pinned Codex CLI/app-server 0.144.3 |
 | Account and network | A valid Codex/ChatGPT sign-in and access to the OpenAI service |
@@ -56,7 +56,7 @@ For users reproducing that published snapshot, the ZIP is the simplest installat
 7. When no red checks remain, click **Launch Houdini**. In Houdini, open **New Pane Tab Type → Python Panel → Big-Chicken Houdini Intelligence Agent**.
 8. Confirm that the Panel reports Codex, Houdini, and HIA MCP V2 as available. Start with the read-only verification request in [Installation](docs/INSTALLATION.md) before editing an important HIP.
 
-Only Windows x64 and Houdini 21.0.440 with Python 3.11 have completed the current real-GUI acceptance path. Other Houdini versions may be discovered by the launcher but are not yet claimed as verified.
+Only Windows x64 and Houdini 21.0.440 with Python 3.11 have completed the current real-GUI acceptance path. The launcher does not pin a Houdini major version, and the source package includes the Python 3.13 UI-ready path required by the standard Houdini 22 build; that path remains honestly marked unverified until a Houdini 22 GUI session is available.
 
 See [Installation and first run](docs/INSTALLATION.md) for the expanded walkthrough and troubleshooting.
 
@@ -236,11 +236,18 @@ powershell -File .\scripts\hia-knowledge.ps1 delete -SourceId "<source-id>"
 powershell -File .\scripts\hia-knowledge.ps1 rescan
 powershell -File .\scripts\hia-knowledge.ps1 index-status
 powershell -File .\scripts\hia-knowledge.ps1 index-build -BatchSize 32
+powershell -File .\scripts\hia-knowledge.ps1 assets capabilities
+powershell -File .\scripts\hia-knowledge.ps1 assets repair
+powershell -File .\scripts\hia-knowledge.ps1 assets import -Path "<path-to-document-or-media>"
+powershell -File .\scripts\hia-knowledge.ps1 assets status -AssetId "<asset-id>"
+powershell -File .\scripts\hia-knowledge.ps1 assets resume -AssetId "<asset-id>"
 ```
 
 `bootstrap` is the launcher-independent, offline first-run contract. It installs the shipped pack and builds its FTS5 layer; `index-build` can then resume optional vector batches. `status` remains strictly read-only: if no database exists it reports `not_initialized` without creating `.runtime`, WAL files, or schema migrations.
 
-The WPF local-knowledge page and the Houdini Panel's **Knowledge and Memory** tab call this same CLI; neither owns a second importer, source registry, parser, installer, or indexer. They expose file/folder import, a managed-source list with origin, format, size, and index state, exact delete-selected, repair, and build/continue-index actions. Users who start the lifecycle directly through `scripts\launch-houdini.ps1` retain the Panel and CLI paths without WPF. The interfaces support only Markdown, TXT, HTML/HTM, SRT, VTT, and text-based PDF in this first version; they do not claim video ingestion, scanned-document OCR, or image OCR. Imported files are managed copies under `.runtime\knowledge\sources`. Deleting one managed copy never deletes or edits its original file. Folder import applies the same format allowlist.
+The WPF local-knowledge page and the Houdini Panel's **Knowledge and Memory** tab call this same CLI; neither owns a second importer, source registry, parser, installer, or indexer. They expose file/folder import, a managed-source list with origin, format, size, and index state, exact delete-selected, repair, and build/continue-index actions. Users who start the lifecycle directly through `scripts\launch-houdini.ps1` retain the Panel and CLI paths without WPF. Ordinary source import supports Markdown, TXT, HTML/HTM, SRT, VTT, and text-based PDF. The asset pipeline adds deterministic CSV, DOCX, PPTX, XLSX, image OCR, scanned-PDF page OCR, and local media-transcription adapters; extracted `user_document` and `user_transcript` fragments feed the same SQLite FTS5 and optional Qwen vector index. `assets capabilities` reports what is actually ready before import, while `assets repair`, `assets import`, `assets status`, and `assets resume` drive the explicit install and checkpointed extraction lifecycle. Ordinary imports are managed copies under `.runtime\knowledge\sources`, asset state stays under `.runtime\knowledge\assets`, and deleting a managed item never deletes or edits its original file.
+
+Current source-tree acceptance evidence is deliberately narrower than the code contract. In the clean-clone fixture, the project-local RapidOCR/ONNX Runtime stack and scanned-PDF page OCR report ready, and a real Markdown asset reaches the shared FTS5/Qwen index. The media-ASR path exists in code, but this machine did not complete the external faster-whisper model or FFmpeg downloads because both endpoints returned `WinError 10060`; real no-sidecar video transcription therefore remains unverified here.
 
 `environment-status` reports the resolved venv path, Python version and bitness, project-local uv, `pypdf`, PyTorch version, CUDA build/availability and GPU name, installed model profiles, free-space hint, and proxy presence with values redacted. `status` adds managed-source and index state, while `index-status` returns the dedicated index view. WPF groups these facts into environment, parser, model, and index status. When the environment is missing, legacy, unsafe, or incomplete, the page shows the detected reason and a one-click install/repair action. The command runs asynchronously, exposes its current stage and project-local log, and becomes a retry action after failure; GUI users do not need to copy a PowerShell command. The full absolute paths remain available in structured output and WPF tooltips/reports even when the visible label is shortened.
 
@@ -306,7 +313,7 @@ Official sources: [Qwen3-Embedding-0.6B model card](https://huggingface.co/Qwen/
 
 ## Known Preview limitations
 
-- Only Windows x64 and Houdini 21.0.440/Python 3.11 have completed the current real-GUI acceptance path.
+- Only Windows x64 and Houdini 21.0.440/Python 3.11 have completed the current real-GUI acceptance path; Houdini 22/Python 3.13 startup compatibility is included but has not yet received a live H22 GUI run on this machine.
 - Once a long HOM call has entered Houdini's UI thread, Stop can stop waiting and freeze Panel output but cannot safely force-kill that Python operation.
 - Goal continuation and crash recovery are Preview features. Recovery requires a launcher-confirmed Houdini crash and a valid Thread/Goal binding.
 - The public package does not include Houdini, Codex credentials, user HIP files, the optional FXHoudiniMCP runtime, Qwen model weights, an embedding virtual environment, the knowledge database, indexed bodies, or vectors.

@@ -488,6 +488,93 @@ class LocalExtractorTests(unittest.TestCase):
         self.assertEqual("PP-OCRv6 small", capability["model_family"])
         self.assertFalse(capability["network_downloads"])
 
+    def test_remediation_uses_managed_launcher_entrypoints(self) -> None:
+        config = extractors.ExtractionConfig(project_root=self.root)
+        source = (
+            REPOSITORY_ROOT
+            / "houdini_package"
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "local_extractors.py"
+        ).read_text(encoding="utf-8")
+        for obsolete in (
+            ".venv/Scripts/python.exe -m pip",
+            "Place one converted model",
+            "Install FFmpeg below",
+            "Copy the model below .runtime",
+        ):
+            self.assertNotIn(obsolete, source)
+
+        with mock.patch.object(
+            extractors,
+            "_module_available",
+            return_value=False,
+        ):
+            report = extractors.capability_report(config)
+            contract = extractors.dependency_contract(config)
+
+        self.assertIn(
+            extractors.KNOWLEDGE_ENVIRONMENT_REPAIR_ACTION,
+            report["capabilities"]["pypdf"]["action"],
+        )
+        for name in ("image_ocr", "media_asr"):
+            self.assertIn(
+                extractors.ASSET_REPAIR_ACTION,
+                report["capabilities"][name]["action"],
+            )
+        self.assertEqual(
+            extractors.ASSET_REPAIR_ACTION,
+            contract["backends"]["ocr"]["install_command"],
+        )
+        self.assertEqual(
+            extractors.ASSET_REPAIR_ACTION,
+            contract["backends"]["asr"]["install_command"],
+        )
+
+        site_packages = self.root / ".venv" / "Lib" / "site-packages"
+        for module in ("faster_whisper", "ctranslate2", "numpy"):
+            (site_packages / module).mkdir(parents=True, exist_ok=True)
+        backend = extractors.FasterWhisperBackend(config)
+        with (
+            mock.patch.object(
+                extractors,
+                "_module_available",
+                return_value=True,
+            ),
+            mock.patch.object(
+                extractors,
+                "_module_root",
+                side_effect=lambda name: site_packages / name,
+            ),
+        ):
+            missing_model = backend.capability()
+            (
+                self.root
+                / extractors.ASR_MODEL_RELATIVE
+            ).mkdir(parents=True, exist_ok=True)
+            incomplete_model = backend.capability()
+            model_path = self.root / extractors.ASR_MODEL_RELATIVE
+            for name in (
+                *extractors.ASR_MODEL_REQUIRED_FILES,
+                "vocabulary.json",
+            ):
+                (model_path / name).write_bytes(b"fixture")
+            missing_ffmpeg = backend.capability()
+
+        self.assertEqual("not_configured", missing_model["status"])
+        self.assertIn(
+            extractors.ASSET_REPAIR_ACTION,
+            missing_model["action"],
+        )
+        self.assertEqual("not_configured", incomplete_model["status"])
+        self.assertIn("model.bin", incomplete_model["dependencies"])
+        self.assertIn("resume", incomplete_model["action"])
+        self.assertEqual("not_configured", missing_ffmpeg["status"])
+        self.assertIn(
+            extractors.ASSET_REPAIR_ACTION,
+            missing_ffmpeg["action"],
+        )
+
     def test_ordinary_and_media_size_limits_are_both_enforced(self) -> None:
         text = self.root / "oversized.txt"
         media = self.root / "oversized.mp3"

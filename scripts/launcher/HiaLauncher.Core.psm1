@@ -68,7 +68,9 @@ print("$script:HiaProbeMarker" + json.dumps(
     sort_keys=True,
 ))
 "@
-    $probe = Invoke-HiaProcess -FilePath $PythonExe -Arguments @('-I', '-B', '-c', $pythonCode, $ProjectRoot) `
+    $probe = Invoke-HiaProcess -FilePath $PythonExe -Arguments @(
+        '-I', '-X', 'utf8', '-B', '-c', $pythonCode, $ProjectRoot
+    ) `
         -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $ProjectRoot -Environment @{
             'PYTHONDONTWRITEBYTECODE' = '1'
             'PYTHONNOUSERSITE' = '1'
@@ -452,7 +454,7 @@ print("$script:HiaProbeMarker" + json.dumps({
 "@
             $probe = Invoke-HiaProcess `
                 -FilePath $python `
-                -Arguments @('-I', '-B', '-c', $probeCode) `
+                -Arguments @('-I', '-X', 'utf8', '-B', '-c', $probeCode) `
                 -TimeoutSeconds $TimeoutSeconds `
                 -WorkingDirectory $root `
                 -Environment @{
@@ -1524,7 +1526,9 @@ print("$script:HiaProbeMarker" + json.dumps({
 }, sort_keys=True))
 "@
         $cacheRoot = [string]$EmbeddingData.layout.cache_root
-        $probe = Invoke-HiaProcess -FilePath $workerPython -Arguments @('-I', '-B', '-c', $probeCode, $workerModule) `
+        $probe = Invoke-HiaProcess -FilePath $workerPython -Arguments @(
+            '-I', '-X', 'utf8', '-B', '-c', $probeCode, $workerModule
+        ) `
             -TimeoutSeconds ([Math]::Max(30, $TimeoutSeconds)) -WorkingDirectory $ProjectRoot -Environment @{
                 'PYTHONDONTWRITEBYTECODE' = '1'
                 'PYTHONNOUSERSITE' = '1'
@@ -2019,6 +2023,8 @@ function Invoke-HiaProcess {
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
+        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
         if ($WorkingDirectory) { $startInfo.WorkingDirectory = $WorkingDirectory }
         foreach ($entry in $Environment.GetEnumerator()) {
             if ($null -ne $startInfo.Environment) {
@@ -2199,7 +2205,7 @@ function Invoke-HiaHoudiniChecks {
     if (-not $HoudiniExe) {
         if ($Candidates.Count -eq 0) {
             return @(New-HiaCheckResult -Id 'houdini.selection' -Name 'Houdini selection' -Level 'red' `
-                -Message '未发现 Houdini 安装。' -Advice '安装或选择 Houdini 后重新扫描。当前 Preview 已验证 Houdini 21.0.440 / Python 3.11：https://www.sidefx.com/download/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Houdini、提权或修改系统配置。')
+                -Message '未发现 Houdini 安装。' -Advice '安装或选择 Houdini 后重新扫描。启动器按实际安装动态识别 Houdini/Python 版本，不固定 Houdini 大版本：https://www.sidefx.com/download/ 。Big-Chicken Houdini Intelligence Agent 不会自动安装 Houdini、提权或修改系统配置。')
         }
         if ($Candidates.Count -gt 1) {
             return @(New-HiaCheckResult -Id 'houdini.selection' -Name 'Houdini selection' -Level 'red' `
@@ -2876,13 +2882,23 @@ function Invoke-HiaProjectChecks {
     if ($McpBackend -eq 'hia_v2') {
         $hiaService = Join-Path $ProjectRoot 'services\hia_mcp_v2\hia_mcp_v2\__main__.py'
         $hiaRuntime = Join-Path $ProjectRoot 'houdini_package\python_libs\hia_mcp_runtime\http_server.py'
-        $hiaUiReady310 = Join-Path $ProjectRoot 'houdini_package\python3.10libs\uiready.py'
-        $hiaUiReady311 = Join-Path $ProjectRoot 'houdini_package\python3.11libs\uiready.py'
+        $hiaUiReadyHooks = @(
+            Get-ChildItem `
+                -LiteralPath (Join-Path $ProjectRoot 'houdini_package') `
+                -Directory `
+                -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^python3\.\d+libs$' } |
+                ForEach-Object {
+                    Join-Path $_.FullName 'uiready.py'
+                } |
+                Where-Object {
+                    Test-Path -LiteralPath $_ -PathType Leaf
+                }
+        )
         $hiaFilesPresent = (
             (Test-Path -LiteralPath $hiaService -PathType Leaf) -and
             (Test-Path -LiteralPath $hiaRuntime -PathType Leaf) -and
-            (Test-Path -LiteralPath $hiaUiReady310 -PathType Leaf) -and
-            (Test-Path -LiteralPath $hiaUiReady311 -PathType Leaf)
+            $hiaUiReadyHooks.Count -gt 0
         )
         $checks += New-HiaCheckResult -Id 'hia_mcp_v2.runtime' -Name 'HIA MCP V2' `
             -Level $(if ($hiaFilesPresent) { 'green' } else { 'red' }) `

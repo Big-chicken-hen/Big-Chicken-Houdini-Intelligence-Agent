@@ -30,6 +30,24 @@ TECHNIQUE_SELECTION_CONTRACT = (
 )
 REVIEW_SKILL = SKILLS_ROOT / "houdini-artifact-review" / "SKILL.md"
 PROCEDURAL_SKILL = SKILLS_ROOT / "houdini-procedural-modeling" / "SKILL.md"
+PROCEDURAL_ARCHITECTURE_CONTRACT = (
+    SKILLS_ROOT
+    / "houdini-procedural-modeling"
+    / "references"
+    / "procedural-architecture.md"
+)
+MODELING_VALIDATION_CONTRACT = (
+    SKILLS_ROOT
+    / "houdini-procedural-modeling"
+    / "references"
+    / "modeling-validation.md"
+)
+GEOMETRY_INTEGRITY_CONTRACT = (
+    SKILLS_ROOT
+    / "houdini-procedural-modeling"
+    / "references"
+    / "geometry-integrity.md"
+)
 MATERIAL_SKILL = SKILLS_ROOT / "houdini-material-lookdev" / "SKILL.md"
 KNOWLEDGE_MEMORY_CONTRACT = (
     SKILLS_ROOT
@@ -45,6 +63,9 @@ BUILD_REVIEW_CONTRACT = (
 )
 HIA_TOOLS_SCHEMA = (
     REPOSITORY_ROOT / "services" / "hia_mcp_v2" / "hia_mcp_v2" / "tools.py"
+)
+BRIDGE_SESSION = (
+    REPOSITORY_ROOT / "services" / "bridge" / "hia_bridge" / "session.py"
 )
 HIA_RUNTIME_EXECUTOR = (
     REPOSITORY_ROOT
@@ -72,10 +93,16 @@ class HoudiniSkillContractTests(unittest.TestCase):
         cls.technique_selection = read_contract(TECHNIQUE_SELECTION_CONTRACT)
         cls.review = read_contract(REVIEW_SKILL)
         cls.procedural = read_contract(PROCEDURAL_SKILL)
+        cls.procedural_architecture = read_contract(
+            PROCEDURAL_ARCHITECTURE_CONTRACT
+        )
+        cls.modeling_validation = read_contract(MODELING_VALIDATION_CONTRACT)
+        cls.geometry_integrity = read_contract(GEOMETRY_INTEGRITY_CONTRACT)
         cls.material = read_contract(MATERIAL_SKILL)
         cls.knowledge_memory = read_contract(KNOWLEDGE_MEMORY_CONTRACT)
         cls.build_review = read_contract(BUILD_REVIEW_CONTRACT)
         cls.hia_tools_schema = read_contract(HIA_TOOLS_SCHEMA)
+        cls.bridge_session = read_contract(BRIDGE_SESSION)
         cls.hia_runtime_executor = read_contract(HIA_RUNTIME_EXECUTOR)
         cls.repository_agents = read_contract(REPOSITORY_AGENTS)
         cls.hia_mcp_doc = read_contract(HIA_MCP_DOC)
@@ -146,6 +173,15 @@ class HoudiniSkillContractTests(unittest.TestCase):
         self.assertIn(
             "execute without knowledge retrieval",
             self.material,
+        )
+        self.assertIn(
+            "Do not retrieve merely because material work is substantive",
+            self.material,
+        )
+        self.assertIn(
+            "uncertain or version-sensitive complex material/simulation/Solaris "
+            "workflow",
+            self.build_review,
         )
         for obsolete in (
             "Every creation, modification, or repair that will write",
@@ -505,6 +541,114 @@ class HoudiniSkillContractTests(unittest.TestCase):
         )
         self.assertIn("Do not start external research, build a full Brief", self.material)
 
+    def test_negative_constraints_cannot_be_evaded_by_equivalent_geometry(self) -> None:
+        for marker, contract in (
+            (
+                "explicit negative constraint as a hard acceptance requirement on "
+                "the resulting geometry and semantic role",
+                self.procedural,
+            ),
+            (
+                "changing the node, script, or construction method must not recreate "
+                "a forbidden form as an equivalent stand-in",
+                self.procedural,
+            ),
+            (
+                "Judge an explicit negative constraint by the resulting geometry and "
+                "component role",
+                self.procedural_architecture,
+            ),
+            (
+                "semantically equivalent substitute for a forbidden form fails "
+                "acceptance",
+                self.modeling_validation,
+            ),
+            (
+                "negative constraint is hard on the observed result and its semantic "
+                "role",
+                self.build_review,
+            ),
+            (
+                "different construction method does not make an equivalent forbidden "
+                "substitute acceptable",
+                self.review,
+            ),
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, contract)
+        self.assertIn("用户负约束必须原样保留并进入验收", self.bridge_session)
+        self.assertIn("禁止用语义等价或换皮替代绕过", self.bridge_session)
+
+    def test_small_relational_assemblies_get_validation_without_research_overhead(
+        self,
+    ) -> None:
+        for marker in (
+            "small multi-part assembly whose endpoints, support, contact, spacing, "
+            "clearance, or nonintersection must be correct",
+            "also needs relation-aware validation even when its construction is simple",
+            "does not by itself require knowledge retrieval or external research",
+            "including a small one",
+            "Do not load it for an isolated primitive",
+        ):
+            with self.subTest(procedural_marker=marker):
+                self.assertIn(marker, self.procedural)
+        for marker in (
+            "small multi-part assembly's completion depends on endpoints, support, "
+            "contact, spacing, clearance, or nonintersection",
+            "Do not use for an isolated simple primitive",
+        ):
+            with self.subTest(review_marker=marker):
+                self.assertIn(marker, self.review)
+        self.assertIn("Keep a single primitive", self.procedural)
+        self.assertIn(
+            "execute without knowledge retrieval and run one necessary targeted "
+            "validation",
+            self.procedural,
+        )
+
+    def test_spatial_completion_requires_numeric_relationship_evidence(self) -> None:
+        for marker in (
+            "both endpoints resolve to their intended hosts",
+            "intended span or bounds",
+            "scale-relative tolerance",
+            "clearance has a measured minimum",
+            "forbidden intersection has an appropriate precise result",
+            "AABB or packed bounds as a broad phase",
+            "overlapping bounds identify a candidate rather than prove penetration",
+            "Neither a viewport image, an error-free cook, nor generic validation "
+            "silently proves precise nonintersection",
+            "keep that narrow completion claim unverified",
+        ):
+            with self.subTest(validation_marker=marker):
+                self.assertIn(marker, self.modeling_validation)
+        for marker in (
+            "measure both endpoint-to-host relationships",
+            "full segment or envelope",
+            "Endpoint contact alone does not prove support or clearance",
+        ):
+            with self.subTest(integrity_marker=marker):
+                self.assertIn(marker, self.geometry_integrity)
+        self.assertIn(
+            "Bounds are only a broad phase; a viewport image, node existence, and a "
+            "clean cook do not prove nonintersection",
+            self.review,
+        )
+        self.assertIn(
+            "Spatial intersection is an extension boundary, not a hidden heavy scan",
+            self.hia_tools_schema,
+        )
+
+    def test_skill_workflows_are_not_locked_to_houdini_21_or_22(self) -> None:
+        contract_paths = sorted(SKILLS_ROOT.glob("houdini-*/**/*.md")) + sorted(
+            SKILLS_ROOT.glob("houdini-*/**/*.yaml")
+        )
+        combined = "\n".join(read_contract(path) for path in contract_paths)
+        for version_gate in ("H21", "H22", "Houdini 21", "Houdini 22"):
+            with self.subTest(version_gate=version_gate):
+                self.assertNotIn(version_gate, combined)
+        self.assertIn("version-sensitive", combined)
+        self.assertIn("hia_search_node_types", combined)
+
     def test_risk_scaled_workflow_keeps_simple_edits_direct(self) -> None:
         for marker in (
             "**Direct:**",
@@ -581,6 +725,13 @@ class HoudiniSkillContractTests(unittest.TestCase):
                 "A successful Python return is not completion"
             ),
         )
+        self.assertIn(
+            "Prefer modifying suitable existing nodes, then installed native Houdini "
+            "nodes and parameter networks",
+            self.hia_tools_schema,
+        )
+        self.assertIn("优先现有节点和标准原生节点网络", self.bridge_session)
+        self.assertIn("场景内 Python SOP 或直接几何须说明必要性", self.bridge_session)
 
     def test_retry_and_runtime_identity_contracts_match_mcp_behavior(self) -> None:
         for marker in (
@@ -589,6 +740,9 @@ class HoudiniSkillContractTests(unittest.TestCase):
             "trigger Undo",
             "`not_proven`, timeout, or possible external side effects require a "
             "targeted inspect/diff first",
+            "consult relevant local help only when the cause is uncertain",
+            "evidence gaps, not terminal Goal states or restart reasons",
+            "continue with a corrected in-scope action when safe",
         ):
             with self.subTest(recovery_marker=marker):
                 self.assertIn(marker, self.validation)
@@ -596,11 +750,33 @@ class HoudiniSkillContractTests(unittest.TestCase):
             "`HOUDINI_SESSION_CHANGED`",
             "`HOUDINI_RUNTIME_SOURCE_CHANGED`",
             "`STALE_HOUDINI_RUNTIME`",
-            "use health or read-only inspection only as needed",
-            "do not hot-reload the executor or switch routes",
+            "different HIA session, Houdini process, or executor module path",
+            "disk-mtime or source-newer notice",
+            "is advisory",
+            "continue using the executor already loaded in that Houdini process",
+            "Do not hot-reload the executor or switch routes",
         ):
             with self.subTest(identity_marker=marker):
                 self.assertIn(marker, self.visual)
+        for marker in (
+            "Scene writes remain bound to the launcher session, Houdini process, "
+            "and executor module path",
+            "A newer executor source file on disk is only advisory",
+            "the write continues against the version already loaded",
+        ):
+            with self.subTest(tool_identity_marker=marker):
+                self.assertIn(marker, self.hia_tools_schema)
+        for marker in (
+            "Stop 后已发 HOM 仍可能收尾",
+            "真实 HOM 异常仅失败本次",
+            "dirty、automatic_retry_safe=false、unknown/partial/NO_OBSERVED_EFFECT",
+            "只报告，不Undo、不终止Goal",
+            "hom_may_still_execute=true",
+            "必须保持串行 barrier",
+            "源码更新提示，用加载版本；验新源码再重启",
+        ):
+            with self.subTest(bridge_marker=marker):
+                self.assertIn(marker, self.bridge_session)
         for marker in (
             "`expected_outputs` 只隐式补目标存在性和节点错误检查",
             "`unknown`、`partial` 与 `NO_OBSERVED_EFFECT`",
@@ -612,6 +788,28 @@ class HoudiniSkillContractTests(unittest.TestCase):
             with self.subTest(doc_marker=marker):
                 self.assertIn(marker, self.hia_mcp_doc)
         self.assertNotIn("不会回滚", self.hia_mcp_doc)
+
+    def test_context_and_knowledge_absence_do_not_gate_or_restart_goal(self) -> None:
+        for marker in (
+            "A Context Pack is optional evidence and Direct tasks skip it",
+            "not a terminal Goal state or restart reason",
+            "Do not repeat the same lookup",
+            "mark only the unresolved claim unverified",
+        ):
+            with self.subTest(skill_marker=marker):
+                self.assertIn(marker, self.knowledge_memory)
+        self.assertIn(
+            "Explicit include_context_pack=false suppresses Context Pack construction "
+            "and knowledge retrieval",
+            self.hia_tools_schema,
+        )
+        self.assertIn(
+            "Local knowledge remains an optional single batched lookup and is not an "
+            "execution gate",
+            self.hia_tools_schema,
+        )
+        self.assertIn("hia_context 设 include_context_pack=false", self.bridge_session)
+        self.assertIn("仅非平凡或不确定改动", self.bridge_session)
 
     def test_retrieved_knowledge_becomes_explicit_semantic_expectations(self) -> None:
         for marker in (
@@ -790,7 +988,8 @@ class HoudiniSkillContractTests(unittest.TestCase):
     ) -> None:
         for marker in (
             "temporary, bounded EffectSpec experiment contract",
-            "current task context or existing Goal state",
+            "current task context associated with the Goal",
+            "do not add fields to the native Goal",
             "Direct deterministic work never enters this loop",
         ):
             with self.subTest(marker=marker):
@@ -800,7 +999,8 @@ class HoudiniSkillContractTests(unittest.TestCase):
             "goal, target and mutable scope",
             "a few visual or temporal objectives",
             "only relevant metrics and controls",
-            "fixed frame and view samples",
+            "fixed frame samples",
+            "one locked view for each experiment call",
             "observable success conditions",
             "do not automatically write them into Skill files or project memory",
         ):
@@ -812,8 +1012,9 @@ class HoudiniSkillContractTests(unittest.TestCase):
     ) -> None:
         for marker in (
             "one low-cost baseline and two or three bounded candidates",
-            "actual previews for every specified frame and view together with the "
+            "actual previews for every specified frame in the call's locked view together with the "
             "relevant returned Houdini data",
+            "one call supports several cameras",
             "explicit ranking and best candidate",
             "each candidate's main issue",
             "single largest remaining issue",

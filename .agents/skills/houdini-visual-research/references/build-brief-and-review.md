@@ -6,7 +6,7 @@ Use this contract for a high-risk creation, substantial rebuild, simulation/cach
 
 - **Direct:** execute a known deterministic edit immediately and perform one necessary targeted validation. Do not require local retrieval, a Build Brief, external research, capture, or artifact review.
 - **Focused:** for a bounded multi-node edit or familiar technique, retrieve only when a node, parameter, version, project convention, or failure cause is uncertain. Use only the one or two relevant supports, such as narrow help, a compact semantic expectation, a scene diff, or one visual check.
-- **Full:** use one shared batched local lookup when the task involves an uncertain or version-sensitive workflow, complex material/simulation/Solaris work, historical project convention, or uncertain failure cause. Add SideFX/original-source research for simulation or cache work, substantive material or color-management/render work, reference matching, unfamiliar or version-sensitive behavior, a high-cost operation, or a multi-stage deliverable. Use only the applicable compact Brief, technical evidence, and visual or professional review needed by the claim.
+- **Full:** use one shared batched local lookup when the task involves an uncertain or version-sensitive complex material/simulation/Solaris workflow, historical project convention, or uncertain failure cause. Add SideFX/original-source research for simulation or cache work, substantive material or color-management/render work, reference matching, unfamiliar or version-sensitive behavior, a high-cost operation, or a multi-stage deliverable. Use only the applicable compact Brief, technical evidence, and visual or professional review needed by the claim.
 
 These are reasoning tiers, not a Gate, approval layer, state machine, or fixed tool sequence. Escalate or reduce the workflow when observed uncertainty, cost, or evidence changes. A direct color assignment remains Direct; material complexity or color-pipeline uncertainty, not the word “color” alone, raises the tier.
 
@@ -22,6 +22,8 @@ For the Full tier, keep these current decisions in the Director's task context b
 - **Risks:** uncertain technique or version support, topology, scale, performance, simulation, renderer, source, or licensing concerns.
 - **Stages:** only the applicable construction and review stages.
 - **Acceptance:** technical and visual evidence required for each completion claim.
+
+Record explicit required and forbidden outcomes under Goal or Acceptance. A negative constraint is hard on the observed result and its semantic role, including an equivalent substitute produced by another node or method; only the user may relax it or authorize an approximation.
 
 Use short bullets and update only decisions that changed. Keep the Build Brief plus a compact research synthesis in the main task context. Preserve decisions, evidence, source links, risks, current stage, and unverified items; reference full documents, ledgers, and subtask artifacts by path or URL instead of pasting whole documents, long subtask replies, or source bodies.
 

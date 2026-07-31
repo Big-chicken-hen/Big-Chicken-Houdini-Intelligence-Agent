@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -301,6 +302,10 @@ class LauncherCacheCliTests(unittest.TestCase):
                 / "huggingface"
             ),
             category["excluded_path"],
+        )
+        os.utime(
+            runtime_cache.parent,
+            (1_700_000_000, 1_700_000_000),
         )
 
         cleared = self.run_cli(

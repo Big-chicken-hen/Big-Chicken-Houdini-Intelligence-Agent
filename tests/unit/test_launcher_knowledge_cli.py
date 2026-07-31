@@ -1081,6 +1081,14 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
         self.assertEqual("missing", payload["result"]["state"])
         self.assertFalse(payload["result"]["python"]["available"])
         self.assertEqual(
+            "qwen3-embedding-0.6b",
+            payload["result"]["requested_profile"],
+        )
+        self.assertEqual(
+            "installer_contract",
+            payload["result"]["profile_source"],
+        )
+        self.assertEqual(
             str(wrapper_root / ".venv"),
             payload["result"]["venv"]["path"],
         )
@@ -1294,6 +1302,111 @@ try {{
         )
         self.assertIn("'PYTHONNOUSERSITE' = '1'", source)
         self.assertIn("'-I'", source)
+
+    def test_clean_clone_explicit_profile_selects_full_embedding_install(self) -> None:
+        script = f"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(WRAPPER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'wrapper did not parse' }}
+$definition = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Get-HiaKnowledgeEnvironmentInstallPlan'
+}}, $true))
+if ($definition.Count -ne 1) {{ throw 'install plan function is missing' }}
+Invoke-Expression $definition[0].Extent.Text
+$clean = [pscustomobject]@{{
+    active_profile = ''
+    requested_device = 'auto'
+    torch = [pscustomobject]@{{ cuda_available = $false }}
+    models = [pscustomobject]@{{
+        items = @(
+            [pscustomobject]@{{
+                profile_id = 'qwen3-embedding-0.6b'
+                installed = $false
+                revision = ''
+            }},
+            [pscustomobject]@{{
+                profile_id = 'qwen3-embedding-8b'
+                installed = $false
+                revision = ''
+            }}
+        )
+    }}
+}}
+$explicit = Get-HiaKnowledgeEnvironmentInstallPlan `
+    -Environment $clean `
+    -ActionName 'environment-install' `
+    -RequestedProfile 'qwen3-embedding-0.6b' `
+    -RequestedDevice 'cuda'
+$explicitEight = Get-HiaKnowledgeEnvironmentInstallPlan `
+    -Environment $clean `
+    -ActionName 'environment-install' `
+    -RequestedProfile 'qwen3-embedding-8b'
+$base = Get-HiaKnowledgeEnvironmentInstallPlan `
+    -Environment $clean `
+    -ActionName 'environment-install'
+$invalidFailure = ''
+try {{
+    [void](Get-HiaKnowledgeEnvironmentInstallPlan `
+        -Environment $clean `
+        -ActionName 'environment-install' `
+        -RequestedProfile 'not-a-real-profile')
+}} catch {{
+    $invalidFailure = [string]$_.Exception.Message
+}}
+[pscustomobject]@{{
+    explicit = $explicit
+    explicit_eight = $explicitEight
+    base = $base
+    invalid_failure = $invalidFailure
+}} | ConvertTo-Json -Depth 6 -Compress
+"""
+        completed = subprocess.run(
+            [
+                _powershell(),
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        payload = json.loads(completed.stdout.strip())
+        self.assertFalse(payload["explicit"]["parser_only"])
+        self.assertEqual(
+            "qwen3-embedding-0.6b",
+            payload["explicit"]["profile"],
+        )
+        self.assertEqual("main", payload["explicit"]["revision"])
+        self.assertEqual("cuda", payload["explicit"]["device"])
+        self.assertFalse(payload["explicit_eight"]["parser_only"])
+        self.assertEqual(
+            "qwen3-embedding-8b",
+            payload["explicit_eight"]["profile"],
+        )
+        self.assertEqual("main", payload["explicit_eight"]["revision"])
+        self.assertTrue(payload["base"]["parser_only"])
+        self.assertEqual("", payload["base"]["profile"])
+        self.assertIn(
+            "Unsupported embedding profile",
+            payload["invalid_failure"],
+        )
 
     def test_parser_install_plan_is_project_managed_and_model_free(self) -> None:
         source = INSTALLER_PATH.read_text(encoding="utf-8")
@@ -1649,8 +1762,12 @@ $retryPublish = Publish-HiaKnowledgeManagedVenv `
         ) -eq 'preserve')
     )
     staging_count = @(
-        Get-ChildItem -LiteralPath {_ps_literal(toolchain_root)} -Directory |
-            Where-Object {{ $_.Name -like '.venv-staging-*' }}
+        Get-ChildItem `
+            -LiteralPath {_ps_literal(case_root / '.runtime' / 'v')} `
+            -Directory `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Where-Object {{ $_.Name -eq 's' }}
     ).Count
 }} | ConvertTo-Json -Compress
 """
