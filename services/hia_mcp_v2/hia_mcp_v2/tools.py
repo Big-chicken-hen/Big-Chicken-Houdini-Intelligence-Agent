@@ -399,7 +399,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_node_help",
         "dynamic_node_knowledge",
-        "Resolve installed Houdini help. Use requests to batch several targets, or the compatible single-target form with node_path, category plus a bare node_type, or node_type=\"Category/name\". A node_path returns expanded runtime parameter names, including instantiated multiparms; a type-only query returns template patterns such as names containing # because no live instance exists. Also returns the real versioned type, context, input rules, definition/source hints, and installed help metadata.",
+        "Resolve installed Houdini help. Use requests to batch several targets, or the compatible single-target form with node_path, category plus a bare node_type, or node_type=\"Category/name\". With requests, any top-level node-help fields are shared defaults and fields inside an item override them. A node_path returns expanded runtime parameter names, including instantiated multiparms; a type-only query returns template patterns such as names containing # because no live instance exists. Also returns the real versioned type, context, input rules, definition/source hints, and installed help metadata.",
         _object(
             {
                 **NODE_HELP_PROPERTIES,
@@ -842,13 +842,7 @@ def validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
             "INVALID_ARGUMENTS",
             "Provide path or paths, not both",
         )
-    if tool_name == "hia_node_help" and "requests" in arguments:
-        if set(arguments) != {"requests"}:
-            raise InputError(
-                "INVALID_ARGUMENTS",
-                "Batch node help options belong inside each requests item",
-            )
-    elif tool_name == "hia_node_help" and not (
+    if tool_name == "hia_node_help" and "requests" not in arguments and not (
         str(arguments.get("node_path") or "").strip()
         or str(arguments.get("node_type") or "").strip()
     ):

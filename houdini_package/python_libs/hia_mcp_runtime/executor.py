@@ -724,11 +724,25 @@ class HoudiniExecutor:
                 "INVALID_ARGUMENTS",
                 f"requests must contain between 1 and {MAX_BATCH_QUERIES} objects",
             )
-        if set(arguments) != {"requests"}:
+        shared_keys = {
+            "node_path",
+            "category",
+            "node_type",
+            "include_parameters",
+            "parameter_query",
+            "offset",
+            "limit",
+        }
+        unexpected_keys = set(arguments) - shared_keys - {"requests"}
+        if unexpected_keys:
             raise HiaRuntimeError(
                 "INVALID_ARGUMENTS",
-                "Batch node help options belong inside each requests item",
+                "Unknown batch node help options",
+                {"keys": sorted(unexpected_keys)},
             )
+        shared_defaults = {
+            key: arguments[key] for key in shared_keys if key in arguments
+        }
         results = []
         error_count = 0
         for index, request in enumerate(requests):
@@ -738,13 +752,15 @@ class HoudiniExecutor:
                     "Each requests item must be an object",
                     {"index": index},
                 )
+            effective_request = dict(shared_defaults)
+            effective_request.update(request)
             try:
                 results.append(
                     {
                         "index": index,
-                        "request": dict(request),
+                        "request": effective_request,
                         "ok": True,
-                        "result": self._node_help_result(request),
+                        "result": self._node_help_result(effective_request),
                     }
                 )
             except HiaRuntimeError as exc:
@@ -752,7 +768,7 @@ class HoudiniExecutor:
                 results.append(
                     {
                         "index": index,
-                        "request": dict(request),
+                        "request": effective_request,
                         "ok": False,
                         "error": {
                             "code": exc.code,

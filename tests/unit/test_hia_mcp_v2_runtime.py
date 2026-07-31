@@ -546,6 +546,33 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
             result["results"][1]["error"]["code"],
         )
 
+    def test_node_help_batch_accepts_shared_defaults_and_item_overrides(self) -> None:
+        installed_type = FakeHelpNodeType()
+        self.hou.nodeTypeCategories = lambda: {
+            "Cop": FakeNodeTypeCategory(installed_type)
+        }
+
+        result = self.executor.dispatch(
+            "hia_node_help",
+            {
+                "category": "Cop",
+                "include_parameters": False,
+                "limit": 7,
+                "requests": [
+                    {"node_type": "wrangle"},
+                    {"node_type": "wrangle", "limit": 1},
+                ],
+            },
+        )["result"]
+
+        self.assertEqual(2, result["ok_count"])
+        self.assertEqual([], result["results"][0]["result"]["parameters"])
+        self.assertEqual(7, result["results"][0]["result"]["limit"])
+        self.assertEqual([], result["results"][1]["result"]["parameters"])
+        self.assertEqual(1, result["results"][1]["result"]["limit"])
+        self.assertFalse(result["results"][0]["request"]["include_parameters"])
+        self.assertEqual(1, result["results"][1]["request"]["limit"])
+
     def test_node_help_rejects_empty_or_conflicting_qualified_segments(self) -> None:
         for arguments in (
             {"node_type": "Cop/"},

@@ -206,6 +206,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("node_path", help_description)
         self.assertIn("category plus a bare node_type", help_description)
         self.assertIn('node_type="category/name"', help_description)
+        self.assertIn("shared defaults", help_description)
         self.assertEqual(
             16,
             help_tool["inputSchema"]["properties"]["requests"]["maxItems"],
@@ -559,15 +560,14 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                 3,
                 "hia_node_help",
                 {
+                    "include_parameters": False,
                     "requests": [
                         {
                             "category": "Sop",
                             "node_type": "vellumsolver",
-                            "include_parameters": False,
                         },
                         {
                             "node_type": "Lop/karmarendersettings",
-                            "include_parameters": False,
                         },
                     ]
                 },
@@ -1004,13 +1004,6 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             (
                 "hia_local_help_search",
                 {"query": "vellum", "mode": "semantic"},
-            ),
-            (
-                "hia_node_help",
-                {
-                    "node_type": "Sop/box",
-                    "requests": [{"node_type": "Sop/box"}],
-                },
             ),
         )
         for request_id, (name, arguments) in enumerate(cases, start=10):
