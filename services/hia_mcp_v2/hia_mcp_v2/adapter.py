@@ -157,7 +157,9 @@ class HiaMcpAdapter:
             "instructions": (
                 "HIA MCP V2 is Codex's live Houdini perception, knowledge, execution, and validation layer. "
                 "Batch related read queries and reuse their results; discover installed node types dynamically, "
-                "and prefer one hia_execute_hom batch for complex edits."
+                "and split complex assets into bounded semantic authoring batches. Each hia_execute_hom call "
+                "owns one stage or coherent subsystem and must return to real scene and visual review before "
+                "the next stage; lack of native subagents never justifies one all-asset HOM script."
             ),
         }
 
@@ -311,15 +313,23 @@ class HiaMcpAdapter:
     def _tool_result(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(payload)
         image = value.pop("image", None)
+        images = value.pop("images", None)
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
             }
         ]
+        image_records: list[Mapping[str, Any]] = []
         if isinstance(image, Mapping):
-            data = image.get("data_base64")
-            mime_type = image.get("mime_type", "image/png")
+            image_records.append(image)
+        if isinstance(images, list):
+            image_records.extend(
+                item for item in images if isinstance(item, Mapping)
+            )
+        for image_record in image_records:
+            data = image_record.get("data_base64")
+            mime_type = image_record.get("mime_type", "image/png")
             if isinstance(data, str) and data:
                 content.append({"type": "image", "data": data, "mimeType": str(mime_type)})
         is_error = value.get("ok") is False

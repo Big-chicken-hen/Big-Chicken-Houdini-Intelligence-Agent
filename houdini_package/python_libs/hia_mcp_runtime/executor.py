@@ -43,6 +43,7 @@ from .viewport_quality import analyze_png_quality
 MAX_SCRIPT_CHARS = 524_288
 MAX_FLIPBOOK_FRAME_SPAN = 240.0
 MAX_CAPTURE_FRAMES = 24
+MAX_INLINE_CAPTURE_BYTES = 2_500_000
 MAX_EXPERIMENT_SAMPLE_FRAMES = 6
 MAX_EXPERIMENT_PARAMETERS = 16
 MAX_EXPERIMENT_COOK_CALLS = 1024
@@ -5560,9 +5561,10 @@ class HoudiniExecutor:
         arguments: Mapping[str, Any],
         frames: list[float],
     ) -> dict[str, Any]:
+        return_images = bool(arguments.get("return_image", True))
         original_frame = float(_safe_call(self._hou, "frame", 1.0))
         frame_records: list[dict[str, Any]] = []
-        successful: list[dict[str, Any]] = []
+        captured_responses: list[dict[str, Any]] = []
         warnings: list[str] = []
         errors: list[str] = []
         restore_error: str | None = None
@@ -5600,19 +5602,22 @@ class HoudiniExecutor:
                     continue
                 captured = response["result"]
                 path = Path(captured["absolute_path"])
+                capture_succeeded = bool(captured.get("capture_ok")) and path.is_file()
                 record = {
                     "requested_frame": requested_frame,
                     "actual_frame": captured.get("actual_frame"),
                     "cook_frame": captured.get("cook_frame"),
-                    "status": "captured" if response["ok"] else "failed",
+                    "status": "captured" if capture_succeeded else "failed",
+                    "quality_status": captured.get("quality_status"),
+                    "frame_ok": bool(response["ok"]),
                     "width": captured.get("width"),
                     "height": captured.get("height"),
                     "absolute_path": str(path),
                 }
                 frame_records.append(record)
-                if response["ok"]:
-                    successful.append(response)
-                else:
+                if capture_succeeded:
+                    captured_responses.append(response)
+                if not response["ok"]:
                     errors.extend(str(value) for value in response["errors"])
                 warnings.extend(str(value) for value in response["warnings"])
         finally:
@@ -5652,7 +5657,14 @@ class HoudiniExecutor:
             for record in frame_records
             if record["status"] != "captured"
         ]
+        quality_failed_frames = [
+            record["requested_frame"]
+            for record in captured_records
+            if record["quality_status"] == "failed"
+        ]
         if missing_frames:
+            temporal_status = "failed"
+        elif quality_failed_frames:
             temporal_status = "failed"
         elif no_change and expect_change:
             temporal_status = "not_proven"
@@ -5661,14 +5673,21 @@ class HoudiniExecutor:
             )
         else:
             temporal_status = "passed"
-        evidence_paths = [
-            record["absolute_path"]
-            for record in (
-                captured_records[:1] + captured_records[-1:]
-                if len(captured_records) > 1
-                else captured_records
-            )
+        captured_by_frame = {
+            float(record["requested_frame"]): record for record in captured_records
+        }
+        endpoint_frames = (
+            [float(frames[0]), float(frames[-1])]
+            if len(frames) > 1
+            else [float(frames[0])]
+        )
+        endpoint_frames = list(dict.fromkeys(endpoint_frames))
+        evidence_records = [
+            captured_by_frame[frame]
+            for frame in endpoint_frames
+            if frame in captured_by_frame
         ]
+        evidence_paths = [record["absolute_path"] for record in evidence_records]
         compact_frames = []
         for record in frame_records:
             compact = {
@@ -5679,11 +5698,38 @@ class HoudiniExecutor:
             if record.get("absolute_path") in evidence_paths:
                 compact["evidence_path"] = record["absolute_path"]
             compact_frames.append(compact)
-        first = successful[0] if successful else None
+        quality_statuses = [
+            str(record["quality_status"])
+            for record in captured_records
+            if record.get("quality_status")
+        ]
+        aggregate_quality_status = "unverified"
+        if quality_statuses:
+            aggregate_quality_status = (
+                "failed"
+                if "failed" in quality_statuses
+                else (
+                    "warning"
+                    if "warning" in quality_statuses
+                    else (
+                        "unverified"
+                        if "unverified" in quality_statuses
+                        else "passed"
+                    )
+                )
+            )
+        aggregate_quality_reasons = []
+        for response in captured_responses:
+            frame = response["result"].get("requested_frame")
+            for reason in response["result"].get("quality_reasons", ()):
+                aggregate_quality_reasons.append({"frame": frame, **reason})
+        first = captured_responses[0] if captured_responses else None
         first_result = dict(first["result"]) if first is not None else {}
         first_result.update(
             {
                 "mode": "sequence",
+                "quality_status": aggregate_quality_status,
+                "quality_reasons": aggregate_quality_reasons[:32],
                 "requested_frames": frames,
                 "actual_frames": [
                     record.get("actual_frame") for record in frame_records
@@ -5694,21 +5740,80 @@ class HoudiniExecutor:
                     "captured_count": len(captured_records),
                     "failed_count": len(frames) - len(captured_records),
                     "missing_or_failed_frames": missing_frames,
+                    "quality_failed_frames": quality_failed_frames,
+                    "quality_statuses": quality_statuses,
                     **temporal_evidence,
                     "temporal_jump_detected": bool(missing_frames),
                     "frames": compact_frames,
                     "evidence_paths": evidence_paths,
+                    "evidence_frames": [
+                        record["requested_frame"] for record in evidence_records
+                    ],
                 },
             }
         )
         result: dict[str, Any] = {
-            "ok": bool(successful) and not missing_frames,
+            "ok": bool(captured_responses)
+            and not missing_frames
+            and not quality_failed_frames,
             "result": first_result,
             "warnings": list(dict.fromkeys(warnings))[:32],
             "errors": list(dict.fromkeys(errors))[:32],
             "revision": self.scene_revision,
             "dirty": self._dirty(),
         }
+        inline_images: list[dict[str, str]] = []
+        inline_image_frames: list[float] = []
+        if return_images:
+            readable_records: list[tuple[dict[str, Any], Path, int]] = []
+            for record in evidence_records:
+                image_path = Path(record["absolute_path"])
+                try:
+                    readable_records.append(
+                        (record, image_path, image_path.stat().st_size)
+                    )
+                except OSError as exc:
+                    result["warnings"].append(
+                        f"Could not inspect captured image {image_path.name}: {_bounded_text(str(exc), 256)}"
+                    )
+            total_image_bytes = sum(item[2] for item in readable_records)
+            if total_image_bytes <= MAX_INLINE_CAPTURE_BYTES:
+                for record, image_path, _size in readable_records:
+                    try:
+                        raw = image_path.read_bytes()
+                    except OSError as exc:
+                        result["warnings"].append(
+                            f"Could not inline captured image {image_path.name}: {_bounded_text(str(exc), 256)}"
+                        )
+                        continue
+                    inline_images.append(
+                        {
+                            "mime_type": "image/png",
+                            "data_base64": base64.b64encode(raw).decode("ascii"),
+                        }
+                    )
+                    inline_image_frames.append(float(record["requested_frame"]))
+            elif readable_records:
+                result["warnings"].append(
+                    "Sequence images exceeded the aggregate inline MCP budget; returning local paths only"
+                )
+        expected_inline_image_count = len(endpoint_frames)
+        result["result"]["inline_image_count"] = len(inline_images)
+        result["result"]["expected_inline_image_count"] = expected_inline_image_count
+        result["result"]["inline_image_frames"] = inline_image_frames
+        if not return_images:
+            visual_content_status = "not_requested"
+        elif len(inline_images) == expected_inline_image_count:
+            visual_content_status = "returned"
+        elif inline_images:
+            visual_content_status = "partial"
+        elif evidence_paths:
+            visual_content_status = "path_only"
+        else:
+            visual_content_status = "unavailable"
+        result["result"]["visual_content_status"] = visual_content_status
+        if inline_images:
+            result["images"] = inline_images
         return result
 
     def _capture_viewport(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -6078,6 +6183,7 @@ class HoudiniExecutor:
                 "cook_cache_evidence": capture_cook_evidence,
                 "capture_api": capture_api,
                 "capture_ok": True,
+                "quality_scope": "capture_integrity_only",
                 "quality_status": quality_status,
                 "quality_reasons": quality["reasons"],
                 "quality_metrics": quality["metrics"],
@@ -6096,11 +6202,47 @@ class HoudiniExecutor:
             "dirty": self._dirty(),
         }
         if bool(arguments.get("return_image", True)):
-            if output_path.stat().st_size <= 3_000_000:
-                raw = output_path.read_bytes()
-                result["image"] = {"mime_type": "image/png", "data_base64": base64.b64encode(raw).decode("ascii")}
+            try:
+                image_size = output_path.stat().st_size
+            except OSError as exc:
+                result["warnings"].append(
+                    f"Could not inspect captured image for inline return: {_bounded_text(str(exc), 256)}"
+                )
+                result["result"]["inline_image_count"] = 0
+                result["result"]["expected_inline_image_count"] = 1
+                result["result"]["visual_content_status"] = "unavailable"
             else:
-                result["warnings"].append("Image exceeded inline MCP size; returning its local path only")
+                if image_size <= MAX_INLINE_CAPTURE_BYTES:
+                    try:
+                        raw = output_path.read_bytes()
+                    except OSError as exc:
+                        result["warnings"].append(
+                            f"Could not inline captured image: {_bounded_text(str(exc), 256)}"
+                        )
+                        result["result"]["inline_image_count"] = 0
+                        result["result"]["expected_inline_image_count"] = 1
+                        result["result"]["visual_content_status"] = (
+                            "path_only" if output_path.exists() else "unavailable"
+                        )
+                    else:
+                        result["image"] = {
+                            "mime_type": "image/png",
+                            "data_base64": base64.b64encode(raw).decode("ascii"),
+                        }
+                        result["result"]["inline_image_count"] = 1
+                        result["result"]["expected_inline_image_count"] = 1
+                        result["result"]["visual_content_status"] = "returned"
+                else:
+                    result["warnings"].append(
+                        "Image exceeded inline MCP size; returning its local path only"
+                    )
+                    result["result"]["inline_image_count"] = 0
+                    result["result"]["expected_inline_image_count"] = 1
+                    result["result"]["visual_content_status"] = "path_only"
+        else:
+            result["result"]["inline_image_count"] = 0
+            result["result"]["expected_inline_image_count"] = 1
+            result["result"]["visual_content_status"] = "not_requested"
         return result
 
     def _dispatch_local_help(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -6994,7 +7136,7 @@ class HoudiniExecutor:
                 material_entries.append(control)
 
         child_nodes = list(_safe_call(node, "children", ()))
-        assessed_nodes = [node, *child_nodes[:31]]
+        assessed_nodes = [node, *child_nodes[:255]]
         signals = []
         type_counts: dict[str, int] = {}
         box_count = 0
@@ -7105,7 +7247,7 @@ class HoudiniExecutor:
                 "outputs": len(outputs) > 16,
                 "upstream": bool(queue),
                 "controls": control_candidate_count > 8,
-                "assessed_children": len(child_nodes) > 31,
+                "assessed_children": len(child_nodes) > 255,
             },
         }
 

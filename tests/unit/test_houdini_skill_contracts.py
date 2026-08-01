@@ -464,6 +464,19 @@ class HoudiniSkillContractTests(unittest.TestCase):
         self.assertIn("name the largest consequential deviation", self.build_review)
         self.assertIn("Stop when that stage's acceptance claim is supported", self.build_review)
         self.assertIn("Merge or skip inapplicable stages", self.build_review)
+        self.assertIn("primary form as the first bounded authoring batch", self.procedural)
+        self.assertIn("Do not remove or weaken user requirements", self.procedural)
+        self.assertIn("continue modeling that stage", self.procedural)
+        self.assertIn("instead of handing off to LookDev", self.procedural)
+        self.assertLess(
+            self.procedural.index("primary form as the first bounded authoring batch"),
+            self.procedural.index("before adding broad tagging, animation, detail, or materials"),
+        )
+        self.assertIn("lack of parallelism must never collapse", self.build_review)
+        self.assertIn("one all-system batch", self.build_review)
+        self.assertIn("Never author all stages of a complex asset", self.procedural)
+        self.assertIn("one semantic stage or one coherent subsystem", self.procedural)
+        self.assertIn("image-content review before the next batch", self.procedural)
 
     def test_complex_execution_orders_search_before_brief_stages_and_review(self) -> None:
         positions = [
@@ -939,12 +952,26 @@ class HoudiniSkillContractTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.validation)
+        for marker in (
+            "actual image content",
+            "without image content is not visual observation",
+            "capture-integrity and basic pixel-sanity evidence only",
+            "When native subagents are available",
+            "distinct read-only passes before the next write",
+            "reviewer availability changes independence, never the evidence bar",
+            "multiple non-overlapping read-only reviewers",
+            "return the same acceptance claim",
+            "Director-controlled write-review loop",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.validation)
         self.assertIn("capture-quality and display-match interpretation", self.visual)
         self.assertIn("selective preview and display-match contract", self.material)
         self.assertIn("capture-quality and display-match rule", self.review)
         self.assertNotIn("capture_quality", self.validation)
         for runtime_marker in (
             '"quality_status"',
+            '"quality_scope": "capture_integrity_only"',
             '"quality_reasons"',
             '"quality_metrics"',
             '"display_match": "unverified"',
@@ -962,7 +989,7 @@ class HoudiniSkillContractTests(unittest.TestCase):
 
     def test_dynamic_visual_evidence_is_temporal_but_bounded(self) -> None:
         for marker in (
-            "one representative frame for a static claim",
+            "one representative frame for an ordinary static claim",
             "animation, simulation, or a time-varying material or effect",
             "risk-proportionate short sequence or representative frame set",
             "meaningful change, contacts or transitions, continuity",

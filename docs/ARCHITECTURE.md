@@ -13,7 +13,7 @@ User → Houdini Panel → local Bridge → Codex app-server
      → current Houdini scene
 ```
 
-The Panel sends text, local reference images, and optional selection context. The Bridge supervises the app-server and forwards authenticated loopback requests and protocol events. Codex interprets the request and uses exactly one backend selected by the launcher. HIA MCP V2 is the default perception, knowledge, execution, and validation layer; complex current-scene work normally becomes one `hia_execute_hom` batch. The fallback retains the third-party `execute_python` path. The two tool surfaces are never registered in the same app-server.
+The Panel sends text, local reference images, and optional selection context. The Bridge supervises the app-server and forwards authenticated loopback requests and protocol events. Codex interprets the request and uses exactly one backend selected by the launcher. HIA MCP V2 is the default perception, knowledge, execution, and validation layer; complex assets use bounded `hia_execute_hom` batches, each owning one semantic stage or coherent subsystem and returning to real scene and image review before the next. The fallback retains the third-party `execute_python` path under the same staged-authoring rule. The two tool surfaces are never registered in the same app-server.
 
 Local HTTP services bind only to `127.0.0.1` and use a fresh random token for each launcher session.
 

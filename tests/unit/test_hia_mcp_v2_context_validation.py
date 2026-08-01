@@ -733,6 +733,13 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
             )
             for index in range(8)
         )
+        decoys = tuple(
+            FakeValidationNode(
+                f"/obj/asset/decoy_{index}",
+                type_name="sphere",
+            )
+            for index in range(40)
+        )
         python_sop = FakeValidationNode(
             "/obj/asset/python_geometry",
             type_name="python",
@@ -746,9 +753,17 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
             "/obj/asset",
             category="Object",
             type_name="geo",
-            children=(*boxes, python_sop, broken, target),
+            children=(*decoys, *boxes, python_sop, broken, target),
         )
-        self.install_nodes(root, source, target, *boxes, python_sop, broken)
+        self.install_nodes(
+            root,
+            source,
+            target,
+            *decoys,
+            *boxes,
+            python_sop,
+            broken,
+        )
 
         result = self.executor.dispatch(
             "hia_inspect",
@@ -785,6 +800,10 @@ class HiaMcpV2ContextValidationTests(unittest.TestCase):
         self.assertIn("REPEATED_NODE_TYPE_CLUSTER", codes)
         self.assertIn("PYTHON_GEOMETRY_AUTHORING", codes)
         self.assertIn("MISSING_REQUIRED_INPUT", codes)
+        box_signal = next(
+            item for item in quality["signals"] if item["code"] == "BOX_PRIMITIVE_HEAVY"
+        )
+        self.assertEqual(8, box_signal["observed"]["box_nodes"])
         self.assertFalse(quality["subjective_quality_proven"])
         self.assertTrue(
             any(

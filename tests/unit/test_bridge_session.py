@@ -2660,14 +2660,16 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         for required_text in (
             "当前场景的创建、修改、连接、材质和动画默认使用",
             "FXHoudini MCP 与 HOM",
-            "复杂操作优先用 execute_python 批量执行",
+            "复杂资产分主形体/结构/细节/材质",
+            "execute_python 每批仅一阶段/子系统",
+            "无子任务也禁全资产脚本",
+            "截图仍像通用 primitive 就继续修正",
             "细粒度工具用于读取、单项修改和最终验证",
             "不要逐节点循环",
             "相同调用失败后先读真实错误再改用兼容方法",
             "capture_screenshot 只做阶段性验证",
             "主代理负责当前 HIP 写入",
             "子代理只做研究、草案和审阅",
-            "FX fallback 同样非代码级隔离",
             "实时 MCP 不可用时直接说明",
             "不得改成离线 HIP",
             "只有用户明确要求离线",
@@ -2712,7 +2714,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         session.start_thread()
 
         instructions = client.requests[0][1]["developerInstructions"]
-        self.assertLessEqual(len(instructions), 1_550)
+        self.assertLessEqual(len(instructions), 1_700)
         for required_text in (
             "HIA MCP V2 与 HOM",
             "已知小改回读目标值/连接后直改",
@@ -2722,9 +2724,12 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "公共控制、材质入口、引用和允许 scope",
             "优先现有节点和标准原生节点网络",
             "场景内 Python SOP 或直接几何须说明必要性",
-            "同一 scope 内一次 hia_execute_hom",
+            "复杂资产按主形体、结构、细节用少量语义批次",
+            "无子任务也不得并成全资产大批次",
+            "每批同一 scope 内一次 hia_execute_hom",
             "fresh cook、hia_scene_diff/hia_validate",
             "plan/revision/tool completed 不算通过",
+            "复杂资产把承诺、可识别特征和禁项写入简短 Brief，不得静默缩水",
             "用户负约束必须原样保留并进入验收",
             "禁止用语义等价或换皮替代绕过",
             "禁 Box 也禁盒状代用品",
@@ -2732,6 +2737,9 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "小型多部件装配也要量端点、宿主、接触、净空和穿插",
             "截图/AABB/clean cook 不算精确证明",
             "hia_capture_viewport，不固定尺寸",
+            "未收到 image content 只能报视觉未验证",
+            "主形体仍像通用 primitive 拼装时继续建模",
+            "不得转入材质或声称完成",
             "动画/模拟用代表帧或短序列",
             "材质验收读取绑定、MaterialX 连接和正确输入",
             "Stop 后已发 HOM 仍可能收尾",

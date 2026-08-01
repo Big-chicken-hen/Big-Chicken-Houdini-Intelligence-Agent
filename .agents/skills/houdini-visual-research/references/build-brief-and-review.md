@@ -25,7 +25,7 @@ For the Full tier, keep these current decisions in the Director's task context b
 
 Record explicit required and forbidden outcomes under Goal or Acceptance. A negative constraint is hard on the observed result and its semantic role, including an equivalent substitute produced by another node or method; only the user may relax it or authorize an approximation.
 
-Use short bullets and update only decisions that changed. Keep the Build Brief plus a compact research synthesis in the main task context. Preserve decisions, evidence, source links, risks, current stage, and unverified items; reference full documents, ledgers, and subtask artifacts by path or URL instead of pasting whole documents, long subtask replies, or source bodies.
+Use short bullets and update only decisions that changed. Do not remove or weaken a user requirement. If a Codex-originated recognition feature or completion promise proves infeasible, report it as incomplete or request user direction instead of rewriting Acceptance to manufacture a pass. Keep the Build Brief plus a compact research synthesis in the main task context. Preserve decisions, evidence, source links, risks, current stage, and unverified items; reference full documents, ledgers, and subtask artifacts by path or URL instead of pasting whole documents, long subtask replies, or source bodies.
 
 ## Turn knowledge into semantic expectations
 
@@ -58,7 +58,7 @@ Merge or skip inapplicable stages; this is not a fixed Gate or iteration count. 
 - **Artifact Reviewer:** read-only integrated review of structure, contacts, proportions, readability, and delivery claims.
 - **Performance Reviewer:** read-only review of measured cook, geometry, instancing, time dependence, cache, and delivery-cost evidence.
 
-These are task roles within native Codex collaboration, not persistent Agents, another model, a scheduler, or a local chat system. Research and planning roles do not write the live HIP. Reviewer roles report evidence and the minimum useful correction; the Director decides and applies changes serially.
+These are task roles within native Codex collaboration, not persistent Agents, another model, a scheduler, or a local chat system. When native subagents are available for Full multi-subsystem work, the Director may run non-overlapping Researcher and Architect drafts in parallel after sharing the same Brief. Research and planning roles do not write the live HIP. When subagents are unavailable, the Director performs the same subsystem planning sequentially before each bounded authoring batch; lack of parallelism must never collapse the asset into one all-system batch. Reviewer roles report evidence and the minimum useful correction; the Director decides and applies changes serially.
 
 Keep every subtask return compact: **Decision**, **Evidence**, **Risks**, **Recommended next action**, and **Unverified**. Do not forward the full working transcript to the Director.
 

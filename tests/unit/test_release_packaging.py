@@ -18,6 +18,7 @@ INSTALLATION_PATH = REPOSITORY_ROOT / "docs" / "INSTALLATION.md"
 TEST_REPORT_PATH = REPOSITORY_ROOT / "docs" / "TEST-REPORT.md"
 GITIGNORE_PATH = REPOSITORY_ROOT / ".gitignore"
 HIA_MCP_V2_PATH = REPOSITORY_ROOT / "docs" / "HIA-MCP-V2.md"
+ARCHITECTURE_PATH = REPOSITORY_ROOT / "docs" / "ARCHITECTURE.md"
 XAML_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.xaml"
 WPF_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Wpf.ps1"
 CORE_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Core.psm1"
@@ -31,6 +32,20 @@ CS_PROJECT_PATH = (
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    def test_runtime_docs_require_staged_complex_asset_authoring(self) -> None:
+        hia_mcp_v2 = HIA_MCP_V2_PATH.read_text(encoding="utf-8")
+        architecture = ARCHITECTURE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("按语义阶段或连贯子系统", hia_mcp_v2)
+        self.assertIn("不能把整件资产塞进一个 HOM 脚本", hia_mcp_v2)
+        self.assertNotIn("复杂变更优先一次 `hia_execute_hom` 完成", hia_mcp_v2)
+        self.assertIn("each owning one semantic stage or coherent subsystem", architecture)
+        self.assertIn("under the same staged-authoring rule", architecture)
+        self.assertNotIn(
+            "complex current-scene work normally becomes one `hia_execute_hom` batch",
+            architecture,
+        )
+
     def test_knowledge_cli_documentation_uses_project_managed_venv(self) -> None:
         readme = README_PATH.read_text(encoding="utf-8")
         hia_mcp_v2 = HIA_MCP_V2_PATH.read_text(encoding="utf-8")

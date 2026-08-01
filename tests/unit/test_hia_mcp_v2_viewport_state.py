@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import struct
 import sys
@@ -1093,6 +1094,189 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertEqual([12.0, 12.0, 12.0], hou_module.frame_history)
         self.assertEqual(0, hou_module.scene_viewer.focus_calls)
         self.assertEqual(0, hou_module.scene_viewer.mplay_launches)
+
+    def test_sequence_returns_bounded_first_and_last_inline_images(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.frame_colors = {
+            1: (72, 104, 136),
+            2: (88, 118, 148),
+            3: (104, 132, 160),
+        }
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"mode": "flipbook", "frames": [1, 2, 3], "return_image": True},
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(2, response["result"]["inline_image_count"])
+        self.assertEqual([1.0, 3.0], response["result"]["inline_image_frames"])
+        self.assertEqual(
+            [1.0, 3.0],
+            response["result"]["sequence"]["evidence_frames"],
+        )
+        self.assertEqual("returned", response["result"]["visual_content_status"])
+        self.assertEqual("capture_integrity_only", response["result"]["quality_scope"])
+        self.assertEqual(2, len(response["images"]))
+        decoded_images = []
+        for image in response["images"]:
+            self.assertEqual("image/png", image["mime_type"])
+            decoded = base64.b64decode(image["data_base64"])
+            self.assertTrue(decoded.startswith(b"\x89PNG"))
+            decoded_images.append(decoded)
+        self.assertNotEqual(decoded_images[0], decoded_images[1])
+
+    def test_sequence_never_substitutes_an_internal_frame_for_a_missing_endpoint(
+        self,
+    ) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.frame_colors = {
+            1: (72, 104, 136),
+            2: (88, 118, 148),
+            3: (104, 132, 160),
+        }
+        hou_module.scene_viewer.missing_frames = {1}
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"mode": "flipbook", "frames": [1, 2, 3], "return_image": True},
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual([3.0], response["result"]["inline_image_frames"])
+        self.assertEqual(
+            [3.0],
+            response["result"]["sequence"]["evidence_frames"],
+        )
+        self.assertEqual(1, response["result"]["inline_image_count"])
+        self.assertEqual(2, response["result"]["expected_inline_image_count"])
+        self.assertEqual("partial", response["result"]["visual_content_status"])
+        self.assertEqual(1, len(response["images"]))
+
+    def test_sequence_reports_unavailable_when_both_evidence_endpoints_fail(
+        self,
+    ) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.frame_colors = {2: (88, 118, 148)}
+        hou_module.scene_viewer.missing_frames = {1, 3}
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"mode": "flipbook", "frames": [1, 2, 3], "return_image": True},
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual([], response["result"]["inline_image_frames"])
+        self.assertEqual([], response["result"]["sequence"]["evidence_frames"])
+        self.assertEqual([], response["result"]["sequence"]["evidence_paths"])
+        self.assertEqual(0, response["result"]["inline_image_count"])
+        self.assertEqual("unavailable", response["result"]["visual_content_status"])
+        self.assertNotIn("images", response)
+
+    def test_sequence_marks_visual_content_not_requested_without_inline_images(
+        self,
+    ) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.frame_colors = {
+            1: (72, 104, 136),
+            2: (104, 132, 160),
+        }
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"mode": "flipbook", "frames": [1, 2], "return_image": False},
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(0, response["result"]["inline_image_count"])
+        self.assertEqual("not_requested", response["result"]["visual_content_status"])
+        self.assertNotIn("images", response)
+
+    def test_sequence_downgrades_both_images_when_aggregate_budget_is_exceeded(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.frame_colors = {
+            1: (72, 104, 136),
+            2: (104, 132, 160),
+        }
+
+        with mock.patch(
+            "hia_mcp_runtime.executor.MAX_INLINE_CAPTURE_BYTES",
+            1,
+        ):
+            response = executor.dispatch(
+                "hia_capture_viewport",
+                {"mode": "flipbook", "frames": [1, 2], "return_image": True},
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertNotIn("images", response)
+        self.assertEqual(0, response["result"]["inline_image_count"])
+        self.assertEqual("path_only", response["result"]["visual_content_status"])
+        self.assertTrue(
+            any("aggregate inline MCP budget" in warning for warning in response["warnings"])
+        )
+
+    def test_sequence_returns_failed_quality_frames_for_visual_diagnosis(self) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+            image_color=(0, 0, 0),
+        )
+        _hou_module, executor = self.make_executor(viewport)
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {
+                "mode": "flipbook",
+                "frames": [1, 2],
+                "expect_change": False,
+                "return_image": True,
+            },
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual("failed", response["result"]["quality_status"])
+        self.assertEqual(2, response["result"]["sequence"]["captured_count"])
+        self.assertEqual(0, response["result"]["sequence"]["failed_count"])
+        self.assertEqual(
+            [1.0, 2.0],
+            response["result"]["sequence"]["quality_failed_frames"],
+        )
+        self.assertEqual(2, len(response["result"]["sequence"]["evidence_paths"]))
+        self.assertEqual(2, len(response["images"]))
+        self.assertEqual("returned", response["result"]["visual_content_status"])
 
     def test_flipbook_rejects_invalid_or_excessive_ranges_before_capture(self) -> None:
         cases = (

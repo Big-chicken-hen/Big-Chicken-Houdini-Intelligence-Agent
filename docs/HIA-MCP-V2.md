@@ -4,7 +4,7 @@ HIA MCP V2 是 Codex 的 Houdini 感知、知识、执行与验证层。Codex �
 
 ## 为什么替代 179 工具森林
 
-第三方 `fxhoudinimcp` 1.3.0 暴露 179 个工具，其中大量是 `create_node`、`set_parameter`、`connect_nodes` 一类微操作。复杂网络因此需要很多往返调用，模型还要在大量重叠工具间选择。HIA V2 不复制其实现或模块路径，也不维护旧 HIA MCP 的五节点白名单；它按能力域提供可过滤、分页、批量的语义工具，复杂变更优先一次 `hia_execute_hom` 完成。
+第三方 `fxhoudinimcp` 1.3.0 暴露 179 个工具，其中大量是 `create_node`、`set_parameter`、`connect_nodes` 一类微操作。复杂网络因此需要很多往返调用，模型还要在大量重叠工具间选择。HIA V2 不复制其实现或模块路径，也不维护旧 HIA MCP 的五节点白名单；它按能力域提供可过滤、分页、批量的语义工具。复杂资产按语义阶段或连贯子系统使用少量 `hia_execute_hom`，每批回到真实场景与图像审阅后再继续，不能把整件资产塞进一个 HOM 脚本。
 
 HIA V2 不是固定五工具桥，也不是另一个 Agent。当前能力矩阵公开 18 个工具。目录由 stdio 注册表的唯一事实源 `TOOL_SPECS` 派生，不再维护第二份手写工具清单；`hia_search_capabilities` 可检索工具名、能力域、描述、参数名及少量中英文别名，并用 `catalog_health` 报告 registered/catalogued/missing/orphaned。`checkpoint/检查点/备份` 指向 `hia_execute_hom`，`runtime/recovery/恢复` 指向 `hia_context`；空结果明确区分 `NO_MATCH` 与 `CATALOG_INCOMPLETE`。
 
@@ -193,7 +193,7 @@ WPF launcher 现在提供互斥 backend 选择：默认 `hia_v2`，手动兼容�
 1. 打开 WPF launcher，选择 **HIA MCP V2（推荐）**，启动 Houdini，确认 Panel 顶部显示 `HIA MCP V2：可用`。
 2. 让 Codex 调用 `hia_context`，再用 `hia_search_node_types` 分别动态搜索 box、vellum、mtlx、karma。
 3. 在 Houdini 选择一个节点，让 Codex 调用 `hia_inspect` 读取当前选择。
-4. 让 Codex 用一次 `hia_execute_hom` 创建一个小型、可编辑资产，再用 `hia_scene_diff` 验证变化。
+4. 让 Codex 用一个有界 `hia_execute_hom` 批次创建小型、可编辑资产；复杂资产则按主形体、结构、细节和材质分批，并在批次之间用真实图像及 `hia_scene_diff` 验证。
 5. 明确要求视觉核对时调用 `hia_capture_viewport`。
 6. 确认该 session 的工具列表没有上游 `create_node`、`set_parameter` 等 179 工具。
 

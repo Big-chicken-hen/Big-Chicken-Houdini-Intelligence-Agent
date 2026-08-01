@@ -42,13 +42,23 @@ class FakeTransport:
                 "dirty": True,
             }
         if tool_name == "hia_capture_viewport":
-            return {
+            result = {
                 "ok": True,
                 "result": {"path": ".runtime/cache/screenshots/test.png"},
                 "warnings": [],
                 "errors": [],
-                "image": {"mime_type": "image/png", "data_base64": "aW1hZ2U="},
             }
+            if arguments.get("frames"):
+                result["images"] = [
+                    {"mime_type": "image/png", "data_base64": "ZnJhbWUx"},
+                    {"mime_type": "image/png", "data_base64": "ZnJhbWUy"},
+                ]
+            else:
+                result["image"] = {
+                    "mime_type": "image/png",
+                    "data_base64": "aW1hZ2U=",
+                }
+            return result
         return {"ok": True, "result": {"tool": tool_name}, "warnings": [], "errors": []}
 
     def cancel(self, request_id: int | str) -> None:
@@ -87,8 +97,30 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         )
         description = capture.description.casefold()
         self.assertIn("documented flipbook path", description)
-        self.assertIn("capture quality", description)
+        self.assertIn("first/last image content", description)
+        self.assertIn("capture integrity", description)
+        self.assertIn("never composition", description)
         self.assertIn("unverified os hdr", description)
+
+    def test_adapter_emits_every_bounded_sequence_image(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+
+        response = adapter.handle_message(
+            rpc(
+                2,
+                "tools/call",
+                {
+                    "name": "hia_capture_viewport",
+                    "arguments": {"mode": "flipbook", "frames": [1, 48]},
+                },
+            )
+        )
+
+        content = response["result"]["content"]
+        self.assertEqual(["text", "image", "image"], [item["type"] for item in content])
+        self.assertNotIn("images", response["result"]["structuredContent"])
 
     def test_geometry_summary_does_not_claim_spatial_acceptance(self) -> None:
         geometry = next(
@@ -99,6 +131,50 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertIn("not proof of intersection", description)
         self.assertIn("endpoint clearance", description)
         self.assertIn("short read-only hom batch", description)
+
+    def test_execute_hom_describes_staged_complex_asset_guidance(self) -> None:
+        execute = next(spec for spec in TOOL_SPECS if spec.name == "hia_execute_hom")
+        description = execute.description.casefold()
+
+        self.assertIn("one semantic stage", description)
+        self.assertIn("one coherent subsystem", description)
+        self.assertIn("never pack primary form", description)
+        self.assertIn("one all-asset script", description)
+
+    def test_adapter_initialization_does_not_invite_one_complex_asset_batch(
+        self,
+    ) -> None:
+        adapter = HiaMcpAdapter(FakeTransport())
+        self.addCleanup(adapter.shutdown)
+
+        response = adapter.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            }
+        )
+
+        assert response is not None
+        instructions = response["result"]["instructions"].casefold()
+        self.assertIn("bounded semantic authoring batches", instructions)
+        self.assertIn("real scene and visual review", instructions)
+        self.assertIn("lack of native subagents", instructions)
+
+    def test_capability_discovery_describes_staged_complex_asset_writes(self) -> None:
+        capability = next(
+            spec for spec in TOOL_SPECS if spec.name == "hia_search_capabilities"
+        )
+        description = capability.description.casefold()
+
+        self.assertIn("split complex asset writes", description)
+        self.assertIn("bounded semantic stages", description)
+        self.assertIn("review the real scene and images", description)
 
     def test_effect_experiment_is_one_bounded_domain_neutral_tool(self) -> None:
         experiment = next(

@@ -539,6 +539,117 @@ class HoudiniRuntimeIntegrationTests(unittest.TestCase):
                 fx_start.assert_called_once_with()
                 hia_start.assert_not_called()
 
+    def test_runtime_transport_and_adapter_preserve_two_capture_images(self) -> None:
+        class FakeHipFile:
+            def path(self) -> str:
+                return "untitled.hip"
+
+            def isNewFile(self) -> bool:  # noqa: N802
+                return True
+
+            def hasUnsavedChanges(self) -> bool:  # noqa: N802
+                return False
+
+        class InlineCaptureExecutor:
+            scene_revision = 0
+            _hou = SimpleNamespace(hipFile=FakeHipFile())
+
+            def dispatch(
+                self,
+                tool_name: str,
+                arguments: object,
+            ) -> dict[str, object]:
+                self.last_call = (tool_name, arguments)
+                return {
+                    "ok": True,
+                    "result": {
+                        "mode": "sequence",
+                        "inline_image_count": 2,
+                        "inline_image_frames": [1.0, 48.0],
+                        "visual_content_status": "returned",
+                    },
+                    "warnings": [],
+                    "errors": [],
+                    "images": [
+                        {"mime_type": "image/png", "data_base64": "ZnJhbWUx"},
+                        {"mime_type": "image/png", "data_base64": "ZnJhbWU0OA=="},
+                    ],
+                }
+
+        token = "capture_" + "c" * 40
+        launcher_session_id = "3" * 32
+        executor_path = Path(__file__).resolve()
+        executor = InlineCaptureExecutor()
+        session = start_runtime_server(
+            executor=executor,  # type: ignore[arg-type]
+            project_root=REPOSITORY_ROOT,
+            token=token,
+            port=0,
+            launcher_session_id=launcher_session_id,
+            expected_executor_path=executor_path,
+        )
+        transport = LoopbackTransport(
+            TransportConfig(
+                host="127.0.0.1",
+                port=session.port,
+                token=token,
+                launcher_session_id=launcher_session_id,
+                executor_module_path=str(executor_path),
+                route=RUNTIME_EXECUTE_ROUTE,
+                timeout_seconds=3,
+            )
+        )
+        adapter = HiaMcpAdapter(transport)
+        try:
+            initialized = adapter.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "capture-integration-test",
+                            "version": "1",
+                        },
+                    },
+                }
+            )
+            self.assertIsNotNone(initialized)
+            response = adapter.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "hia_capture_viewport",
+                        "arguments": {
+                            "mode": "flipbook",
+                            "frames": [1, 48],
+                            "return_image": True,
+                        },
+                    },
+                }
+            )
+            self.assertIsNotNone(response)
+            assert response is not None
+            result = response["result"]
+            self.assertEqual(
+                ["text", "image", "image"],
+                [item["type"] for item in result["content"]],
+            )
+            self.assertEqual("ZnJhbWUx", result["content"][1]["data"])
+            self.assertEqual("ZnJhbWU0OA==", result["content"][2]["data"])
+            self.assertNotIn("images", result["structuredContent"])
+            self.assertEqual(
+                [1.0, 48.0],
+                result["structuredContent"]["result"]["inline_image_frames"],
+            )
+        finally:
+            adapter.shutdown()
+            session.stop()
+
     def test_runtime_health_and_tool_call_use_fake_ui_main_thread_dispatch(self) -> None:
         class FakeHipFile:
             def path(self) -> str:
