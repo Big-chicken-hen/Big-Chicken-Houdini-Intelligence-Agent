@@ -463,12 +463,20 @@ class BridgeSession:
         self._last_tool_name: str | None = None
         self._last_tool_status: str | None = None
         self._stop_recovery_thread: threading.Thread | None = None
+        self._project_event_observer: Callable[[dict[str, Any]], bool] | None = None
         self._closed = False
         self._client.set_event_sink(self._on_client_event)
 
     @property
     def client(self) -> CodexStdioClient:
         return self._client
+
+    def set_project_event_observer(
+        self, observer: Callable[[dict[str, Any]], bool]
+    ) -> None:
+        """Attach the non-blocking project compaction observer after composition."""
+
+        self._project_event_observer = observer
 
     def start(self) -> dict[str, Any]:
         try:
@@ -2664,5 +2672,14 @@ class BridgeSession:
             with self._turn_condition:
                 self._connected = False
                 self._turn_condition.notify_all()
+        observer = self._project_event_observer
+        if observer is not None and event_type == "codex_notification":
+            try:
+                observer(dict(event))
+            except Exception as exc:
+                self._events.publish(
+                    "project_event_observer_failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
         fields = {key: value for key, value in event.items() if key != "type"}
         self._events.publish(str(event_type), **fields)

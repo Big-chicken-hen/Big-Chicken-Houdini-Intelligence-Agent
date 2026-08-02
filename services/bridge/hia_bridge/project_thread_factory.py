@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .project_contracts import ProjectState, ProjectStatus, Role, RoleThread
-from .project_permissions import permission_profile, require_complete_project_roles
+from .project_permissions import (
+    permission_profile,
+    require_complete_project_roles,
+    validate_observable_role_response,
+)
 
 
 class AppServerClient(Protocol):
@@ -68,6 +72,7 @@ class ProjectThreadFactory:
             self._selected_backend,
             self._server_transports,
         )
+        source = f"hia-project/{state.project_id}/{role.value}"
         params: dict[str, Any] = {
             "cwd": str(self._project_root),
             "approvalPolicy": profile.approval_policy,
@@ -75,7 +80,7 @@ class ProjectThreadFactory:
             "sandbox": profile.sandbox,
             "ephemeral": False,
             "developerInstructions": ROLE_INSTRUCTIONS[role],
-            "threadSource": f"hia-project/{state.project_id}/{role.value}",
+            "threadSource": source,
             "config": dict(profile.config),
         }
         if model is not None:
@@ -87,6 +92,19 @@ class ProjectThreadFactory:
         thread_id = thread.get("id") if isinstance(thread, Mapping) else None
         if not isinstance(thread_id, str) or not thread_id.strip():
             raise ValueError("thread/start did not return a valid Thread id")
+        try:
+            validate_observable_role_response(
+                role,
+                result,
+                expected_source=source,
+                expected_model=model,
+            )
+        except Exception as exc:
+            cleanup_error = self._delete_thread(thread_id)
+            suffix = f"; cleanup failed: {cleanup_error}" if cleanup_error else ""
+            raise ValueError(
+                f"thread/start observable profile mismatch: {exc}{suffix}"
+            ) from exc
         actual_model = result.get("model", model) if isinstance(result, Mapping) else model
         actual_tier = (
             result.get("serviceTier", service_tier)
@@ -113,6 +131,13 @@ class ProjectThreadFactory:
         if role is Role.SUPERVISOR:
             changes["goal_thread_id"] = thread_id
         return replace(state, **changes)
+
+    def _delete_thread(self, thread_id: str) -> str | None:
+        try:
+            self._client.request("thread/delete", {"threadId": thread_id})
+        except Exception as exc:
+            return str(exc)
+        return None
 
     def start_supervisor(
         self,

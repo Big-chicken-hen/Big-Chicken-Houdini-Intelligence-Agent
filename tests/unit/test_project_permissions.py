@@ -16,7 +16,7 @@ from services.bridge.hia_bridge.project_permissions import (
     validate_role_permissions,
 )
 from services.bridge.hia_bridge.project_thread_factory import ProjectThreadFactory
-from tests.unit.project_test_support import server_transports
+from tests.unit.project_test_support import observable_thread_response, server_transports
 
 
 class FakeClient:
@@ -26,11 +26,7 @@ class FakeClient:
     def request(self, method: str, params: dict):
         self.calls.append((method, params))
         role = params["threadSource"].rsplit("/", 1)[-1]
-        return {
-            "thread": {"id": f"thread-{role}"},
-            "model": params.get("model", "gpt-test"),
-            "serviceTier": params.get("serviceTier"),
-        }
+        return observable_thread_response(params, f"thread-{role}")
 
 
 class FailingClient(FakeClient):
@@ -104,6 +100,25 @@ class ProjectPermissionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "permission drift"):
             validate_role_permissions(
                 Role.VISUAL_REVIEW,
+                descriptor,
+                "hia_mcp_v2",
+                transports,
+            )
+
+    def test_permission_validation_rejects_unexpected_mcp_alias(self) -> None:
+        transports = server_transports()
+        profile = permission_profile(Role.PLANNING, "hia_mcp_v2", transports)
+        descriptor = {
+            "sandbox": profile.sandbox,
+            "approvalPolicy": profile.approval_policy,
+            "config": {
+                **dict(profile.config),
+                "mcp_servers.unexpected.enabled": True,
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "unexpected permission keys"):
+            validate_role_permissions(
+                Role.PLANNING,
                 descriptor,
                 "hia_mcp_v2",
                 transports,

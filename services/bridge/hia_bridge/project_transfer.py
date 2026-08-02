@@ -1,8 +1,10 @@
 """Transactional migration for the five native project-role Threads.
 
-The module is intentionally not wired into the project runner.  A caller must
-explicitly enable it, persist the returned project identity during ``commit``,
-and decide when a completed context-compaction cycle warrants a migration.
+The project runtime invokes this transaction only after the third persisted
+automatic context-compaction event for one exact role Thread.  The transaction
+itself remains independent from lifecycle reduction and never deletes the old
+Thread until the replacement has passed identity, context, Goal, and observable
+permission verification.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Protocol
 
 from .project_contracts import ProjectState, Role, RoleThread
-from .project_permissions import permission_profile, validate_role_permissions
+from .project_permissions import permission_profile, validate_observable_role_response
 
 
 class AppServerClient(Protocol):
@@ -153,7 +155,7 @@ class ProjectThreadTransfer:
             raise ProjectTransferError("thread/fork returned the old Thread identity")
 
         try:
-            self._validate_fork_profile(role, binding, fork_result)
+            self._validate_fork_profile(role, binding, source, fork_result)
             new_read = self._read_thread(new_id)
             self._validate_project_thread(new_read, new_id, source)
             new_thread = self._thread(new_read)
@@ -348,28 +350,23 @@ class ProjectThreadTransfer:
         return turns
 
     def _validate_fork_profile(
-        self, role: Role, binding: RoleThread, result: Any
+        self,
+        role: Role,
+        binding: RoleThread,
+        expected_source: str,
+        result: Any,
     ) -> None:
         if not isinstance(result, Mapping):
             raise ProjectTransferError("thread/fork returned an invalid descriptor")
-        config = result.get("config")
-        if not isinstance(config, Mapping):
-            raise ProjectTransferError(
-                "forked Thread effective tool inventory was not observable"
+        try:
+            validate_observable_role_response(
+                role,
+                result,
+                expected_source=expected_source,
+                expected_model=binding.model,
             )
-        observable_profile = {
-            "sandbox": result.get("sandbox"),
-            "approvalPolicy": result.get("approvalPolicy"),
-            "config": config,
-        }
-        validate_role_permissions(
-            role,
-            observable_profile,
-            self._selected_backend,
-            self._server_transports,
-        )
-        if binding.model is not None and result.get("model") != binding.model:
-            raise ProjectTransferError("forked Thread model changed")
+        except ValueError as exc:
+            raise ProjectTransferError(str(exc)) from exc
         if binding.effort is not None and result.get("reasoningEffort") != binding.effort:
             raise ProjectTransferError("forked Thread reasoning effort changed")
         if (

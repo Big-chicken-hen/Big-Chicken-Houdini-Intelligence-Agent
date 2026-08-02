@@ -137,6 +137,16 @@ class RoleThread:
     model: str | None = None
     effort: str | None = None
     service_tier: str | None = None
+    compaction_count: int = 0
+    compaction_event_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.compaction_count < 0:
+            raise ValueError("role compaction_count cannot be negative")
+        if self.compaction_count != len(self.compaction_event_ids):
+            raise ValueError("role compaction count and event identities disagree")
+        if len(set(self.compaction_event_ids)) != len(self.compaction_event_ids):
+            raise ValueError("role compaction event identities must be unique")
 
 
 @dataclass(frozen=True)
@@ -225,6 +235,8 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
                 "model": binding.model,
                 "effort": binding.effort,
                 "service_tier": binding.service_tier,
+                "compaction_count": binding.compaction_count,
+                "compaction_event_ids": list(binding.compaction_event_ids),
             }
             for role, binding in state.roles.items()
         },
@@ -302,6 +314,11 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
         thread_id = raw_binding.get("thread_id")
         if not isinstance(thread_id, str) or not thread_id:
             raise ValueError("role thread_id must be a non-empty string")
+        raw_compaction_ids = raw_binding.get("compaction_event_ids", [])
+        if not isinstance(raw_compaction_ids, list) or any(
+            not isinstance(item, str) or not item for item in raw_compaction_ids
+        ):
+            raise ValueError("role compaction_event_ids are malformed")
         roles[role] = RoleThread(
             role=role,
             thread_id=thread_id,
@@ -310,6 +327,10 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
             service_tier=_optional_text(
                 raw_binding.get("service_tier"), "service_tier"
             ),
+            compaction_count=_non_negative_int(
+                raw_binding.get("compaction_count", 0), "role compaction_count"
+            ),
+            compaction_event_ids=tuple(raw_compaction_ids),
         )
 
     raw_requirements = value.get("requirements", [])

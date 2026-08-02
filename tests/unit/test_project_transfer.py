@@ -16,7 +16,7 @@ from services.bridge.hia_bridge.project_transfer import (
     ProjectThreadTransfer,
     ProjectTransferError,
 )
-from tests.unit.project_test_support import server_transports
+from tests.unit.project_test_support import observable_thread_response, server_transports
 
 
 def _transfer(client, *, enabled: bool) -> ProjectThreadTransfer:
@@ -96,15 +96,7 @@ class FakeClient:
 
     @staticmethod
     def _fork_response(thread_id: str, params: dict) -> dict:
-        return {
-            "thread": {"id": thread_id},
-            "sandbox": params["sandbox"],
-            "approvalPolicy": params["approvalPolicy"],
-            "config": dict(params["config"]),
-            "model": params.get("model"),
-            "reasoningEffort": "high",
-            "serviceTier": params.get("serviceTier"),
-        }
+        return observable_thread_response(params, thread_id)
 
 
 class ProjectTransferTests(unittest.TestCase):
@@ -168,13 +160,13 @@ class ProjectTransferTests(unittest.TestCase):
         def bad_profile(method: str, params: dict):
             result = original(method, params)
             if method == "thread/fork":
-                result["sandbox"] = "read-only"
+                result["sandbox"] = {"type": "dangerFullAccess"}
             return result
 
         client.request = bad_profile  # type: ignore[method-assign]
         transfer = _transfer(client, enabled=True)
 
-        with self.assertRaisesRegex(ProjectTransferError, "permission drift"):
+        with self.assertRaisesRegex(ProjectTransferError, "sandbox permission drift"):
             transfer.prepare(project, Role.EXECUTION)
 
         self.assertIn("old-execution", client.threads)
@@ -194,7 +186,7 @@ class ProjectTransferTests(unittest.TestCase):
         client.request = bad_model  # type: ignore[method-assign]
         transfer = _transfer(client, enabled=True)
 
-        with self.assertRaisesRegex(ProjectTransferError, "model changed"):
+        with self.assertRaisesRegex(ProjectTransferError, "model drift"):
             transfer.prepare(project, Role.PLANNING)
 
         self.assertIn("old-planning", client.threads)

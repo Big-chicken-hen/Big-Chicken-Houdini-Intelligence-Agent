@@ -74,11 +74,46 @@ def validate_role_permissions(
     config = descriptor.get("config")
     if not isinstance(config, Mapping):
         raise ValueError(f"{role.value} config is missing")
+    if set(config) != set(expected.config):
+        raise ValueError(f"{role.value} config contains unexpected permission keys")
     for key, value in expected.config.items():
         if config.get(key) != value:
             raise ValueError(f"{role.value} config permission drift: {key}")
 
 
+def validate_observable_role_response(
+    role: Role,
+    descriptor: Mapping[str, Any],
+    *,
+    expected_source: str,
+    expected_model: str | None = None,
+) -> None:
+    """Validate only fields exposed by pinned app-server start/fork responses.
+
+    Codex 0.144.3 does not return the effective per-Thread ``config`` or MCP
+    inventory.  Those capabilities must be proven by a real Turn/tool smoke;
+    request echoing is deliberately not treated as runtime evidence here.
+    """
+
+    read_only = role in READ_ONLY_ROLES
+    allowed_sandboxes = {"readOnly"} if read_only else {"readOnly", "workspaceWrite"}
+    expected_approval = "never" if read_only else "on-request"
+    sandbox = descriptor.get("sandbox")
+    sandbox_type = sandbox.get("type") if isinstance(sandbox, Mapping) else None
+    if sandbox_type not in allowed_sandboxes:
+        raise ValueError(f"{role.value} observable sandbox permission drift")
+    if descriptor.get("approvalPolicy") != expected_approval:
+        raise ValueError(f"{role.value} observable approval policy drift")
+    thread = descriptor.get("thread")
+    if not isinstance(thread, Mapping):
+        raise ValueError(f"{role.value} response Thread is missing")
+    if thread.get("threadSource") != expected_source:
+        raise ValueError(f"{role.value} response Thread source drift")
+    actual_model = descriptor.get("model")
+    if not isinstance(actual_model, str) or not actual_model:
+        raise ValueError(f"{role.value} response model is missing")
+    if expected_model is not None and actual_model != expected_model:
+        raise ValueError(f"{role.value} response model drift")
 def _validate_server_transports(
     value: Mapping[str, Mapping[str, Any]],
 ) -> None:

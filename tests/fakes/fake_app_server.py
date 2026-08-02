@@ -39,6 +39,27 @@ def thread_payload(thread_id: str = THREAD_ID) -> dict[str, Any]:
     return {"thread": {"id": thread_id, "turns": [], "preview": "fake thread"}}
 
 
+def observable_thread_payload(
+    thread_id: str, params: dict[str, Any]
+) -> dict[str, Any]:
+    payload = thread_payload(thread_id)
+    payload["thread"]["threadSource"] = params.get("threadSource")
+    requested_sandbox = params.get("sandbox")
+    sandbox_type = (
+        "workspaceWrite" if requested_sandbox == "workspace-write" else "readOnly"
+    )
+    payload.update(
+        {
+            "sandbox": {"type": sandbox_type, "networkAccess": False},
+            "approvalPolicy": params.get("approvalPolicy"),
+            "model": params.get("model") or "fake-default-model",
+            "reasoningEffort": "high",
+            "serviceTier": params.get("serviceTier"),
+        }
+    )
+    return payload
+
+
 def goal_payload(thread_id: str, params: dict[str, Any]) -> dict[str, Any]:
     previous = _goals.get(thread_id, {})
     return {
@@ -215,7 +236,7 @@ def handle_request(message: dict[str, Any]) -> None:
                 }
             )
     elif method == "thread/start":
-        response = thread_payload()
+        response = observable_thread_payload(THREAD_ID, params)
         response["receivedParams"] = params
         result(request_id, response)
         emit(
@@ -224,6 +245,13 @@ def handle_request(message: dict[str, Any]) -> None:
                 "params": {"thread": thread_payload()["thread"]},
             }
         )
+    elif method == "thread/fork":
+        old_thread_id = params.get("threadId", THREAD_ID)
+        forked_id = f"fork-{old_thread_id}"
+        response = observable_thread_payload(forked_id, params)
+        response["thread"]["forkedFromId"] = old_thread_id
+        response["receivedParams"] = params
+        result(request_id, response)
     elif method == "thread/resume":
         result(request_id, thread_payload(params.get("threadId", THREAD_ID)))
     elif method == "thread/read":
