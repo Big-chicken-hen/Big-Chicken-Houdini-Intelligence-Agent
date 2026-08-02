@@ -378,6 +378,8 @@ class ProjectEffectExecutor:
                     "item_id": item.item_id,
                     "tool": item.tool,
                     "artifact_paths": list(item.artifact_paths),
+                    "frame": item.capture_frame,
+                    "view": item.capture_view,
                     "evidence_bytes": item.evidence_bytes,
                 }
                 for item in evidence.evidence
@@ -521,10 +523,17 @@ class ProjectEffectExecutor:
         deadline: float,
     ) -> tuple[ProjectState, list[dict[str, Any]]]:
         calls: list[_TurnCall] = []
+        visual_images = _capture_image_paths(execution)
         for role in (Role.VISUAL_REVIEW, Role.TECHNICAL_REVIEW):
             request = self._base_request(state, role, "review_stage")
             request.update({"stage_card": stage, "execution": execution})
-            state, call = self._start_turn(state, role, request, deadline)
+            state, call = self._start_turn(
+                state,
+                role,
+                request,
+                deadline,
+                local_image_paths=visual_images if role is Role.VISUAL_REVIEW else (),
+            )
             calls.append(call)
         remaining = self._remaining(deadline)
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hia-project-review") as pool:
@@ -559,7 +568,14 @@ class ProjectEffectExecutor:
                 request = self._base_request(state, role, "revise_stage_review")
                 request.update({"stage_card": stage, "execution": execution, "prior_reviews": reviews})
                 state, completed = self._run_structured(
-                    state, role, request, "hia-project-review/1", deadline
+                    state,
+                    role,
+                    request,
+                    "hia-project-review/1",
+                    deadline,
+                    local_image_paths=(
+                        visual_images if role is Role.VISUAL_REVIEW else ()
+                    ),
                 )
                 revised = self._parse_review_payload(completed.payload, role, stage, execution)
                 reviews = [item for item in reviews if item["reviewer"] != role.value]
@@ -587,10 +603,25 @@ class ProjectEffectExecutor:
         if len(claims) != len(raw_claims):
             raise ProjectEffectError("INVALID_REVIEW_SCHEMA", "review claim is malformed")
         available = {item["item_id"] for item in execution["evidence"]}
+        capture_ids = {
+            item["item_id"]
+            for item in execution["evidence"]
+            if item.get("tool") == "hia_capture_viewport"
+            and item.get("artifact_paths")
+        }
+        technical_ids = available - capture_ids
         for claim in claims:
             refs = getattr(claim, "evidence_refs", ())
             if not set(refs).issubset(available):
                 raise ProjectEffectError("UNKNOWN_REVIEW_EVIDENCE", "review cites unavailable evidence")
+            if claim.disposition in {"verified", "failed"}:
+                required = capture_ids if role is Role.VISUAL_REVIEW else technical_ids
+                if not set(refs).intersection(required):
+                    kind = "capture" if role is Role.VISUAL_REVIEW else "technical"
+                    raise ProjectEffectError(
+                        "REVIEW_EVIDENCE_KIND_MISMATCH",
+                        f"{role.value} {claim.disposition} claim requires current {kind} evidence",
+                    )
         return json.loads(json.dumps(payload, ensure_ascii=False))
 
     def _run_structured(
@@ -602,6 +633,7 @@ class ProjectEffectExecutor:
         deadline: float,
         *,
         record_success: bool = True,
+        local_image_paths: Sequence[str] = (),
     ) -> tuple[ProjectState, CompletedTurn]:
         correction = 0
         current_request = dict(request)
@@ -613,7 +645,13 @@ class ProjectEffectExecutor:
             "no_placeholder_or_filler": True,
         }
         while correction <= state.budget.max_schema_corrections:
-            state, call = self._start_turn(state, role, current_request, deadline)
+            state, call = self._start_turn(
+                state,
+                role,
+                current_request,
+                deadline,
+                local_image_paths=local_image_paths,
+            )
             try:
                 completed = self._client.wait_for_turn(
                     call.thread_id, call.turn_id, self._remaining(deadline)
@@ -686,6 +724,8 @@ class ProjectEffectExecutor:
         role: Role,
         request: Mapping[str, Any],
         deadline: float,
+        *,
+        local_image_paths: Sequence[str] = (),
     ) -> tuple[ProjectState, _TurnCall]:
         state = self._refresh_guidance(state)
         guidance = pending_guidance(state, role)
@@ -706,7 +746,11 @@ class ProjectEffectExecutor:
                         "type": "text",
                         "text": json.dumps(envelope, ensure_ascii=False, separators=(",", ":")),
                         "text_elements": [],
-                    }
+                    },
+                    *(
+                        {"type": "localImage", "path": path}
+                        for path in local_image_paths
+                    ),
                 ],
                 "approvalPolicy": "on-request" if role is Role.EXECUTION else "never",
                 "sandboxPolicy": (
@@ -1101,6 +1145,34 @@ def _capture_hash(evidence: EvidenceValidationResult) -> str | None:
     for path in sorted(paths):
         digest.update(Path(path).read_bytes())
     return digest.hexdigest()
+
+
+def _capture_image_paths(execution: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return only current validated viewport artifacts, preserving evidence order."""
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    evidence = execution.get("evidence")
+    if not isinstance(evidence, list):
+        raise ProjectEffectError(
+            "MISSING_EXECUTION_EVIDENCE", "validated execution evidence is unavailable"
+        )
+    for item in evidence:
+        if not isinstance(item, Mapping) or item.get("tool") != "hia_capture_viewport":
+            continue
+        artifact_paths = item.get("artifact_paths")
+        if not isinstance(artifact_paths, list):
+            continue
+        for path in artifact_paths:
+            if isinstance(path, str) and path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+    if not paths:
+        raise ProjectEffectError(
+            "MISSING_VISUAL_REVIEW_IMAGE",
+            "Visual Review requires current validated viewport image content",
+        )
+    return tuple(paths)
 
 
 def _response_contract(schema: str) -> Mapping[str, Any]:

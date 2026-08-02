@@ -20,6 +20,7 @@ from services.bridge.hia_bridge.project_contracts import (
 )
 from services.bridge.hia_bridge.project_effects import (
     CompletedTurn,
+    ProjectEffectError,
     ProjectEffectExecutor,
 )
 from services.bridge.hia_bridge.project_guidance import publish_guidance
@@ -242,6 +243,13 @@ class FakeProjectClient:
                         "requested_frame": 1,
                         "actual_frame": 1,
                         "quality_frame": 1,
+                        "mode": "viewport",
+                        "width": 640,
+                        "height": 360,
+                        "source_state": {
+                            "camera": {"path": "/obj/review_cam"},
+                            "viewport": {"name": "persp1"},
+                        },
                     },
                 },
             ),
@@ -401,6 +409,26 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         )
         execution = next(item for item in starts if item["threadId"] == "thread-execution")
         self.assertEqual("workspaceWrite", execution["sandboxPolicy"]["type"])
+        visual = next(item for item in starts if item["threadId"] == "thread-visual_review")
+        technical = next(
+            item for item in starts if item["threadId"] == "thread-technical_review"
+        )
+        self.assertEqual(
+            [{"type": "localImage", "path": str(self.capture.resolve())}],
+            visual["input"][1:],
+        )
+        self.assertEqual(["text"], [entry["type"] for entry in technical["input"]])
+        stored_capture = next(
+            item
+            for item in harness.artifacts.get_named("project-1", "current_execution")[
+                "evidence"
+            ]
+            if item["tool"] == "hia_capture_viewport"
+        )
+        self.assertEqual("tool-capture", stored_capture["item_id"])
+        self.assertEqual(1.0, stored_capture["frame"])
+        self.assertEqual([str(self.capture.resolve())], stored_capture["artifact_paths"])
+        self.assertEqual("persp1", stored_capture["view"]["viewport"]["name"])
         for item in starts:
             if item["threadId"] != "thread-execution":
                 self.assertEqual("readOnly", item["sandboxPolicy"]["type"])
@@ -412,6 +440,59 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         goals = [params for method, params in self.client.calls if method == "thread/goal/set"]
         self.assertEqual("completed", goals[-1]["status"])
         self.assertEqual("thread-supervisor", goals[-1]["threadId"])
+
+    def test_visual_verified_claim_cannot_cite_only_technical_evidence(self):
+        harness = EffectHarness(self.root, self.client)
+        payload = _review_payload(Role.VISUAL_REVIEW)
+        payload["claims"][0]["evidence_refs"] = ["tool-validate"]
+        execution = {
+            "evidence": [
+                {
+                    "item_id": "tool-validate",
+                    "tool": "hia_validate",
+                    "artifact_paths": [],
+                },
+                {
+                    "item_id": "tool-capture",
+                    "tool": "hia_capture_viewport",
+                    "artifact_paths": [str(self.capture.resolve())],
+                },
+            ]
+        }
+        with self.assertRaises(ProjectEffectError) as raised:
+            harness.executor._parse_review_payload(
+                payload, Role.VISUAL_REVIEW, _full_stage(), execution
+            )
+        self.assertEqual("REVIEW_EVIDENCE_KIND_MISMATCH", raised.exception.code)
+
+    def test_visual_unverified_claim_does_not_invent_capture_binding(self):
+        harness = EffectHarness(self.root, self.client)
+        payload = {
+            "schema": "hia-project-review/1",
+            "stage_id": "stage-1",
+            "reviewer": Role.VISUAL_REVIEW.value,
+            "claims": [
+                {
+                    "disposition": "unverified",
+                    "claim_id": "claim-missing-view",
+                    "missing_evidence": ["front capture"],
+                    "minimum_next_observation": "capture the missing front view",
+                }
+            ],
+        }
+        execution = {
+            "evidence": [
+                {
+                    "item_id": "tool-capture",
+                    "tool": "hia_capture_viewport",
+                    "artifact_paths": [str(self.capture.resolve())],
+                }
+            ]
+        }
+        parsed = harness.executor._parse_review_payload(
+            payload, Role.VISUAL_REVIEW, _full_stage(), execution
+        )
+        self.assertEqual("unverified", parsed["claims"][0]["disposition"])
 
     def test_role_capsule_includes_complete_attachment_identity_without_artifact_copy(self):
         self.client.queue(
