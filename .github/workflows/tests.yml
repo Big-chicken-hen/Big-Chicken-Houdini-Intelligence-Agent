@@ -68,6 +68,18 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Force .runtime/tmp | Out-Null
 
+      - name: Create canonical CI environment
+        shell: pwsh
+        run: |
+          python -B -m venv .venv
+          if ($LASTEXITCODE -ne 0) { throw 'CI venv creation failed' }
+
       - name: Run standard-library tests
         shell: pwsh
-        run: python -B -m unittest discover -s tests -t .
+        run: |
+          $env:TEMP = Join-Path $env:GITHUB_WORKSPACE '.runtime\tmp'
+          $env:TMP = $env:TEMP
+          python -B -m unittest discover -s tests -t .
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tests failed with exit code $LASTEXITCODE"
+          }
