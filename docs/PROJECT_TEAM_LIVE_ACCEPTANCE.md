@@ -103,8 +103,10 @@ case with “expected to pass.”
 ## C. Real Execution write and evidence delivery
 
 1. Wait for the authorized current stage card. Verify it references stable
-   active requirement IDs and the authoritative task ID/hash; it must not depend
-   on a character-count threshold.
+   active requirement IDs and the authoritative task ID/hash. Confirm it meets
+   the configured Full-detail floors as well as the anti-filler, task-anchor,
+   required-structure, and semantic-completeness checks; length alone is never
+   acceptance evidence.
 2. Let Execution perform a real HIA/HOM write in the disposable current HIP.
    Confirm native editable nodes are created and the scene revision changes.
 3. Record every completed Execution HIA tool item used as technical evidence.
