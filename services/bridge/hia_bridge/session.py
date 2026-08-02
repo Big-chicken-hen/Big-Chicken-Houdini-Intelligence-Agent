@@ -12,16 +12,11 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .codex_stdio import CodexStdioClient, RequestId
 from .errors import BridgeError, CodexRPCError
 from .events import EventBuffer
-from .project_identity import (
-    PROJECT_THREAD_SOURCE_PREFIX,
-    ProjectThreadIdentity,
-    parse_project_thread_source,
-)
 
 
 MODEL_LIST_PAGE_SIZE = 100
@@ -145,8 +140,6 @@ class BridgeSession:
         self._account_result: dict[str, Any] | None = None
         self._account_error: dict[str, Any] | None = None
         self._thread_id: str | None = None
-        self._ordinary_thread_ids: set[str] = set()
-        self._project_thread_identities: dict[str, ProjectThreadIdentity] = {}
         self._turn_id: str | None = None
         self._turn_status: str | None = None
         self._turn_active = False
@@ -170,8 +163,6 @@ class BridgeSession:
                 self._initialize_result = initialize_result
                 self._connected = True
                 self._thread_id = None
-                self._ordinary_thread_ids.clear()
-                self._project_thread_identities.clear()
                 self._write_focus_state_locked()
             try:
                 account = self._client.request(
@@ -474,8 +465,6 @@ class BridgeSession:
         result = self._client.request("thread/start", params)
         thread_id = self._extract_thread_id(result)
         with self._lock:
-            self._ordinary_thread_ids.add(thread_id)
-            self._project_thread_identities.pop(thread_id, None)
             self._thread_id = thread_id
             self._reset_turn_locked()
             self._write_focus_state_locked()
@@ -499,7 +488,6 @@ class BridgeSession:
         )
         with self._lock:
             self._require_no_active_turn_locked()
-            self._require_ordinary_thread(thread_id)
         resumed = self._client.request(
             "thread/resume",
             {
@@ -512,11 +500,6 @@ class BridgeSession:
             },
         )
         resolved_id = self._extract_thread_id(resumed)
-        self._remember_thread_classification(
-            resumed,
-            resolved_id,
-            ordinary_if_source_missing=True,
-        )
         read_result = self._project_thread_messages(resumed, resolved_id)
         with self._lock:
             self._thread_id = resolved_id
@@ -537,7 +520,6 @@ class BridgeSession:
             "thread/read",
             {"threadId": selected, "includeTurns": True},
         )
-        self._require_ordinary_thread_result(result, selected)
         return {
             "thread_id": selected,
             "result": self._project_thread_messages(result, selected),
@@ -583,27 +565,6 @@ class BridgeSession:
                 thread_id = self._validated_thread_response_string(
                     entry.get("id"), "id", MODEL_IDENTIFIER_MAX_LENGTH, allow_empty=False
                 )
-                source = entry.get("threadSource")
-                identity = parse_project_thread_source(source)
-                if (
-                    isinstance(source, str)
-                    and source.startswith(PROJECT_THREAD_SOURCE_PREFIX)
-                    and identity is None
-                ):
-                    raise self._invalid_thread_response(
-                        "Project Thread source is malformed",
-                        field="threadSource",
-                    )
-                if identity is not None:
-                    with self._lock:
-                        self._project_thread_identities[thread_id] = identity
-                        self._ordinary_thread_ids.discard(thread_id)
-                    # Project roles are rendered from the project snapshot and
-                    # never enter ordinary history selection.
-                    continue
-                with self._lock:
-                    self._ordinary_thread_ids.add(thread_id)
-                    self._project_thread_identities.pop(thread_id, None)
                 cwd = self._validated_thread_response_string(
                     entry.get("cwd"), "cwd", THREAD_CWD_MAX_LENGTH, allow_empty=False
                 )
@@ -680,7 +641,6 @@ class BridgeSession:
 
     def rename_thread(self, thread_id: str, name: str) -> dict[str, Any]:
         thread_id = self._validated_identifier(thread_id, "thread_id")
-        self._require_ordinary_thread(thread_id)
         name = self._validated_optional_selection(
             name, "thread_name", THREAD_NAME_MAX_LENGTH
         )
@@ -697,7 +657,6 @@ class BridgeSession:
         thread_id = self._validated_identifier(thread_id, "thread_id")
         with self._lock:
             self._require_no_active_turn_locked()
-            self._require_ordinary_thread(thread_id)
 
         result = self._client.request(
             "thread/delete",
@@ -712,8 +671,6 @@ class BridgeSession:
             was_selected = self._thread_id == thread_id
             self._focus_enabled_threads.discard(thread_id)
             self._focus_goal_bindings.pop(thread_id, None)
-            self._ordinary_thread_ids.discard(thread_id)
-            self._project_thread_identities.pop(thread_id, None)
             if was_selected:
                 self._thread_id = None
                 self._reset_turn_locked()
@@ -764,7 +721,6 @@ class BridgeSession:
 
     def get_goal(self, expected_thread_id: str) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)
-        self._require_ordinary_thread(thread_id)
         result = self._client.request(
             "thread/goal/get",
             {"threadId": thread_id},
@@ -792,7 +748,6 @@ class BridgeSession:
         token_budget: int | None,
     ) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)
-        self._require_ordinary_thread(thread_id)
         if (
             not isinstance(objective, str)
             or not objective.strip()
@@ -828,7 +783,6 @@ class BridgeSession:
 
     def clear_goal(self, expected_thread_id: str) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)
-        self._require_ordinary_thread(thread_id)
         result = self._client.request(
             "thread/goal/clear",
             {"threadId": thread_id},
@@ -864,7 +818,6 @@ class BridgeSession:
                 "Target focus mode enabled must be a boolean",
             )
         thread_id = self._selected_thread_id(expected_thread_id)
-        self._require_ordinary_thread(thread_id)
         if enabled:
             result = self._client.request(
                 "thread/goal/get",
@@ -975,6 +928,7 @@ class BridgeSession:
         effort: str | None = None,
         local_image_paths: list[str] | None = None,
         service_tier: str | None = None,
+        thread_guard: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(text, str):
             raise BridgeError("EMPTY_INPUT", "Natural-language input must not be empty")
@@ -997,7 +951,12 @@ class BridgeSession:
         )
         with self._lock:
             thread_id = self._validated_identifier(self._thread_id, "thread_id")
-            self._require_ordinary_thread(thread_id)
+            if thread_guard is not None:
+                # Resolve and authorize the exact selected Thread while the
+                # same lock that reserves turn/start still owns its identity.
+                # This prevents a concurrent resume from changing the Thread
+                # between a preflight check and the native request.
+                thread_guard(thread_id)
             image_paths = self._validated_local_image_paths(
                 local_image_paths,
                 thread_id,
@@ -1130,7 +1089,6 @@ class BridgeSession:
 
         with self._lock:
             thread_id = self._validated_identifier(self._thread_id, "thread_id")
-            self._require_ordinary_thread(thread_id)
             turn_id = self._turn_id
             if not self._turn_active or not self._identifier_is_valid(turn_id):
                 raise BridgeError(
@@ -1346,7 +1304,6 @@ class BridgeSession:
                 self._identifier_is_valid(value) for value in (thread_id, turn_id)
             ):
                 raise self._no_active_turn_error_locked()
-            self._require_ordinary_thread(str(thread_id))
             if self._turn_status == "stopRequested":
                 raise BridgeError(
                     "INTERRUPT_NOT_CONFIRMED",
@@ -1921,89 +1878,6 @@ class BridgeSession:
             raise BridgeError("INVALID_CODEX_RESPONSE", "Thread response has no thread object", 502)
         thread_id = result["thread"].get("id")
         return BridgeSession._validated_identifier(thread_id, "thread_id")
-
-    def _require_ordinary_thread(self, thread_id: str) -> None:
-        with self._lock:
-            identity = self._project_thread_identities.get(thread_id)
-            if identity is not None:
-                self._raise_project_role_api_required(thread_id, identity)
-            if thread_id in self._ordinary_thread_ids:
-                return
-        result = self._client.request(
-            "thread/read",
-            {"threadId": thread_id, "includeTurns": False},
-        )
-        self._require_ordinary_thread_result(result, thread_id)
-
-    def _require_ordinary_thread_result(self, result: Any, thread_id: str) -> None:
-        resolved_id = BridgeSession._extract_thread_id(result)
-        if resolved_id != thread_id:
-            raise BridgeError(
-                "INVALID_CODEX_RESPONSE",
-                "Thread response does not match the requested thread",
-                502,
-            )
-        thread = result["thread"]
-        source = thread.get("threadSource")
-        identity = parse_project_thread_source(source)
-        if (
-            isinstance(source, str)
-            and source.startswith(PROJECT_THREAD_SOURCE_PREFIX)
-            and identity is None
-        ):
-            raise BridgeError(
-                "INVALID_CODEX_RESPONSE",
-                "Project Thread source is malformed",
-                502,
-            )
-        if identity is not None:
-            with self._lock:
-                self._project_thread_identities[thread_id] = identity
-                self._ordinary_thread_ids.discard(thread_id)
-            self._raise_project_role_api_required(thread_id, identity)
-        with self._lock:
-            self._ordinary_thread_ids.add(thread_id)
-            self._project_thread_identities.pop(thread_id, None)
-
-    def _remember_thread_classification(
-        self,
-        result: Any,
-        thread_id: str,
-        *,
-        ordinary_if_source_missing: bool,
-    ) -> None:
-        if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
-            return
-        identity = parse_project_thread_source(result["thread"].get("threadSource"))
-        with self._lock:
-            if identity is not None:
-                self._project_thread_identities[thread_id] = identity
-                self._ordinary_thread_ids.discard(thread_id)
-            elif ordinary_if_source_missing:
-                self._ordinary_thread_ids.add(thread_id)
-                self._project_thread_identities.pop(thread_id, None)
-
-    @staticmethod
-    def _raise_project_role_api_required(
-        thread_id: str,
-        identity: ProjectThreadIdentity,
-    ) -> None:
-        raise BridgeError(
-            "PROJECT_ROLE_REQUIRES_PROJECT_API",
-            "Project role Threads can only be used through project APIs",
-            409,
-            {
-                "project_id": identity.project_id,
-                "thread_id": thread_id,
-                "role": identity.role.value,
-            },
-        )
-        if isinstance(source, str) and source.startswith(PROJECT_THREAD_SOURCE_PREFIX):
-            raise BridgeError(
-                "INVALID_CODEX_RESPONSE",
-                "Project Thread source is malformed",
-                502,
-            )
 
     @staticmethod
     def _project_thread_messages(

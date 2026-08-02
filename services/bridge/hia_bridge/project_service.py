@@ -20,12 +20,10 @@ from .project_contracts import (
     authoritative_task_identity,
 )
 from .project_guidance import RequirementDelta, publish_guidance
-from .project_identity import parse_project_thread_source
 from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_registry import ProjectRecord, ProjectRegistry
 from .project_runner import ProjectRunner
 from .project_thread_factory import AppServerClient, ProjectThreadFactory, ROLE_TITLES
-from .session import BridgeSession
 
 
 PROJECT_TEAM_SCHEMA = "hia-project-team/2"
@@ -183,6 +181,11 @@ class ProjectTeamService:
         self._settings.set(mode)
         return self.snapshot()
 
+    def route(self, override: str | None) -> str:
+        if override is not None and override not in PROJECT_MODES:
+            raise ValueError("team_override must be single or team")
+        return override or self._settings.get()
+
     def role_identity_for_thread(self, thread_id: str) -> tuple[str, Role] | None:
         """Return only an exact persisted Project/Role identity for a Thread."""
 
@@ -200,34 +203,6 @@ class ProjectTeamService:
                 if matches:
                     return record.state.project_id, matches[0]
         return None
-
-    def read_role_thread(self, thread_id: str) -> dict[str, Any]:
-        """Read one project role without resuming it or changing ordinary Session."""
-
-        identity = self.role_identity_for_thread(thread_id)
-        if identity is None:
-            raise KeyError(thread_id)
-        project_id, role = identity
-        result = self._client.request(
-            "thread/read",
-            {"threadId": thread_id, "includeTurns": True},
-        )
-        thread = result.get("thread") if isinstance(result, Mapping) else None
-        native_identity = parse_project_thread_source(
-            thread.get("threadSource") if isinstance(thread, Mapping) else None
-        )
-        if (
-            native_identity is None
-            or native_identity.project_id != project_id
-            or native_identity.role is not role
-        ):
-            raise ValueError("native project Thread source does not match the registry")
-        return {
-            "project_id": project_id,
-            "role": role.value,
-            "thread_id": thread_id,
-            "read": BridgeSession._project_thread_messages(result, thread_id),
-        }
 
     def start_team_project(
         self,

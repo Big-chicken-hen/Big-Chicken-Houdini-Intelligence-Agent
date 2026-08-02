@@ -12,7 +12,7 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlsplit
@@ -311,15 +311,12 @@ class BridgeApplication:
         houdini_executor_path: Path | None = None,
         knowledge_cli: KnowledgeCliRunner | None = None,
         project_team: ProjectTeamService | None = None,
-        project_team_factory: Callable[[], ProjectTeamService] | None = None,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Bearer token must contain at least 32 characters")
         self.session = session
         self.events = events
         self.project_team = project_team
-        self._project_team_factory = project_team_factory
-        self._project_team_lock = threading.Lock()
         if scene_queue is None and scene_registry is not None:
             raise ValueError("A scene registry cannot be enabled without a scene queue")
         self.scene_queue = scene_queue
@@ -422,29 +419,6 @@ class BridgeApplication:
             self._hia_transport_error = TransportError
             self._hia_cancellation_type = CancellationToken
         self._knowledge_cli = knowledge_cli or KnowledgeCliRunner()
-
-    def require_project_team(self) -> ProjectTeamService:
-        with self._project_team_lock:
-            if self.project_team is not None:
-                return self.project_team
-            if self._project_team_factory is None:
-                raise BridgeError(
-                    "PROJECT_TEAM_UNAVAILABLE",
-                    "Project mode is unavailable; ordinary chat remains available",
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                )
-            try:
-                service = self._project_team_factory()
-            except BridgeError:
-                raise
-            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-                raise BridgeError(
-                    "PROJECT_REGISTRY_CORRUPTED",
-                    "Project registry exists but cannot be read",
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                ) from exc
-            self.project_team = service
-            return service
 
     def authorized(self, value: str | None) -> bool:
         return value is not None and hmac.compare_digest(
@@ -781,29 +755,16 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             result = application.session.list_threads()
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/project-team":
-            project_team = application.require_project_team()
+            if application.project_team is None:
+                raise BridgeError(
+                    "PROJECT_TEAM_UNAVAILABLE",
+                    "Project team runtime is not configured",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
             return {
                 "ok": True,
-                "project_team": project_team.snapshot(),
+                "project_team": application.project_team.snapshot(),
             }, HTTPStatus.OK
-        project_thread_prefix = "/v1/project-team/threads/"
-        if path.startswith(project_thread_prefix):
-            thread_id = urllib_parse.unquote(path[len(project_thread_prefix) :])
-            if not thread_id or "/" in thread_id or "\\" in thread_id:
-                raise BridgeError(
-                    "INVALID_REQUEST",
-                    "Project role read requires one encoded thread id",
-                    HTTPStatus.BAD_REQUEST,
-                )
-            try:
-                result = application.require_project_team().read_role_thread(thread_id)
-            except KeyError as exc:
-                raise BridgeError(
-                    "PROJECT_ROLE_NOT_FOUND",
-                    "Project role Thread was not found",
-                    HTTPStatus.NOT_FOUND,
-                ) from exc
-            return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/goal":
             values = parse_qs(query, keep_blank_values=True)
             thread_ids = values.get("thread_id", [])
@@ -897,59 +858,82 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/turn":
-            allowed = {
-                "text",
-                "model",
-                "effort",
-                "local_image_paths",
-                "service_tier",
-            }
-            if set(body) - allowed:
+            team_override = body.get("team_override")
+            if team_override is not None and application.project_team is None:
                 raise BridgeError(
-                    "INVALID_REQUEST",
-                    "Ordinary Turn contains unsupported fields",
-                    HTTPStatus.BAD_REQUEST,
+                    "PROJECT_TEAM_UNAVAILABLE",
+                    "Project team runtime is not configured",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
                 )
-            result = application.session.start_turn(
-                text=body.get("text"),
-                model=body.get("model"),
-                effort=body.get("effort"),
-                local_image_paths=body.get("local_image_paths"),
-                service_tier=body.get("service_tier"),
+            route = (
+                application.project_team.route(team_override)
+                if application.project_team is not None
+                else "single"
             )
-            return {"ok": True, **result}, HTTPStatus.OK
-        if path == "/v1/project-team/start":
-            allowed = {
-                "text",
-                "model",
-                "effort",
-                "service_tier",
-                "local_image_paths",
-            }
-            if set(body) - allowed:
-                raise BridgeError(
-                    "INVALID_REQUEST",
-                    "Project start contains unsupported fields",
-                    HTTPStatus.BAD_REQUEST,
+            if route == "team":
+                if application.project_team is None:
+                    raise BridgeError(
+                        "PROJECT_TEAM_UNAVAILABLE",
+                        "Project team runtime is not configured",
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                result = application.project_team.start_team_project(
+                    task_text=body.get("text"),
+                    model=body.get("model"),
+                    effort=body.get("effort"),
+                    service_tier=body.get("service_tier"),
+                    local_image_paths=body.get("local_image_paths"),
                 )
-            result = application.require_project_team().start_team_project(
-                task_text=body.get("text"),
-                model=body.get("model"),
-                effort=body.get("effort"),
-                service_tier=body.get("service_tier"),
-                local_image_paths=body.get("local_image_paths"),
-            )
+            else:
+                def require_ordinary_thread(thread_id: str) -> None:
+                    if application.project_team is None:
+                        return
+                    identity = application.project_team.role_identity_for_thread(
+                        thread_id
+                    )
+                    if identity is None:
+                        return
+                    project_id, role = identity
+                    raise BridgeError(
+                        "PROJECT_ROLE_TURN_REQUIRES_WORKFLOW",
+                        "Project role Threads can only advance through the project workflow",
+                        HTTPStatus.CONFLICT,
+                        {
+                            "project_id": project_id,
+                            "thread_id": thread_id,
+                            "role": role.value,
+                        },
+                    )
+
+                result = application.session.start_turn(
+                    text=body.get("text"),
+                    model=body.get("model"),
+                    effort=body.get("effort"),
+                    local_image_paths=body.get("local_image_paths"),
+                    service_tier=body.get("service_tier"),
+                    thread_guard=require_ordinary_thread,
+                )
+                result["routing"] = "single"
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/project-team":
+            if application.project_team is None:
+                raise BridgeError(
+                    "PROJECT_TEAM_UNAVAILABLE",
+                    "Project team runtime is not configured",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
             self._require_exact_fields(body, {"mode"})
             return {
                 "ok": True,
-                "project_team": application.require_project_team().set_mode(
-                    body.get("mode")
-                ),
+                "project_team": application.project_team.set_mode(body.get("mode")),
             }, HTTPStatus.OK
         if path == "/v1/project-team/actions":
-            project_team = application.require_project_team()
+            if application.project_team is None:
+                raise BridgeError(
+                    "PROJECT_TEAM_UNAVAILABLE",
+                    "Project team runtime is not configured",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
             action = body.get("action")
             if action == "append_guidance":
                 allowed = {
@@ -962,7 +946,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 if set(body) - allowed:
                     raise BridgeError("INVALID_REQUEST", "Unexpected guidance fields")
                 try:
-                    snapshot = project_team.append_guidance(
+                    snapshot = application.project_team.append_guidance(
                         project_id=body.get("project_id"),
                         thread_id=body.get("thread_id"),
                         text=body.get("text"),
@@ -1002,7 +986,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 }
                 self._require_exact_fields(body, expected)
                 try:
-                    snapshot = project_team.set_role_runtime(
+                    snapshot = application.project_team.set_role_runtime(
                         project_id=body.get("project_id"),
                         thread_id=body.get("thread_id"),
                         model=body.get("model"),
@@ -1024,11 +1008,11 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             elif action in {"continue", "stop"}:
                 self._require_exact_fields(body, {"action", "project_id"})
                 if action == "continue":
-                    snapshot = project_team.continue_project(
+                    snapshot = application.project_team.continue_project(
                         project_id=body.get("project_id")
                     )
                 elif action == "stop":
-                    snapshot = project_team.stop_project(
+                    snapshot = application.project_team.stop_project(
                         project_id=body.get("project_id")
                     )
             else:

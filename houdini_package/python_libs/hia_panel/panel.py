@@ -190,8 +190,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._threads_requested = False
         self._thread_history: list[dict[str, Any]] = []
         self._project_team_controller: Any | None = None
-        self._project_draft_active = False
-        self._project_start_pending = False
+        self._new_task_route: str | None = None
         self._pending_team_drafts: dict[str, dict[str, Any]] = {}
         self._thread_delete_confirm_id: str | None = None
         self._thread_delete_confirm_not_before: float | None = None
@@ -334,10 +333,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._client,
             on_new_task=self._on_project_team_new_task,
             on_open_thread=self._open_project_role_thread,
-            on_refresh_ordinary=self._refresh_threads,
             on_delete_thread=self._delete_project_navigation_thread,
-            on_rename_thread=self._rename_project_navigation_thread,
-            on_copy_thread_id=self._copy_project_navigation_thread_id,
             on_error=self._append_system,
         )
         self._project_team_controller.show()
@@ -506,6 +502,60 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._set_project_navigation_collapsed
         )
         left_layout.addWidget(self.project_team_view, 1)
+
+        # These objects remain alive because the existing session, rename and
+        # deletion code still uses them as an internal compatibility model.
+        # ProjectTeamView is the only user-visible history/navigation surface.
+        self.legacy_history_label = QtWidgets.QLabel("历史任务")
+        left_layout.addWidget(self.legacy_history_label)
+        self.history_combo = QtWidgets.QComboBox()
+        self.history_combo.addItem("暂无历史会话", None)
+        self.history_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.history_combo.setMinimumContentsLength(0)
+        self.history_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.history_combo.setToolTip("当前项目全部可打开的未归档 Codex 会话")
+        left_layout.addWidget(self.history_combo)
+        history_action_row = QtWidgets.QHBoxLayout()
+        self.refresh_threads_button = QtWidgets.QPushButton("刷新")
+        self.new_thread_button = QtWidgets.QPushButton("新建")
+        self.resume_thread_button = QtWidgets.QPushButton("打开")
+        history_action_row.addWidget(self.refresh_threads_button)
+        history_action_row.addWidget(self.new_thread_button)
+        history_action_row.addWidget(self.resume_thread_button)
+        left_layout.addLayout(history_action_row)
+        self.thread_name_edit = QtWidgets.QLineEdit()
+        self.thread_name_edit.setPlaceholderText("会话名称")
+        left_layout.addWidget(self.thread_name_edit)
+        history_name_row = QtWidgets.QHBoxLayout()
+        self.rename_thread_button = QtWidgets.QPushButton("重命名")
+        self.copy_thread_id_button = QtWidgets.QPushButton("复制 ID")
+        self.delete_thread_button = QtWidgets.QPushButton("删除")
+        self.delete_thread_button.setToolTip("永久删除当前明确选中的 Codex Thread")
+        history_name_row.addWidget(self.rename_thread_button)
+        history_name_row.addWidget(self.copy_thread_id_button)
+        history_name_row.addWidget(self.delete_thread_button)
+        left_layout.addLayout(history_name_row)
+        self.thread_id_edit = QtWidgets.QLineEdit()
+        self.thread_id_edit.setVisible(False)
+        left_layout.addWidget(self.thread_id_edit)
+        for legacy_widget in (
+            self.legacy_history_label,
+            self.history_combo,
+            self.refresh_threads_button,
+            self.new_thread_button,
+            self.resume_thread_button,
+            self.thread_name_edit,
+            self.rename_thread_button,
+            self.copy_thread_id_button,
+            self.delete_thread_button,
+            self.thread_id_edit,
+        ):
+            legacy_widget.setVisible(False)
 
         self.center_column = QtWidgets.QWidget(self.main_splitter)
         self.center_column.setMinimumWidth(360)
@@ -1321,6 +1371,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._project_navigation_expanded_width = 300
         root.addWidget(self.main_splitter, 1)
 
+        self.new_thread_button.clicked.connect(self._new_thread)
+        self.resume_thread_button.clicked.connect(self._resume_thread)
         self.add_image_button.clicked.connect(self._choose_images)
         self.report_issue_button.clicked.connect(self._record_manual_issue)
         self.copy_report_path_button.clicked.connect(self._copy_report_path)
@@ -1345,11 +1397,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.service_tier_combo.currentIndexChanged.connect(
             self._on_service_tier_changed
         )
+        self.history_combo.currentIndexChanged.connect(
+            self._on_history_index_changed
+        )
         self.goal_refresh_button.clicked.connect(self._request_goal)
         self.goal_save_button.clicked.connect(self._save_goal)
         self.goal_clear_button.clicked.connect(self._clear_goal)
         self.goal_focus_checkbox.toggled.connect(self._set_focus_mode)
         self.team_combo.currentIndexChanged.connect(self._on_team_selected)
+        self.refresh_threads_button.clicked.connect(self._refresh_threads)
+        self.rename_thread_button.clicked.connect(self._rename_thread)
+        self.copy_thread_id_button.clicked.connect(self._copy_thread_id)
+        self.delete_thread_button.clicked.connect(self._delete_thread)
         self.project_memory_search_edit.returnPressed.connect(
             self._search_project_memories
         )
@@ -2914,14 +2973,42 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         stopping = self._is_stopping_turn()
         steer_available = controls.stop and not stopping
         team_intake_ready = bool(
-            self._project_draft_active
+            getattr(self, "_new_task_route", None) == "team"
             and self._connected
             and self._authenticated
             and not self._turn_state.busy
             and not self._goal_houdini_busy()
-            and not self._project_start_pending
         )
         capabilities = self._selected_context_capabilities()
+        history_record = self._selected_history_record()
+        history_available = history_record is not None
+        self.new_thread_button.setEnabled(
+            controls.new_thread and thread_switch_enabled
+        )
+        self.resume_thread_button.setEnabled(
+            controls.resume_thread and thread_switch_enabled and history_available
+        )
+        self.history_combo.setEnabled(
+            self._connected
+            and not self._turn_state.busy
+            and thread_switch_enabled
+        )
+        self.refresh_threads_button.setEnabled(
+            self._connected and not self._session_action_pending
+        )
+        self.thread_name_edit.setEnabled(
+            history_available and not self._turn_state.busy and session_enabled
+        )
+        self.rename_thread_button.setEnabled(
+            history_available and not self._turn_state.busy and session_enabled
+        )
+        self.copy_thread_id_button.setEnabled(history_available)
+        self.delete_thread_button.setEnabled(
+            self._connected
+            and history_available
+            and capabilities.can_delete
+            and not self._session_action_pending
+        )
         project_memory_ready = (
             getattr(self, "_client", None) is not None
             and self._mcp_backend == "hia_v2"
@@ -3004,9 +3091,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             controls.stop and not stopping and not self._interrupt_pending
         )
         self.send_button.setText(
-            "正在创建项目…"
-            if self._project_start_pending
-            else (
             "发送中…"
             if self._turn_start_request_pending
             else (
@@ -3022,7 +3106,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     )
                 )
             )
-        ))
+        )
+        self.thread_id_edit.setEnabled(
+            not self._turn_state.busy and thread_switch_enabled
+        )
         selection_enabled = self._connected and session_enabled
         self.model_combo.setEnabled(selection_enabled)
         self.effort_combo.setEnabled(selection_enabled)
@@ -3313,6 +3400,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._clear_turn_performance()
             self._selected_thread_id = thread_id
             self._apply_focus_mode(thread_id, session.get("focus_mode", False))
+            self.thread_id_edit.setText(thread_id)
             self.thread_status_label.setText(
                 f"Thread：{self._history_title(thread_id)}"
             )
@@ -3342,6 +3430,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._team_records.clear()
             self._refresh_team_combo()
             self._clear_task_insights()
+            self.thread_id_edit.setText("")
             self.thread_status_label.setText("Thread：未选择")
             self.thread_status_label.setToolTip("当前未选择 Codex Thread")
             self._clear_diagnostic_context()
@@ -4301,21 +4390,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._append_system("问题报告路径已复制。")
 
     def _selected_history_record(self) -> dict[str, Any] | None:
-        view = getattr(self, "project_team_view", None)
-        state = getattr(view, "state", None)
-        selected_thread_id = (
-            state.selected_chat_thread_id() if state is not None else None
-        )
-        if not isinstance(selected_thread_id, str):
-            return None
-        return next(
-            (
-                record
-                for record in self._thread_history
-                if record.get("thread_id") == selected_thread_id
-            ),
-            None,
-        )
+        combo = getattr(self, "history_combo", None)
+        record = combo.currentData() if combo is not None else None
+        return record if isinstance(record, dict) else None
 
     def _history_title(self, thread_id: str, *, full: bool = False) -> str:
         for record in self._thread_history:
@@ -4359,6 +4436,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         return f"{title}  ·  {updated_text}"
 
     def _apply_threads(self, raw_threads: Any) -> None:
+        previous_record = self._selected_history_record()
+        previous_choice = (
+            previous_record.get("thread_id")
+            if previous_record is not None
+            else self._selected_thread_id
+        )
         threads = raw_threads if isinstance(raw_threads, list) else []
         records: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -4381,6 +4464,39 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
             if callable(consume_ordinary_threads):
                 consume_ordinary_threads(records)
+
+        self.history_combo.blockSignals(True)
+        self.history_combo.clear()
+        selected_index = 0
+        self.history_combo.addItem(
+            "未选择历史会话" if records else "暂无历史会话",
+            None,
+        )
+        if records:
+            for record in records:
+                self.history_combo.addItem(self._history_label(record), record)
+                index = self.history_combo.count() - 1
+                thread_id = record["thread_id"]
+                self.history_combo.setItemData(
+                    index,
+                    f"{self._history_title(thread_id, full=True)}\n"
+                    f"Codex Thread ID：{thread_id}",
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                )
+                if thread_id == previous_choice:
+                    selected_index = index
+        self.history_combo.setCurrentIndex(selected_index)
+        self.history_combo.blockSignals(False)
+        self._on_history_index_changed(selected_index)
+
+    def _on_history_index_changed(self, _index: int = -1) -> None:
+        self._reset_thread_delete_confirmation()
+        record = self._selected_history_record()
+        thread_id = record.get("thread_id") if record is not None else None
+        name = record.get("name") if record is not None else None
+        self.thread_id_edit.setText(thread_id if isinstance(thread_id, str) else "")
+        self.thread_name_edit.setText(name if isinstance(name, str) else "")
+        self._refresh_controls()
 
     def _refresh_threads(self) -> None:
         if self._client is None or not self._connected:
@@ -4407,9 +4523,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _rename_thread(self) -> None:
         record = self._selected_history_record()
-        view = getattr(self, "project_team_view", None)
-        name_edit = getattr(view, "ordinary_name_edit", None)
-        name = name_edit.text().strip() if name_edit is not None else ""
+        name = self.thread_name_edit.text().strip()
         thread_id = record.get("thread_id") if record is not None else None
         if not isinstance(thread_id, str) or not name:
             self._append_system("请选择历史会话并输入名称。")
@@ -4428,33 +4542,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         record = self._selected_history_record()
         thread_id = record.get("thread_id") if record is not None else None
         if not isinstance(thread_id, str):
-            return
-        try:
-            QtWidgets.QApplication.clipboard().setText(thread_id)
-        except Exception as exc:
-            self._append_system(f"复制 Thread ID 失败：{type(exc).__name__}: {exc}")
-            return
-        self._append_system("Thread ID 已复制。")
-
-    def _rename_project_navigation_thread(self, thread_id: str, name: str) -> None:
-        if not any(
-            record.get("thread_id") == thread_id for record in self._thread_history
-        ):
-            return
-        if self._client is None or self._session_action_pending:
-            return
-        self._session_action_pending = True
-        self._refresh_controls()
-        self._client.rename_thread(
-            thread_id,
-            name,
-            context=f"{_THREAD_RENAME_CONTEXT_PREFIX}{uuid.uuid4().hex}",
-        )
-
-    def _copy_project_navigation_thread_id(self, thread_id: str) -> None:
-        if not any(
-            record.get("thread_id") == thread_id for record in self._thread_history
-        ):
             return
         try:
             QtWidgets.QApplication.clipboard().setText(thread_id)
@@ -4512,6 +4599,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._thread_delete_confirm_id = thread_id
             self._thread_delete_confirm_not_before = (
                 now + _THREAD_DELETE_CONFIRM_MIN_SECONDS
+            )
+            self.delete_thread_button.setText("再次点击删除")
+            self.delete_thread_button.setToolTip(
+                f"再次点击将永久删除：{self._history_title(thread_id, full=True)}"
             )
             project_team_view = getattr(self, "project_team_view", None)
             if project_team_view is not None:
@@ -4592,6 +4683,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             if hasattr(self.conversation, "clear_messages"):
                 self.conversation.clear_messages()
             self.welcome_group.setVisible(True)
+            self.thread_id_edit.setText("")
             self.thread_status_label.setText("Thread：未选择")
             self.thread_status_label.setToolTip("当前未选择 Codex Thread")
         self._apply_threads(self._thread_history)
@@ -6433,9 +6525,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         *,
         allow_active: bool = False,
         hidden_user_prefix: str | None = None,
-        expected_thread_id: str | None = None,
-        explicit_project_role: tuple[str, str] | None = None,
-        preserve_ordinary_state: bool = False,
     ) -> bool:
         if self._turn_state.busy and not allow_active:
             return False
@@ -6446,15 +6535,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if not isinstance(thread, dict):
             return False
         thread_id = thread.get("id")
-        target_thread_id = expected_thread_id or self._selected_thread_id
-        if thread_id != target_thread_id:
+        if thread_id != self._selected_thread_id:
             return False
         turns = thread.get("turns")
         if not isinstance(turns, list):
             return False
-        project_role = explicit_project_role or self._project_role_for_thread(thread_id)
-        if not preserve_ordinary_state:
-            self._restore_goal_stage_from_thread(turns)
+        project_role = self._project_role_for_thread(thread_id)
+        self._restore_goal_stage_from_thread(turns)
 
         restored: list[tuple[str, Any]] = []
         for turn in turns:
@@ -6510,7 +6597,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     restored.append(("agent", agent_text))
         if hasattr(self.conversation, "clear_messages"):
             self.conversation.clear_messages()
-        if not preserve_ordinary_state and self._build_brief_thread_id != thread_id:
+        if self._build_brief_thread_id != thread_id:
             for role, value in restored:
                 if role != "user":
                     continue
@@ -6562,8 +6649,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._project_role_context_for_thread(thread_id) if has_thread else None
         )
         ordinary = has_thread and project_role is None
-        project_guidance = False
-        team_intake = self._project_draft_active
+        project_guidance = bool(
+            project_role is not None
+            and getattr(project_role[0], "can_guide", False)
+            and getattr(project_role[0], "status", None)
+            not in {"completed", "failed"}
+        )
+        team_intake = bool(
+            getattr(self, "_new_task_route", None) == "team" and not has_thread
+        )
         return SelectedContextCapabilities(
             can_send=ordinary or project_guidance or team_intake,
             can_edit_goal=ordinary,
@@ -6724,7 +6818,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         return [scalar_text(value)]
 
     def _new_thread(self) -> None:
-        self._project_draft_active = False
+        self._new_task_route = None
         if (
             self._client is not None
             and not self._turn_state.busy
@@ -6754,13 +6848,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             or self._goal_houdini_busy()
             or self._session_action_pending
             or self._turn_start_request_pending
-            or self._project_start_pending
             or self._turn_steer_request_pending
             or self._reconciliation_tokens
         ):
             self._append_system("当前操作结束后才能新建项目。")
             return
-        self._project_draft_active = True
+        self._new_task_route = "team"
         self._append_system(
             "已选择新建项目。请在下方输入完整初始任务并发送；"
             "无需先新建普通任务。"
@@ -6809,16 +6902,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
         if not isinstance(thread_id, str) or not thread_id:
             return
-        role_context = self._project_role_context_for_thread(thread_id)
-        if role_context is None:
-            self._project_draft_active = False
-            self._request_thread_resume(thread_id, context="session_resume")
-            return
-        if self._client is not None:
-            self._client.read_project_role_thread(
-                thread_id,
-                context=f"project_role_read:{thread_id}",
-            )
+        self._new_task_route = None
+        self._request_thread_resume(thread_id, context="session_resume")
 
     def _resume_thread(self) -> None:
         if self._goal_houdini_busy():
@@ -6853,7 +6938,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if attachment_paths and not self._selected_model_supports_images():
             self._append_system("当前模型不支持图片输入，请选择其他模型后再发送。")
             return
-        if self._project_draft_active:
+        if getattr(self, "_new_task_route", None) == "team":
             if self._turn_state.busy:
                 self._append_system("当前 Turn 结束后才能新建项目。")
                 return
@@ -6871,6 +6956,32 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         ):
             return
         if self._client is None:
+            return
+        project_role = self._project_role_context_for_thread(thread_id)
+        if project_role is not None:
+            project, role = project_role
+            if attachment_paths:
+                self._append_system(
+                    "项目追加指导暂不接受新图片；请新建项目并在初始任务中附图。"
+                )
+                return
+            if not self._selected_context_capabilities().can_append_guidance:
+                self._append_system(
+                    "该项目当前不能接收新消息，请刷新项目状态后重试。"
+                )
+                return
+            controller = getattr(self, "_project_team_controller", None)
+            submit = getattr(controller, "submit_guidance", None)
+            if not callable(submit) or not submit(
+                project_id=project.project_id,
+                thread_id=role.thread_id,
+                text=text.strip(),
+            ):
+                self._append_system("项目指导暂未发出，请稍后重试。")
+                return
+            self._add_user_message(text, ())
+            self.input_edit.clear()
+            self._append_system("已作为项目指导发送，项目团队将按当前阶段继续处理。")
             return
         if self._turn_state.busy:
             if (
@@ -6899,7 +7010,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
         if (
             self._client is None
-            or self._project_start_pending
+            or self._turn_start_request_pending
             or self._session_action_pending
             or self._turn_steer_request_pending
             or self._reconciliation_tokens
@@ -6912,18 +7023,19 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "text": text,
             "attachment_paths": attachment_paths,
         }
-        self._project_start_pending = True
+        self._turn_start_request_pending = True
         self._refresh_controls()
-        request_id = self._client.start_project(
-            text,
+        request_id = self._client.start_turn(
+            self._request_text_with_selection(text),
             model=runtime_settings["model"],
             effort=runtime_settings["effort"],
             service_tier=runtime_settings["service_tier"],
             local_image_paths=list(attachment_paths),
+            team_override="team",
             context=context,
         )
         if request_id is None:
-            self._project_start_pending = False
+            self._turn_start_request_pending = False
             self._pending_team_drafts.pop(context, None)
             self._refresh_controls()
             return False
@@ -6994,6 +7106,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             effort=runtime_settings["effort"],
             service_tier=runtime_settings["service_tier"],
             local_image_paths=list(attachment_paths),
+            team_override="single",
             context=context,
         )
         return True
@@ -7243,31 +7356,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if self._handle_scene_action(context, payload):
             self._maybe_start_goal_continuation()
             return
-        if context.startswith("project_role_read:"):
-            thread_id = context.removeprefix("project_role_read:")
-            role_context = self._project_role_context_for_thread(thread_id)
-            if role_context is None:
-                self._append_system("项目角色已不在当前项目快照中；未改变普通任务。")
-                return
-            project, role = role_context
-            rendered = self._render_thread_read(
-                payload,
-                allow_active=True,
-                expected_thread_id=thread_id,
-                explicit_project_role=(project.title, role.title),
-                preserve_ordinary_state=True,
-            )
-            if rendered:
-                self._append_system(
-                    f"正在只读查看项目角色：{role.title}。"
-                    "普通任务、Goal、Focus、附件和活动 Turn 均未切换。"
-                )
-            else:
-                self._append_system("项目角色历史格式无效；未改变普通任务。")
-            return
         if context.startswith(_PROJECT_TEAM_CREATE_CONTEXT_PREFIX):
             draft = self._pending_team_drafts.pop(context, None)
-            self._project_start_pending = False
+            self._turn_start_request_pending = False
             if isinstance(draft, dict):
                 text = draft.get("text")
                 paths = tuple(draft.get("attachment_paths") or ())
@@ -7275,7 +7366,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self.input_edit.clear()
                 if paths and paths == self._attachment_paths():
                     self.attachment_strip.clear()
-            self._project_draft_active = False
+            self._new_task_route = None
             project_id = payload.get("project_id")
             self._append_system(
                 "项目已创建，监督 AI 正在接收初始任务。"
@@ -7584,9 +7675,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     thread_id,
                     payload.get("focus_mode", False),
                 )
-                controller = getattr(self, "_project_team_controller", None)
-                if controller is not None:
-                    controller.select_ordinary_thread_when_available(thread_id)
+                self.thread_id_edit.setText(thread_id)
+                for index in range(self.history_combo.count()):
+                    record = self.history_combo.itemData(index)
+                    if (
+                        isinstance(record, dict)
+                        and record.get("thread_id") == thread_id
+                    ):
+                        self.history_combo.setCurrentIndex(index)
+                        self._on_history_index_changed(index)
+                        break
                 self.thread_status_label.setText(
                     f"Thread：{self._history_title(thread_id)}"
                 )
@@ -8378,19 +8476,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(str, dict)
     def _on_request_failed(self, context: str, payload: dict[str, Any]) -> None:
-        if context.startswith("project_role_read:"):
-            self._append_system(
-                "读取项目角色历史失败；普通任务保持不变。\n"
-                + format_bridge_error(payload)
-            )
-            return
         if context.startswith(_PROJECT_TEAM_CREATE_CONTEXT_PREFIX):
             # The composer and attachments deliberately remain unchanged.  A
             # failed project intake is never silently converted into a normal
             # chat or automatically retried.
             self._pending_team_drafts.pop(context, None)
-            self._project_start_pending = False
-            self._project_draft_active = True
+            self._turn_start_request_pending = False
+            self._new_task_route = "team"
             self._append_system(
                 "项目创建失败；初始任务和图片已保留，未自动重试。\n"
                 + format_bridge_error(payload)

@@ -55,8 +55,6 @@ if PYSIDE_AVAILABLE:
         newTaskRequested = QtCore.Signal(str)
         openThreadRequested = QtCore.Signal(str)
         deleteThreadRequested = QtCore.Signal(str)
-        renameThreadRequested = QtCore.Signal(str, str)
-        copyThreadIdRequested = QtCore.Signal(str)
         projectSelected = QtCore.Signal(str)
         projectContextChanged = QtCore.Signal(bool)
         appendGuidanceRequested = QtCore.Signal(str, object, str, object)
@@ -168,20 +166,6 @@ if PYSIDE_AVAILABLE:
             self.tree.setUniformRowHeights(True)
             self.tree.setMinimumHeight(150)
             navigation_layout.addWidget(self.tree, 1)
-
-            self.ordinary_actions = QtWidgets.QWidget()
-            ordinary_actions_layout = QtWidgets.QGridLayout(self.ordinary_actions)
-            ordinary_actions_layout.setContentsMargins(0, 0, 0, 0)
-            ordinary_actions_layout.setHorizontalSpacing(6)
-            ordinary_actions_layout.setVerticalSpacing(4)
-            self.ordinary_name_edit = QtWidgets.QLineEdit()
-            self.ordinary_name_edit.setPlaceholderText("普通任务名称")
-            self.rename_button = QtWidgets.QPushButton("重命名")
-            self.copy_id_button = QtWidgets.QPushButton("复制 ID")
-            ordinary_actions_layout.addWidget(self.ordinary_name_edit, 0, 0, 1, 2)
-            ordinary_actions_layout.addWidget(self.rename_button, 1, 0)
-            ordinary_actions_layout.addWidget(self.copy_id_button, 1, 1)
-            navigation_layout.addWidget(self.ordinary_actions)
 
             action_grid = QtWidgets.QGridLayout()
             self.refresh_button = QtWidgets.QPushButton("刷新")
@@ -321,9 +305,6 @@ if PYSIDE_AVAILABLE:
             )
             self.tree.itemDoubleClicked.connect(self._item_double_clicked)
             self.delete_button.clicked.connect(self._delete_selected)
-            self.rename_button.clicked.connect(self._rename_selected)
-            self.copy_id_button.clicked.connect(self._copy_selected_id)
-            self.ordinary_name_edit.returnPressed.connect(self._rename_selected)
             self.save_runtime_button.clicked.connect(self._save_runtime)
             self.refresh_models_button.clicked.connect(
                 self.modelCatalogRefreshRequested.emit
@@ -591,15 +572,6 @@ if PYSIDE_AVAILABLE:
             self.delete_button.setEnabled(
                 isinstance(selected, OrdinaryThreadViewModel)
             )
-            ordinary_selected = isinstance(selected, OrdinaryThreadViewModel)
-            self.ordinary_actions.setVisible(ordinary_selected)
-            self.rename_button.setEnabled(ordinary_selected)
-            self.copy_id_button.setEnabled(ordinary_selected)
-            self.ordinary_name_edit.setEnabled(ordinary_selected)
-            if ordinary_selected:
-                self.ordinary_name_edit.setText(selected.title)
-            else:
-                self.ordinary_name_edit.clear()
             self.runtime_widget.setVisible(isinstance(selected, RoleViewModel))
             project = self._selected_project(selected)
             self._render_requirement_choices(project)
@@ -754,17 +726,6 @@ if PYSIDE_AVAILABLE:
             selected = find_tree_item(self.state.tree, self.state.selected_key)
             if isinstance(selected, OrdinaryThreadViewModel):
                 self.deleteThreadRequested.emit(selected.thread_id)
-
-        def _rename_selected(self) -> None:
-            selected = find_tree_item(self.state.tree, self.state.selected_key)
-            name = self.ordinary_name_edit.text().strip()
-            if isinstance(selected, OrdinaryThreadViewModel) and name:
-                self.renameThreadRequested.emit(selected.thread_id, name)
-
-        def _copy_selected_id(self) -> None:
-            selected = find_tree_item(self.state.tree, self.state.selected_key)
-            if isinstance(selected, OrdinaryThreadViewModel):
-                self.copyThreadIdRequested.emit(selected.thread_id)
 
         def set_delete_confirmation(self, thread_id: str | None) -> None:
             selected = find_tree_item(self.state.tree, self.state.selected_key)
