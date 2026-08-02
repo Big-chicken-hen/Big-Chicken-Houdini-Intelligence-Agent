@@ -83,6 +83,29 @@ class FailingExecutor:
         raise RuntimeError("external rpc failed")
 
 
+class RecoveryReplanExecutor(RecordingExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.replan_seen = threading.Event()
+
+    def execute(self, state, effect):
+        with self.lock:
+            self.effects.append((state.project_id, effect.kind))
+        if effect.kind == "verify_recovery":
+            return EffectResult(
+                state, LifecycleEvent(ProjectEvent.RECOVERY_VALIDATED)
+            )
+        if effect.kind == "resume_goal":
+            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_RESUMED))
+        if effect.kind == "request_plan":
+            self.replan_seen.set()
+            return EffectResult(
+                replace(state, plan_stale=False),
+                LifecycleEvent(ProjectEvent.PLAN_READY),
+            )
+        return EffectResult(state, None)
+
+
 class ProjectWorkflowHostTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -250,6 +273,38 @@ class ProjectWorkflowHostTests(unittest.TestCase):
         executor.release.set()
         self._wait_until(lambda: not host.is_inflight("stale"))
         self.assertEqual(1, len(executor.effects))
+
+    def test_recovery_continue_with_empty_stale_plan_schedules_replan(self) -> None:
+        record = _record("stale-attention", 0)
+        record = ProjectRecord(
+            replace(
+                record.state,
+                status=ProjectStatus.NEEDS_ATTENTION,
+                plan_stale=True,
+                recovery_required=True,
+                recovery_return_status=ProjectStatus.EXECUTING_STAGE,
+                attention_reason="identity missing",
+            ),
+            record.authoritative_task_text,
+        )
+        self.registry.put(record)
+        self.runner.dispatch(
+            "stale-attention", LifecycleEvent(ProjectEvent.USER_CONTINUE)
+        )
+        executor = RecoveryReplanExecutor()
+        host = self._host(executor)
+
+        self.assertTrue(host.start("stale-attention"))
+        self.assertTrue(executor.replan_seen.wait(1))
+        self._wait_until(lambda: not host.is_inflight("stale-attention"))
+        self.assertEqual(
+            ["verify_recovery", "resume_goal", "request_plan", "request_authorization"],
+            [kind for _project_id, kind in executor.effects],
+        )
+        final = self.registry.require("stale-attention").state
+        self.assertEqual(ProjectStatus.AUTHORIZATION, final.status)
+        self.assertFalse(final.plan_stale)
+        self.assertEqual((), final.pending_effects)
 
     def test_resuming_project_becomes_active_only_after_resume_effect_ack(self) -> None:
         record = _record("p1")

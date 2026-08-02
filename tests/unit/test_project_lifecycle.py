@@ -180,6 +180,23 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.assertEqual((), state.pending_effects)
         self.assertEqual((), commands)
 
+    def test_recovery_of_empty_stale_plan_emits_real_replan_work(self) -> None:
+        state = replace(
+            _state(ProjectStatus.EXECUTING_STAGE),
+            plan_stale=True,
+        )
+        state, _ = self.apply(
+            state, ProjectEvent.RECOVERY_FAILED, error="identity missing"
+        )
+        state, _ = self.apply(state, ProjectEvent.USER_CONTINUE)
+        state, _ = self.apply(state, ProjectEvent.RECOVERY_VALIDATED)
+        state, commands = self.apply(state, ProjectEvent.GOAL_RESUMED)
+        self.assertEqual(ProjectStatus.PLANNING, state.status)
+        self.assertTrue(state.plan_stale)
+        self.assertFalse(state.recovery_required)
+        self.assertEqual(ProjectCommand.REQUEST_PLAN, commands[0].kind)
+        self.assertEqual({"revision": True}, commands[0].data)
+
     def test_recovery_restores_valid_pausing_and_resuming_control_effects(self) -> None:
         cases = (
             (

@@ -94,6 +94,16 @@ _RECOVERY_RESTORABLE = frozenset(
     {*_ACTIVE, ProjectStatus.PAUSING, ProjectStatus.RESUMING}
 )
 
+_REPLAN_RECOVERY_TARGETS = frozenset(
+    {
+        ProjectStatus.PLANNING,
+        ProjectStatus.AUTHORIZATION,
+        ProjectStatus.EXECUTING_STAGE,
+        ProjectStatus.REVIEWING_STAGE,
+        ProjectStatus.REPAIRING_STAGE,
+    }
+)
+
 
 def _next(
     state: ProjectState,
@@ -334,6 +344,22 @@ def reduce_project(
         if target not in _RECOVERY_RESTORABLE:
             raise InvalidTransition(status, kind)
         if state.recovery_required:
+            if (
+                state.plan_stale
+                and not state.recovery_pending_effects
+                and target in _REPLAN_RECOVERY_TARGETS
+            ):
+                return _next(
+                    state,
+                    ProjectStatus.PLANNING,
+                    LifecycleCommand(ProjectCommand.REQUEST_PLAN, {"revision": True}),
+                    pending_effects=(),
+                    recovery_required=False,
+                    recovery_return_status=None,
+                    recovery_pending_effects=(),
+                    attention_reason=None,
+                    last_error=None,
+                )
             return _next(
                 state,
                 target,
