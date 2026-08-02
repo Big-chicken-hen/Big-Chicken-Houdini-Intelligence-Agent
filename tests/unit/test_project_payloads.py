@@ -12,6 +12,18 @@ from services.bridge.hia_bridge.project_payloads import (
 )
 
 
+def _step(step_id="STEP-1", requirement_id="REQ-1", dependencies=None):
+    return {
+        "step_id": step_id,
+        "operation": "construct the requirement-specific editable subsystem",
+        "dependencies": list(dependencies or []),
+        "requirement_ids": [requirement_id],
+        "inputs": [{"source": "authoritative task", "use": "dimensions"}],
+        "outputs": [{"artifact": "native node subsystem"}],
+        "acceptance": {"method": "inspect exact relationship"},
+    }
+
+
 class ProjectPayloadTests(unittest.TestCase):
     def test_review_claim_dispositions_have_only_applicable_fields(self) -> None:
         values = (
@@ -73,7 +85,7 @@ class ProjectPayloadTests(unittest.TestCase):
                 "depth": "direct",
                 "stage_id": "S1",
                 "requirement_ids": ["REQ-1"],
-                "ordered_steps": [{"operation": "set parameter"}],
+                "ordered_steps": [_step()],
             }
         )
         self.assertEqual("direct", card.depth)
@@ -84,7 +96,7 @@ class ProjectPayloadTests(unittest.TestCase):
             "depth": "full",
             "stage_id": "S1",
             "requirement_ids": ["REQ-1"],
-            "ordered_steps": [{"operation": "build structure"}],
+            "ordered_steps": [_step()],
             "evidence_contract": {"capture": "side and perspective"},
             "reviewers": ["visual_review", "technical_review"],
             "failure_minimum_repair": "repair only the failed claim",
@@ -100,10 +112,25 @@ class ProjectPayloadTests(unittest.TestCase):
                 "depth": "focused",
                 "stage_id": "S",
                 "requirement_ids": ["R"],
-                "ordered_steps": [{"operation": "x"}],
+                "ordered_steps": [_step(requirement_id="R")],
             }
         )
         self.assertEqual("S", card.stage_id)
+
+    def test_stage_steps_require_semantic_structure_and_exact_coverage(self) -> None:
+        base = {
+            "depth": "focused",
+            "stage_id": "S",
+            "requirement_ids": ["R1", "R2"],
+            "ordered_steps": [_step(requirement_id="R1")],
+        }
+        with self.assertRaisesRegex(ValueError, "do not cover"):
+            parse_stage_card(base)
+        base["ordered_steps"].append(
+            _step("STEP-2", "R2", dependencies=["STEP-1"])
+        )
+        card = parse_stage_card(base)
+        self.assertEqual(2, len(card.ordered_steps))
 
 
 if __name__ == "__main__":

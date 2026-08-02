@@ -33,7 +33,17 @@ def _full_stage() -> dict:
         "depth": "full",
         "stage_id": "stage-1",
         "requirement_ids": ["req-1"],
-        "ordered_steps": [{"step_id": "step-1", "operation": "build"}],
+        "ordered_steps": [
+            {
+                "step_id": "step-1",
+                "operation": "build the requirement-specific editable subsystem",
+                "dependencies": [],
+                "requirement_ids": ["req-1"],
+                "inputs": [{"source": "task-ref"}],
+                "outputs": [{"artifact": "native nodes"}],
+                "acceptance": {"method": "real HIA evidence"},
+            }
+        ],
         "evidence_contract": {"capture": True, "technical": True},
         "reviewers": ["visual_review", "technical_review"],
         "failure_minimum_repair": "repair only the observed defect",
