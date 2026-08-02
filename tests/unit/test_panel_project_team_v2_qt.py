@@ -53,6 +53,23 @@ def snapshot():
     }
 
 
+def add_execution_role(value, *, status="waiting"):
+    value["projects"][0]["threads"].append(
+        {
+            "role": "execution",
+            "role_title": "执行 AI",
+            "thread_id": "thread-execution",
+            "status": status,
+            "actions": {
+                "open_thread": True,
+                "append_guidance": True,
+                "set_role_runtime": True,
+            },
+        }
+    )
+    return value
+
+
 @unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is available only in Houdini/runtime Qt")
 class ProjectTeamQtTests(unittest.TestCase):
     @classmethod
@@ -109,6 +126,27 @@ class ProjectTeamQtTests(unittest.TestCase):
         self.state.select("role:project-a:supervisor")
         self.view._open_selected()
         self.assertEqual(["thread-supervisor"], opened)
+
+    def test_ordinary_selection_clears_project_only_detail(self) -> None:
+        data = snapshot()
+        self.state.apply_snapshot(
+            data,
+            [{"thread_id": "ordinary-a", "name": "普通任务 A", "updated_at": 2}],
+        )
+        self.state.select("project:project-a")
+        self.view.refresh_view()
+        self.assertTrue(self.view.guidance_edit.isVisible())
+        self.assertTrue(self.view.attention_surface.isVisible())
+
+        self.state.select("thread:ordinary-a")
+        self.view.refresh_view()
+        self.app.processEvents()
+        self.assertEqual("普通任务 A", self.view.selection_title.text())
+        self.assertFalse(self.view.runtime_widget.isVisible())
+        self.assertFalse(self.view.guidance_edit.isVisible())
+        self.assertFalse(self.view.guidance_button.isVisible())
+        self.assertFalse(self.view.requirement_change_widget.isVisible())
+        self.assertFalse(self.view.attention_surface.isVisible())
 
     def test_collapse_and_expand_restore_navigation(self) -> None:
         changes = []
@@ -180,6 +218,66 @@ class ProjectTeamQtTests(unittest.TestCase):
             "model-b",
             self.state.runtime_draft_for(self.state.tree.projects[0].roles[0]).model,
         )
+
+    def test_role_runtime_drafts_are_independent_and_interrupted_roles_editable(self) -> None:
+        data = add_execution_role(snapshot(), status="interrupted")
+        self.state.apply_snapshot(data)
+        self.view.set_model_catalog(
+            [
+                {
+                    "model": "model-a",
+                    "isDefault": True,
+                    "inputModalities": ["text"],
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "fast"},
+                        {"reasoningEffort": "high", "description": "deep"},
+                    ],
+                    "defaultReasoningEffort": "low",
+                    "serviceTiers": [],
+                    "defaultServiceTier": None,
+                },
+                {
+                    "model": "model-b",
+                    "inputModalities": ["text"],
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "max", "description": "deepest"}
+                    ],
+                    "defaultReasoningEffort": "max",
+                    "serviceTiers": [],
+                    "defaultServiceTier": None,
+                },
+            ]
+        )
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.view.model_combo.setCurrentIndex(1)
+        self.app.processEvents()
+        supervisor = self.state.tree.projects[0].roles[0]
+        self.assertEqual("model-b", self.state.runtime_draft_for(supervisor).model)
+
+        self.state.select("role:project-a:execution")
+        self.view.refresh_view()
+        self.app.processEvents()
+        execution = self.state.tree.projects[0].roles[1]
+        self.assertTrue(self.view.model_combo.isEnabled())
+        self.assertTrue(self.view.effort_combo.isEnabled())
+        self.assertTrue(self.view.save_runtime_button.isEnabled())
+        self.view.effort_combo.setCurrentIndex(2)
+        self.app.processEvents()
+        self.assertEqual("model-a", self.state.runtime_draft_for(execution).model)
+        self.assertEqual("high", self.state.runtime_draft_for(execution).effort)
+        self.assertEqual("model-b", self.state.runtime_draft_for(supervisor).model)
+
+    def test_empty_catalog_exposes_refresh_instead_of_permanent_lock(self) -> None:
+        requested = []
+        self.view.modelCatalogRefreshRequested.connect(lambda: requested.append(True))
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.assertFalse(self.view.model_combo.isEnabled())
+        self.assertTrue(self.view.refresh_models_button.isEnabled())
+        self.assertIn("刷新", self.view.runtime_status_label.text())
+        self.view.refresh_models_button.click()
+        self.assertEqual([True], requested)
 
     def test_guidance_scope_is_mutually_exclusive_and_ack_matches_mode(self) -> None:
         emitted = []

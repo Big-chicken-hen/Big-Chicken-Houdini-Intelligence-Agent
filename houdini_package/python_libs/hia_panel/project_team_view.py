@@ -42,6 +42,7 @@ if PYSIDE_AVAILABLE:
         roleRuntimeRequested = QtCore.Signal(
             str, str, object, object, object
         )
+        modelCatalogRefreshRequested = QtCore.Signal()
 
         _BACKGROUND = "#101218"
         _SURFACE = "#171a22"
@@ -179,11 +180,18 @@ if PYSIDE_AVAILABLE:
             self.model_combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
             self.effort_combo = QtWidgets.QComboBox()
             self.tier_combo = QtWidgets.QComboBox()
+            self.refresh_models_button = QtWidgets.QPushButton("刷新模型目录")
+            self.runtime_status_label = QtWidgets.QLabel()
+            self.runtime_status_label.setProperty("muted", True)
+            self.runtime_status_label.setWordWrap(True)
             self.save_runtime_button = QtWidgets.QPushButton("保存到该角色的下一 Turn")
             runtime_layout.addRow("模型", self.model_combo)
             runtime_layout.addRow("推理", self.effort_combo)
             runtime_layout.addRow("速度", self.tier_combo)
+            runtime_layout.addRow(self.refresh_models_button)
+            runtime_layout.addRow(self.runtime_status_label)
             runtime_layout.addRow(self.save_runtime_button)
+            self._show_catalog_unavailable()
             detail.addWidget(self.runtime_widget)
 
             self.guidance_edit = QtWidgets.QPlainTextEdit()
@@ -257,6 +265,9 @@ if PYSIDE_AVAILABLE:
             self.tree.itemDoubleClicked.connect(self._item_double_clicked)
             self.open_button.clicked.connect(self._open_selected)
             self.save_runtime_button.clicked.connect(self._save_runtime)
+            self.refresh_models_button.clicked.connect(
+                self.modelCatalogRefreshRequested.emit
+            )
             self.model_combo.currentIndexChanged.connect(self._model_changed)
             self.effort_combo.currentTextChanged.connect(self._capture_runtime_draft)
             self.tier_combo.currentTextChanged.connect(self._capture_runtime_draft)
@@ -297,13 +308,49 @@ if PYSIDE_AVAILABLE:
                 self.model_combo.addItem(label, record)
                 if record.get("isDefault") is True:
                     default_index = self.model_combo.count() - 1
+            if not self._model_catalog:
+                self.model_combo.blockSignals(False)
+                self._show_catalog_unavailable()
+                self._render_selection()
+                return
             selected = self._model_index(current)
+            fallback_index = default_index
+            if fallback_index < 0 and self.model_combo.count() > 0:
+                fallback_index = 0
             self.model_combo.setCurrentIndex(
-                selected if selected >= 0 else default_index
+                selected if selected >= 0 else fallback_index
             )
             self.model_combo.blockSignals(False)
             self._update_runtime_capabilities(None, None)
             self._render_selection()
+
+        def _show_catalog_unavailable(self) -> None:
+            """Render an honest, recoverable empty-catalog state."""
+
+            blocked = self.model_combo.blockSignals(True)
+            self.model_combo.clear()
+            self.model_combo.addItem("实时模型目录尚未加载", None)
+            self.model_combo.setCurrentIndex(0)
+            self.model_combo.blockSignals(blocked)
+            self._replace_options(
+                self.effort_combo,
+                [],
+                id_key="reasoningEffort",
+                label_key="reasoningEffort",
+                preferred=None,
+                default_value=None,
+            )
+            self._replace_options(
+                self.tier_combo,
+                [],
+                id_key="id",
+                label_key="name",
+                preferred=None,
+                default_value=None,
+            )
+            self.runtime_status_label.setText(
+                "实时模型目录不可用；可刷新目录后再为该角色选择模型。"
+            )
 
         def _model_changed(self, _index: int = -1) -> None:
             previous_effort = self._combo_value(self.effort_combo)
@@ -383,6 +430,8 @@ if PYSIDE_AVAILABLE:
             combo.blockSignals(blocked)
 
         def refresh_view(self) -> None:
+            selected_key = self.state.selected_key
+            blocked = self.tree.blockSignals(True)
             self._items_by_key.clear()
             self.tree.clear()
             projects_root = QtWidgets.QTreeWidgetItem(["项目"])
@@ -420,8 +469,9 @@ if PYSIDE_AVAILABLE:
             ordinary_root.setExpanded(True)
             for index in range(projects_root.childCount()):
                 projects_root.child(index).setExpanded(True)
-            if self.state.selected_key in self._items_by_key:
-                self.tree.setCurrentItem(self._items_by_key[self.state.selected_key])
+            if selected_key in self._items_by_key:
+                self.tree.setCurrentItem(self._items_by_key[selected_key])
+            self.tree.blockSignals(blocked)
             self._render_selection()
 
         def _set_collapsed(self, collapsed: bool) -> None:
@@ -492,12 +542,34 @@ if PYSIDE_AVAILABLE:
                 )
                 record = self._selected_model_record()
                 modalities = record.get("inputModalities") if record else None
-                self.save_runtime_button.setEnabled(
-                    selected.can_set_runtime
-                    and record is not None
-                    and isinstance(modalities, list)
-                    and "text" in modalities
+                has_catalog = bool(self._model_catalog)
+                supports_text = (
+                    isinstance(modalities, list) and "text" in modalities
                 )
+                editable = selected.can_set_runtime
+                self.model_combo.setEnabled(editable and has_catalog)
+                self.effort_combo.setEnabled(editable and record is not None)
+                self.tier_combo.setEnabled(editable and record is not None)
+                self.refresh_models_button.setEnabled(editable)
+                self.save_runtime_button.setEnabled(
+                    editable and record is not None and supports_text
+                )
+                if not editable:
+                    self.runtime_status_label.setText(
+                        "该项目已结束，角色运行设置不可再修改。"
+                    )
+                elif not has_catalog:
+                    self.runtime_status_label.setText(
+                        "实时模型目录不可用；可刷新目录后再为该角色选择模型。"
+                    )
+                elif not supports_text:
+                    self.runtime_status_label.setText(
+                        "所选模型不支持文本输入，不能用于项目角色。"
+                    )
+                else:
+                    self.runtime_status_label.setText(
+                        "仅影响该角色的下一 Turn；其他角色和左上角设置保持不变。"
+                    )
             elif isinstance(selected, OrdinaryThreadViewModel):
                 self.selection_title.setText(selected.title)
                 self.selection_meta.setText(selected.preview or f"Thread：{selected.thread_id}")
@@ -703,6 +775,9 @@ if PYSIDE_AVAILABLE:
             return -1
 
         def _set_model_value(self, model_id: str | None) -> None:
+            if not self._model_catalog:
+                self._show_catalog_unavailable()
+                return
             blocked = self.model_combo.blockSignals(True)
             index = self._model_index(model_id)
             if index < 0:

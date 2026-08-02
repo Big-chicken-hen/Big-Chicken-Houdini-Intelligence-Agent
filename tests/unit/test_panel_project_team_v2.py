@@ -242,6 +242,7 @@ class FakeView:
         self.openThreadRequested = FakeSignal()
         self.appendGuidanceRequested = FakeSignal()
         self.roleRuntimeRequested = FakeSignal()
+        self.modelCatalogRefreshRequested = FakeSignal()
         self.continueProjectRequested = FakeSignal()
         self.stopProjectRequested = FakeSignal()
         self.state = ProjectPanelState()
@@ -312,6 +313,7 @@ class ProjectTeamControllerTests(unittest.TestCase):
             self.view.openThreadRequested,
             self.view.appendGuidanceRequested,
             self.view.roleRuntimeRequested,
+            self.view.modelCatalogRefreshRequested,
             self.view.continueProjectRequested,
             self.view.stopProjectRequested,
         )
@@ -343,6 +345,18 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.assertEqual(2, self.gateway.actionCompleted.connect_count)
         self.assertEqual(1, self.view.refreshRequested.connect_count)
 
+    def test_empty_catalog_has_a_direct_retry_path(self) -> None:
+        self.controller.show()
+        initial_model_calls = len(
+            [call for call in self.gateway.calls if call[0] == "get_models"]
+        )
+        self.view.modelCatalogRefreshRequested.emit()
+        model_calls = [
+            call for call in self.gateway.calls if call[0] == "get_models"
+        ]
+        self.assertEqual(initial_model_calls + 1, len(model_calls))
+        self.assertEqual("project_model_catalog", model_calls[-1][2]["context"])
+
     def test_snapshot_and_history_render_as_one_tree_when_both_arrive(self) -> None:
         self.controller.show()
         self.gateway.actionCompleted.emit(
@@ -358,6 +372,65 @@ class ProjectTeamControllerTests(unittest.TestCase):
         )
         self.assertEqual(1, len(self.view.state.tree.projects))
         self.assertEqual(1, len(self.view.state.tree.ordinary_threads))
+
+    def test_new_ordinary_selection_survives_project_then_history_order(self) -> None:
+        self.controller.show()
+        self.controller.select_ordinary_thread_when_available("ordinary-new")
+        self.gateway.actionCompleted.emit(
+            "project_team_refresh", {"project_team": project_snapshot()}
+        )
+        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
+        self.assertEqual("新普通任务", self.view.state.tree.ordinary_threads[0].title)
+        self.controller.consume_ordinary_threads(
+            [{"thread_id": "ordinary-new", "name": "新普通任务", "updated_at": 2}]
+        )
+        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
+        self.assertEqual("ordinary-new", self.view.state.selected_chat_thread_id())
+
+    def test_delayed_history_does_not_make_acknowledged_ordinary_thread_disappear(self) -> None:
+        self.controller.show()
+        self.gateway.actionCompleted.emit(
+            "project_team_refresh", {"project_team": project_snapshot()}
+        )
+        self.controller.select_ordinary_thread_when_available("ordinary-new")
+        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
+
+        self.controller.consume_ordinary_threads([])
+
+        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
+        self.assertEqual(
+            ["ordinary-new"],
+            [item.thread_id for item in self.view.state.tree.ordinary_threads],
+        )
+
+    def test_delayed_history_does_not_steal_a_later_explicit_project_selection(self) -> None:
+        self.controller.show()
+        self.gateway.actionCompleted.emit(
+            "project_team_refresh", {"project_team": project_snapshot()}
+        )
+        self.controller.select_ordinary_thread_when_available("ordinary-new")
+        self.view.state.select("project:project-house")
+
+        self.controller.consume_ordinary_threads([])
+
+        self.assertEqual("project:project-house", self.view.state.selected_key)
+        self.assertEqual(
+            ["ordinary-new"],
+            [item.thread_id for item in self.view.state.tree.ordinary_threads],
+        )
+
+    def test_new_ordinary_selection_survives_history_then_project_order(self) -> None:
+        self.controller.show()
+        self.controller.select_ordinary_thread_when_available("ordinary-new")
+        self.controller.consume_ordinary_threads(
+            [{"thread_id": "ordinary-new", "name": "新普通任务", "updated_at": 2}]
+        )
+        self.assertIsNone(self.view.state.selected_key)
+        self.gateway.actionCompleted.emit(
+            "project_team_refresh", {"project_team": project_snapshot()}
+        )
+        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
+        self.assertEqual("ordinary-new", self.view.state.selected_chat_thread_id())
 
     def test_live_project_event_updates_project_without_losing_ordinary_history(self) -> None:
         self.controller.show()

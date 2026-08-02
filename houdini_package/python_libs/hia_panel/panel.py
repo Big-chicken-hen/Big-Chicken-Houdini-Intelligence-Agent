@@ -4535,6 +4535,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             records.append(dict(raw_record))
         self._thread_history = records
 
+        project_team_controller = getattr(self, "_project_team_controller", None)
+        if project_team_controller is not None:
+            consume_ordinary_threads = getattr(
+                project_team_controller,
+                "consume_ordinary_threads",
+                None,
+            )
+            if callable(consume_ordinary_threads):
+                consume_ordinary_threads(records)
+
         self.history_combo.blockSignals(True)
         self.history_combo.clear()
         selected_index = 0
@@ -7892,6 +7902,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     if hasattr(self.conversation, "clear_messages"):
                         self.conversation.clear_messages()
                     self._append_system("已新建会话。")
+                    controller = getattr(self, "_project_team_controller", None)
+                    if controller is not None:
+                        select_ordinary = getattr(
+                            controller,
+                            "select_ordinary_thread_when_available",
+                            None,
+                        )
+                        if callable(select_ordinary):
+                            select_ordinary(thread_id)
                     if self._client is not None:
                         self._client.get_threads()
                 else:

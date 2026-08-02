@@ -20,6 +20,8 @@ class _Controller:
         self.refresh_calls = 0
         self.close_calls = 0
         self.events = []
+        self.ordinary_snapshots = []
+        self.pending_ordinary_selections = []
 
     def refresh(self) -> None:
         self.refresh_calls += 1
@@ -30,6 +32,12 @@ class _Controller:
     def consume_project_team_update(self, event) -> bool:
         self.events.append(event)
         return True
+
+    def consume_ordinary_threads(self, threads) -> None:
+        self.ordinary_snapshots.append(threads)
+
+    def select_ordinary_thread_when_available(self, thread_id) -> None:
+        self.pending_ordinary_selections.append(thread_id)
 
 
 class PanelProjectTeamWiringTests(unittest.TestCase):
@@ -62,6 +70,37 @@ class PanelProjectTeamWiringTests(unittest.TestCase):
 
         self.assertEqual(before + 1, len(panel._client.thread_requests))
         self.assertIsNone(panel._new_task_route)
+
+    def test_single_creation_ack_selects_new_ordinary_and_keeps_composer(self) -> None:
+        panel = _make_panel(selected_thread_id=None)
+        controller = _Controller()
+        panel._project_team_controller = controller
+        panel.input_edit.setPlainText("下一条普通任务消息")
+
+        panel._on_action_completed(
+            "session_start",
+            {
+                "thread_id": "ordinary-new",
+                "focus_mode": False,
+            },
+        )
+
+        self.assertEqual("ordinary-new", panel._selected_thread_id)
+        self.assertEqual(["ordinary-new"], controller.pending_ordinary_selections)
+        self.assertTrue(panel.input_edit.isVisible())
+        self.assertTrue(panel.input_edit.isEnabled())
+
+    def test_thread_history_is_forwarded_to_visible_workspace_tree(self) -> None:
+        panel = _make_panel(selected_thread_id=None)
+        controller = _Controller()
+        panel._project_team_controller = controller
+        threads = [
+            {"thread_id": "ordinary-new", "name": "普通任务", "updated_at": 2}
+        ]
+
+        panel._apply_threads(threads)
+
+        self.assertEqual([threads], controller.ordinary_snapshots)
 
     def test_project_ack_clears_exact_draft_and_refreshes_tree(self) -> None:
         panel = self._team_panel()

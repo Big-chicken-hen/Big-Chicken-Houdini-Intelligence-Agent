@@ -77,6 +77,8 @@ class ProjectTeamController:
         self._closed = True
         self._ordinary_threads: Any = None
         self._project_snapshot: Any = None
+        self._pending_ordinary_selection: str | None = None
+        self._provisional_ordinary_thread_id: str | None = None
         self._pending_guidance: dict[
             str, tuple[str, str | None, str, Mapping[str, Any] | None, bool]
         ] = {}
@@ -109,6 +111,53 @@ class ProjectTeamController:
         self.gateway.get_threads(context="project_history_refresh")
         self.gateway.get_models(context="project_model_catalog")
 
+    def refresh_models(self) -> None:
+        if self.active:
+            self.gateway.get_models(context="project_model_catalog")
+
+    def consume_ordinary_threads(self, threads: Any) -> None:
+        """Apply the host's authoritative ordinary-Thread history.
+
+        The main Panel already requests this list for its compatibility model.
+        Reusing that response avoids a second request and, importantly, lets a
+        just-created ordinary Thread become visible even when project/history
+        snapshots arrive in either order.
+        """
+
+        if not self.active:
+            return
+        candidates = _ordinary_thread_candidates(threads)
+        provisional_thread_id = self._provisional_ordinary_thread_id
+        provisional_is_published = bool(
+            isinstance(provisional_thread_id, str)
+            and any(
+                item.get("thread_id") == provisional_thread_id
+                for item in candidates
+            )
+        )
+        if (
+            isinstance(provisional_thread_id, str)
+            and not provisional_is_published
+        ):
+            candidates.append(_provisional_ordinary_thread(provisional_thread_id))
+        self._ordinary_threads = candidates
+        self._render_if_available()
+        if provisional_is_published:
+            self._provisional_ordinary_thread_id = None
+
+    def select_ordinary_thread_when_available(self, thread_id: str) -> None:
+        """Select a newly started ordinary Thread after history publishes it."""
+
+        if not self.active or not isinstance(thread_id, str) or not thread_id:
+            return
+        self._pending_ordinary_selection = thread_id
+        self._provisional_ordinary_thread_id = thread_id
+        candidates = _ordinary_thread_candidates(self._ordinary_threads)
+        if not any(item.get("thread_id") == thread_id for item in candidates):
+            candidates.append(_provisional_ordinary_thread(thread_id))
+        self._ordinary_threads = candidates
+        self._render_if_available()
+
     def consume_project_team_update(self, event: Any) -> bool:
         """Apply one trusted Bridge event without disturbing ordinary history."""
 
@@ -129,6 +178,7 @@ class ProjectTeamController:
         self.view.openThreadRequested.connect(self._open_thread)
         self.view.appendGuidanceRequested.connect(self._append_guidance)
         self.view.roleRuntimeRequested.connect(self._set_role_runtime)
+        self.view.modelCatalogRefreshRequested.connect(self.refresh_models)
         self.view.continueProjectRequested.connect(self._continue_project)
         self.view.stopProjectRequested.connect(self._stop_project)
 
@@ -225,7 +275,8 @@ class ProjectTeamController:
                 self._project_snapshot = snapshot
                 project_snapshot_received = True
         if context == "project_history_refresh":
-            self._ordinary_threads = payload.get("threads")
+            self.consume_ordinary_threads(payload.get("threads"))
+            return
         if context == "project_model_catalog":
             self.view.set_model_catalog(payload.get("models", []))
         if context.startswith("project_guidance:") and project_snapshot_received:
@@ -294,7 +345,38 @@ class ProjectTeamController:
             self._project_snapshot,
             self._ordinary_threads,
         )
+        pending_thread_id = self._pending_ordinary_selection
+        pending_key = (
+            f"thread:{pending_thread_id}"
+            if isinstance(pending_thread_id, str)
+            else None
+        )
+        if pending_key is not None:
+            available = any(
+                thread.stable_key == pending_key
+                for thread in self.view.state.tree.ordinary_threads
+            )
+            if available:
+                self.view.state.select(pending_key)
+                self._pending_ordinary_selection = None
         self.view.refresh_view()
+
+
+def _ordinary_thread_candidates(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, Mapping):
+        value = value.get("threads")
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _provisional_ordinary_thread(thread_id: str) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "name": "新普通任务",
+        "preview": "Thread 已创建，正在同步历史记录。",
+        "updated_at": 0,
+    }
 
 
 def _disconnect(signal: Any, callback: Callable[..., Any]) -> None:
