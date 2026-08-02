@@ -42,6 +42,7 @@ _PASSIVE_STATUS_NOTIFICATIONS = frozenset(
     }
 )
 _TURN_START_CONTEXT_PREFIX = "turn_start:"
+_PROJECT_TEAM_CREATE_CONTEXT_PREFIX = "project_team_create:"
 _TURN_STEER_CONTEXT_PREFIX = "turn_steer:"
 _INTERRUPT_CONTEXT_PREFIX = "interrupt:"
 _SESSION_RECONCILE_CONTEXT_PREFIX = "session_reconcile:"
@@ -210,6 +211,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._models_resolved = False
         self._threads_requested = False
         self._thread_history: list[dict[str, Any]] = []
+        self._project_team_controller: Any | None = None
+        self._new_task_route: str | None = None
+        self._pending_team_drafts: dict[str, dict[str, Any]] = {}
         self._thread_delete_confirm_id: str | None = None
         self._thread_delete_confirm_not_before: float | None = None
         self._thread_delete_pending: dict[str, Any] | None = None
@@ -344,11 +348,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._client.eventsReceived.connect(self._on_events)
         self._client.actionCompleted.connect(self._on_action_completed)
         self._client.requestFailed.connect(self._on_request_failed)
+        from .project_team_controller import ProjectTeamController
+
+        self._project_team_controller = ProjectTeamController(
+            self.project_team_view,
+            self._client,
+            on_new_task=self._on_project_team_new_task,
+            on_open_thread=self._open_project_role_thread,
+            on_error=self._append_system,
+        )
+        self._project_team_controller.show()
         self._client.get_health()
 
     def _build_ui(self) -> None:
         from .composer import AttachmentStrip, ExpandableTextEdit
         from .conversation_view import ConversationView
+        from .project_team_view import ProjectTeamView
 
         self.setObjectName("houdiniIntelligencePanel")
         root = QtWidgets.QVBoxLayout(self)
@@ -501,7 +516,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         left_layout = QtWidgets.QVBoxLayout(self.left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(QtWidgets.QLabel("历史任务"))
+        self.project_team_view = ProjectTeamView(parent=self.left_column)
+        left_layout.addWidget(self.project_team_view, 1)
+
+        # These objects remain alive because the existing session, rename and
+        # deletion code still uses them as an internal compatibility model.
+        # ProjectTeamView is the only user-visible history/navigation surface.
+        self.legacy_history_label = QtWidgets.QLabel("历史任务")
+        left_layout.addWidget(self.legacy_history_label)
         self.history_combo = QtWidgets.QComboBox()
         self.history_combo.addItem("暂无历史会话", None)
         self.history_combo.setSizeAdjustPolicy(
@@ -537,7 +559,19 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.thread_id_edit = QtWidgets.QLineEdit()
         self.thread_id_edit.setVisible(False)
         left_layout.addWidget(self.thread_id_edit)
-        left_layout.addStretch(1)
+        for legacy_widget in (
+            self.legacy_history_label,
+            self.history_combo,
+            self.refresh_threads_button,
+            self.new_thread_button,
+            self.resume_thread_button,
+            self.thread_name_edit,
+            self.rename_thread_button,
+            self.copy_thread_id_button,
+            self.delete_thread_button,
+            self.thread_id_edit,
+        ):
+            legacy_widget.setVisible(False)
 
         self.center_column = QtWidgets.QWidget(self.main_splitter)
         self.center_column.setMinimumWidth(360)
@@ -2929,6 +2963,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         stopping = self._is_stopping_turn()
         steer_available = controls.stop and not stopping
+        team_intake_ready = bool(
+            getattr(self, "_new_task_route", None) == "team"
+            and self._connected
+            and self._authenticated
+            and not self._turn_state.busy
+            and not self._goal_houdini_busy()
+        )
         history_record = self._selected_history_record()
         history_available = history_record is not None
         self.new_thread_button.setEnabled(
@@ -3031,7 +3072,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             knowledge_idle and selected_source is not None
         )
         self.send_button.setEnabled(
-            (controls.send or steer_available) and request_submission_ready
+            (controls.send or steer_available or team_intake_ready)
+            and request_submission_ready
         )
         self.stop_button.setEnabled(
             controls.stop and not stopping and not self._interrupt_pending
@@ -3080,7 +3122,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if add_image_button is not None:
             add_image_button.setEnabled(
                 composer_enabled
-                and isinstance(self._selected_thread_id, str)
+                and (
+                    isinstance(self._selected_thread_id, str)
+                    or team_intake_ready
+                )
                 and self._selected_model_supports_images()
             )
         include_selection = getattr(self, "include_selection_checkbox", None)
@@ -6808,6 +6853,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         return True
 
     def _new_thread(self) -> None:
+        self._new_task_route = None
         if (
             self._client is not None
             and not self._turn_state.busy
@@ -6823,6 +6869,40 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 model=self._selected_model_id(),
                 service_tier=self._selected_service_tier(),
             )
+
+    def _on_project_team_new_task(self, route: str) -> None:
+        """Select the one explicit creation route exposed by the left tree."""
+
+        if route == "single":
+            self._new_thread()
+            return
+        if route != "team" or self._client is None:
+            return
+        if (
+            self._turn_state.busy
+            or self._goal_houdini_busy()
+            or self._session_action_pending
+            or self._turn_start_request_pending
+            or self._turn_steer_request_pending
+            or self._reconciliation_tokens
+        ):
+            self._append_system("当前操作结束后才能新建项目。")
+            return
+        self._new_task_route = "team"
+        self._append_system(
+            "已选择新建项目。请在下方输入完整初始任务并发送；"
+            "无需先新建普通任务。"
+        )
+        self.input_edit.setFocus()
+        self._refresh_controls()
+
+    def _open_project_role_thread(self, thread_id: str) -> None:
+        """Open only an explicit ordinary or project-role Thread."""
+
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        self._new_task_route = None
+        self._request_thread_resume(thread_id, context="session_resume")
 
     def _resume_thread(self) -> None:
         if self._goal_houdini_busy():
@@ -6855,6 +6935,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if attachment_paths and not self._selected_model_supports_images():
             self._append_system("当前模型不支持图片输入，请选择其他模型后再发送。")
             return
+        if getattr(self, "_new_task_route", None) == "team":
+            if self._turn_state.busy:
+                self._append_system("当前 Turn 结束后才能新建项目。")
+                return
+            self._start_team_project(text, attachment_paths)
+            return
         thread_id = self._selected_thread_id
         if not isinstance(thread_id, str) or not thread_id:
             self._append_system("请先新建或恢复 Thread。")
@@ -6885,6 +6971,46 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._goal_continuation_paused = False
             self._apply_focus_mode(thread_id, self._focus_mode)
         return
+
+    def _start_team_project(
+        self,
+        text: str,
+        attachment_paths: tuple[str, ...],
+    ) -> bool:
+        """Submit one project intake without manufacturing an ordinary Thread."""
+
+        if (
+            self._client is None
+            or self._turn_start_request_pending
+            or self._session_action_pending
+            or self._turn_steer_request_pending
+            or self._reconciliation_tokens
+            or self._goal_houdini_busy()
+        ):
+            return False
+        runtime_settings = self._capture_turn_runtime_settings()
+        context = f"{_PROJECT_TEAM_CREATE_CONTEXT_PREFIX}{uuid.uuid4().hex}"
+        self._pending_team_drafts[context] = {
+            "text": text,
+            "attachment_paths": attachment_paths,
+        }
+        self._turn_start_request_pending = True
+        self._refresh_controls()
+        request_id = self._client.start_turn(
+            self._request_text_with_selection(text),
+            model=runtime_settings["model"],
+            effort=runtime_settings["effort"],
+            service_tier=runtime_settings["service_tier"],
+            local_image_paths=list(attachment_paths),
+            team_override="team",
+            context=context,
+        )
+        if request_id is None:
+            self._turn_start_request_pending = False
+            self._pending_team_drafts.pop(context, None)
+            self._refresh_controls()
+            return False
+        return True
 
     def _start_new_turn(
         self,
@@ -6957,6 +7083,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             effort=runtime_settings["effort"],
             service_tier=runtime_settings["service_tier"],
             local_image_paths=list(attachment_paths),
+            team_override="single",
             context=context,
         )
         return True
@@ -7335,6 +7462,31 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _on_action_completed(self, context: str, payload: dict[str, Any]) -> None:
         if self._handle_scene_action(context, payload):
             self._maybe_start_goal_continuation()
+            return
+        if context.startswith(_PROJECT_TEAM_CREATE_CONTEXT_PREFIX):
+            draft = self._pending_team_drafts.pop(context, None)
+            self._turn_start_request_pending = False
+            if isinstance(draft, dict):
+                text = draft.get("text")
+                paths = tuple(draft.get("attachment_paths") or ())
+                if isinstance(text, str) and self.input_edit.toPlainText() == text:
+                    self.input_edit.clear()
+                if paths and paths == self._attachment_paths():
+                    self.attachment_strip.clear()
+            self._new_task_route = None
+            project_id = payload.get("project_id")
+            self._append_system(
+                "项目已创建，监督 AI 正在接收初始任务。"
+                + (
+                    f"\n项目 ID：{project_id}"
+                    if isinstance(project_id, str) and project_id
+                    else ""
+                )
+            )
+            controller = self._project_team_controller
+            if controller is not None:
+                controller.refresh()
+            self._refresh_controls()
             return
         if context == _HOUDINI_STATUS_CONTEXT:
             self._houdini_status_pending = False
@@ -8485,6 +8637,19 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(str, dict)
     def _on_request_failed(self, context: str, payload: dict[str, Any]) -> None:
+        if context.startswith(_PROJECT_TEAM_CREATE_CONTEXT_PREFIX):
+            # The composer and attachments deliberately remain unchanged.  A
+            # failed project intake is never silently converted into a normal
+            # chat or automatically retried.
+            self._pending_team_drafts.pop(context, None)
+            self._turn_start_request_pending = False
+            self._new_task_route = "team"
+            self._append_system(
+                "项目创建失败；初始任务和图片已保留，未自动重试。\n"
+                + format_bridge_error(payload)
+            )
+            self._refresh_controls()
+            return
         if context == _HOUDINI_STATUS_CONTEXT:
             self._houdini_status_pending = False
             self._houdini_status_turn_token = None
@@ -9040,6 +9205,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 selected_index = index
         self.model_combo.setCurrentIndex(selected_index)
         self.model_combo.blockSignals(False)
+        project_team_view = getattr(self, "project_team_view", None)
+        if project_team_view is not None:
+            project_team_view.set_model_catalog(sorted(seen))
         self._update_reasoning_efforts()
         self._update_service_tiers()
 
@@ -9417,6 +9585,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 adapter.dispose()
             except HoudiniReadAdapterError:
                 pass
+        project_team_controller = getattr(self, "_project_team_controller", None)
+        self._project_team_controller = None
+        if project_team_controller is not None:
+            project_team_controller.close()
         client = self._client
         self._client = None
         if client is not None:

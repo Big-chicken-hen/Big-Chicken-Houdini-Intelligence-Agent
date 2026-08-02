@@ -564,6 +564,7 @@ class _BridgeClientShim:
         effort: str | None,
         service_tier: str | None,
         local_image_paths: list[str],
+        team_override: str | None = None,
         context: str,
     ) -> str | None:
         self.turn_requests.append(
