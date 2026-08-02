@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -23,10 +24,26 @@ from services.bridge.hia_bridge.project_effects import (
 )
 from services.bridge.hia_bridge.project_guidance import publish_guidance
 from services.bridge.hia_bridge.project_lifecycle import ProjectEvent, reduce_project
-from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
+from services.bridge.hia_bridge.project_registry import (
+    ProjectAttachment,
+    ProjectRecord,
+    ProjectRegistry,
+)
 from services.bridge.hia_bridge.project_runner import _pending_effect
 from services.bridge.hia_bridge.project_thread_factory import ProjectThreadFactory
-from tests.unit.project_test_support import server_transports
+from tests.unit.project_test_support import observable_thread_response, server_transports
+
+
+def _detail(label: str, size: int) -> str:
+    value = label
+    index = 0
+    translation = str.maketrans("0123456789", "abcdefghij")
+    while len(value) < size:
+        value += hashlib.sha256(f"{label}:{index}".encode()).hexdigest().translate(
+            translation
+        )
+        index += 1
+    return value[:size]
 
 
 def _full_stage() -> dict:
@@ -37,12 +54,26 @@ def _full_stage() -> dict:
         "ordered_steps": [
             {
                 "step_id": "step-1",
-                "operation": "build the requirement-specific editable subsystem",
                 "dependencies": [],
                 "requirement_ids": ["req-1"],
-                "inputs": [{"source": "task-ref"}],
-                "outputs": [{"artifact": "native nodes"}],
-                "acceptance": {"method": "real HIA evidence"},
+                "user_fact_ids": ["fact-1"],
+                "target_network_region": {
+                    "context": "SOP",
+                    "target": _detail("networktarget", 700),
+                },
+                "native_operation_strategy": {
+                    "native_nodes": ["polyextrude", "sweep"],
+                    "operation": _detail("nativeoperation", 700),
+                },
+                "connections": [
+                    {"from": "source/0", "to": "body/0", "purpose": _detail("connection", 700)}
+                ],
+                "parameter_dependencies": [
+                    {"parameter": "body/height", "depends_on": "fact-1", "effect": _detail("parameter", 700)}
+                ],
+                "expected_result": {"visible": _detail("visible", 700), "editable": _detail("editable", 700)},
+                "evidence": {"visual": _detail("visualevidence", 700), "technical": _detail("technicalevidence", 700)},
+                "minimum_repair": {"trigger": _detail("repairtrigger", 700), "operation": _detail("repairoperation", 700)},
             }
         ],
         "evidence_contract": {"capture": True, "technical": True},
@@ -52,10 +83,30 @@ def _full_stage() -> dict:
 
 
 def _plan() -> dict:
+    task_id, _ = authoritative_task_identity("build a Houdini asset")
+    anchor = f"task:{task_id}"
     return {
         "schema": "hia-project-plan/1",
+        "task_description": {
+            "description": _detail("taskdescription", 1200),
+            "source_anchors": [anchor],
+        },
+        "user_facts": [
+            {"fact_id": "fact-1", "description": _detail("userfact", 1200), "source_anchor": anchor}
+        ],
+        "blueprint_sections": [
+            {
+                "section_id": "section-1",
+                "title": "Editable asset construction",
+                "description": _detail("blueprintsection", 3000),
+                "source_anchors": [anchor],
+                "user_fact_ids": ["fact-1"],
+                "requirement_ids": ["req-1"],
+                "stage_ids": ["stage-1"],
+            }
+        ],
         "requirements": [
-            {"requirement_id": "req-1", "kind": "hard_constraint", "source_ref": "task-ref"}
+            {"requirement_id": "req-1", "kind": "hard_constraint", "source_ref": anchor}
         ],
         "stages": [_full_stage()],
     }
@@ -100,7 +151,7 @@ class FakeProjectClient:
             self.calls.append((method, dict(params)))
             if method == "thread/start":
                 role = params["threadSource"].rsplit("/", 1)[-1]
-                return {"thread": {"id": f"thread-{role}"}, "model": params.get("model")}
+                return observable_thread_response(params, f"thread-{role}")
             if method == "turn/start":
                 self._turn_number += 1
                 turn_id = f"turn-{self._turn_number}"
@@ -353,9 +404,42 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         for item in starts:
             if item["threadId"] != "thread-execution":
                 self.assertEqual("readOnly", item["sandboxPolicy"]["type"])
+            envelope = json.loads(item["input"][0]["text"])
+            capsule = envelope["authoritative_task"]
+            self.assertEqual("hia-authoritative-task/1", capsule["schema"])
+            self.assertEqual("build a Houdini asset", capsule["task_text"])
+            self.assertEqual([], capsule["attachments"])
         goals = [params for method, params in self.client.calls if method == "thread/goal/set"]
         self.assertEqual("completed", goals[-1]["status"])
         self.assertEqual("thread-supervisor", goals[-1]["threadId"])
+
+    def test_role_capsule_includes_complete_attachment_identity_without_artifact_copy(self):
+        self.client.queue(
+            Role.SUPERVISOR,
+            "scene_task_eligibility",
+            {"schema": "hia-project-eligibility/1", "disposition": "ineligible", "reason": "test"},
+        )
+        harness = EffectHarness(self.root, self.client)
+        record = harness.registry.require("project-1")
+        attachment = ProjectAttachment(
+            str(self.root / "reference.png"), "a" * 64, 123
+        )
+        harness.registry.put(
+            ProjectRecord(record.state, record.authoritative_task_text, (attachment,)),
+            expected_revision=record.state.revision,
+        )
+        harness.run_one()
+        envelope = next(iter(self.client.turns.values()))[2]
+        self.assertEqual(
+            {
+                "attachment_anchor": f"attachment:{'a' * 64}",
+                "path": str(self.root / "reference.png"),
+                "sha256": "a" * 64,
+                "size_bytes": 123,
+            },
+            envelope["authoritative_task"]["attachments"][0],
+        )
+        self.assertNotIn("authoritative_task", harness.artifacts.project("project-1"))
 
     def test_failed_reviews_drive_supervisor_repair_and_execution_repair(self):
         self._queue_common()

@@ -34,7 +34,12 @@ from .project_guidance import (
     validate_requirement_coverage,
 )
 from .project_lifecycle import LifecycleEvent, ProjectEvent
-from .project_payloads import parse_review_claim, parse_stage_card
+from .project_payloads import (
+    parse_review_claim,
+    parse_stage_card,
+    validate_blueprint_information,
+    validate_plan_structure,
+)
 from .project_registry import ProjectRegistry
 from .project_thread_factory import ProjectThreadFactory
 from .project_turns import TurnOwnershipLedger
@@ -220,8 +225,17 @@ class ProjectEffectExecutor:
             state, Role.PLANNING, request, "hia-project-plan/1", deadline
         )
         payload = completed.payload
-        if set(payload) != {"schema", "requirements", "stages"}:
-            raise ProjectEffectError("INVALID_PLAN_SCHEMA", "plan fields are invalid")
+        capsule = self._authoritative_task_capsule(state)
+        try:
+            validate_plan_structure(
+                payload,
+                allowed_source_anchors=(
+                    capsule["task_anchor"],
+                    *(item["attachment_anchor"] for item in capsule["attachments"]),
+                ),
+            )
+        except ValueError as exc:
+            raise ProjectEffectError("INVALID_PLAN_SCHEMA", str(exc)) from exc
         raw_requirements = payload.get("requirements")
         raw_stages = payload.get("stages")
         if not isinstance(raw_requirements, list) or not raw_requirements:
@@ -248,6 +262,13 @@ class ProjectEffectExecutor:
         cards = [parse_stage_card(raw) for raw in raw_stages if isinstance(raw, Mapping)]
         if len(cards) != len(raw_stages) or len({card.stage_id for card in cards}) != len(cards):
             raise ProjectEffectError("INVALID_PLAN_SCHEMA", "stage cards are malformed or duplicated")
+        try:
+            validate_blueprint_information(payload, tuple(cards))
+        except ValueError as exc:
+            raise ProjectEffectError(
+                "INVALID_PLAN_SCHEMA",
+                str(exc),
+            ) from exc
         covered = tuple(item for card in cards for item in card.requirement_ids)
         validate_requirement_coverage(requirements, covered)
         state = replace(
@@ -779,6 +800,7 @@ class ProjectEffectExecutor:
                 "task_id": state.authoritative_task_id,
                 "sha256": state.authoritative_task_sha256,
             },
+            "authoritative_task": self._authoritative_task_capsule(state),
             "requirements": [
                 {
                     "requirement_id": item.requirement_id,
@@ -793,6 +815,36 @@ class ProjectEffectExecutor:
                 if role is Role.EXECUTION or action == "scene_task_eligibility"
                 else state.budget.max_native_subagents_per_turn
             ),
+        }
+
+    def _authoritative_task_capsule(self, state: ProjectState) -> dict[str, Any]:
+        """Return the sole persisted task record as a read-only Turn capsule."""
+
+        record = self._registry.require(state.project_id)
+        if (
+            record.state.authoritative_task_id != state.authoritative_task_id
+            or record.state.authoritative_task_sha256
+            != state.authoritative_task_sha256
+        ):
+            raise ProjectEffectError(
+                "AUTHORITATIVE_TASK_MISMATCH",
+                "persisted authoritative task identity changed",
+            )
+        return {
+            "schema": "hia-authoritative-task/1",
+            "task_id": state.authoritative_task_id,
+            "sha256": state.authoritative_task_sha256,
+            "task_anchor": f"task:{state.authoritative_task_id}",
+            "task_text": record.authoritative_task_text,
+            "attachments": [
+                {
+                    "attachment_anchor": f"attachment:{item.sha256}",
+                    "path": item.path,
+                    "sha256": item.sha256,
+                    "size_bytes": item.size_bytes,
+                }
+                for item in record.attachments
+            ],
         }
 
     def _set_goal(
@@ -892,7 +944,14 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
 
     fields = {
         "hia-project-eligibility/1": {"schema", "disposition", "reason"},
-        "hia-project-plan/1": {"schema", "requirements", "stages"},
+        "hia-project-plan/1": {
+            "schema",
+            "task_description",
+            "user_facts",
+            "blueprint_sections",
+            "requirements",
+            "stages",
+        },
         "hia-project-authorization/1": {"schema", "authorized", "stage_ids"},
         "hia-project-execution/1": {
             "schema",
@@ -923,8 +982,17 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             raise ValueError("eligibility disposition is invalid")
         _plain_text(payload.get("reason"))
     elif schema == "hia-project-plan/1":
+        description = payload.get("task_description")
+        facts = payload.get("user_facts")
+        sections = payload.get("blueprint_sections")
         requirements = payload.get("requirements")
         stages = payload.get("stages")
+        if not isinstance(description, Mapping) or not description:
+            raise ValueError("task_description must be a non-empty object")
+        if not isinstance(facts, list) or not facts:
+            raise ValueError("user_facts must be non-empty")
+        if not isinstance(sections, list) or not sections:
+            raise ValueError("blueprint_sections must be non-empty")
         if not isinstance(requirements, list) or not requirements:
             raise ValueError("requirements must be non-empty")
         if not isinstance(stages, list) or not stages:
@@ -1044,6 +1112,28 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
         },
         "hia-project-plan/1": {
             "schema": schema,
+            "task_description": {
+                "description": "complete task-specific production description",
+                "source_anchors": ["task:<authoritative task ID>"],
+            },
+            "user_facts": [
+                {
+                    "fact_id": "stable user-fact ID",
+                    "description": "one explicit user fact without invention",
+                    "source_anchor": "task:<task ID> or attachment:<sha256>",
+                }
+            ],
+            "blueprint_sections": [
+                {
+                    "section_id": "stable visible section ID",
+                    "title": "user-visible section title",
+                    "description": "complete task-specific section content",
+                    "source_anchors": ["authoritative source anchors"],
+                    "user_fact_ids": ["covered user-fact IDs"],
+                    "requirement_ids": ["covered requirement IDs"],
+                    "stage_ids": ["covered stage IDs"],
+                }
+            ],
             "requirements": [
                 {
                     "requirement_id": "stable task-specific ID",
@@ -1059,12 +1149,35 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                     "ordered_steps": [
                         {
                             "step_id": "stable ID",
-                            "operation": "specific construction or validation operation",
                             "dependencies": ["earlier step IDs only"],
                             "requirement_ids": ["requirements covered by this step"],
-                            "inputs": [{"source": "specific input", "use": "specific use"}],
-                            "outputs": [{"artifact": "specific editable output"}],
-                            "acceptance": {"method": "specific observable acceptance"},
+                            "user_fact_ids": ["authoritative facts implemented by this step"],
+                            "target_network_region": {
+                                "context": "OBJ/SOP/LOP/material context",
+                                "target": "specific editable network region",
+                            },
+                            "native_operation_strategy": {
+                                "native_nodes": ["specific native node types"],
+                                "operation": "specific construction or validation operation",
+                            },
+                            "connections": [
+                                {"from": "source/output", "to": "target/input", "purpose": "data-flow reason"}
+                            ],
+                            "parameter_dependencies": [
+                                {"parameter": "path/name", "depends_on": "fact or upstream value", "effect": "observable dependency"}
+                            ],
+                            "expected_result": {
+                                "visible": "specific visible result",
+                                "editable": "specific procedural editability",
+                            },
+                            "evidence": {
+                                "visual": "specific image content and view",
+                                "technical": "specific HIA measurement or inspection",
+                            },
+                            "minimum_repair": {
+                                "trigger": "specific failed observation",
+                                "operation": "smallest evidence-backed repair",
+                            },
                         }
                     ],
                     "evidence_contract": {

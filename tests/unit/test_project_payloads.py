@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 
 from services.bridge.hia_bridge.project_payloads import (
@@ -9,18 +10,90 @@ from services.bridge.hia_bridge.project_payloads import (
     VerifiedClaim,
     parse_review_claim,
     parse_stage_card,
+    validate_blueprint_information,
+    validate_plan_structure,
 )
+
+
+def _detail(label: str, size: int) -> str:
+    value = label
+    index = 0
+    translation = str.maketrans("0123456789", "abcdefghij")
+    while len(value) < size:
+        value += hashlib.sha256(f"{label}:{index}".encode()).hexdigest().translate(
+            translation
+        )
+        index += 1
+    return value[:size]
 
 
 def _step(step_id="STEP-1", requirement_id="REQ-1", dependencies=None):
     return {
         "step_id": step_id,
-        "operation": "construct the requirement-specific editable subsystem",
         "dependencies": list(dependencies or []),
         "requirement_ids": [requirement_id],
-        "inputs": [{"source": "authoritative task", "use": "dimensions"}],
-        "outputs": [{"artifact": "native node subsystem"}],
-        "acceptance": {"method": "inspect exact relationship"},
+        "user_fact_ids": ["FACT-1"],
+        "target_network_region": {"context": "SOP", "target": "asset body"},
+        "native_operation_strategy": {
+            "native_nodes": ["polyextrude"],
+            "operation": "construct the requirement-specific editable subsystem",
+        },
+        "connections": [
+            {"from": "source/0", "to": "shape/0", "purpose": "geometry flow"}
+        ],
+        "parameter_dependencies": [
+            {"parameter": "shape/height", "depends_on": "FACT-1", "effect": "sets height"}
+        ],
+        "expected_result": {"visible": "recognizable form", "editable": "native controls"},
+        "evidence": {"visual": "perspective capture", "technical": "geometry summary"},
+        "minimum_repair": {"trigger": "shape mismatch", "operation": "adjust height only"},
+    }
+
+
+def _full_step():
+    step = _step()
+    step["native_operation_strategy"]["operation"] = _detail("operation", 700)
+    step["expected_result"]["visible"] = _detail("visible", 700)
+    step["evidence"]["technical"] = _detail("technical", 700)
+    step["minimum_repair"]["operation"] = _detail("repair", 700)
+    return step
+
+
+def _plan_structure() -> dict:
+    stage = {
+        "depth": "focused",
+        "stage_id": "STAGE-1",
+        "requirement_ids": ["REQ-1"],
+        "ordered_steps": [_step()],
+    }
+    return {
+        "schema": "hia-project-plan/1",
+        "task_description": {
+            "description": "Build the editable asset described by the user",
+            "source_anchors": ["task:TASK-1"],
+        },
+        "user_facts": [
+            {
+                "fact_id": "FACT-1",
+                "description": "The user requires an editable asset",
+                "source_anchor": "task:TASK-1",
+            }
+        ],
+        "blueprint_sections": [
+            {
+                "section_id": "SECTION-1",
+                "title": "Editable construction",
+                "description": "Construct and verify the editable native network",
+                "source_anchors": ["task:TASK-1"],
+                "user_fact_ids": ["FACT-1"],
+                "requirement_ids": ["REQ-1"],
+                "stage_ids": ["STAGE-1"],
+            }
+        ],
+        "requirements": [
+            {"requirement_id": "REQ-1", "kind": "structure", "source_ref": "task:TASK-1"}
+        ],
+        "stages": [stage],
     }
 
 
@@ -96,7 +169,7 @@ class ProjectPayloadTests(unittest.TestCase):
             "depth": "full",
             "stage_id": "S1",
             "requirement_ids": ["REQ-1"],
-            "ordered_steps": [_step()],
+            "ordered_steps": [_full_step()],
             "evidence_contract": {"capture": "side and perspective"},
             "reviewers": ["visual_review", "technical_review"],
             "failure_minimum_repair": "repair only the failed claim",
@@ -106,7 +179,7 @@ class ProjectPayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "both"):
             parse_stage_card(payload)
 
-    def test_no_character_length_floor_exists(self) -> None:
+    def test_focused_card_has_no_full_information_floor(self) -> None:
         card = parse_stage_card(
             {
                 "depth": "focused",
@@ -116,6 +189,67 @@ class ProjectPayloadTests(unittest.TestCase):
             }
         )
         self.assertEqual("S", card.stage_id)
+
+    def test_full_card_rejects_shallow_stage_and_step(self) -> None:
+        payload = {
+            "depth": "full",
+            "stage_id": "S1",
+            "requirement_ids": ["REQ-1"],
+            "ordered_steps": [_step()],
+            "evidence_contract": {"capture": "side and perspective"},
+            "reviewers": ["visual_review", "technical_review"],
+            "failure_minimum_repair": "repair only the failed claim",
+        }
+        with self.assertRaisesRegex(ValueError, "2500 task-specific"):
+            parse_stage_card(payload)
+
+    def test_full_blueprint_rejects_stage_detail_below_overall_floor(self) -> None:
+        payload = {
+            "depth": "full",
+            "stage_id": "S1",
+            "requirement_ids": ["REQ-1"],
+            "ordered_steps": [_full_step()],
+            "evidence_contract": {"capture": "side and perspective"},
+            "reviewers": ["visual_review", "technical_review"],
+            "failure_minimum_repair": "repair only the failed claim",
+        }
+        card = parse_stage_card(payload)
+        with self.assertRaisesRegex(ValueError, "10000 task-specific"):
+            validate_blueprint_information(
+                {"schema": "hia-project-plan/1", "stages": [payload]},
+                (card,),
+            )
+
+    def test_repeated_tokens_and_numbered_paragraphs_do_not_satisfy_full_floor(self) -> None:
+        step = _step()
+        repeated = ("same generic detail " * 2000) + " ".join(
+            f"same generic paragraph {index}" for index in range(2000)
+        )
+        step["native_operation_strategy"]["operation"] = repeated
+        payload = {
+            "depth": "full",
+            "stage_id": "S1",
+            "requirement_ids": ["REQ-1"],
+            "ordered_steps": [step],
+            "evidence_contract": {"capture": repeated},
+            "reviewers": ["visual_review", "technical_review"],
+            "failure_minimum_repair": repeated,
+        }
+        with self.assertRaisesRegex(ValueError, "2500 task-specific"):
+            parse_stage_card(payload)
+
+    def test_plan_structure_requires_authoritative_anchors_and_complete_sections(self) -> None:
+        payload = _plan_structure()
+        validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
+        payload["blueprint_sections"][0]["user_fact_ids"] = ["UNKNOWN"]
+        with self.assertRaisesRegex(ValueError, "unknown user fact"):
+            validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
+
+    def test_every_ordered_step_reverse_references_a_user_fact(self) -> None:
+        payload = _plan_structure()
+        payload["stages"][0]["ordered_steps"][0]["user_fact_ids"] = ["UNKNOWN"]
+        with self.assertRaisesRegex(ValueError, "unknown user fact"):
+            validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
 
     def test_stage_steps_require_semantic_structure_and_exact_coverage(self) -> None:
         base = {

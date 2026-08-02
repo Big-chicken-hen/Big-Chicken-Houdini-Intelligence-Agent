@@ -1,14 +1,21 @@
 """Conditional structured payloads for plans and reviews.
 
-These contracts validate shape and stable references only.  They do not score
-professionalism, prose length, keyword overlap, or visual quality.
+These contracts validate shape, stable references, and the Full-blueprint
+production information floors.  They do not score professionalism, keyword
+overlap, or visual quality.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Any, Mapping
+import re
+from typing import Any, Iterable, Mapping
+
+
+FULL_BLUEPRINT_INFORMATION_UNITS = 10_000
+FULL_STAGE_INFORMATION_UNITS = 2_500
+FULL_STEP_INFORMATION_UNITS = 350
 
 
 @dataclass(frozen=True)
@@ -135,6 +142,13 @@ def parse_stage_card(value: Mapping[str, Any]) -> StageCard:
     reviewers = _text_tuple(value, "reviewers")
     if set(reviewers) != {"visual_review", "technical_review"}:
         raise ValueError("full stage requires both independent reviewers")
+    if information_units(value) < FULL_STAGE_INFORMATION_UNITS:
+        raise ValueError("full stage has fewer than 2500 task-specific information units")
+    for index, step in enumerate(steps, 1):
+        if information_units(step) < FULL_STEP_INFORMATION_UNITS:
+            raise ValueError(
+                f"full ordered step {index} has fewer than 350 task-specific information units"
+            )
     return StageCard(
         depth,
         _required_text(value, "stage_id"),
@@ -144,6 +158,150 @@ def parse_stage_card(value: Mapping[str, Any]) -> StageCard:
         reviewers,
         _required_text(value, "failure_minimum_repair"),
     )
+
+
+def validate_blueprint_information(
+    value: Mapping[str, Any], cards: tuple[StageCard, ...]
+) -> None:
+    """Apply Full-only overall depth after every stage card is validated."""
+
+    depths = {card.depth for card in cards}
+    if len(depths) != 1:
+        raise ValueError("all stage cards must use one task depth")
+    if depths == {"full"} and information_units(value) < FULL_BLUEPRINT_INFORMATION_UNITS:
+        raise ValueError(
+            "Full blueprint has fewer than 10000 task-specific information units"
+        )
+
+
+def validate_plan_structure(
+    value: Mapping[str, Any], *, allowed_source_anchors: Iterable[str]
+) -> None:
+    """Validate task facts and visible blueprint sections without judging prose."""
+
+    expected = {
+        "schema",
+        "task_description",
+        "user_facts",
+        "blueprint_sections",
+        "requirements",
+        "stages",
+    }
+    if set(value) != expected:
+        raise ValueError(f"plan fields must be exactly {sorted(expected)}")
+    allowed = set(allowed_source_anchors)
+    if not allowed:
+        raise ValueError("authoritative source anchors are unavailable")
+    description = value.get("task_description")
+    if not isinstance(description, Mapping) or set(description) != {
+        "description",
+        "source_anchors",
+    }:
+        raise ValueError("task_description fields are invalid")
+    _required_text(description, "description")
+    _validate_source_anchors(description, allowed)
+
+    raw_facts = value.get("user_facts")
+    if not isinstance(raw_facts, list) or not raw_facts:
+        raise ValueError("user_facts must be a non-empty list")
+    fact_ids: set[str] = set()
+    for fact in raw_facts:
+        if not isinstance(fact, Mapping) or set(fact) != {
+            "fact_id",
+            "description",
+            "source_anchor",
+        }:
+            raise ValueError("user fact fields are invalid")
+        fact_id = _required_text(fact, "fact_id")
+        if fact_id in fact_ids:
+            raise ValueError("user fact IDs must be unique")
+        _required_text(fact, "description")
+        if _required_text(fact, "source_anchor") not in allowed:
+            raise ValueError("user fact source_anchor is not authoritative")
+        fact_ids.add(fact_id)
+
+    requirements = value.get("requirements")
+    stages = value.get("stages")
+    sections = value.get("blueprint_sections")
+    if not isinstance(requirements, list) or not requirements:
+        raise ValueError("requirements must be a non-empty list")
+    if not isinstance(stages, list) or not stages:
+        raise ValueError("stages must be a non-empty list")
+    if not isinstance(sections, list) or not sections:
+        raise ValueError("blueprint_sections must be a non-empty list")
+    requirement_ids = {
+        _required_text(item, "requirement_id")
+        for item in requirements
+        if isinstance(item, Mapping)
+    }
+    stage_ids = {
+        _required_text(item, "stage_id")
+        for item in stages
+        if isinstance(item, Mapping)
+    }
+    if len(requirement_ids) != len(requirements):
+        raise ValueError("requirements are malformed or duplicated")
+    if any(
+        _required_text(item, "source_ref") not in allowed
+        for item in requirements
+        if isinstance(item, Mapping)
+    ):
+        raise ValueError("requirement source_ref is not authoritative")
+    if len(stage_ids) != len(stages):
+        raise ValueError("stages are malformed or duplicated")
+
+    section_ids: set[str] = set()
+    covered_facts: set[str] = set()
+    covered_requirements: set[str] = set()
+    covered_stages: set[str] = set()
+    for section in sections:
+        if not isinstance(section, Mapping) or set(section) != {
+            "section_id",
+            "title",
+            "description",
+            "source_anchors",
+            "user_fact_ids",
+            "requirement_ids",
+            "stage_ids",
+        }:
+            raise ValueError("blueprint section fields are invalid")
+        section_id = _required_text(section, "section_id")
+        if section_id in section_ids:
+            raise ValueError("blueprint section IDs must be unique")
+        _required_text(section, "title")
+        _required_text(section, "description")
+        _validate_source_anchors(section, allowed)
+        section_facts = set(_text_tuple(section, "user_fact_ids"))
+        section_requirements = set(_text_tuple(section, "requirement_ids"))
+        section_stages = set(_text_tuple(section, "stage_ids"))
+        if not section_facts.issubset(fact_ids):
+            raise ValueError("blueprint section references an unknown user fact")
+        if not section_requirements.issubset(requirement_ids):
+            raise ValueError("blueprint section references an unknown requirement")
+        if not section_stages.issubset(stage_ids):
+            raise ValueError("blueprint section references an unknown stage")
+        section_ids.add(section_id)
+        covered_facts.update(section_facts)
+        covered_requirements.update(section_requirements)
+        covered_stages.update(section_stages)
+    if covered_facts != fact_ids:
+        raise ValueError("blueprint sections do not cover every user fact")
+    if covered_requirements != requirement_ids:
+        raise ValueError("blueprint sections do not cover every requirement")
+    if covered_stages != stage_ids:
+        raise ValueError("blueprint sections do not cover every stage")
+
+    for stage in stages:
+        for step in stage["ordered_steps"]:
+            refs = set(_text_tuple(step, "user_fact_ids"))
+            if not refs.issubset(fact_ids):
+                raise ValueError("ordered step references an unknown user fact")
+
+
+def _validate_source_anchors(value: Mapping[str, Any], allowed: set[str]) -> None:
+    anchors = set(_text_tuple(value, "source_anchors"))
+    if not anchors.issubset(allowed):
+        raise ValueError("source_anchors contain a non-authoritative reference")
 
 
 def _required_text(value: Mapping[str, Any], key: str) -> str:
@@ -164,12 +322,16 @@ def _text_tuple(value: Mapping[str, Any], key: str) -> tuple[str, ...]:
 
 _STEP_FIELDS = {
     "step_id",
-    "operation",
     "dependencies",
     "requirement_ids",
-    "inputs",
-    "outputs",
-    "acceptance",
+    "user_fact_ids",
+    "target_network_region",
+    "native_operation_strategy",
+    "connections",
+    "parameter_dependencies",
+    "expected_result",
+    "evidence",
+    "minimum_repair",
 }
 
 
@@ -186,7 +348,6 @@ def _validate_ordered_steps(
                 f"ordered step fields must be exactly {sorted(_STEP_FIELDS)}"
             )
         step_id = _required_text(raw, "step_id")
-        _required_text(raw, "operation")
         if step_id in seen_ids:
             raise ValueError("ordered step IDs must be unique")
         dependencies = raw.get("dependencies")
@@ -197,17 +358,25 @@ def _validate_ordered_steps(
         if any(item not in seen_ids for item in dependencies):
             raise ValueError("step dependencies must reference earlier ordered steps")
         requirement_ids = set(_text_tuple(raw, "requirement_ids"))
+        _text_tuple(raw, "user_fact_ids")
         if not requirement_ids.issubset(stage_requirement_ids):
             raise ValueError("step references a requirement outside its stage")
-        for key in ("inputs", "outputs"):
+        for key in (
+            "target_network_region",
+            "native_operation_strategy",
+            "expected_result",
+            "evidence",
+            "minimum_repair",
+        ):
+            item = raw.get(key)
+            if not isinstance(item, Mapping) or not item:
+                raise ValueError(f"step {key} must be a structured record")
+        for key in ("connections", "parameter_dependencies"):
             items = raw.get(key)
             if not isinstance(items, list) or not items or not all(
                 isinstance(item, Mapping) and item for item in items
             ):
                 raise ValueError(f"step {key} must contain structured records")
-        acceptance = raw.get("acceptance")
-        if not isinstance(acceptance, Mapping) or not acceptance:
-            raise ValueError("step acceptance must be a structured record")
         fingerprint = json.dumps(
             raw, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
@@ -221,3 +390,48 @@ def _validate_ordered_steps(
     if missing:
         raise ValueError(f"ordered steps do not cover stage requirements: {missing}")
     return tuple(parsed)
+
+
+def information_units(value: Any) -> int:
+    """Count novel visible text while heavily discounting repeated filler.
+
+    Field names never count.  Digits are normalized and repeated 12-character
+    shingles count once across the complete value, so repeated tokens,
+    duplicated paragraphs, and numbered copies cannot satisfy a floor.
+    """
+
+    texts: list[str] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, Mapping):
+            for key, child in item.items():
+                if not str(key).startswith("_"):
+                    collect(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child)
+        elif isinstance(item, str):
+            texts.append(item)
+
+    collect(value)
+    seen: set[str] = set()
+    units = 0
+    for text in texts:
+        normalized = re.sub(r"\d+", "#", text.casefold())
+        normalized = "".join(
+            character
+            for character in normalized
+            if ("\u4e00" <= character <= "\u9fff")
+            or character.isascii() and (character.isalnum() or character in "/._=:\\-")
+        )
+        if not normalized:
+            continue
+        width = min(12, len(normalized))
+        shingles = {
+            normalized[index : index + width]
+            for index in range(len(normalized) - width + 1)
+        }
+        novel = shingles - seen
+        seen.update(shingles)
+        units += len(novel)
+    return units
