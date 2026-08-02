@@ -207,6 +207,51 @@ class ProjectHTTPTests(unittest.TestCase):
         record = self.project_team._registry.require(started["project_id"])
         self.assertEqual("REQ-simple-material", record.state.requirements[0].requirement_id)
 
+        replaced = self.request(
+            "POST",
+            "/v1/project-team/actions",
+            {
+                "action": "append_guidance",
+                "project_id": started["project_id"],
+                "text": "shrink the material scope",
+                "requirement_delta": {
+                    "add": [
+                        {
+                            "requirement_id": "REQ-basic-material",
+                            "kind": "material",
+                        }
+                    ],
+                    "supersede": {
+                        "REQ-simple-material": "REQ-basic-material"
+                    },
+                },
+            },
+        )
+        self.assertIn("project_team", replaced)
+        record = self.project_team._registry.require(started["project_id"])
+        statuses = {
+            item.requirement_id: item.status.value for item in record.state.requirements
+        }
+        self.assertEqual("superseded_by_user", statuses["REQ-simple-material"])
+        self.assertEqual("active", statuses["REQ-basic-material"])
+
+        cancelled = self.request(
+            "POST",
+            "/v1/project-team/actions",
+            {
+                "action": "append_guidance",
+                "project_id": started["project_id"],
+                "text": "cancel material animation",
+                "requirement_delta": {"remove": ["REQ-basic-material"]},
+            },
+        )
+        self.assertIn("project_team", cancelled)
+        record = self.project_team._registry.require(started["project_id"])
+        statuses = {
+            item.requirement_id: item.status.value for item in record.state.requirements
+        }
+        self.assertEqual("removed_by_user", statuses["REQ-basic-material"])
+
         replanned = self.request(
             "POST",
             "/v1/project-team/actions",

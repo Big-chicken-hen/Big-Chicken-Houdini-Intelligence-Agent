@@ -111,7 +111,7 @@ def validate_requirement_coverage(
     }
     covered = set(covered_requirement_ids)
     missing = sorted(active - covered)
-    unknown = sorted(covered - {item.requirement_id for item in requirements})
+    unknown = sorted(covered - active)
     if missing or unknown:
         raise ValueError(
             f"requirement coverage mismatch: missing={missing}, unknown={unknown}"

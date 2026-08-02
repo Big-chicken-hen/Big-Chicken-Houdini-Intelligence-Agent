@@ -37,6 +37,7 @@ class ProjectTeamGateway(Protocol):
         project_id: str,
         thread_id: str | None,
         text: str,
+        requirement_delta: Mapping[str, Any] | None = None,
         force_replan: bool = False,
         context: str,
     ) -> str | None: ...
@@ -76,7 +77,9 @@ class ProjectTeamController:
         self._closed = True
         self._ordinary_threads: Any = None
         self._project_snapshot: Any = None
-        self._pending_guidance: dict[str, tuple[str, str | None, str, bool]] = {}
+        self._pending_guidance: dict[
+            str, tuple[str, str | None, str, Mapping[str, Any] | None, bool]
+        ] = {}
         self._connect_view_once()
 
     @property
@@ -156,21 +159,25 @@ class ProjectTeamController:
         project_id: str,
         thread_id: str | None,
         text: str,
+        requirement_change: Mapping[str, Any] | None = None,
         force_replan: bool = False,
     ) -> None:
         if not self.active:
             return
         context = f"project_guidance:{uuid.uuid4().hex}"
+        requirement_delta = _requirement_delta(requirement_change, context)
         self._pending_guidance[context] = (
             project_id,
             thread_id,
             text,
+            requirement_change,
             force_replan,
         )
         self.gateway.append_project_guidance(
             project_id=project_id,
             thread_id=thread_id,
             text=text,
+            requirement_delta=requirement_delta,
             force_replan=force_replan,
             context=context,
         )
@@ -224,9 +231,15 @@ class ProjectTeamController:
         if context.startswith("project_guidance:") and project_snapshot_received:
             pending = self._pending_guidance.pop(context, None)
             if pending is not None:
-                _project_id, _thread_id, submitted_text, force_replan = pending
+                (
+                    _project_id,
+                    _thread_id,
+                    submitted_text,
+                    requirement_change,
+                    force_replan,
+                ) = pending
                 if not self.view.acknowledge_guidance(
-                    submitted_text, force_replan
+                    submitted_text, requirement_change, force_replan
                 ):
                     self._on_error(
                         "先前版本的追加指导已发送；当前正在编辑的内容已保留。"
@@ -291,3 +304,31 @@ def _disconnect(signal: Any, callback: Callable[..., Any]) -> None:
         # Qt raises when an already-destroyed signal or an absent connection is
         # disconnected.  The controller's own flag remains authoritative.
         pass
+
+
+def _requirement_delta(
+    change: Mapping[str, Any] | None, context: str
+) -> Mapping[str, Any] | None:
+    if change is None:
+        return None
+    operation = change.get("operation")
+    target = change.get("target_requirement_id")
+    if operation not in {"add", "replace", "remove"}:
+        raise ValueError("requirement change operation is invalid")
+    if operation in {"replace", "remove"} and not isinstance(target, str):
+        raise ValueError("requirement change target is required")
+    if operation == "remove":
+        return {"remove": [target]}
+    new_id = f"REQ-user-{uuid.uuid5(uuid.NAMESPACE_URL, context).hex[:16]}"
+    result: dict[str, Any] = {
+        "add": [
+            {
+                "requirement_id": new_id,
+                "kind": "user_scope",
+                "source_ref": f"guidance:{context.rsplit(':', 1)[-1]}",
+            }
+        ]
+    }
+    if operation == "replace":
+        result["supersede"] = {target: new_id}
+    return result

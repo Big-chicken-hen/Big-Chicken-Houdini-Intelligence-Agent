@@ -35,7 +35,7 @@ if PYSIDE_AVAILABLE:
         newTaskRequested = QtCore.Signal(str)
         openThreadRequested = QtCore.Signal(str)
         projectSelected = QtCore.Signal(str)
-        appendGuidanceRequested = QtCore.Signal(str, object, str, bool)
+        appendGuidanceRequested = QtCore.Signal(str, object, str, object, bool)
         continueProjectRequested = QtCore.Signal(str)
         stopProjectRequested = QtCore.Signal(str)
         collapsedChanged = QtCore.Signal(bool)
@@ -206,9 +206,22 @@ if PYSIDE_AVAILABLE:
             self.current_step_guidance_button.setChecked(True)
             guidance_scope.addWidget(self.current_step_guidance_button, 1)
             guidance_scope.addWidget(self.replan_guidance_button, 1)
+            self.requirement_change_widget = QtWidgets.QWidget()
+            requirement_change_layout = QtWidgets.QFormLayout(
+                self.requirement_change_widget
+            )
+            requirement_change_layout.setContentsMargins(0, 0, 0, 0)
+            self.requirement_change_combo = QtWidgets.QComboBox()
+            self.requirement_change_combo.addItem("新增需求", "add")
+            self.requirement_change_combo.addItem("替换已有需求", "replace")
+            self.requirement_change_combo.addItem("取消已有需求", "remove")
+            self.requirement_target_combo = QtWidgets.QComboBox()
+            requirement_change_layout.addRow("变更类型", self.requirement_change_combo)
+            requirement_change_layout.addRow("已有需求", self.requirement_target_combo)
             self.guidance_button = QtWidgets.QPushButton("发送追加指导")
             detail.addWidget(self.guidance_edit)
             detail.addLayout(guidance_scope)
+            detail.addWidget(self.requirement_change_widget)
             detail.addWidget(self.guidance_button)
             root.addWidget(self.detail_surface)
 
@@ -248,6 +261,12 @@ if PYSIDE_AVAILABLE:
             self.effort_combo.currentTextChanged.connect(self._capture_runtime_draft)
             self.tier_combo.currentTextChanged.connect(self._capture_runtime_draft)
             self.guidance_button.clicked.connect(self._send_guidance)
+            self.replan_guidance_button.toggled.connect(
+                self.requirement_change_widget.setVisible
+            )
+            self.requirement_change_combo.currentIndexChanged.connect(
+                self._update_requirement_change_controls
+            )
             self.continue_button.clicked.connect(self._continue_project)
             self.stop_button.clicked.connect(self._stop_project)
 
@@ -440,6 +459,7 @@ if PYSIDE_AVAILABLE:
             )
             self.runtime_widget.setVisible(isinstance(selected, RoleViewModel))
             project = self._selected_project(selected)
+            self._render_requirement_choices(project)
             self.guidance_edit.setVisible(project is not None)
             self.guidance_button.setVisible(project is not None)
             self.guidance_button.setEnabled(
@@ -485,6 +505,37 @@ if PYSIDE_AVAILABLE:
                 self.selection_title.setText("尚未选择任务")
                 self.selection_meta.setText("")
             self._render_attention(project)
+
+        def _render_requirement_choices(
+            self, project: ProjectViewModel | None
+        ) -> None:
+            blocked = self.requirement_target_combo.blockSignals(True)
+            current = self.requirement_target_combo.currentData()
+            self.requirement_target_combo.clear()
+            if project is not None:
+                for item in project.requirements:
+                    if item.status in {
+                        "active",
+                        "planned",
+                        "verified",
+                        "failed",
+                        "blocked",
+                    }:
+                        self.requirement_target_combo.addItem(
+                            f"{item.requirement_id} ({item.kind})",
+                            item.requirement_id,
+                        )
+            index = self.requirement_target_combo.findData(current)
+            self.requirement_target_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.requirement_target_combo.blockSignals(blocked)
+            self.requirement_change_widget.setVisible(
+                project is not None and self.replan_guidance_button.isChecked()
+            )
+            self._update_requirement_change_controls()
+
+        def _update_requirement_change_controls(self, _index: int = 0) -> None:
+            operation = self.requirement_change_combo.currentData()
+            self.requirement_target_combo.setVisible(operation in {"replace", "remove"})
 
         def _render_attention(self, project: ProjectViewModel | None) -> None:
             visible = bool(project and project.attention.visible)
@@ -562,17 +613,34 @@ if PYSIDE_AVAILABLE:
             if not text or project is None or not project.can_guide:
                 return
             force_replan = self.replan_guidance_button.isChecked()
+            requirement_change = None
+            if force_replan:
+                operation = self.requirement_change_combo.currentData()
+                target = self.requirement_target_combo.currentData()
+                if operation in {"replace", "remove"} and not isinstance(target, str):
+                    return
+                requirement_change = {
+                    "operation": operation,
+                    **({"target_requirement_id": target} if target else {}),
+                }
             thread_id = (
                 selected.thread_id
                 if isinstance(selected, RoleViewModel) and not force_replan
                 else None
             )
             self.appendGuidanceRequested.emit(
-                project.project_id, thread_id, text, force_replan
+                project.project_id,
+                thread_id,
+                text,
+                requirement_change,
+                force_replan,
             )
 
         def acknowledge_guidance(
-            self, submitted_text: str, force_replan: bool = False
+            self,
+            submitted_text: str,
+            requirement_change: object = None,
+            force_replan: bool = False,
         ) -> bool:
             """Clear only the exact draft acknowledged by this response."""
 
@@ -580,9 +648,21 @@ if PYSIDE_AVAILABLE:
                 return False
             if self.replan_guidance_button.isChecked() != force_replan:
                 return False
+            if self._current_requirement_change() != requirement_change:
+                return False
             self.guidance_edit.clear()
             self.current_step_guidance_button.setChecked(True)
             return True
+
+        def _current_requirement_change(self) -> dict[str, Any] | None:
+            if not self.replan_guidance_button.isChecked():
+                return None
+            operation = self.requirement_change_combo.currentData()
+            target = self.requirement_target_combo.currentData()
+            return {
+                "operation": operation,
+                **({"target_requirement_id": target} if target else {}),
+            }
 
         def _continue_project(self) -> None:
             selected = find_tree_item(self.state.tree, self.state.selected_key)

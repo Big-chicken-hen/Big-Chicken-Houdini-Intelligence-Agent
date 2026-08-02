@@ -505,6 +505,14 @@ class ProjectTeamService:
             "last_error": state.last_error,
             "latest_evidence_ids": list(state.stage.latest_evidence_ids),
             "attachment_count": len(record.attachments),
+            "requirements": [
+                {
+                    "requirement_id": item.requirement_id,
+                    "kind": item.kind,
+                    "status": item.status.value,
+                }
+                for item in state.requirements
+            ],
             "actions": {
                 "append_guidance": guidance_allowed,
                 "continue": state.status is ProjectStatus.NEEDS_ATTENTION,

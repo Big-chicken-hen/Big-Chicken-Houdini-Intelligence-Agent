@@ -30,6 +30,10 @@ def snapshot():
                 "stage": "review",
                 "attention_reason": "视觉证据显示栏杆穿插",
                 "consumed_turns": 8,
+                "requirements": [
+                    {"requirement_id": "REQ-structure", "kind": "structure", "status": "active"},
+                    {"requirement_id": "REQ-animation", "kind": "animation", "status": "active"},
+                ],
                 "actions": {"append_guidance": True, "continue": True, "stop": True},
                 "threads": [
                     {
@@ -180,8 +184,8 @@ class ProjectTeamQtTests(unittest.TestCase):
     def test_guidance_scope_is_mutually_exclusive_and_ack_matches_mode(self) -> None:
         emitted = []
         self.view.appendGuidanceRequested.connect(
-            lambda project_id, thread_id, text, force_replan: emitted.append(
-                (project_id, thread_id, text, force_replan)
+            lambda project_id, thread_id, text, requirement_change, force_replan: emitted.append(
+                (project_id, thread_id, text, requirement_change, force_replan)
             )
         )
         self.state.select("role:project-a:supervisor")
@@ -199,6 +203,7 @@ class ProjectTeamQtTests(unittest.TestCase):
                     "project-a",
                     None,
                     "改成三层钢结构并重新安排所有阶段",
+                    {"operation": "add"},
                     True,
                 )
             ],
@@ -206,7 +211,7 @@ class ProjectTeamQtTests(unittest.TestCase):
         )
         self.assertFalse(
             self.view.acknowledge_guidance(
-                "改成三层钢结构并重新安排所有阶段", False
+                "改成三层钢结构并重新安排所有阶段", {"operation": "add"}, False
             )
         )
         self.assertEqual(
@@ -215,7 +220,7 @@ class ProjectTeamQtTests(unittest.TestCase):
         )
         self.assertTrue(
             self.view.acknowledge_guidance(
-                "改成三层钢结构并重新安排所有阶段", True
+                "改成三层钢结构并重新安排所有阶段", {"operation": "add"}, True
             )
         )
         self.assertTrue(self.view.current_step_guidance_button.isChecked())

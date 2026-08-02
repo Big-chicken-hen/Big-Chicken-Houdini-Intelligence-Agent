@@ -34,6 +34,10 @@ def project_snapshot(*, role_thread_id: str = "thread-supervisor", status: str =
                 "last_error": "栏杆穿入扶手",
                 "latest_evidence_ids": ["evidence-17", "image-8"],
                 "latest_repair_card": "重新约束栏杆端点和扶手净空",
+                "requirements": [
+                    {"requirement_id": "REQ-structure", "kind": "structure", "status": "active"},
+                    {"requirement_id": "REQ-animation", "kind": "animation", "status": "active"},
+                ],
                 "actions": {
                     "append_guidance": True,
                     "continue": status == "needs_attention",
@@ -244,6 +248,7 @@ class FakeView:
         self.render_count = 0
         self.guidance_ack_count = 0
         self.guidance_text = ""
+        self.guidance_requirement_change = None
         self.guidance_force_replan = False
         self.model_catalogs = []
 
@@ -251,15 +256,20 @@ class FakeView:
         self.render_count += 1
 
     def acknowledge_guidance(
-        self, submitted_text: str, force_replan: bool = False
+        self,
+        submitted_text: str,
+        requirement_change=None,
+        force_replan: bool = False,
     ) -> bool:
         if (
             self.guidance_text != submitted_text
+            or self.guidance_requirement_change != requirement_change
             or self.guidance_force_replan != force_replan
         ):
             return False
         self.guidance_ack_count += 1
         self.guidance_text = ""
+        self.guidance_requirement_change = None
         self.guidance_force_replan = False
         return True
 
@@ -461,8 +471,16 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.controller.show()
         self.view.guidance_text = "改成三层钢结构并重新安排所有阶段"
         self.view.guidance_force_replan = True
+        self.view.guidance_requirement_change = {
+            "operation": "remove",
+            "target_requirement_id": "REQ-animation",
+        }
         self.view.appendGuidanceRequested.emit(
-            "project-house", None, self.view.guidance_text, True
+            "project-house",
+            None,
+            self.view.guidance_text,
+            self.view.guidance_requirement_change,
+            True,
         )
         guidance = [
             call
@@ -470,6 +488,9 @@ class ProjectTeamControllerTests(unittest.TestCase):
             if call[0] == "append_project_guidance"
         ][-1]
         self.assertTrue(guidance[2]["force_replan"])
+        self.assertEqual(
+            {"remove": ["REQ-animation"]}, guidance[2]["requirement_delta"]
+        )
         context = guidance[2]["context"]
         self.view.guidance_force_replan = False
         self.gateway.actionCompleted.emit(
@@ -477,6 +498,40 @@ class ProjectTeamControllerTests(unittest.TestCase):
         )
         self.assertEqual("改成三层钢结构并重新安排所有阶段", self.view.guidance_text)
         self.assertEqual(0, self.view.guidance_ack_count)
+
+    def test_replacing_requirement_sends_explicit_add_and_supersede_delta(self) -> None:
+        self.controller.show()
+        self.view.guidance_text = "缩小材质范围，只保留基础木材"
+        self.view.guidance_force_replan = True
+        self.view.guidance_requirement_change = {
+            "operation": "replace",
+            "target_requirement_id": "REQ-structure",
+        }
+        self.view.appendGuidanceRequested.emit(
+            "project-house",
+            None,
+            self.view.guidance_text,
+            self.view.guidance_requirement_change,
+            True,
+        )
+        guidance = [
+            call for call in self.gateway.calls if call[0] == "append_project_guidance"
+        ][-1]
+        delta = guidance[2]["requirement_delta"]
+        new_id = delta["add"][0]["requirement_id"]
+        self.assertEqual({"REQ-structure": new_id}, delta["supersede"])
+        self.assertEqual("user_scope", delta["add"][0]["kind"])
+
+    def test_plain_current_step_guidance_has_no_requirement_delta(self) -> None:
+        self.controller.show()
+        self.view.appendGuidanceRequested.emit(
+            "project-house", "thread-execution", "只调整当前扶手间距"
+        )
+        guidance = [
+            call for call in self.gateway.calls if call[0] == "append_project_guidance"
+        ][-1]
+        self.assertIsNone(guidance[2]["requirement_delta"])
+        self.assertFalse(guidance[2]["force_replan"])
 
     def test_old_guidance_ack_never_clears_new_draft(self) -> None:
         self.controller.show()

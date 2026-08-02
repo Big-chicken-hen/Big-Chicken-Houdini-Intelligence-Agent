@@ -89,12 +89,20 @@ class AttentionViewModel:
 
 
 @dataclass(frozen=True)
+class RequirementViewModel:
+    requirement_id: str
+    kind: str
+    status: str
+
+
+@dataclass(frozen=True)
 class ProjectViewModel:
     project_id: str
     title: str
     status: str
     stage: str | None
     roles: tuple[RoleViewModel, ...]
+    requirements: tuple[RequirementViewModel, ...]
     attention: AttentionViewModel
     can_continue: bool
     can_guide: bool
@@ -269,6 +277,15 @@ def _normalize_project(raw: Mapping[str, Any]) -> ProjectViewModel | None:
         status=status,
         stage=_optional_text(raw.get("stage"), limit=256),
         roles=roles,
+        requirements=tuple(
+            RequirementViewModel(
+                requirement_id=_text(item.get("requirement_id"), limit=256),
+                kind=_text(item.get("kind"), limit=120),
+                status=_text(item.get("status"), limit=64),
+            )
+            for item in _mapping_list(raw.get("requirements"))
+            if _text(item.get("requirement_id"), limit=256)
+        ),
         attention=attention,
         can_continue=_boolean_action(actions, "continue"),
         can_guide=_boolean_action(actions, "append_guidance"),
