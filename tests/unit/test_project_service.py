@@ -5,7 +5,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from services.bridge.hia_bridge.project_contracts import ProjectStatus, Requirement, Role
+from services.bridge.hia_bridge.project_contracts import (
+    PendingEffect,
+    ProjectStatus,
+    Requirement,
+    Role,
+)
 from services.bridge.hia_bridge.project_guidance import RequirementDelta
 from services.bridge.hia_bridge.project_registry import ProjectRegistry
 from services.bridge.hia_bridge.project_service import (
@@ -362,6 +367,55 @@ class ProjectServiceTests(unittest.TestCase):
         )
         self.assertEqual([project_id, project_id], workflow.started)
         self.assertTrue(registry.require(project_id).state.plan_stale)
+
+    def test_completing_rejects_project_and_role_guidance_while_active_allows_it(self) -> None:
+        result = self.service.start_team_project(task_text="build a scene")
+        project_id = result["project_id"]
+        supervisor_id = result["root_thread_id"]
+        record = self.registry.require(project_id)
+        completing = replace(
+            record.state,
+            status=ProjectStatus.COMPLETING,
+            pending_effects=(PendingEffect("complete", "complete_goal"),),
+            revision=record.state.revision + 1,
+        )
+        self.registry.put(
+            type(record)(
+                completing, record.authoritative_task_text, record.attachments
+            ),
+            expected_revision=record.state.revision,
+        )
+
+        project = self.service.snapshot()["projects"][0]
+        self.assertFalse(project["actions"]["append_guidance"])
+        self.assertFalse(project["threads"][0]["actions"]["append_guidance"])
+        with self.assertRaises(ProjectGuidanceUnavailable):
+            self.service.append_guidance(project_id=project_id, text="late project")
+        with self.assertRaises(ProjectGuidanceUnavailable):
+            self.service.append_guidance(
+                project_id=project_id,
+                thread_id=supervisor_id,
+                text="late role",
+            )
+
+        record = self.registry.require(project_id)
+        active = replace(
+            record.state,
+            status=ProjectStatus.EXECUTING_STAGE,
+            pending_effects=(),
+            revision=record.state.revision + 1,
+        )
+        self.registry.put(
+            type(record)(active, record.authoritative_task_text, record.attachments),
+            expected_revision=record.state.revision,
+        )
+        self.service.append_guidance(project_id=project_id, text="active project")
+        self.service.append_guidance(
+            project_id=project_id,
+            thread_id=supervisor_id,
+            text="active role",
+        )
+        self.assertEqual(2, len(self.registry.require(project_id).state.guidance))
 
     def test_stop_request_immediately_disables_and_rejects_guidance(self) -> None:
         root = Path(self.temp.name)

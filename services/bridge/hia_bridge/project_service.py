@@ -39,6 +39,7 @@ _GUIDANCE_INACTIVE = frozenset(
         ProjectStatus.BLOCKED,
         ProjectStatus.INTERRUPTED,
         ProjectStatus.PAUSING,
+        ProjectStatus.COMPLETING,
     }
 )
 
