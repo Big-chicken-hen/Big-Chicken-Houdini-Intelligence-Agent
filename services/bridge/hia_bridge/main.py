@@ -825,8 +825,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         session_model_catalog = getattr(session, "list_models", None)
         if callable(session_model_catalog):
             project_runtime_arguments["model_catalog"] = session_model_catalog
-        project_runtime = _build_project_runtime(**project_runtime_arguments)
-        project_team = project_runtime.service
+        def build_project_team() -> ProjectTeamService:
+            nonlocal project_runtime
+            if project_runtime is None:
+                project_runtime = _build_project_runtime(**project_runtime_arguments)
+            return project_runtime.service
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
         houdini_process_nonce = f"houdini-{secrets.token_hex(16)}"
@@ -853,7 +856,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             houdini_mcp_backend=backend,
             houdini_launcher_session_id=houdini_launcher_session_id,
             houdini_executor_path=houdini_executor_path,
-            project_team=project_team,
+            project_team_factory=build_project_team,
         )
         server = LoopbackHTTPServer(
             ("127.0.0.1", requested_bridge_port),
@@ -874,10 +877,6 @@ def run(argv: Sequence[str] | None = None) -> int:
             }
         )
         session.start()
-        events.publish(
-            "project_team_updated",
-            project_team=project_runtime.service.snapshot(),
-        )
 
         def request_shutdown(*_: object) -> None:
             threading.Thread(
