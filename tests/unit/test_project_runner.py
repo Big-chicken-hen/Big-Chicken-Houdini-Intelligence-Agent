@@ -6,11 +6,14 @@ import tempfile
 import unittest
 
 from services.bridge.hia_bridge.project_contracts import (
+    PendingEffect,
     ProjectState,
     ProjectStatus,
     authoritative_task_identity,
 )
 from services.bridge.hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent
+from services.bridge.hia_bridge.project_effects import EffectResult
+from services.bridge.hia_bridge.project_guidance import publish_guidance
 from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
 from services.bridge.hia_bridge.project_runner import ProjectRunner
 
@@ -37,7 +40,7 @@ class FakeExecutor:
 
     def execute(self, state, effect):
         self.effects.append(effect)
-        return LifecycleEvent(self.event)
+        return EffectResult(state, LifecycleEvent(self.event))
 
 
 class ProjectRunnerTests(unittest.TestCase):
@@ -105,6 +108,52 @@ class ProjectRunnerTests(unittest.TestCase):
         self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.SCENE_ELIGIBLE))
         with self.assertRaisesRegex(ValueError, "pending"):
             self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_FAILED))
+
+    def test_state_only_effect_ack_persists_stage_advance_without_auto_pass(self) -> None:
+        record = _record(ProjectStatus.EXECUTING_STAGE)
+        effect = PendingEffect("effect-advance", "advance_stage", {})
+        record = ProjectRecord(
+            replace(record.state, pending_effects=(effect,)),
+            record.authoritative_task_text,
+        )
+        self.registry.put(record)
+        advanced = replace(
+            record.state,
+            stage=replace(record.state.stage, stage_id="stage-2", ordinal=2),
+            revision=record.state.revision + 1,
+        )
+        updated = self.runner.acknowledge_effect(
+            "p1", effect.effect_id, EffectResult(advanced, None)
+        )
+        self.assertEqual(ProjectStatus.EXECUTING_STAGE, updated.state.status)
+        self.assertEqual("stage-2", updated.state.stage.stage_id)
+        self.assertEqual((), updated.state.pending_effects)
+
+    def test_effect_ack_preserves_guidance_added_while_rpc_was_running(self) -> None:
+        record = _record(ProjectStatus.EXECUTING_STAGE)
+        effect = PendingEffect("effect-long-rpc", "advance_stage", {})
+        started = replace(record.state, pending_effects=(effect,))
+        self.registry.put(ProjectRecord(started, record.authoritative_task_text))
+        outcome = replace(
+            started,
+            stage=replace(started.stage, stage_id="stage-2", ordinal=2),
+            revision=started.revision + 1,
+        )
+
+        latest = publish_guidance(started, "remove the optional antenna")
+        self.registry.put(
+            ProjectRecord(latest, record.authoritative_task_text),
+            expected_revision=started.revision,
+        )
+        updated = self.runner.acknowledge_effect(
+            "p1", effect.effect_id, EffectResult(outcome, None)
+        )
+
+        self.assertEqual("stage-2", updated.state.stage.stage_id)
+        self.assertEqual(
+            ["remove the optional antenna"],
+            [item.text for item in updated.state.guidance],
+        )
 
 
 if __name__ == "__main__":
