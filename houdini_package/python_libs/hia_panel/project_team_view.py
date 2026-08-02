@@ -24,23 +24,16 @@ except ImportError:  # pragma: no cover - exercised by the pure view-model suite
 PYSIDE_AVAILABLE = QtWidgets is not None
 
 _STATUS_LABELS = {
-    "provisioning": "正在创建",
-    "intake": "正在接收任务",
-    "provisioning_roles": "正在创建团队",
     "planning": "正在制定方案",
-    "authorization": "等待监督确认",
-    "executing_stage": "正在执行",
-    "reviewing_stage": "正在审查",
-    "repairing_stage": "正在修复",
-    "completing": "正在收尾",
+    "executing": "正在执行",
+    "reviewing": "正在审查",
+    "waiting_user": "等待用户",
     "completed": "已完成",
-    "not_applicable": "已由监督 AI 处理",
+    "stopped": "已停止",
     "pending": "等待开始",
     "waiting": "等待开始",
     "running": "进行中",
     "interrupted": "已中断",
-    "needs_attention": "需要处理",
-    "blocked": "已阻塞",
     "failed": "失败",
 }
 
@@ -62,10 +55,9 @@ if PYSIDE_AVAILABLE:
         newTaskRequested = QtCore.Signal(str)
         openThreadRequested = QtCore.Signal(str)
         deleteThreadRequested = QtCore.Signal(str)
-        deleteProjectRequested = QtCore.Signal(str)
         projectSelected = QtCore.Signal(str)
         projectContextChanged = QtCore.Signal(bool)
-        appendGuidanceRequested = QtCore.Signal(str, object, str, object, bool)
+        appendGuidanceRequested = QtCore.Signal(str, object, str, object)
         continueProjectRequested = QtCore.Signal(str)
         stopProjectRequested = QtCore.Signal(str)
         collapsedChanged = QtCore.Signal(bool)
@@ -89,7 +81,6 @@ if PYSIDE_AVAILABLE:
             self.state = state or ProjectPanelState()
             self._items_by_key: dict[str, QtWidgets.QTreeWidgetItem] = {}
             self._model_catalog: dict[str, dict[str, Any]] = {}
-            self._delete_project_confirmation: str | None = None
             self._build_ui()
             self._connect_signals_once()
             self.refresh_view()
@@ -365,11 +356,11 @@ if PYSIDE_AVAILABLE:
                 self._render_selection()
                 return
             selected = self._model_index(current)
-            fallback_index = default_index
-            if fallback_index < 0 and self.model_combo.count() > 0:
-                fallback_index = 0
+            default_candidate_index = default_index
+            if default_candidate_index < 0 and self.model_combo.count() > 0:
+                default_candidate_index = 0
             self.model_combo.setCurrentIndex(
-                selected if selected >= 0 else fallback_index
+                selected if selected >= 0 else default_candidate_index
             )
             self.model_combo.blockSignals(False)
             self._update_runtime_capabilities(None, None)
@@ -580,10 +571,6 @@ if PYSIDE_AVAILABLE:
             selected = find_tree_item(self.state.tree, self.state.selected_key)
             self.delete_button.setEnabled(
                 isinstance(selected, OrdinaryThreadViewModel)
-                or (
-                    isinstance(selected, ProjectViewModel)
-                    and selected.can_delete
-                )
             )
             self.runtime_widget.setVisible(isinstance(selected, RoleViewModel))
             project = self._selected_project(selected)
@@ -739,19 +726,8 @@ if PYSIDE_AVAILABLE:
             selected = find_tree_item(self.state.tree, self.state.selected_key)
             if isinstance(selected, OrdinaryThreadViewModel):
                 self.deleteThreadRequested.emit(selected.thread_id)
-            elif isinstance(selected, ProjectViewModel) and selected.can_delete:
-                if self._delete_project_confirmation != selected.project_id:
-                    self._delete_project_confirmation = selected.project_id
-                    self.delete_button.setText("再次点击确认删除项目")
-                    self.delete_button.setToolTip(
-                        "永久删除该项目容器、五个角色任务及其本地缓存"
-                    )
-                    return
-                self._delete_project_confirmation = None
-                self.deleteProjectRequested.emit(selected.project_id)
 
         def set_delete_confirmation(self, thread_id: str | None) -> None:
-            self._delete_project_confirmation = None
             selected = find_tree_item(self.state.tree, self.state.selected_key)
             confirmed = (
                 isinstance(selected, OrdinaryThreadViewModel)
@@ -811,20 +787,18 @@ if PYSIDE_AVAILABLE:
                 thread_id,
                 text,
                 None,
-                False,
             )
 
         def acknowledge_guidance(
             self,
             submitted_text: str,
             requirement_change: object = None,
-            force_replan: bool = False,
         ) -> bool:
             """Clear only the exact draft acknowledged by this response."""
 
             if self.guidance_edit.toPlainText().strip() != submitted_text:
                 return False
-            if requirement_change is not None or force_replan:
+            if requirement_change is not None:
                 return False
             self.guidance_edit.clear()
             return True

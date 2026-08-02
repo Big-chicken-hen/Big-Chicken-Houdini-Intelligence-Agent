@@ -17,7 +17,6 @@ EMBEDDING_PROFILE_SETTING_KEY = "embedding_profile"
 EMBEDDING_DIMENSION_SETTING_KEY = "embedding_dimension"
 EMBEDDING_DEVICE_SETTING_KEY = "embedding_device"
 DEFAULT_EMBEDDING_PROFILE = "qwen3-embedding-0.6b"
-FALLBACK_EMBEDDING_PROFILE = "qwen3-embedding-0.6b"
 
 EMBEDDING_PROFILE_ENVIRONMENT = "HIA_EMBEDDING_PROFILE"
 EMBEDDING_PYTHON_ENVIRONMENT = "HIA_EMBEDDING_PYTHON"
@@ -56,8 +55,6 @@ KNOWLEDGE_INDEX_STATUS_FIELDS = (
     "model_revision",
     "dim",
     "normalized",
-    "degraded",
-    "fallback_reason",
     "repair",
     "complete",
     "partial",
@@ -90,7 +87,6 @@ EMBEDDING_STATUS_VALUES = (
     "configured",
     "loading",
     "ready",
-    "degraded",
     "error",
 )
 EMBEDDING_PUBLIC_STATUS_FIELDS = (
@@ -98,7 +94,6 @@ EMBEDDING_PUBLIC_STATUS_FIELDS = (
     "status",
     "installed",
     "ready",
-    "degraded",
     "requested_profile",
     "active_profile",
     "model_id",
@@ -112,7 +107,6 @@ EMBEDDING_PUBLIC_STATUS_FIELDS = (
     "normalized",
     "initialized",
     "loaded",
-    "fallback_reason",
     "repair",
 )
 
@@ -222,7 +216,6 @@ def launcher_contract() -> dict[str, Any]:
             "device": EMBEDDING_DEVICE_SETTING_KEY,
         },
         "default_profile": DEFAULT_EMBEDDING_PROFILE,
-        "fallback_profile": FALLBACK_EMBEDDING_PROFILE,
         "profiles": {
             key: asdict(value) for key, value in PROFILE_REGISTRY.items()
         },
@@ -300,11 +293,9 @@ def launcher_contract() -> dict[str, Any]:
         "status_fields": list(EMBEDDING_PUBLIC_STATUS_FIELDS),
         "selection": {
             "single_loaded_model": True,
-            "selected_8b_fallback": [
-                "qwen3-embedding-0.6b",
-                "lexical",
-            ],
-            "selected_0_6b_fallback": ["lexical"],
+            "selected_profile_required": True,
+            "implicit_profile_switch": False,
+            "lexical_mode_explicit": True,
             "download_on_import_or_search": False,
         },
         "repair_actions": {
@@ -325,7 +316,6 @@ __all__ = [
     "EMBEDDING_PUBLIC_STATUS_FIELDS",
     "EMBEDDING_STATUS_VALUES",
     "EmbeddingProfileContract",
-    "FALLBACK_EMBEDDING_PROFILE",
     "KNOWLEDGE_INDEX_CLI_EVENTS",
     "KNOWLEDGE_INDEX_CLI_MODULE",
     "KNOWLEDGE_INDEX_CLI_PROTOCOL",

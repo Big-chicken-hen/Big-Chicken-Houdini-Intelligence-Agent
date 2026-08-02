@@ -125,10 +125,6 @@ $quickCleanupScreenshotsButton = Get-RequiredControl -Name 'QuickCleanupScreensh
 $quickOpenReportButton = Get-RequiredControl -Name 'QuickOpenReportButton'
 $quickCopyReportButton = Get-RequiredControl -Name 'QuickCopyReportButton'
 $launchButton = Get-RequiredControl -Name 'LaunchButton'
-$recoveryCard = Get-RequiredControl -Name 'RecoveryCard'
-$recoveryCheckpointText = Get-RequiredControl -Name 'RecoveryCheckpointText'
-$recoverCheckpointOption = Get-RequiredControl -Name 'RecoverCheckpointOption'
-$normalLaunchOption = Get-RequiredControl -Name 'NormalLaunchOption'
 $layoutRoot = Get-RequiredControl -Name 'LayoutRoot'
 $rightVisualRail = Get-RequiredControl -Name 'RightVisualRail'
 $navigationColumn = Get-RequiredControl -Name 'NavigationColumn'
@@ -193,7 +189,6 @@ $script:preflightFailed = $false
 $script:suppressSelectionCheck = $false
 $script:isBusy = $false
 $script:initialScanStarted = $false
-$script:pendingRecovery = $null
 $script:compactLayout = $null
 $script:currentPage = 'overview'
 $script:bootstrapProcess = $null
@@ -682,25 +677,6 @@ function Update-ResponsiveLayout {
     $rightVisualRail.Margin = [System.Windows.Thickness]::new(0, 16, 0, 0)
 }
 
-function Initialize-RecoveryPrompt {
-    $script:pendingRecovery = $null
-    $recoveryCard.Visibility = [System.Windows.Visibility]::Collapsed
-    try {
-        $candidates = @(Get-HiaRecoverableLauncherSession -ProjectRoot $projectRoot)
-        if ($candidates.Count -eq 0) { return }
-        $script:pendingRecovery = $candidates[0]
-        $recoveryCheckpointText.Text = [string]$script:pendingRecovery.checkpoint_path
-        $recoveryCheckpointText.ToolTip = [string]$script:pendingRecovery.checkpoint_path
-        $recoverCheckpointOption.IsChecked = $true
-        $normalLaunchOption.IsChecked = $false
-        $recoveryCard.Visibility = [System.Windows.Visibility]::Visible
-    } catch {
-        # Recovery discovery is fail-closed; a malformed old session cannot block a normal launch.
-        $script:pendingRecovery = $null
-        $recoveryCard.Visibility = [System.Windows.Visibility]::Collapsed
-    }
-}
-
 function Hide-InlineStatus {
     $script:inlineStatusTimer.Stop()
     $inlineStatusBorder.Visibility = [System.Windows.Visibility]::Collapsed
@@ -906,9 +882,9 @@ function Set-HiaKnowledgeIndexDisplay {
         } elseif (-not $available) {
             $reason = [string](Get-HiaKnowledgeIndexValue `
                 -Index $current `
-                -Name 'fallback_reason' `
+                -Name 'error' `
                 -Default '')
-            $Message = '向量模型暂不可用；FTS5 lexical 检索可继续工作，Houdini 仍可启动。'
+            $Message = '向量模型不可用；hybrid/vector 请求会明确失败，lexical 模式需显式选择。'
             if ($reason) { $Message += " 原因：$reason" }
         } elseif ($complete) {
             $Message = '索引已完成。'
@@ -1868,8 +1844,6 @@ function Set-BusyState {
     $browseHoudiniButton.IsEnabled = -not $Busy
     $browseBridgeButton.IsEnabled = -not $Busy
     $browseRenderOutputButton.IsEnabled = -not $Busy
-    $recoverCheckpointOption.IsEnabled = -not $Busy
-    $normalLaunchOption.IsEnabled = -not $Busy
     $rescanButton.IsEnabled = -not $Busy
     $quickRescanButton.IsEnabled = -not $Busy
     $repairButton.IsEnabled = -not $Busy
@@ -3736,19 +3710,7 @@ $launchButton.Add_Click({
                 SelectedEmbeddingDevice = $selectedEmbeddingDevice
                 SelectedRenderOutput = $selectedRenderOutput
             }
-            if ($null -ne $script:pendingRecovery) {
-                $recoveryDecision = if ($recoverCheckpointOption.IsChecked) { 'recover' } else { 'normal' }
-                $launchParameters['RecoverySessionId'] = [string]$script:pendingRecovery.session_id
-                $launchParameters['RecoveryDecision'] = $recoveryDecision
-                if ($recoveryDecision -eq 'recover') {
-                    $launchParameters['RecoveryCheckpoint'] = [string]$script:pendingRecovery.checkpoint_path
-                }
-            }
             Start-ExistingHoudiniLauncher @launchParameters
-            if ($null -ne $script:pendingRecovery) {
-                $script:pendingRecovery = $null
-                $recoveryCard.Visibility = [System.Windows.Visibility]::Collapsed
-            }
             Show-InlineStatus `
                 -Kind 'success' `
                 -Transient `
@@ -3780,7 +3742,6 @@ Update-HiaWindowStateVisual
 Initialize-HiaOptionalArtwork
 Set-HiaLauncherPage -Page 'overview'
 Update-HiaOverviewSummary
-Initialize-RecoveryPrompt
 
 $window.Add_SizeChanged({ Update-ResponsiveLayout })
 $window.Add_Closed({

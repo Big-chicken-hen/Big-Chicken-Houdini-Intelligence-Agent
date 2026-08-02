@@ -132,7 +132,6 @@ class BridgeClient(QtCore.QObject):
         *,
         thread_id: str | None = None,
         requirement_delta: Mapping[str, Any] | None = None,
-        force_replan: bool = False,
         context: str = "project_team_guidance",
     ) -> str | None:
         payload: dict[str, Any] = {
@@ -144,8 +143,6 @@ class BridgeClient(QtCore.QObject):
             payload["thread_id"] = thread_id
         if requirement_delta is not None:
             payload["requirement_delta"] = dict(requirement_delta)
-        if force_replan:
-            payload["force_replan"] = True
         return self._request(
             "POST",
             "/v1/project-team/actions",
@@ -200,19 +197,6 @@ class BridgeClient(QtCore.QObject):
             "POST",
             "/v1/project-team/actions",
             {"action": "stop", "project_id": project_id},
-            context=context,
-        )
-
-    def delete_project(
-        self,
-        *,
-        project_id: str,
-        context: str = "project_team_delete",
-    ) -> str | None:
-        return self._request(
-            "POST",
-            "/v1/project-team/actions",
-            {"action": "delete", "project_id": project_id},
             context=context,
         )
 

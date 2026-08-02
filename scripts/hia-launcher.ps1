@@ -218,10 +218,7 @@ function Start-ExistingHoudiniLauncher {
         [ValidateSet('hia_v2', 'fxhoudini')][string]$SelectedBackend,
         [AllowEmptyString()][string]$SelectedEmbedding = '',
         [ValidateSet('auto', 'cuda', 'cpu')][string]$SelectedEmbeddingDevice = 'auto',
-        [AllowEmptyString()][string]$SelectedRenderOutput = '',
-        [AllowEmptyString()][string]$RecoverySessionId = '',
-        [AllowEmptyString()][string]$RecoveryCheckpoint = '',
-        [AllowEmptyString()][string]$RecoveryDecision = ''
+        [AllowEmptyString()][string]$SelectedRenderOutput = ''
     )
 
     $resolvedRenderOutput = Resolve-HiaRenderOutputDirectory `
@@ -243,15 +240,6 @@ function Start-ExistingHoudiniLauncher {
         $arguments += @('-EmbeddingProfile', $SelectedEmbedding)
     }
     $arguments += @('-EmbeddingDevice', $SelectedEmbeddingDevice)
-    if ($RecoveryDecision) {
-        $arguments += @(
-            '-RecoverySessionId', $RecoverySessionId,
-            '-RecoveryDecision', $RecoveryDecision
-        )
-        if ($RecoveryDecision -eq 'recover') {
-            $arguments += @('-RecoveryCheckpoint', $RecoveryCheckpoint)
-        }
-    }
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $powershellExe
     $startInfo.Arguments = (@($arguments | ForEach-Object { ConvertTo-HiaProcessArgument -Value ([string]$_) }) -join ' ')

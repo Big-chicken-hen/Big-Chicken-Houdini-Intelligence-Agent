@@ -967,13 +967,6 @@
 - 定向运行 `test_bridge_session`、`test_bridge_http`、`test_bridge_client_reply`、`test_conversation_tool_activity` 与 `test_panel_wiring`：187/187 通过，用时 10.445 秒；Markdown/IME/焦点静态回归 `test_p1_assets`：23/23 通过，用时 1.176 秒。未运行完整套件，也未启动、停止或重启 Houdini、Bridge、Codex。仍需真实 GUI 验证无文本 Goal 的占位/终态、首 delta 原位替换，以及 stale old ID→同步到新 active ID→恰好一次 steer 重试时草稿和图片不丢。
 - 后续只读审查发现两项迟到竞态：Goal 正文已出现后，stale-steer session 响应仍会无条件冻结并新建占位卡；同步失败或单次 retry 再冲突时，代码又会直接丢弃 pending 快照，若用户期间改写 composer，原文字或图片可能实际丢失。修正后只在 Goal 对账成功且可见流确实需要切换时换卡；失败收口把尚未包含的原文字置于当前新草稿之前，并只补回缺失附件，Stop/cancel 明确不恢复。相关 Panel/Bridge/ConversationView 回归 189/189 通过，用时 9.754 秒；仍需真实 GUI 验证 Goal 已输出正文时的迟到对账，以及同步失败/二次冲突期间继续编辑草稿的结果。
 
-## Stop 后 Codex 后台恢复（2026-07-21）
-
-- 真实 GUI 中 Stop 的 6 秒同步 restart/init/resume 预算不足以恢复长 Thread；Bridge 超时后把会话永久置为 `stopRecoveryFailed`，Panel 又无条件清除连接与认证，因此模型、推理强度、速度和发送全部锁死。Goal Turn 关联未清理，右栏同时错误显示“正在推进”；超时移除的 `thread/resume` 请求若稍后返回，还会产生 `UNKNOWN_RESPONSE_ID`。
-- 本节取代前述“6 秒内成功，否则永久断线”的 Stop 收口。Stop 仍只发送一次 interrupt，并在约 1 秒宽限内接受正常 completion；超过宽限后立即把旧 Turn 本地终结并隔离，HTTP 返回 `stopRecovering`。Bridge 同时最多启动一个后台 worker，在 50 秒总上限内只执行 Codex app-server restart、initialize 和原 exact Thread resume，不调用 `turn/start`，不重放 Turn、HOM 或 Houdini 操作。成功或最终失败都只通过既有 `session_state` 发布；旧进程 reader、旧 Turn 通知和已知恢复请求的迟到响应不能污染新 generation。
-- Panel 点击 Stop 后立即冻结可见流、显示“已停止”并保持 composer 可编辑；恢复期间发送/新建/切会话禁用，但模型、推理强度和速度可为下一 Turn 本地调整。active Goal 只显示恢复暂停，不改 Goal 或专注模式；恢复成功后同一 Thread 自动恢复连接与发送，最终失败则保留草稿/附件并只提示一次重启 launcher。普通未知 response 仍保留协议警告。
-- 定向运行 Bridge session、Codex stdio、Bridge HTTP、BridgeClient、ConversationView 与 Panel wiring 回归 210/210 通过，用时 10.849 秒；未运行完整套件，也未启动、停止或重启真实 Houdini、Bridge 或 Codex。仍需真实 GUI 验证长 Thread Stop 后恢复中状态、自动恢复模型控件与发送、Goal 暂停文案，以及已进入 Houdini UI 主线程的 HOM 最终收尾行为。
-
 ## Goal 专注模式自动续轮（2026-07-21）
 
 - 真实 GUI 中 Goal 仍显示“正在跟进/正在推进”，但当前 Turn 已经 idle，底部按钮退回“发送”，用户必须手动发消息才能继续。根因是既有逻辑只收口 completion 和保留 active Goal 元数据，没有把“active Goal + 专注开启 + 权威 idle”连接到下一轮 `turn/start`。
@@ -1111,15 +1104,15 @@
 ### 最小设计与兼容边界
 
 - HIA MCP V2 registry 当前为 17 个工具。`hia_local_help_search` 保留既有单项/批量、`sources`、分页和 `refresh` 兼容形状，新增 `lexical|vector|hybrid`，默认 hybrid；SQLite FTS5 始终是硬基线。唯一新增持久记忆入口为 `hia_project_memory`，actions 为 `record/search/list/delete/supersede`，types 为 `decision/preference/asset/lesson/workflow`。只有显式 record/supersede/delete 改写记忆，不保存聊天、不从 compaction 或诊断自动总结。
-- SQLite `knowledge.sqlite3` 同时保存正文、FTS5、显式 memory 和向量行；向量行保留 `model_id` 与 `dim`。刷新按 chunk SHA-256 增量处理，来源删除同步删除正文/FTS/向量；切换 profile/revision/dimension 只重建向量层，不重建正文或 FTS5。结果保留 provenance/verification，并公开 requested/active profile、status、degraded、fallback reason 和 repair。
+- SQLite `knowledge.sqlite3` 同时保存正文、FTS5、显式 memory 和向量行；向量行保留 `model_id` 与 `dim`。刷新按 chunk SHA-256 增量处理，来源删除同步删除正文/FTS/向量；切换 profile/revision/dimension 只重建向量层，不重建正文或 FTS5。结果保留 provenance/verification，并公开 requested/active profile、status 和 repair；缺失或无法加载所选 profile 时显式失败，不返回 degraded/fallback 成功。
 - 普通 hybrid 每次最多渐进补齐 256 chunks，优先本次 lexical candidates，再处理 backlog；在 `retrieval.vector.index` 返回 `complete/vector_chunks/total_chunks/pending_chunks/chunks_indexed_this_call`，不宣称首次查询完成全量向量化。向量排名使用 SQLite 流式游标与 bounded heap，不把全库向量物化到内存。
 - encoder 是独立、持久、串行 JSONL stdio worker，不会进入 Houdini Python/UI 主线程。该轮当时使用 `.runtime/toolchains/hia-embedding/venv/Scripts/python.exe`；当前权威环境是项目根 `<project-root>/.venv`，旧路径仅作为 legacy migration source。协议仍为 `hia-embedding-stdio/1`。MRL 通过构造 `SentenceTransformer` 时的 `truncate_dim=profile.dim` 实现，并在截断维度 normalize，不在 Python 返回后 slice。Codex 仍是唯一推理、规划、记忆正文和 HOM 生成主体；Qwen 只编码文本。搜索/import 不下载，不增加量化、reranker、第三模型、Agent、watcher、网络服务或 scheduler。
 
 ### 双 profile 与 launcher contract
 
 - `src/hia_core/embedding_contract.py` 是轻量、无 I/O、可导入的稳定权威。默认 `qwen3-embedding-0.6b` 对应官方 `Qwen/Qwen3-Embedding-0.6B`，约 1.21 GB，默认/最大 1024 维；高质量 `qwen3-embedding-8b` 对应 `Qwen/Qwen3-Embedding-8B`，约 15.2 GB BF16 分片，默认 1024、MRL 最大 4096。两者均 Apache-2.0、32K、100+ 语言，并支持 MRL 与 query instruction。
-- 同一时刻只加载一个 profile。8B 在 16 GB 显存上可能因运行时开销无法稳定全 GPU 加载；缺失、内存/显存不足或损坏时，只降级到已安装 0.6B，再降级到 FTS5，并返回原因。0.6B 失败直接降级 FTS5。没有维度 launcher UI；高级环境可显式选择 8B 的 4096 维。
-- contract 固定 settings `embedding_profile/embedding_dimension/embedding_device`，完整 `.runtime` venv/model/cache/DB 路径，worker distribution/module/entry point，`HIA_EMBEDDING_*` 与 profile-specific model/revision 环境变量，以及 `installed/ready/degraded` 等 health 字段和 `install/repair/repair_toolchain` 动作。当前共享工作树的 launcher 已按该 contract 接入 profile 选择、项目内安装/修复、preflight 与子进程环境；不声称任一模型或 venv 已实际安装。
+- 同一时刻只加载用户明确选择的一个 profile。8B 在 16 GB 显存上可能因运行时开销无法稳定全 GPU 加载；缺失、内存/显存不足、设备不满足或模型损坏时，所选 profile 显式不可用并要求安装/修复，不会隐藏切换到 0.6B、CPU 或 FTS5。词法检索必须由调用者显式选择。没有维度 launcher UI；高级环境可显式选择 8B 的 4096 维。
+- contract 固定 settings `embedding_profile/embedding_dimension/embedding_device`，完整 `.runtime` venv/model/cache/DB 路径，worker distribution/module/entry point，`HIA_EMBEDDING_*` 与 profile-specific model/revision 环境变量，以及 `installed/ready/status` 等 health 字段和 `install/repair/repair_toolchain` 动作。当前共享工作树的 launcher 已按该 contract 接入 profile 选择、项目内安装/修复、preflight 与子进程环境；不声称任一模型或 venv 已实际安装。
 - 发行边界保持严格：Release 不包含模型权重、encoder venv、缓存、SQLite DB、索引正文或向量。官方依据为 [0.6B model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)、[0.6B files](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/main)、[8B model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B) 与 [8B files](https://huggingface.co/Qwen/Qwen3-Embedding-8B/tree/main)。
 
 ### 当前定向验证
@@ -1169,7 +1162,7 @@
 
 ### 主任务真实验证（2026-07-24）
 
-- 使用 `Qwen/Qwen3-Embedding-0.6B`、1024 维进行真实检索。部分索引状态下首次查询用时 9.5 秒；无 lexical candidate 时明确返回 fallback，且不再错误返回 CHOP Warp。有 lexical candidate 的查询用时 6.477 秒，只补齐 1 个 chunk。
+- 使用 `Qwen/Qwen3-Embedding-0.6B`、1024 维进行真实检索。部分索引状态下首次查询用时 9.5 秒；无 lexical candidate 时明确返回空候选，且不再错误返回 CHOP Warp。有 lexical candidate 的查询用时 6.477 秒，只补齐 1 个 chunk。
 - CLI 以 `batch=64` 从 1027/8724 继续构建至 8724/8724，共 121 批，约 20 分 03 秒。完整索引后，同一查询的前三项结果为 AdvectByFilaments、pyro_buildadvectionmap、shallowfields；冷查询用时 5.078 秒，热查询用时 1.268 秒。
 - 最终完整测试 875/875 通过；HIA MCP 工具集合仍为 17 个，`.runtime` 保持 Git ignored。尚未执行真实 WPF 点击验收。
 
@@ -1392,7 +1385,7 @@
 - 安装与修复必须走同源项目命令：WPF 调用 `scripts\hia-knowledge.ps1`、
   `scripts\hia-cache.ps1` 及显式 embedding installer；不使用 WPF 的用户运行
   相同命令。基础修复只准备 managed Python、uv、共享 venv 与 `pypdf`，没有
-  PyTorch/模型时明确降级 FTS5，且不阻断 Houdini。
+  PyTorch/所选模型时明确报告该 profile 不可用，不会切换模型或伪报 embedding 可用；Houdini 启动是否阻断由严格 preflight 结果决定。
 - 本节是文档与已观察问题的收口记录。本次文档任务没有修改产品代码，没有运行
   unittest、PowerShell AST、XAML 或完整套件，也不新增或声称任何测试通过数量。
   上文已有数字仍分别属于其原始历史轮次。
@@ -1408,11 +1401,11 @@
   重扫委托既有 `knowledge_index_cli`，删除托管副本不会删除原文件。
 - Bridge、本地知识解析器和可选 embedding 复用唯一项目受管 venv。基础安装/
   修复只准备项目本地 Python、uv、同一 venv 与固定 `pypdf`，不会使用全局 pip、
-  用户 site-packages、系统 PATH 或 Houdini 安装目录；模型缺失或设备不可用仍可
-  降级 FTS5，不阻断基础 Houdini 启动。
+  用户 site-packages、系统 PATH 或 Houdini 安装目录；模型缺失或设备不可用会
+  明确报告所选 profile 不可用，不会切换到其他模型、设备或 FTS5。
 - 当前机器的既有 venv 是未带受管 marker 的旧环境，基础 Python 仍来自项目外，
   且缺少 `pypdf`。真实 `environment-status` 因而正确返回
-  `repair_required`、保留已探测到的 Torch/CUDA 信息并降级 FTS5；未在本轮执行
+  `repair_required`、保留已探测到的 Torch/CUDA 信息并阻止错误的 ready 状态；未在本轮执行
   安装或修复。`-CheckOnly -Json` 也因没有可接受的 Bridge Python 返回 red，
   没有伪报环境可用，也没有启动 Houdini GUI。
 - 缓存 CLI 只暴露六个固定分类并采用双快照、精确解析路径、reparse/逃逸拒绝和
@@ -1476,11 +1469,11 @@
 
 ## Panel/Bridge 本地知识入口（2026-07-26，定向通过）
 
-- 原入口缺少非 WPF 用户可用的知识环境、资料与索引管理；环境 loaded、FTS5
-  fallback 和索引 complete 也没有独立展示。现于既有“知识与记忆”页增加紧凑
+- 原入口缺少非 WPF 用户可用的知识环境、资料与索引管理；环境 loaded、所选 profile
+  unavailable 和索引 complete 也没有独立展示。现于既有“知识与记忆”页增加紧凑
   本地知识区，保留项目记忆 CRUD，不新增页面、数据库或安装实现。
 - Panel 通过 Bridge 固定 `/v1/knowledge` 合约调用项目相对
-  `scripts\hia-knowledge.ps1`。环境状态分为可用、FTS5 降级、需修复和正在修复；
+  `scripts\hia-knowledge.ps1`。环境状态分为可用、所选 profile 不可用、需修复和正在修复；
   官方包、用户资料数与索引进度独立显示。文件/文件夹选择保持非模态，精确
   source ID 删除只移除托管副本；修复无安全取消契约，索引取消保留已提交批次。
 - 同源 CLI 收口后，`environment-repair` 会复用已安装 profile/device 执行完整
@@ -1609,27 +1602,13 @@
   修复重建。进程在目录改名之间被强制终止的恢复需要持久事务日志，未在本次窄
   修复中扩展实现。
 
-## HIP-local HIA 截图与 AI stage checkpoint（2026-07-27，定向通过）
+## 项目本地 HIA 截图（2026-07-27 历史记录，现行契约已取代）
 
-- 原行为把所有自动 viewport/flipbook 放入项目
-  `.runtime/cache/screenshots`，AI Goal stage checkpoint 只写当前 launcher
-  session；用户已保存 HIP 后，产物与场景交付目录分离。
-- runtime 现在每次调用重新读取 `hou.hipFile.path()`。真实已保存 HIP、普通非
-  reparse 且可写父目录使用同级唯一 `.hia/screenshots` 与
-  `.hia/checkpoints`；untitled、不存在、相对、只读、reparse 或异常路径均回退
-  原项目/session 目录。结果返回 `storage_scope` 和实际绝对路径；Save As 后同一
-  executor 的下一次调用自然切换。
-- HIP-local checkpoint 在实际目录和当前 session checkpoints 各写一份原子 v2
-  marker，绑定 launcher session、Thread、Goal、canonical saved HIP 与
-  checkpoint basename。launcher 只从 session marker 出发推导
-  `<hip-parent>/.hia/checkpoints`，逐项拒绝路径逃逸、reparse、marker 不一致和旧
-  session，再复制到既有 session recovery 目录；没有新增恢复数据库或守护进程。
-- 定向 unittest：runtime/viewport/checkpoint/recovery 共 `45/45` 通过；既有
-  launcher v1 checkpoint、crash-HIP 与 lifecycle 兼容回归 `4/4` 通过；MCP protocol/tool
-  集合回归 `15/15` 通过。未运行完整套件，未启动 Houdini/WPF，未清理
-  `.runtime`。仍需真实 Houdini 验证当前 build 中临时
-  `hou.putenv("HOUDINI_BACKUP_DIR", ...)` 对 `saveAsBackup()` 即时生效、环境恢复
-  不影响手工备份，以及实际 Save As 后截图/checkpoint/崩溃恢复闭环。
+- 这一轮曾验证过 HIP 相邻截图与自动场景恢复方案；该方案已从现行产品删除，
+  不能作为当前行为或发布证据。
+- 当前 `hia_capture_viewport` 只写项目
+  `.runtime/cache/screenshots`，HIA 不创建或自动打开场景恢复副本。旧轮次的通过
+  数量只属于当时实现，当前版本必须以现行定向测试与真实 Houdini 验收为准。
 
 ## 启动器基础知识环境空 Profile 参数（2026-07-27，定向通过）
 
@@ -1763,22 +1742,16 @@
 - 仍需真实 Houdini 人工确认：窄侧栏中二级标签与折叠区可达、中文 IME 输入、
   资料任务运行时进度显示、真实记忆来源字段展示，以及历史/Goal/Stop 操作不回归。
 
-## Viewport/flipbook 色彩与质量证据（2026-07-28，定向通过）
+## Viewport/flipbook 客观捕获证据（2026-07-28 历史记录，现行契约已取代）
 
 - 根因是旧捕获只检查 PNG 头、尺寸和文件存在，随后无条件返回 `ok=true`；
   响应没有记录实际 Scene Viewer、viewport、camera/free view、投影、显示选项或
   OCIO 状态，也无法区分“文件写成”与“画面可信”。`viewport` 还优先调用当前
   SideFX HOM 文档未列出的 `saveViewToImage`，无法证明保存的是用户所见显示变换。
-- `viewport` 和 `flipbook` 现优先复用文档化的 `SceneViewer.flipbook`，不改变
-  当前 gamma/LUT override，并继续恢复 camera/free view、相机锁和帧；旧
-  `saveViewToImage` 只作为单帧、明确标注的降级路径。响应记录 capture API、
-  viewer/viewport、camera、投影、分辨率/裁剪、shading/lighting/display options、
-  OCIO display/view、flipbook gamma/LUT 及所有不可观察项。
-- 新的标准库 PNG 检查受文件、像素和采样预算限制，区分 `capture_ok`、
-  `quality_status`、`visual_match` 与 `display_match`。近全黑、严重过曝、
-  分辨率/宽高比或请求相机不符返回 failed；明显单通道偏色返回 warning。
-  Windows HDR/OS compositor 无 HOM 证据，始终诚实标为 unverified，不做屏幕
-  接管、系统 HDR 修改或写死色彩配置。
+- 现行实现只使用文档化的 `SceneViewer.flipbook`，记录 capture API、viewer、
+  viewport、camera、投影、分辨率、frame lock、cook 与 source state 等客观事实。
+  运行时不对画面作主观评分；Codex 必须检查真实返回图像。Windows HDR/OS
+  compositor 无 HOM 证据时，截图只能作为诊断证据，不能冒充最终色彩匹配。
 - capture/viewport 定向 unittest `23/23` 通过；5 个相关 Python 文件 AST 与
   unstaged/cached `git diff --check` 均通过。未启动 Houdini、Bridge 或 launcher，
   未捕获或修改用户场景；仍需真实 Houdini GUI 对比 SDR、OCIO 与 Windows HDR

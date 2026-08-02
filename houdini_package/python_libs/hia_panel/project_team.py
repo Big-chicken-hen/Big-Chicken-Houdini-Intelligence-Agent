@@ -27,9 +27,7 @@ ROLE_TITLES = {
     "technical_review": "技术审查 AI",
 }
 
-TERMINAL_PROJECT_STATUSES = frozenset(
-    {"completed", "failed", "not_applicable"}
-)
+TERMINAL_PROJECT_STATUSES = frozenset({"completed", "failed"})
 
 
 def _text(value: Any, *, limit: int = 512) -> str:
@@ -73,7 +71,6 @@ class RoleViewModel:
 
     @property
     def stable_key(self) -> str:
-        # Survives a verified native Thread transfer for the same project role.
         return f"role:{self.project_id}:{self.role}"
 
 
@@ -107,7 +104,6 @@ class ProjectViewModel:
     can_continue: bool
     can_guide: bool
     can_stop: bool
-    can_delete: bool
 
     @property
     def stable_key(self) -> str:
@@ -300,7 +296,6 @@ def _normalize_project(raw: Mapping[str, Any]) -> ProjectViewModel | None:
         can_continue=_boolean_action(actions, "continue"),
         can_guide=_boolean_action(actions, "append_guidance"),
         can_stop=_boolean_action(actions, "stop"),
-        can_delete=_boolean_action(actions, "delete"),
     )
 
 

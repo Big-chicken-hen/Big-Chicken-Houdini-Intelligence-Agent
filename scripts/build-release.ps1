@@ -52,7 +52,6 @@ $releaseFileAllowlist = @(
     'houdini_package/python_libs/hia_mcp_runtime/deterministic_sources.py',
     'houdini_package/python_libs/hia_mcp_runtime/embedding_client.py',
     'houdini_package/python_libs/hia_mcp_runtime/executor.py',
-    'houdini_package/python_libs/hia_mcp_runtime/viewport_quality.py',
     'houdini_package/python_libs/hia_mcp_runtime/hybrid_knowledge.py',
     'houdini_package/python_libs/hia_mcp_runtime/http_server.py',
     'houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py',

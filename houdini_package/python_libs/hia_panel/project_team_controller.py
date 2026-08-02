@@ -38,7 +38,6 @@ class ProjectTeamGateway(Protocol):
         thread_id: str | None,
         text: str,
         requirement_delta: Mapping[str, Any] | None = None,
-        force_replan: bool = False,
         context: str,
     ) -> str | None: ...
 
@@ -56,9 +55,6 @@ class ProjectTeamGateway(Protocol):
     def continue_project(self, *, project_id: str, context: str) -> str | None: ...
 
     def stop_project(self, *, project_id: str, context: str) -> str | None: ...
-
-    def delete_project(self, *, project_id: str, context: str) -> str | None: ...
-
 
 class ProjectTeamController:
     def __init__(
@@ -84,7 +80,7 @@ class ProjectTeamController:
         self._pending_ordinary_selection: str | None = None
         self._provisional_ordinary_thread_id: str | None = None
         self._pending_guidance: dict[
-            str, tuple[str, str | None, str, Mapping[str, Any] | None, bool, bool]
+            str, tuple[str, str | None, str, Mapping[str, Any] | None, bool]
         ] = {}
         self._connect_view_once()
 
@@ -181,7 +177,6 @@ class ProjectTeamController:
         self.view.newTaskRequested.connect(self._new_task)
         self.view.openThreadRequested.connect(self._open_thread)
         self.view.deleteThreadRequested.connect(self._delete_thread)
-        self.view.deleteProjectRequested.connect(self._delete_project)
         self.view.appendGuidanceRequested.connect(self._append_guidance)
         self.view.roleRuntimeRequested.connect(self._set_role_runtime)
         self.view.modelCatalogRefreshRequested.connect(self.refresh_models)
@@ -199,13 +194,6 @@ class ProjectTeamController:
     def _delete_thread(self, thread_id: str) -> None:
         if self.active and isinstance(thread_id, str) and thread_id:
             self._on_delete_thread(thread_id)
-
-    def _delete_project(self, project_id: str) -> None:
-        if self.active and isinstance(project_id, str) and project_id:
-            self.gateway.delete_project(
-                project_id=project_id,
-                context=f"project_delete:{project_id}",
-            )
 
     def _connect_gateway(self) -> None:
         if self._gateway_connected:
@@ -227,7 +215,6 @@ class ProjectTeamController:
         thread_id: str | None,
         text: str,
         requirement_change: Mapping[str, Any] | None = None,
-        force_replan: bool = False,
         acknowledge_view: bool = True,
     ) -> bool:
         if not self.active:
@@ -239,7 +226,6 @@ class ProjectTeamController:
             thread_id,
             text,
             requirement_change,
-            force_replan,
             acknowledge_view,
         )
         request_id = self.gateway.append_project_guidance(
@@ -247,7 +233,6 @@ class ProjectTeamController:
             thread_id=thread_id,
             text=text,
             requirement_delta=requirement_delta,
-            force_replan=force_replan,
             context=context,
         )
         if request_id is None:
@@ -269,7 +254,6 @@ class ProjectTeamController:
             thread_id,
             text,
             None,
-            False,
             acknowledge_view=False,
         )
 
@@ -328,11 +312,10 @@ class ProjectTeamController:
                     _thread_id,
                     submitted_text,
                     requirement_change,
-                    force_replan,
                     acknowledge_view,
                 ) = pending
                 if acknowledge_view and not self.view.acknowledge_guidance(
-                    submitted_text, requirement_change, force_replan
+                    submitted_text, requirement_change
                 ):
                     self._on_error(
                         "先前版本的追加指导已发送；当前正在编辑的内容已保留。"

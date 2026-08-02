@@ -4,10 +4,7 @@ param(
     [string]$HoudiniExe = '',
     [ValidateSet('hia_v2', 'fxhoudini')][string]$McpBackend = 'hia_v2',
     [AllowEmptyString()][string]$EmbeddingProfile = '',
-    [ValidateSet('auto', 'cuda', 'cpu')][string]$EmbeddingDevice = 'auto',
-    [AllowEmptyString()][string]$RecoverySessionId = '',
-    [AllowEmptyString()][string]$RecoveryCheckpoint = '',
-    [AllowEmptyString()][string]$RecoveryDecision = ''
+    [ValidateSet('auto', 'cuda', 'cpu')][string]$EmbeddingDevice = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,17 +12,6 @@ Set-StrictMode -Version Latest
 
 $launcherCore = Join-Path $PSScriptRoot 'launcher\HiaLauncher.Core.psm1'
 Import-Module -Force -DisableNameChecking $launcherCore
-
-if ($RecoveryDecision -notin @('', 'recover', 'normal')) {
-    throw 'RecoveryDecision must be empty, recover, or normal.'
-}
-if (
-    ($RecoveryDecision -eq '' -and ($RecoverySessionId -or $RecoveryCheckpoint)) -or
-    ($RecoveryDecision -eq 'normal' -and (-not $RecoverySessionId -or $RecoveryCheckpoint)) -or
-    ($RecoveryDecision -eq 'recover' -and (-not $RecoverySessionId -or -not $RecoveryCheckpoint))
-) {
-    throw 'Recovery session, checkpoint, and decision arguments are inconsistent.'
-}
 
 function Write-LauncherSessionManifest {
     param(
@@ -42,7 +28,6 @@ function Write-LauncherSessionManifest {
         started_at_utc = $State.started_at_utc
         ended_at_utc = $State.ended_at_utc
         process_exit_code = $State.process_exit_code
-        latest_checkpoint = $State.latest_checkpoint
         launcher_process_id = $State.launcher_process_id
         houdini_process_id = $State.houdini_process_id
     }
@@ -52,233 +37,6 @@ function Write-LauncherSessionManifest {
         $json + [Environment]::NewLine,
         [System.Text.UTF8Encoding]::new($false)
     )
-}
-
-function Invoke-LauncherBridgeJson {
-    param(
-        [Parameter(Mandatory = $true)][ValidateSet('GET', 'POST')][string]$Method,
-        [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [Parameter(Mandatory = $true)][string]$Token,
-        [Parameter(Mandatory = $true)][string]$Path,
-        [AllowNull()]$Body = $null,
-        [ValidateRange(1, 60)][int]$TimeoutSec = 5
-    )
-
-    $parameters = @{
-        Method = $Method
-        Uri = $BaseUrl + $Path
-        Headers = @{ Authorization = "Bearer $Token" }
-        TimeoutSec = $TimeoutSec
-    }
-    if ($Method -eq 'POST') {
-        $parameters['ContentType'] = 'application/json'
-        $parameters['Body'] = ConvertTo-Json -InputObject $Body -Depth 6 -Compress
-    }
-    return Invoke-RestMethod @parameters
-}
-
-function Get-FocusedRecoveryContext {
-    param(
-        [Parameter(Mandatory = $true)][string]$BridgeUrl,
-        [Parameter(Mandatory = $true)][string]$BridgeToken,
-        [AllowEmptyString()][string]$ExpectedThreadId = '',
-        [AllowEmptyString()][string]$ExpectedGoalBinding = ''
-    )
-
-    $sessionResponse = Invoke-LauncherBridgeJson `
-        -Method GET `
-        -BaseUrl $BridgeUrl `
-        -Token $BridgeToken `
-        -Path '/v1/session'
-    $session = $sessionResponse.session
-    $threadId = if ($null -eq $session) { '' } else { [string]$session.thread_id }
-    if (
-        $sessionResponse.ok -ne $true -or
-        $null -eq $session -or
-        $session.focus_mode -ne $true -or
-        $threadId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$' -or
-        ($ExpectedThreadId -and -not [System.StringComparer]::Ordinal.Equals($threadId, $ExpectedThreadId))
-    ) {
-        return $null
-    }
-    $encodedThread = [System.Uri]::EscapeDataString($threadId)
-    $goalResponse = Invoke-LauncherBridgeJson `
-        -Method GET `
-        -BaseUrl $BridgeUrl `
-        -Token $BridgeToken `
-        -Path "/v1/goal?thread_id=$encodedThread" `
-        -TimeoutSec 50
-    $goal = $goalResponse.goal
-    $goalBinding = [string]$goalResponse.goal_binding
-    if (
-        $goalResponse.ok -ne $true -or
-        [string]$goalResponse.thread_id -ne $threadId -or
-        $goalResponse.focus_mode -ne $true -or
-        $goalBinding -notmatch '^[0-9a-f]{64}$' -or
-        ($ExpectedGoalBinding -and -not [System.StringComparer]::Ordinal.Equals($goalBinding, $ExpectedGoalBinding)) -or
-        $null -eq $goal -or
-        [string]$goal.threadId -ne $threadId -or
-        [string]$goal.status -ne 'active'
-    ) {
-        return $null
-    }
-    return [pscustomobject]@{
-        thread_id = $threadId
-        goal_binding = $goalBinding
-        session = $session
-        goal = $goal
-    }
-}
-
-function Wait-FocusedThreadIdle {
-    param(
-        [Parameter(Mandatory = $true)][string]$BridgeUrl,
-        [Parameter(Mandatory = $true)][string]$BridgeToken,
-        [Parameter(Mandatory = $true)][string]$ThreadId,
-        [Parameter(Mandatory = $true)][string]$GoalBinding,
-        [ValidateRange(1, 120)][int]$TimeoutSec = 55
-    )
-
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        try {
-            $response = Invoke-LauncherBridgeJson `
-                -Method GET `
-                -BaseUrl $BridgeUrl `
-                -Token $BridgeToken `
-                -Path '/v1/session'
-            $session = $response.session
-            if (
-                $response.ok -ne $true -or
-                $null -eq $session -or
-                [string]$session.thread_id -ne $ThreadId -or
-                $session.focus_mode -ne $true
-            ) {
-                return $null
-            }
-            if ($session.turn_active -eq $false) {
-                return Get-FocusedRecoveryContext `
-                    -BridgeUrl $BridgeUrl `
-                    -BridgeToken $BridgeToken `
-                    -ExpectedThreadId $ThreadId `
-                    -ExpectedGoalBinding $GoalBinding
-            }
-        } catch { }
-        Start-Sleep -Milliseconds 500
-    }
-    return $null
-}
-
-function Wait-FocusedRecoveryReady {
-    param(
-        [Parameter(Mandatory = $true)][string]$BridgeUrl,
-        [Parameter(Mandatory = $true)][string]$BridgeToken,
-        [Parameter(Mandatory = $true)][string]$ThreadId,
-        [Parameter(Mandatory = $true)][string]$GoalBinding,
-        [ValidateRange(1, 120)][int]$TimeoutSec = 60
-    )
-
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        try {
-            $health = Invoke-LauncherBridgeJson `
-                -Method GET `
-                -BaseUrl $BridgeUrl `
-                -Token $BridgeToken `
-                -Path '/v1/health'
-            $session = $health.session
-            if (
-                $health.ok -eq $true -and
-                $null -ne $session -and
-                $null -ne $health.houdini_mcp -and
-                $session.connected -eq $true -and
-                [string]$session.thread_id -eq $ThreadId -and
-                $session.focus_mode -eq $true -and
-                $session.turn_active -eq $false -and
-                $health.houdini_mcp.available -eq $true
-            ) {
-                $context = Get-FocusedRecoveryContext `
-                    -BridgeUrl $BridgeUrl `
-                    -BridgeToken $BridgeToken `
-                    -ExpectedThreadId $ThreadId `
-                    -ExpectedGoalBinding $GoalBinding
-                if ($null -ne $context) { return $context }
-            }
-        } catch { }
-        Start-Sleep -Milliseconds 750
-    }
-    return $null
-}
-
-function Test-RecoveryHipWithHython {
-    param(
-        [Parameter(Mandatory = $true)][string]$HythonExe,
-        [Parameter(Mandatory = $true)][string]$HipPath,
-        [Parameter(Mandatory = $true)][string]$SessionRoot,
-        [Parameter(Mandatory = $true)][string]$SessionTemp,
-        [Parameter(Mandatory = $true)][string]$HoudiniPreferences,
-        [Parameter(Mandatory = $true)][string[]]$EmbeddingEnvironmentNames
-    )
-
-    try {
-        $recoveryDirectory = Join-Path $SessionRoot 'recovery'
-        $hip = Get-Item -LiteralPath $HipPath -Force -ErrorAction Stop
-        if (
-            $hip -isnot [System.IO.FileInfo] -or
-            ([int]$hip.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                $hip.Directory.FullName.TrimEnd('\'),
-                $recoveryDirectory.TrimEnd('\')
-            )
-        ) {
-            return $false
-        }
-        $probeScript = Join-Path $recoveryDirectory (
-            'load-probe-{0}.py' -f [Guid]::NewGuid().ToString('N')
-        )
-        [System.IO.File]::WriteAllText(
-            $probeScript,
-            "import hou, sys`nhou.hipFile.load(sys.argv[1], suppress_save_prompt=True, ignore_load_warnings=True)`n",
-            [System.Text.UTF8Encoding]::new($false)
-        )
-        $probeInfo = [System.Diagnostics.ProcessStartInfo]::new()
-        $probeInfo.FileName = $HythonExe
-        $probeInfo.Arguments = (
-            (ConvertTo-HiaProcessArgument -Value $probeScript) + ' ' +
-            (ConvertTo-HiaProcessArgument -Value $hip.FullName)
-        )
-        $probeInfo.WorkingDirectory = $recoveryDirectory
-        $probeInfo.UseShellExecute = $false
-        $probeInfo.CreateNoWindow = $true
-        $removeEmbeddingEnvironment = @{
-            StartInfo = $probeInfo
-            Names = $EmbeddingEnvironmentNames
-        }
-        Remove-ChildEnvironment @removeEmbeddingEnvironment
-        Set-ChildEnvironment -StartInfo $probeInfo -Values @{
-            'TEMP' = $SessionTemp
-            'TMP' = $SessionTemp
-            'HOUDINI_TEMP_DIR' = $SessionTemp
-            'HOUDINI_USER_PREF_DIR' = $HoudiniPreferences
-            'PYTHONDONTWRITEBYTECODE' = '1'
-            'PYTHONNOUSERSITE' = '1'
-        }
-        $probe = [System.Diagnostics.Process]::new()
-        $probe.StartInfo = $probeInfo
-        try {
-            if (-not $probe.Start()) { return $false }
-            if (-not $probe.WaitForExit(60000)) {
-                $probe.Kill()
-                [void]$probe.WaitForExit(5000)
-                return $false
-            }
-            return $probe.ExitCode -eq 0
-        } finally {
-            $probe.Dispose()
-        }
-    } catch {
-        return $false
-    }
 }
 
 function Get-HoudiniCandidatePaths {
@@ -1196,10 +954,6 @@ $sessionTemp = Assert-OrdinaryProjectPath `
     -Path (Join-Path $sessionRoot 'tmp') `
     -Root $ResolvedRoot `
     -AllowMissingLeaf
-$sessionCheckpoints = Assert-OrdinaryProjectPath `
-    -Path (Join-Path $sessionRoot 'checkpoints') `
-    -Root $ResolvedRoot `
-    -AllowMissingLeaf
 $sessionManifest = Assert-OrdinaryProjectPath `
     -Path (Join-Path $sessionRoot 'session.json') `
     -Root $ResolvedRoot `
@@ -1234,7 +988,6 @@ $focusStatePath = Assert-OrdinaryProjectPath `
     -Root $ResolvedRoot `
     -AllowMissingLeaf
 [System.IO.Directory]::CreateDirectory($sessionTemp) | Out-Null
-[System.IO.Directory]::CreateDirectory($sessionCheckpoints) | Out-Null
 [System.IO.Directory]::CreateDirectory($houdiniPreferences) | Out-Null
 foreach ($cacheDirectory in @($cacheRoot, $screenshotCache, $previewCache, $shortTermCache)) {
     [System.IO.Directory]::CreateDirectory($cacheDirectory) | Out-Null
@@ -1243,71 +996,18 @@ foreach ($cacheDirectory in @($cacheRoot, $screenshotCache, $previewCache, $shor
     [System.IO.Path]::GetDirectoryName($focusStatePath)
 ) | Out-Null
 
-$knownHipPath = $null
-$recoverySourceCheckpoint = $null
-if ($RecoveryDecision -eq 'recover') {
-    if ($RecoverySessionId -notmatch '^[0-9a-fA-F]{32}$') {
-        throw 'Recovery session ID is invalid.'
-    }
-    $sourceSessionCheckpoints = Assert-OrdinaryProjectPath `
-        -Path (Join-Path $ResolvedRoot ".runtime\launcher-sessions\$RecoverySessionId\checkpoints") `
-        -Root $ResolvedRoot
-    $validatedRecoveryCheckpoint = Get-HiaLatestLauncherCheckpoint `
-        -CheckpointDirectory $sourceSessionCheckpoints
-    if (
-        $null -eq $validatedRecoveryCheckpoint -or
-        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-            [System.IO.Path]::GetFullPath($RecoveryCheckpoint),
-            [string]$validatedRecoveryCheckpoint.path
-        )
-    ) {
-        throw 'Recovery checkpoint is not bound to the selected launcher session.'
-    }
-    $recoverySourceCheckpoint = [string]$validatedRecoveryCheckpoint.path
-    $sourceFile = Get-Item -LiteralPath $recoverySourceCheckpoint -Force -ErrorAction Stop
-    $recoveryMatch = [regex]::Match(
-        $sourceFile.Name,
-        '(\.hip(?:lc|nc)?(?:_bak\d*)?)$',
-        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-    )
-    if (
-        $sourceFile -isnot [System.IO.FileInfo] -or
-        ([int]$sourceFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        -not $recoveryMatch.Success
-    ) {
-        throw 'Recovery checkpoint is not an ordinary supported Houdini HIP backup.'
-    }
-    $recoverySuffix = [string]$recoveryMatch.Groups[1].Value
-    $knownHipPath = Join-Path `
-        $sessionCheckpoints `
-        ("recovery-{0}{1}" -f [Guid]::NewGuid().ToString('N'), $recoverySuffix)
-    [System.IO.File]::Copy($recoverySourceCheckpoint, $knownHipPath, $false)
-}
-
 $sessionState = [ordered]@{
     session_id = $sessionId
     state = 'starting'
     selected_houdini = $HoudiniExe
-    hip_path = $knownHipPath
+    hip_path = $null
     started_at_utc = [DateTime]::UtcNow.ToString('o')
     ended_at_utc = $null
     process_exit_code = $null
-    latest_checkpoint = $knownHipPath
     launcher_process_id = [int]$PID
     houdini_process_id = $null
 }
 Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
-if ($RecoveryDecision) {
-    try {
-        Set-HiaLauncherRecoveryDecision `
-            -ProjectRoot $ResolvedRoot `
-            -SessionId $RecoverySessionId `
-            -Decision $RecoveryDecision | Out-Null
-    } catch {
-        Write-Warning 'The previous launcher session could not be marked with the recovery decision.'
-    }
-}
-
 $houdiniProcess = $null
 try {
 
@@ -1360,10 +1060,7 @@ $backendEnvironmentNames = @(
     'HIA_MCP_V2_ROUTE',
     'HIA_MCP_V2_RUNTIME_DIR',
     'HIA_MCP_V2_EXECUTOR_PATH',
-    'HIA_LAUNCHER_SESSION_ID',
-    'HIA_CRASH_RECOVERY_THREAD_ID',
-    'HIA_CRASH_RECOVERY_GOAL_BINDING',
-    'HIA_CRASH_RECOVERY_PROMPT_ID'
+    'HIA_LAUNCHER_SESSION_ID'
 )
 if ($McpBackend -eq 'hia_v2') {
     $hiaMcpServicePath = Assert-OrdinaryProjectPath `
@@ -1530,7 +1227,7 @@ try {
     }
     $houdiniEnvironment = @{
         'HOUDINI_PACKAGE_DIR' = $packageDirectory
-        'HOUDINI_BACKUP_DIR' = $sessionCheckpoints
+        'HOUDINI_BACKUP_DIR' = $sessionTemp
         'HOUDINI_TEMP_DIR' = $sessionTemp
         'HOUDINI_USER_PREF_DIR' = $houdiniPreferences
         'PYTHONPATH' = $houdiniProcessPythonPath -join ';'
@@ -1555,348 +1252,38 @@ try {
     foreach ($entry in $houdiniBackendEnvironment.GetEnumerator()) {
         $houdiniEnvironment[$entry.Key] = $entry.Value
     }
-    $stableCheckpoint = $null
-    $pendingRecovery = $null
-    $recoveryThreadId = ''
-    $recoveryGoalBinding = ''
-    $consecutiveCrashCount = 0
-    $totalCrashCount = 0
-    $automaticRestartCount = 0
-    $maxConsecutiveCrashes = 3
-    $maxAutomaticRestarts = 6
-    $attemptedRecoveryPrompts = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::Ordinal
-    )
+    $houdiniInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $houdiniInfo.FileName = $HoudiniExe
+    $houdiniInfo.WorkingDirectory = $ResolvedRoot
+    $houdiniInfo.UseShellExecute = $false
+    $houdiniInfo.CreateNoWindow = $false
+    Remove-ChildEnvironment `
+        -StartInfo $houdiniInfo `
+        -Names $embeddingEnvironmentNames
+    Remove-ChildEnvironment -StartInfo $houdiniInfo -Names $backendEnvironmentNames
+    Set-ChildEnvironment -StartInfo $houdiniInfo -Values $houdiniEnvironment
 
-    while ($true) {
-        $checkpointAtStart = if ($recoveryThreadId) {
-            Get-HiaLatestLauncherCheckpoint `
-                -CheckpointDirectory $sessionCheckpoints `
-                -ThreadId $recoveryThreadId `
-                -GoalBinding $recoveryGoalBinding
-        } else {
-            $null
-        }
-        $checkpointAtStartTicks = if ($null -eq $checkpointAtStart) {
-            0
-        } else {
-            [long]$checkpointAtStart.last_write_utc_ticks
-        }
-        $houdiniInfo = [System.Diagnostics.ProcessStartInfo]::new()
-        $houdiniInfo.FileName = $HoudiniExe
-        $houdiniInfo.WorkingDirectory = $ResolvedRoot
-        $houdiniInfo.UseShellExecute = $false
-        $houdiniInfo.CreateNoWindow = $false
-        if ($knownHipPath) {
-            $houdiniInfo.Arguments = ConvertTo-HiaProcessArgument -Value $knownHipPath
-        }
-        Remove-ChildEnvironment `
-            -StartInfo $houdiniInfo `
-            -Names $embeddingEnvironmentNames
-        Remove-ChildEnvironment -StartInfo $houdiniInfo -Names $backendEnvironmentNames
-        Set-ChildEnvironment -StartInfo $houdiniInfo -Values $houdiniEnvironment
-        if ($null -ne $pendingRecovery) {
-            Set-ChildEnvironment -StartInfo $houdiniInfo -Values @{
-                'HIA_CRASH_RECOVERY_THREAD_ID' = [string]$pendingRecovery.thread_id
-                'HIA_CRASH_RECOVERY_GOAL_BINDING' = [string]$pendingRecovery.goal_binding
-                'HIA_CRASH_RECOVERY_PROMPT_ID' = [string]$pendingRecovery.prompt_id
-            }
-        }
-        $houdiniProcess = [System.Diagnostics.Process]::new()
-        $houdiniProcess.StartInfo = $houdiniInfo
-        $houdiniStartedAt = [DateTime]::UtcNow
-        if (-not $houdiniProcess.Start()) {
-            throw 'Houdini process did not start'
-        }
-        $houdiniStarted = $true
-        $houdiniExited = $false
-        $sessionState['state'] = 'running'
-        $sessionState['ended_at_utc'] = $null
-        $sessionState['process_exit_code'] = $null
-        $sessionState['hip_path'] = $knownHipPath
-        $sessionState['houdini_process_id'] = [int]$houdiniProcess.Id
-        Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
-
-        if ($null -ne $pendingRecovery) {
-            $ready = Wait-FocusedRecoveryReady `
-                -BridgeUrl $bridgeUrl `
-                -BridgeToken $bridgeToken `
-                -ThreadId $pendingRecovery.thread_id `
-                -GoalBinding $pendingRecovery.goal_binding
-            if ($null -eq $ready) {
-                Write-Warning 'Recovery HIP opened, but the same focused Thread did not become safely idle and ready; no automatic Turn was started.'
-            } elseif ($attemptedRecoveryPrompts.Add($pendingRecovery.prompt_id)) {
-                $lastTurn = if ($pendingRecovery.turn_id) { $pendingRecovery.turn_id } else { 'none' }
-                $lastTool = if ($pendingRecovery.last_tool_name) { $pendingRecovery.last_tool_name } else { 'unknown' }
-                $lastToolStatus = if ($pendingRecovery.last_tool_status) { $pendingRecovery.last_tool_status } else { 'unknown' }
-                $strategy = if ($pendingRecovery.force_alternative) {
-                    'This is a repeated crash. Use a different or degraded implementation and skip the failing step.'
-                } else {
-                    'Identify the failed step from the Thread and scene, then continue with a safer implementation.'
-                }
-                $message = @"
-[HIA launcher recovery $($pendingRecovery.prompt_id)] Houdini exited abnormally with code $($pendingRecovery.exit_code).
-The previous HOM result is unknown and may be partially applied. Do not replay the old write or its arguments.
-Recovered from $($pendingRecovery.source_kind): $($pendingRecovery.recovery_path)
-Previous Turn: $lastTurn. Last observable tool: $lastTool ($lastToolStatus).
-First use only hia_context, hia_inspect, hia_scene_diff, and hia_validate to inspect the recovered scene and the current active Goal. $strategy
-Only after the next meaningful stage succeeds may one hia_execute_hom batch set checkpoint_label; never create a recovery point per node or parameter.
-"@
-                try {
-                    Invoke-LauncherBridgeJson `
-                        -Method POST `
-                        -BaseUrl $bridgeUrl `
-                        -Token $bridgeToken `
-                        -Path '/v1/turn' `
-                        -Body @{
-                            text = $message
-                            model = $null
-                            effort = $null
-                            local_image_paths = @()
-                            service_tier = $null
-                        } `
-                        -TimeoutSec 50 | Out-Null
-                } catch {
-                    Write-Warning 'The one-shot recovery Turn was not confirmed and will not be retried automatically.'
-                }
-            }
-            $pendingRecovery = $null
-        }
-
-        $houdiniProcess.WaitForExit()
-        $houdiniEndedAt = [DateTime]::UtcNow
-        $houdiniExited = $houdiniProcess.HasExited
-        $houdiniExitCode = $houdiniProcess.ExitCode
-        $latestCheckpoint = $stableCheckpoint
-        $sessionState['state'] = if ($houdiniExitCode -eq 0) { 'completed' } else { 'abnormal_exit' }
-        $sessionState['ended_at_utc'] = $houdiniEndedAt.ToString('o')
-        $sessionState['process_exit_code'] = [int]$houdiniExitCode
-        $sessionState['latest_checkpoint'] = if ($null -eq $latestCheckpoint) { $null } else { [string]$latestCheckpoint.path }
-        Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
-        $exitDecision = Get-HiaCrashRecoveryDecision `
-            -ExitCode $houdiniExitCode `
-            -FocusVerified $false `
-            -ThreadIdle $false `
-            -ConsecutiveCrashCount $consecutiveCrashCount `
-            -AutomaticRestartCount $automaticRestartCount `
-            -MaxConsecutiveCrashes $maxConsecutiveCrashes `
-            -MaxAutomaticRestarts $maxAutomaticRestarts
-        if ($exitDecision.reason -eq 'normal_exit') { break }
-
-        $totalCrashCount += 1
-        try {
-            $focusedContext = Get-FocusedRecoveryContext `
-                -BridgeUrl $bridgeUrl `
-                -BridgeToken $bridgeToken `
-                -ExpectedThreadId $recoveryThreadId `
-                -ExpectedGoalBinding $recoveryGoalBinding
-        } catch {
-            $focusedContext = $null
-        }
-        if ($null -eq $focusedContext) {
-            $focusDecision = Get-HiaCrashRecoveryDecision `
-                -ExitCode $houdiniExitCode `
-                -FocusVerified $false `
-                -ThreadIdle $false `
-                -ConsecutiveCrashCount $consecutiveCrashCount `
-                -AutomaticRestartCount $automaticRestartCount `
-                -MaxConsecutiveCrashes $maxConsecutiveCrashes `
-                -MaxAutomaticRestarts $maxAutomaticRestarts
-            if (-not $focusDecision.recover) {
-                Write-Warning 'Houdini exited abnormally, but target focus mode, the exact Thread, or its active Goal could not be verified; automatic recovery is off.'
-                break
-            }
-        }
-        if (-not $recoveryThreadId) {
-            $recoveryThreadId = [string]$focusedContext.thread_id
-            $recoveryGoalBinding = [string]$focusedContext.goal_binding
-        }
-        $latestCheckpoint = Get-HiaLatestLauncherCheckpoint `
-            -CheckpointDirectory $sessionCheckpoints `
-            -ThreadId $recoveryThreadId `
-            -GoalBinding $recoveryGoalBinding
-        $sessionState['latest_checkpoint'] = if ($null -eq $latestCheckpoint) {
-            $null
-        } else {
-            [string]$latestCheckpoint.path
-        }
-        Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
-        if ($focusedContext.session.turn_active -eq $true) {
-            try {
-                Invoke-LauncherBridgeJson `
-                    -Method POST `
-                    -BaseUrl $bridgeUrl `
-                    -Token $bridgeToken `
-                    -Path '/v1/interrupt' `
-                    -Body @{} | Out-Null
-            } catch {
-                Write-Warning 'The previous Turn interrupt was not acknowledged; recovery will still require an authoritative idle session before continuing.'
-            }
-        }
-        $idleContext = Wait-FocusedThreadIdle `
-            -BridgeUrl $bridgeUrl `
-            -BridgeToken $bridgeToken `
-            -ThreadId $recoveryThreadId `
-            -GoalBinding $recoveryGoalBinding
-        $idleDecision = Get-HiaCrashRecoveryDecision `
-            -ExitCode $houdiniExitCode `
-            -FocusVerified $true `
-            -ThreadIdle ($null -ne $idleContext) `
-            -ConsecutiveCrashCount $consecutiveCrashCount `
-            -AutomaticRestartCount $automaticRestartCount `
-            -MaxConsecutiveCrashes $maxConsecutiveCrashes `
-            -MaxAutomaticRestarts $maxAutomaticRestarts
-        if (-not $idleDecision.recover) {
-            Write-Warning 'The previous Turn did not reach authoritative idle on the same focused Thread; automatic recovery stopped before restarting Houdini.'
-            break
-        }
-        $focusedContext = $idleContext
-
-        $restartBudget = Get-HiaCrashRecoveryDecision `
-            -ExitCode $houdiniExitCode `
-            -FocusVerified $true `
-            -ThreadIdle $true `
-            -ConsecutiveCrashCount $consecutiveCrashCount `
-            -AutomaticRestartCount $automaticRestartCount `
-            -MaxConsecutiveCrashes $maxConsecutiveCrashes `
-            -MaxAutomaticRestarts $maxAutomaticRestarts
-        if (-not $restartBudget.recover) {
-            Write-Warning 'Automatic crash recovery reached its bounded limit. All checkpoint and crash HIP files were preserved.'
-            break
-        }
-
-        $madeProgress = (
-            $null -ne $latestCheckpoint -and
-            [long]$latestCheckpoint.last_write_utc_ticks -gt $checkpointAtStartTicks
-        )
-        $selectedRecovery = $null
-        $selectedSourceKind = ''
-        $progressCheckpointFailed = $false
-        if ($madeProgress) {
-            try {
-                $progressCopy = Copy-HiaLauncherRecoveryHip `
-                    -SessionRoot $sessionRoot `
-                    -SourcePath ([string]$latestCheckpoint.path) `
-                    -Attempt ($automaticRestartCount + 1) `
-                    -ThreadId $recoveryThreadId `
-                    -GoalBinding $recoveryGoalBinding
-                if (Test-RecoveryHipWithHython `
-                    -HythonExe $HythonExe `
-                    -HipPath $progressCopy.path `
-                    -SessionRoot $sessionRoot `
-                    -SessionTemp $sessionTemp `
-                    -HoudiniPreferences $houdiniPreferences `
-                    -EmbeddingEnvironmentNames $embeddingEnvironmentNames
-                ) {
-                    $selectedRecovery = $progressCopy
-                    $selectedSourceKind = 'AI checkpoint'
-                    $stableCheckpoint = $latestCheckpoint
-                    $consecutiveCrashCount = 0
-                } else {
-                    $progressCheckpointFailed = $true
-                }
-            } catch {
-                $progressCheckpointFailed = $true
-            }
-            if ($progressCheckpointFailed) {
-                Write-Warning 'The new AI checkpoint failed the bounded hython load probe and did not reset the crash counter.'
-            }
-        }
-        $consecutiveCrashCount += 1
-        $limitDecision = Get-HiaCrashRecoveryDecision `
-            -ExitCode $houdiniExitCode `
-            -FocusVerified $true `
-            -ThreadIdle $true `
-            -ConsecutiveCrashCount $consecutiveCrashCount `
-            -AutomaticRestartCount $automaticRestartCount `
-            -MaxConsecutiveCrashes $maxConsecutiveCrashes `
-            -MaxAutomaticRestarts $maxAutomaticRestarts
-        if (-not $limitDecision.recover) {
-            Write-Warning 'Automatic crash recovery reached its bounded limit. All checkpoint and crash HIP files were preserved.'
-            break
-        }
-
-        $crashHip = Get-HiaLatestLauncherCrashHip `
-            -TempDirectory $sessionTemp `
-            -HoudiniProcessId ([int]$houdiniProcess.Id) `
-            -StartedAtUtcTicks ([long]$houdiniStartedAt.Ticks) `
-            -EndedAtUtcTicks ([long]$houdiniEndedAt.Ticks)
-        $candidateSources = [System.Collections.Generic.List[object]]::new()
-        $checkpointCandidate = if ($null -ne $stableCheckpoint) {
-            $stableCheckpoint
-        } elseif (-not $progressCheckpointFailed) {
-            $latestCheckpoint
-        } else {
-            $null
-        }
-        if ($null -eq $selectedRecovery -and $consecutiveCrashCount -eq 2) {
-            if ($null -ne $crashHip) {
-                $candidateSources.Add([pscustomobject]@{ kind = 'crash HIP'; value = $crashHip })
-            }
-            if ($null -ne $checkpointCandidate) {
-                $candidateSources.Add([pscustomobject]@{ kind = 'AI checkpoint'; value = $checkpointCandidate })
-            }
-        } elseif ($null -eq $selectedRecovery) {
-            if ($null -ne $checkpointCandidate) {
-                $candidateSources.Add([pscustomobject]@{ kind = 'AI checkpoint'; value = $checkpointCandidate })
-            }
-            if ($null -ne $crashHip) {
-                $candidateSources.Add([pscustomobject]@{ kind = 'crash HIP'; value = $crashHip })
-            }
-        }
-        foreach ($candidate in $candidateSources) {
-            try {
-                $copied = Copy-HiaLauncherRecoveryHip `
-                    -SessionRoot $sessionRoot `
-                    -SourcePath ([string]$candidate.value.path) `
-                    -Attempt ($automaticRestartCount + 1) `
-                    -ThreadId $recoveryThreadId `
-                    -GoalBinding $recoveryGoalBinding
-                if (Test-RecoveryHipWithHython `
-                    -HythonExe $HythonExe `
-                    -HipPath $copied.path `
-                    -SessionRoot $sessionRoot `
-                    -SessionTemp $sessionTemp `
-                    -HoudiniPreferences $houdiniPreferences `
-                    -EmbeddingEnvironmentNames $embeddingEnvironmentNames
-                ) {
-                    $selectedRecovery = $copied
-                    $selectedSourceKind = [string]$candidate.kind
-                    if ($selectedSourceKind -eq 'AI checkpoint') {
-                        $stableCheckpoint = $candidate.value
-                    }
-                    break
-                }
-                Write-Warning 'A copied recovery HIP failed the bounded hython load probe; trying the next controlled candidate.'
-            } catch {
-                Write-Warning 'A controlled recovery candidate was invalid and was skipped.'
-            }
-        }
-        if ($null -eq $selectedRecovery) {
-            Write-Warning 'No validated recovery HIP was available. Automatic restart stopped and all source files were preserved.'
-            break
-        }
-
-        $automaticRestartCount += 1
-        $knownHipPath = [string]$selectedRecovery.path
-        $pendingRecovery = [pscustomobject]@{
-            prompt_id = "$sessionId-$totalCrashCount"
-            thread_id = $recoveryThreadId
-            goal_binding = $recoveryGoalBinding
-            exit_code = [int]$houdiniExitCode
-            turn_id = [string]$focusedContext.session.turn_id
-            last_tool_name = [string]$focusedContext.session.last_tool_name
-            last_tool_status = [string]$focusedContext.session.last_tool_status
-            source_kind = $selectedSourceKind
-            recovery_path = $knownHipPath
-            force_alternative = $consecutiveCrashCount -ge 3
-        }
-        $sessionState['state'] = 'recovering'
-        $sessionState['hip_path'] = $knownHipPath
-        $sessionState['ended_at_utc'] = $null
-        $sessionState['process_exit_code'] = $null
-        Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
+    $houdiniProcess = [System.Diagnostics.Process]::new()
+    $houdiniProcess.StartInfo = $houdiniInfo
+    if (-not $houdiniProcess.Start()) {
+        throw 'Houdini process did not start'
     }
+    $houdiniStarted = $true
+    $houdiniExited = $false
+    $sessionState['state'] = 'running'
+    $sessionState['ended_at_utc'] = $null
+    $sessionState['process_exit_code'] = $null
+    $sessionState['hip_path'] = $null
+    $sessionState['houdini_process_id'] = [int]$houdiniProcess.Id
+    Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
+
+    $houdiniProcess.WaitForExit()
+    $houdiniExited = $houdiniProcess.HasExited
+    $houdiniExitCode = $houdiniProcess.ExitCode
+    $sessionState['state'] = if ($houdiniExitCode -eq 0) { 'completed' } else { 'abnormal_exit' }
+    $sessionState['ended_at_utc'] = [DateTime]::UtcNow.ToString('o')
+    $sessionState['process_exit_code'] = [int]$houdiniExitCode
+    Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
 } finally {
     $bridgeCleanupAllowed = (-not $houdiniStarted) -or (
         $houdiniExited -and
@@ -1954,8 +1341,6 @@ Only after the next meaningful stage succeeds may one hia_execute_hom batch set 
         if ($null -ne $houdiniProcess -and $houdiniProcess.HasExited) {
             try { $sessionState['process_exit_code'] = [int]$houdiniProcess.ExitCode } catch { }
         }
-        $latestCheckpoint = Get-HiaLatestLauncherCheckpoint -CheckpointDirectory $sessionCheckpoints
-        $sessionState['latest_checkpoint'] = if ($null -eq $latestCheckpoint) { $null } else { [string]$latestCheckpoint.path }
         try {
             Write-LauncherSessionManifest -ManifestPath $sessionManifest -State $sessionState
         } catch {

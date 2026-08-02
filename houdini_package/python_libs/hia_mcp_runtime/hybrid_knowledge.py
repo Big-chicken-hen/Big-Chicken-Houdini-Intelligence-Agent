@@ -1,9 +1,4 @@
-"""Hybrid local retrieval and explicit project memory.
-
-SQLite FTS5 remains the reliable baseline.  An optional project-local stdio
-worker may provide normalized embeddings; failures always degrade to lexical
-search and never trigger a model download.
-"""
+"""Strict lexical, vector, and hybrid retrieval plus explicit project memory."""
 
 from __future__ import annotations
 
@@ -138,7 +133,6 @@ class _EmbeddingBatch:
     dim: int
     normalized: bool
     status: str
-    fallback_reason: str
     repair: Mapping[str, Any]
 
     @property
@@ -198,8 +192,7 @@ class HybridKnowledgeStore:
                 "model_revision": "",
                 "dim": 0,
                 "normalized": False,
-                "degraded": True,
-                "fallback_reason": _bounded_reason(exc),
+                "error": _bounded_reason(exc),
                 "repair": {},
                 "complete": total_chunks == 0,
                 "partial": total_chunks > 0,
@@ -397,7 +390,6 @@ class HybridKnowledgeStore:
                 requested_mode=requested_mode,
                 mode_used="lexical",
                 vector_available=False,
-                fallback_reason="",
                 timings=timings,
                 source_inventory=source_inventory,
             )
@@ -469,24 +461,10 @@ class HybridKnowledgeStore:
                     0.0,
                     time.perf_counter() - encode_started,
                 )
-            reason = _bounded_reason(exc)
-            status = self._retrieval_status(
-                requested_mode=requested_mode,
-                mode_used="lexical",
-                vector_available=False,
-                fallback_reason=reason,
-                batch=query_batch,
-                timings=timings,
-                source_inventory=source_inventory,
-            )
-            return [
-                {
-                    **result,
-                    "matches": result["matches"][offset : offset + limit],
-                    "retrieval": status,
-                }
-                for result in lexical_results
-            ]
+            raise HybridKnowledgeError(
+                f"{requested_mode} retrieval requires an available vector encoder: "
+                f"{_bounded_reason(exc)}"
+            ) from exc
 
         output: list[dict[str, Any]] = []
         for query, lexical, vector_matches, document_ids in zip(
@@ -496,17 +474,11 @@ class HybridKnowledgeStore:
             candidate_document_ids,
         ):
             index_status = dict(sync)
-            fallback_reason = query_batch.fallback_reason
             signature_compatible = bool(sync["signature_compatible"])
             if not signature_compatible:
-                index_status.update(
-                    {
-                        "ranking_scope": "none",
-                        "partial_reason": "VECTOR_INDEX_SIGNATURE_MISMATCH",
-                    }
+                raise HybridKnowledgeError(
+                    f"{requested_mode} retrieval requires a compatible vector index"
                 )
-                mode_used = "lexical"
-                fallback_reason = "VECTOR_INDEX_SIGNATURE_MISMATCH"
             elif sync["complete"]:
                 index_status.update(
                     {"ranking_scope": "global", "partial_reason": ""}
@@ -519,23 +491,15 @@ class HybridKnowledgeStore:
                         "partial_reason": PARTIAL_CANDIDATES_REASON,
                     }
                 )
-                mode_used = (
-                    "hybrid" if requested_mode == "vector" else requested_mode
-                )
+                mode_used = requested_mode
             else:
-                index_status.update(
-                    {
-                        "ranking_scope": "none",
-                        "partial_reason": PARTIAL_NO_CANDIDATES_REASON,
-                    }
+                raise HybridKnowledgeError(
+                    f"{requested_mode} retrieval requires indexed vector candidates"
                 )
-                mode_used = "lexical"
-                fallback_reason = PARTIAL_NO_CANDIDATES_REASON
             status = self._retrieval_status(
                 requested_mode=requested_mode,
                 mode_used=mode_used,
                 vector_available=signature_compatible,
-                fallback_reason=fallback_reason,
                 batch=query_batch,
                 sync=index_status,
                 timings=timings,
@@ -1058,7 +1022,7 @@ class HybridKnowledgeStore:
             else:
                 # A profile/model/dimension switch invalidates only the vector
                 # layer.  Treat every scoped chunk as missing until encode()
-                # confirms the runtime's actual (possibly fallback) profile.
+                # confirms the exact requested runtime profile.
                 sql = (
                     "SELECT c.id, c.body, c.content_hash FROM chunks c WHERE "
                 )
@@ -1177,10 +1141,6 @@ class HybridKnowledgeStore:
         batch: _EmbeddingBatch,
         progress: Mapping[str, Any],
     ) -> dict[str, Any]:
-        degraded = bool(
-            batch.fallback_reason
-            or batch.requested_profile != batch.profile_id
-        )
         return {
             "available": True,
             "status": batch.status,
@@ -1191,8 +1151,6 @@ class HybridKnowledgeStore:
             "model_revision": batch.model_revision,
             "dim": batch.dim,
             "normalized": batch.normalized,
-            "degraded": degraded,
-            "fallback_reason": batch.fallback_reason,
             "repair": dict(batch.repair),
             **dict(progress),
         }
@@ -1229,23 +1187,14 @@ class HybridKnowledgeStore:
                 requested_mode="hybrid",
                 mode_used="hybrid",
                 vector_available=True,
-                fallback_reason=first.fallback_reason,
                 batch=first,
                 sync=sync,
             )
         except Exception as exc:
-            fallback_status = dict(self.status())
-            inventory = fallback_status.pop("corpus", {})
-            return self._retrieval_status(
-                requested_mode="hybrid",
-                mode_used="lexical",
-                vector_available=False,
-                fallback_reason=_bounded_reason(exc),
-                sync=fallback_status,
-                source_inventory=(
-                    inventory if isinstance(inventory, Mapping) else {}
-                ),
-            )
+            raise HybridKnowledgeError(
+                "Vector indexing requires an available encoder: "
+                f"{_bounded_reason(exc)}"
+            ) from exc
 
     def _store_vectors(
         self,
@@ -1627,126 +1576,57 @@ class HybridKnowledgeStore:
         requested_mode: str,
         mode_used: str,
         vector_available: bool,
-        fallback_reason: str,
         batch: _EmbeddingBatch | None = None,
         sync: Mapping[str, Any] | None = None,
         timings: Mapping[str, Any] | None = None,
         source_inventory: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        raw_status: Mapping[str, Any] = {}
-        embedder = self._embedder if self._embedder_initialized else None
-        status_method = getattr(embedder, "status", None)
-        if callable(status_method):
-            try:
-                value = status_method()
-                if isinstance(value, Mapping):
-                    raw_status = value
-            except Exception:
-                raw_status = {}
-        requested_profile = (
-            batch.requested_profile
-            if batch is not None
-            else str(raw_status.get("requested_profile") or "")
-        )
-        active_profile = (
-            batch.profile_id
-            if batch is not None
-            else str(raw_status.get("active_profile") or "")
-        )
-        encoder_fallback_reason = (
-            batch.fallback_reason
-            if batch is not None
-            else str(raw_status.get("fallback_reason") or "")
-        )
-        encoder_degraded = bool(
-            encoder_fallback_reason
-            or (
-                requested_profile
-                and active_profile
-                and requested_profile != active_profile
-            )
-        )
         corpus = dict(sync or {})
         signature_compatible = bool(
             corpus.get("signature_compatible", batch is not None)
         )
         partial = bool(corpus) and not bool(corpus.get("complete", False))
-        degraded = bool(fallback_reason or encoder_degraded)
+        if batch is None:
+            encoder = {
+                "available": False,
+                "status": "not_requested",
+                "installed": False,
+                "ready": False,
+                "initialized": False,
+                "loaded": False,
+                "requested_profile": "",
+                "active_profile": "",
+                "model_id": "",
+                "model_revision": "",
+                "dim": 0,
+                "normalized": False,
+                "repair": {},
+            }
+        else:
+            encoder = {
+                "available": True,
+                "status": batch.status,
+                "installed": True,
+                "ready": True,
+                "initialized": True,
+                "loaded": True,
+                "requested_profile": batch.requested_profile,
+                "active_profile": batch.profile_id,
+                "model_id": batch.model_id,
+                "model_revision": batch.model_revision,
+                "dim": batch.dim,
+                "normalized": batch.normalized,
+                "repair": dict(batch.repair),
+            }
         vector_state = (
             "incompatible"
             if batch is not None and not signature_compatible
             else "partial"
             if vector_available and partial
-            else "degraded"
-            if vector_available and degraded
             else "ready"
             if vector_available
-            else "unavailable"
+            else "not_requested"
         )
-        repair = dict(batch.repair) if batch is not None else {}
-        if not repair and isinstance(raw_status.get("repair"), Mapping):
-            repair = dict(raw_status["repair"])
-        try:
-            raw_dim = int(raw_status.get("dim") or 0)
-        except (TypeError, ValueError):
-            raw_dim = 0
-        encoder = {
-            "available": bool(
-                batch is not None
-                or raw_status.get("available", False)
-                or raw_status.get("installed", False)
-            ),
-            "status": (
-                batch.status
-                if batch is not None
-                else str(raw_status.get("status") or "unavailable")
-            ),
-            "installed": bool(
-                batch is not None or raw_status.get("installed", False)
-            ),
-            "ready": bool(batch is not None or raw_status.get("ready", False)),
-            "degraded": encoder_degraded,
-            "initialized": bool(
-                batch is not None or raw_status.get("initialized", False)
-            ),
-            "loaded": bool(batch is not None or raw_status.get("loaded", False)),
-            "requested_profile": requested_profile,
-            "active_profile": active_profile,
-            "model_id": (
-                batch.model_id
-                if batch is not None
-                else str(raw_status.get("model_id") or "")
-            ),
-            "model_revision": (
-                batch.model_revision
-                if batch is not None
-                else str(raw_status.get("model_revision") or "")
-            ),
-            "dim": (
-                batch.dim
-                if batch is not None
-                else raw_dim
-            ),
-            "normalized": (
-                bool(batch.normalized)
-                if batch is not None
-                else bool(raw_status.get("normalized", False))
-            ),
-            "fallback_reason": encoder_fallback_reason,
-            "repair": repair,
-        }
-        for name in (
-            "device",
-            "cuda_available",
-            "runtime",
-            "backend",
-            "python_path",
-            "venv_path",
-            "model_path",
-            "model_dir",
-        ):
-            if name in raw_status:
-                encoder[name] = raw_status[name]
         corpus_state = (
             "incompatible"
             if batch is not None and not signature_compatible
@@ -1781,18 +1661,16 @@ class HybridKnowledgeStore:
                 "status": encoder["status"],
                 "installed": encoder["installed"],
                 "ready": encoder["ready"],
-                "degraded": degraded,
                 "partial": partial,
                 "initialized": encoder["initialized"],
                 "loaded": encoder["loaded"],
-                "requested_profile": requested_profile,
-                "active_profile": active_profile,
+                "requested_profile": encoder["requested_profile"],
+                "active_profile": encoder["active_profile"],
                 "model_id": encoder["model_id"],
                 "model_revision": encoder["model_revision"],
                 "dim": encoder["dim"],
                 "normalized": encoder["normalized"],
-                "fallback_reason": fallback_reason,
-                "repair": repair,
+                "repair": encoder["repair"],
                 "index": corpus,
             },
             "timings": {
@@ -1803,7 +1681,6 @@ class HybridKnowledgeStore:
                     "vector_scan_seconds",
                 )
             },
-            "fallback_reason": fallback_reason if mode_used == "lexical" else "",
         }
 
 
@@ -1849,6 +1726,16 @@ def _embedding_batch(value: Any) -> _EmbeddingBatch:
     profile_id = str(field("profile_id") or field("active_profile") or "")
     if not model_id or not profile_id:
         raise _VectorUnavailable("Embedding worker omitted its model identity")
+    requested_profile = str(field("requested_profile") or profile_id)
+    if requested_profile != profile_id:
+        raise _VectorUnavailable(
+            "Embedding worker did not activate the requested profile"
+        )
+    status = str(field("status") or "ready")
+    if status != "ready":
+        raise _VectorUnavailable(
+            "Embedding worker is not ready for the requested profile: " + status
+        )
     repair = field("repair", {})
     return _EmbeddingBatch(
         document_vectors=vectors("document_vectors"),
@@ -1856,11 +1743,10 @@ def _embedding_batch(value: Any) -> _EmbeddingBatch:
         model_id=model_id,
         model_revision=str(field("model_revision") or ""),
         profile_id=profile_id,
-        requested_profile=str(field("requested_profile") or profile_id),
+        requested_profile=requested_profile,
         dim=dim,
         normalized=True,
-        status=str(field("status") or "ready"),
-        fallback_reason=str(field("fallback_reason") or ""),
+        status=status,
         repair=dict(repair) if isinstance(repair, Mapping) else {},
     )
 

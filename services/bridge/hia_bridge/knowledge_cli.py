@@ -508,9 +508,8 @@ def _environment_projection(value: Any) -> dict[str, Any]:
     return {
         "state": _bounded_text(raw.get("state"), 64) or "missing",
         "embedding_mode": _bounded_text(raw.get("embedding_mode"), 64)
-        or "fts5",
+        or "unavailable",
         "active_profile": _bounded_text(raw.get("active_profile"), 128),
-        "fallback_non_blocking": raw.get("fallback_non_blocking") is not False,
     }
 
 
@@ -835,7 +834,7 @@ class KnowledgeCliRunner:
     def _pack_manifest_metadata(self) -> dict[str, Any]:
         """Read only bounded release metadata; never infer runtime index state."""
 
-        fallback = {
+        unavailable_metadata = {
             "installed": None,
             "pack_id": "",
             "version": "",
@@ -849,15 +848,15 @@ class KnowledgeCliRunner:
             )
             raw = manifest_path.read_bytes()
             if not 0 < len(raw) <= 1_048_576:
-                return fallback
+                return unavailable_metadata
             manifest = json.loads(raw.decode("utf-8"))
         except (KnowledgeCliError, OSError, UnicodeError, json.JSONDecodeError):
-            return fallback
+            return unavailable_metadata
         if not isinstance(manifest, Mapping):
-            return fallback
+            return unavailable_metadata
         sources = manifest.get("sources")
         return {
-            **fallback,
+            **unavailable_metadata,
             "pack_id": _bounded_text(manifest.get("pack_id"), 256),
             "version": _bounded_text(
                 manifest.get("pack_version")
