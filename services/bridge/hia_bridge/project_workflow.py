@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 import threading
+import time
 from typing import Callable
 
 from .project_contracts import ProjectStatus
@@ -62,6 +63,7 @@ class ProjectWorkflowHost:
             thread_name_prefix="hia-project",
         )
         self._lock = threading.RLock()
+        self._idle = threading.Condition(self._lock)
         self._inflight: dict[str, Future[ProjectRecord]] = {}
         self._stopped: set[str] = set()
         self._closed = False
@@ -168,6 +170,7 @@ class ProjectWorkflowHost:
 
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds cannot be negative")
+        deadline = time.monotonic() + timeout_seconds
         with self._lock:
             self._closed = True
             project_ids = tuple(self._inflight)
@@ -184,8 +187,12 @@ class ProjectWorkflowHost:
                         with self._lock:
                             self._host_errors[project_id] = error
         _, unfinished = wait(futures, timeout=timeout_seconds)
+        with self._idle:
+            while self._inflight and time.monotonic() < deadline:
+                self._idle.wait(max(0.0, deadline - time.monotonic()))
+            callbacks_unfinished = bool(self._inflight)
         self._pool.shutdown(wait=False, cancel_futures=True)
-        return not unfinished
+        return not unfinished and not callbacks_unfinished
 
     def _execute_one(self, project_id: str) -> ProjectRecord:
         executor = self._executor_factory(project_id)
@@ -205,6 +212,7 @@ class ProjectWorkflowHost:
         with self._lock:
             if self._inflight.get(project_id) is future:
                 self._inflight.pop(project_id, None)
+                self._idle.notify_all()
             stopped = project_id in self._stopped
             should_continue = (
                 not self._closed
