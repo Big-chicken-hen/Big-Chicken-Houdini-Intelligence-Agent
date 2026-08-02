@@ -115,30 +115,6 @@ SEMANTIC_CHECKS = {
     ),
 }
 
-EXPERIMENT_PARAMETERS = {
-    "type": "object",
-    "additionalProperties": True,
-    "description": (
-        "Expanded absolute hou.Parm paths mapped to temporary scalar values. "
-        "baseline.parameters may be empty to use the current scene; candidate "
-        "maps are deltas and may introduce paths not repeated in baseline."
-    ),
-}
-EXPERIMENT_BASELINE = _object(
-    {
-        "name": {"type": "string", "minLength": 1, "maxLength": 64},
-        "parameters": EXPERIMENT_PARAMETERS,
-    },
-    required=("parameters",),
-)
-EXPERIMENT_CANDIDATE = _object(
-    {
-        "name": {"type": "string", "minLength": 1, "maxLength": 64},
-        "parameters": EXPERIMENT_PARAMETERS,
-    },
-    required=("name", "parameters"),
-)
-
 NODE_HELP_PROPERTIES = {
     "node_path": PATH,
     "category": STRING,
@@ -463,7 +439,6 @@ TOOL_SPECS = (
                 "checks": VALIDATION_CHECKS,
                 "changed_paths": PATHS,
                 "mutable_root": PATH,
-                "protected_paths": PATHS,
                 "semantic_checks": SEMANTIC_CHECKS,
                 "query": QUERY,
                 "limit": LIMIT,
@@ -473,139 +448,13 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_execute_hom",
         "hom_execution",
-        "Execute one Codex-generated Python/HOM batch in the current Houdini UI main thread. Prefer modifying suitable existing nodes, then installed native Houdini nodes and parameter networks, using short HOM batches to orchestrate them; use Python SOP/script or direct code-built geometry only when no reasonable native node solution exists, explaining that exception in task. Raw script remains the primary write interface; optional task/mutable_root/protected_paths/expected_outputs/checks form a lightweight evidence envelope, not an IR or security sandbox. The batch is precompiled and runs inside one Houdini undo group. The runtime requests Undo only for a HOM exception or an observed requested validation, scope, or deletion failure, and only undoes when it can prove the batch's own undo item; unknown or partial evidence and NO_OBSERVED_EFFECT do not trigger Undo. Read rollback.status and the failure's automatic_retry_safe flag: only a verified rolled-back batch permits one corrected bounded retry without first inspecting the scene. Verification requires both the Undo stack and the HIP dirty state to match their pre-batch values. Timeouts, unverified rollback, and external file/render side effects are not automatic-retry safe. expected_outputs adds only critical-path existence and node-error checks; empty-output, geometry-summary, semantic, and fresh-cook validation run only when explicitly requested. Default diffing is targeted: predeclare exact diff_paths or call hia_mark_changed(path) before the first edit; only an explicit diff_root_path expands to a bounded network scan. Results include compact before/after local-network facts, target/connection/control/material/cook/message/scope postconditions, requested fresh output validation, rollback evidence, and a machine-fact execution trace under .runtime. postconditions.status is passed only for explicitly requested, fully observed structural assertions; a bare successful script is not result validation, and visual/render requirements remain unproven until separately observed. Visual or render proof is never fabricated or captured automatically; use the existing capture/render inspection tools when the original request needs it. Scene writes are bound to the launcher session, Houdini process, and loaded executor source; a changed or stale runtime rejects the write before submission with restart_required while read-only tools remain available. Local knowledge remains an optional single batched lookup and is not an execution gate. timeout_seconds is a client wait budget, not a HOM kill deadline; a timeout after network I/O begins may have unknown execution state and must not be retried automatically. An optional checkpoint_label saves one Houdini backup only after a confirmed successful change, preferring the safely saved HIP's .hia/checkpoints directory and otherwise using the launcher-session fallback.",
+        "Execute one Codex-generated Python/HOM batch in the current Houdini UI main thread. The tool accepts only script and an optional client wait budget. It executes the script once inside one ordinary Houdini Undo group so the user may undo it manually, but HIA never calls performUndo or rolls the scene back. It reports only direct execution facts and does not validate results, capture a diff, create checkpoints, or judge quality. Use hia_scene_diff, hia_validate, and hia_capture_viewport explicitly when independent observation is needed. timeout_seconds is a client wait budget, not a HOM kill deadline; after submission the scene state may be unknown.",
         _object(
             {
                 "script": {"type": "string", "minLength": 1, "maxLength": 524_288},
-                "task": {"type": "string", "maxLength": 1024},
-                "mutable_root": PATH,
-                "protected_paths": PATHS,
-                "expected_outputs": PATHS,
-                "expected_deletions": PATHS,
-                "checks": VALIDATION_CHECKS,
-                "semantic_checks": SEMANTIC_CHECKS,
-                "fresh_validation": {"type": "boolean", "default": True},
-                "require_scene_change": {
-                    "type": "boolean",
-                    "description": "Require an observed scene change. Defaults on when diff paths, expected outputs, checkpoints, or declared touched paths make a write effect explicit.",
-                },
                 "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300, "default": 60},
-                "capture_diff": {"type": "boolean", "default": True},
-                "diff_paths": PATHS,
-                "diff_root_path": PATH,
-                "checkpoint_label": {"type": "string", "maxLength": 128},
             },
             required=("script",),
-        ),
-        read_only=False,
-        aliases=("checkpoint", "检查点", "备份"),
-    ),
-    ToolSpec(
-        "hia_run_effect_experiment",
-        "effect_experiment",
-        "Run one bounded, temporary, domain-neutral effect comparison in the current Houdini UI session. Preflight a target network and every expanded scalar parameter path before any write, then evaluate one baseline plus two or three named candidates from the same baseline over an inclusive frame range. Explicit cache-reset button parameters are the only cache-clear evidence; force cooking alone is never reported as a reset. Each candidate advances frames sequentially, captures every requested sample with one locked camera/display/framing signature and one derived or requested preview resolution, and returns actual parameter readback, per-frame cook/messages/metrics, embedded-PNG contact-sheet evidence, expected-versus-unexpected deletions, and explicit restoration proof. It never scores candidates, builds EffectSpec, uses PDG/Wedge, or performs knowledge search.",
-        _object(
-            {
-                "target_network": PATH,
-                "baseline": EXPERIMENT_BASELINE,
-                "candidates": {
-                    "type": "array",
-                    "items": EXPERIMENT_CANDIDATE,
-                    "minItems": 2,
-                    "maxItems": 3,
-                },
-                "frame_range": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "minItems": 2,
-                    "maxItems": 2,
-                },
-                "sample_frames": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "minItems": 1,
-                    "maxItems": 6,
-                },
-                "preview": _object(
-                    {
-                        "width": {
-                            "type": "integer",
-                            "minimum": 64,
-                            "maximum": 1920,
-                        },
-                        "height": {
-                            "type": "integer",
-                            "minimum": 64,
-                            "maximum": 1920,
-                        },
-                        "quality_scale": {
-                            "type": "number",
-                            "minimum": 0.1,
-                            "maximum": 1.0,
-                            "default": 1.0,
-                        },
-                    }
-                ),
-                "camera_path": PATH,
-                "display_mode": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128,
-                    "description": (
-                        "Optional exact assertion for the currently observed "
-                        "viewport shading mode; the experiment does not mutate it."
-                    ),
-                },
-                "framing": {
-                    "type": "string",
-                    "enum": ["current_view", "camera"],
-                },
-                "capture_mode": {
-                    "type": "string",
-                    "enum": ["contact_sheet"],
-                    "default": "contact_sheet",
-                },
-                "cache_reset_parms": {
-                    "type": "array",
-                    "items": PATH,
-                    "maxItems": 8,
-                },
-                "cook_targets": {
-                    "type": "array",
-                    "items": PATH,
-                    "maxItems": 8,
-                },
-                "metric_targets": {
-                    "type": "array",
-                    "items": PATH,
-                    "maxItems": 4,
-                },
-                "metrics": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": [
-                            "cook_evidence",
-                            "node_messages",
-                            "geometry_summary",
-                            "image_quality",
-                        ],
-                    },
-                    "maxItems": 4,
-                },
-                "expected_deletions": {
-                    "type": "array",
-                    "items": PATH,
-                    "maxItems": 16,
-                },
-            },
-            required=(
-                "target_network",
-                "baseline",
-                "candidates",
-                "frame_range",
-                "sample_frames",
-            ),
         ),
         read_only=False,
     ),
@@ -627,7 +476,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_capture_viewport",
         "visual_feedback",
-        "Capture the current visible viewport through Houdini's documented flipbook path only when visual verification is needed. Omitted dimensions derive from the live viewport; one supplied dimension preserves its aspect, and two supplied dimensions are honored exactly. A single frame remains the static default. For animation or simulation, use an explicit frames list or frame_range plus frame_step (at most 24 frames); the runtime locks, evaluates, and captures each requested frame, detects missing/failed/unchanged sequences, and records requested versus actual frames with bounded evidence. validation_paths optionally force-cook critical nodes per frame. Restores the original camera/view, camera lock, and frame state, does not open MPlay or take focus, and reports actual dimensions/aspect, capture quality, and the unverified OS HDR/display boundary. A safely saved current HIP uses its sibling .hia/screenshots directory; otherwise images fall back to HIA_CACHE_DIR/screenshots.",
+        "Capture the current visible viewport only through Houdini SceneViewer.flipbook. Images always stay under the project-local .runtime/cache/screenshots directory. Omitted dimensions derive from the live viewport; one supplied dimension preserves its aspect, and two supplied dimensions are honored exactly. A single frame remains the static default. For animation or simulation, use an explicit frames list or frame_range plus frame_step (at most 24 frames). validation_paths may force-cook critical nodes per frame. The runtime restores the original camera/view, camera lock, and frame state, does not open MPlay, and reports objective capture and frame evidence. If flipbook capture or state restoration is unavailable, the tool fails with VIEWPORT_CAPTURE_UNAVAILABLE.",
         _object(
             {
                 "mode": {"type": "string", "enum": ["viewport", "flipbook"], "default": "viewport"},
@@ -666,7 +515,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_local_help_search",
         "local_documentation",
-        "The single local-knowledge search entry for versioned official workflows, curated community tutorials, live installed Houdini help, project references, explicitly imported user documents/transcripts, explicitly selected public Thread exports, and explicit project memories. It uses the existing SQLite FTS5 index plus optional local Qwen embeddings; Qwen only encodes text and Codex remains the sole reasoning system. Use one queries batch instead of parallel duplicate searches. source_kinds isolates a real indexed source kind, and card_id/canonical_id performs exact workflow-card lookup. Exact source-kind or card filters automatically resolve their indexed backing source group while the exact document filter prevents unrelated results. refresh=false is strictly read-only; refresh=true performs one explicit incremental refresh, while full vector builds remain an independent CLI operation. If the encoder is unavailable, retrieval degrades completely to lexical. While the vector index is partial, reranking is limited to each query's own lexical candidates; global vector ranking starts only when the index reports complete. Compact is default; full/diagnostic may return bounded reconstructed content for official, community, and user-supplied records without changing their verification level. This tool does not gate hia_execute_hom or automatically ingest chats.",
+        "The single local-knowledge search entry for versioned official workflows, curated community tutorials, live installed Houdini help, project references, explicitly imported user documents/transcripts, explicitly selected public Thread exports, and explicit project memories. It uses the existing SQLite FTS5 index plus optional local Qwen embeddings; Qwen only encodes text and Codex remains the sole reasoning system. Use one queries batch instead of parallel duplicate searches. source_kinds isolates a real indexed source kind, and card_id/canonical_id performs exact workflow-card lookup. Exact source-kind or card filters automatically resolve their indexed backing source group while the exact document filter prevents unrelated results. refresh=false is strictly read-only; refresh=true performs one explicit incremental refresh, while full vector builds remain an independent CLI operation. Lexical requests use SQLite FTS5 directly. Hybrid or vector requests require the selected encoder profile and return an explicit error when it is unavailable. While the vector index is partial, reranking is limited to each query's own lexical candidates; global vector ranking starts only when the index reports complete. Compact is default; full/diagnostic may return bounded reconstructed content for official, community, and user-supplied records without changing their verification level. This tool does not gate hia_execute_hom or automatically ingest chats.",
         _object(
             {
                 "query": {
@@ -744,7 +593,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_project_memory",
         "project_memory",
-        "Explicitly record, search, list, delete, or supersede durable project decisions, preferences, assets, lessons, and workflows. This is not chat history: nothing is saved automatically, and Codex supplies the final memory text. Search defaults to hybrid local retrieval with lexical fallback; Qwen only encodes text. Results report requested/active embedding profiles and any degradation reason. The runtime generates stable IDs and keeps bodies and vectors under project .runtime/knowledge.",
+        "Explicitly record, search, list, delete, or supersede durable project decisions, preferences, assets, lessons, and workflows. This is not chat history: nothing is saved automatically, and Codex supplies the final memory text. Qwen only encodes text; Codex remains the sole reasoning system. Search defaults to hybrid local retrieval and requires the selected Qwen encoder profile; lexical search must be requested explicitly. The runtime generates stable IDs and keeps bodies and vectors under project .runtime/knowledge.",
         _object(PROJECT_MEMORY_PROPERTIES, required=("action",)),
         read_only=False,
     ),
@@ -811,7 +660,7 @@ def validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
             )
     if tool_name == "hia_project_memory":
         _validate_project_memory(arguments)
-    if tool_name in {"hia_validate", "hia_execute_hom"} and "semantic_checks" in arguments:
+    if tool_name == "hia_validate" and "semantic_checks" in arguments:
         _validate_semantic_checks(arguments["semantic_checks"])
 
 

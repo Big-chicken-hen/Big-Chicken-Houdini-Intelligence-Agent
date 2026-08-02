@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import threading
+import time
 from collections import OrderedDict
 from typing import Any, Mapping
 
@@ -168,6 +170,7 @@ class HiaMcpAdapter:
         *,
         stdio_queue_seconds: float = 0.0,
     ) -> dict[str, Any]:
+        call_started = time.monotonic()
         if not isinstance(params, Mapping) or set(params) - {"name", "arguments", "_meta"}:
             raise InputError("INVALID_PARAMS", "tools/call parameters are invalid")
         name = params.get("name")
@@ -193,9 +196,11 @@ class HiaMcpAdapter:
                         "submission_state": "not_submitted",
                         "request_submitted": False,
                         "hom_may_still_execute": False,
-                        "automatic_retry_safe": True,
                         "interruptible_after_submission": False,
                     },
+                    tool_name=name,
+                    arguments=arguments,
+                    elapsed_seconds=time.monotonic() - call_started,
                 )
             if request_id in self._active:
                 raise InputError("DUPLICATE_REQUEST_ID", "A tool call with this request id is already active")
@@ -211,7 +216,14 @@ class HiaMcpAdapter:
                 raise TransportError("INVALID_RESPONSE", "The transport result must be an object")
             return self._tool_result(dict(payload))
         except TransportError as exc:
-            return self._tool_error(exc.code, exc.message, exc.details)
+            return self._tool_error(
+                exc.code,
+                exc.message,
+                exc.details,
+                tool_name=name,
+                arguments=arguments,
+                elapsed_seconds=time.monotonic() - call_started,
+            )
         finally:
             with self._lock:
                 self._active.pop(request_id, None)
@@ -331,13 +343,55 @@ class HiaMcpAdapter:
         code: str,
         message: str,
         details: Mapping[str, Any] | None = None,
+        *,
+        tool_name: str | None = None,
+        arguments: Mapping[str, Any] | None = None,
+        elapsed_seconds: float = 0.0,
     ) -> dict[str, Any]:
+        error_details = dict(details or {})
+        if tool_name == "hia_execute_hom":
+            script = (
+                arguments.get("script")
+                if isinstance(arguments, Mapping)
+                else ""
+            )
+            script_text = script if isinstance(script, str) else ""
+            submitted = error_details.get("request_submitted")
+            partial_possible = bool(
+                error_details.get("hom_may_still_execute")
+                or submitted is True
+                or submitted is None
+            )
+            error_details["partial_scene_changes_possible"] = partial_possible
+            payload = {
+                "ok": False,
+                "result": None,
+                "stdout": "",
+                "warnings": [],
+                "errors": [
+                    {
+                        "code": code,
+                        "message": message,
+                        "details": error_details,
+                    }
+                ],
+                "revision": None,
+                "dirty": None,
+                "elapsed_seconds": round(max(0.0, elapsed_seconds), 6),
+                "script_sha256": hashlib.sha256(
+                    script_text.encode("utf-8")
+                ).hexdigest(),
+                "scene_change_status": (
+                    "unknown" if partial_possible else "unchanged"
+                ),
+            }
+            return self._tool_result(payload)
         payload = {
             "ok": False,
             "result": None,
             "warnings": [],
-            "errors": [{"code": code, "message": message, "details": dict(details or {})}],
-            "structured_error": {"code": code, "message": message, "details": dict(details or {})},
+            "errors": [{"code": code, "message": message, "details": error_details}],
+            "structured_error": {"code": code, "message": message, "details": error_details},
         }
         return self._tool_result(payload)
 
