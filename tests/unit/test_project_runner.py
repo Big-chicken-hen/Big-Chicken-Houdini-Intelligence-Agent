@@ -87,6 +87,45 @@ class ProjectRunnerTests(unittest.TestCase):
         )
         self.assertEqual(ProjectStatus.NEEDS_ATTENTION, updated.state.status)
 
+    def test_continue_persists_resuming_until_goal_resume_effect_ack(self) -> None:
+        record = _record(ProjectStatus.NEEDS_ATTENTION)
+        record = ProjectRecord(
+            replace(record.state, resume_status=ProjectStatus.PLANNING),
+            record.authoritative_task_text,
+        )
+        self.registry.put(record)
+
+        pending = self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.USER_CONTINUE))
+        self.assertEqual(ProjectStatus.RESUMING, pending.state.status)
+        self.assertEqual("resume_goal", pending.state.pending_effects[0].kind)
+
+        updated = self.runner.execute_next("p1", FakeExecutor(ProjectEvent.GOAL_RESUMED))
+        self.assertEqual(ProjectStatus.PLANNING, updated.state.status)
+        self.assertIsNone(updated.state.resume_status)
+        self.assertEqual((), updated.state.pending_effects)
+
+    def test_resume_effect_failure_is_persisted_as_needs_attention(self) -> None:
+        record = _record(ProjectStatus.NEEDS_ATTENTION)
+        record = ProjectRecord(
+            replace(record.state, resume_status=ProjectStatus.AUTHORIZATION),
+            record.authoritative_task_text,
+        )
+        self.registry.put(record)
+        pending = self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.USER_CONTINUE))
+        effect = pending.state.pending_effects[0]
+
+        updated = self.runner.acknowledge(
+            "p1",
+            effect.effect_id,
+            LifecycleEvent(
+                ProjectEvent.GOAL_RESUME_FAILED,
+                {"error": "native goal stayed paused"},
+            ),
+        )
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, updated.state.status)
+        self.assertEqual(ProjectStatus.AUTHORIZATION, updated.state.resume_status)
+        self.assertEqual("native goal stayed paused", updated.state.last_error)
+
     def test_wrong_or_duplicate_effect_ack_is_rejected(self) -> None:
         self.registry.put(_record(ProjectStatus.INTAKE))
         pending = self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.SCENE_ELIGIBLE))

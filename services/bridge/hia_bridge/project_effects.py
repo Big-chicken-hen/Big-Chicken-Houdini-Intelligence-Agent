@@ -179,7 +179,7 @@ class ProjectEffectExecutor:
         if kind == "pause_goal":
             return self._set_goal(state, effect, "paused", ProjectEvent.GOAL_PAUSED)
         if kind == "resume_goal":
-            return self._set_goal(state, effect, "active", None)
+            return self._set_goal(state, effect, "active", ProjectEvent.GOAL_RESUMED)
         if kind in {"show_attention", "record_failure"}:
             self._artifacts.put_effect(state.project_id, effect.effect_id, kind, dict(effect.data))
             return EffectResult(state, None)
@@ -798,29 +798,33 @@ class ProjectEffectExecutor:
         status: str,
         event: ProjectEvent | None,
     ) -> EffectResult:
-        result = self._client.request(
-            "thread/goal/set",
-            {
-                "threadId": state.goal_thread_id,
-                "objective": f"Houdini project {state.authoritative_task_id}",
-                "status": status,
-                "tokenBudget": None,
-            },
-        )
+        try:
+            result = self._client.request(
+                "thread/goal/set",
+                {
+                    "threadId": state.goal_thread_id,
+                    "objective": f"Houdini project {state.authoritative_task_id}",
+                    "status": status,
+                    "tokenBudget": None,
+                },
+            )
+        except TimeoutError:
+            # A timeout does not prove whether the native Goal changed.  The
+            # outer executor maps it to PROJECT_INTERRUPTED so the reducer first
+            # obtains a confirmed pause before another recovery attempt.
+            raise
+        except Exception:
+            return EffectResult(state, _goal_failure_event(status, "goal_rpc_failed"))
         goal = result.get("goal") if isinstance(result, Mapping) else None
         if (
             not isinstance(goal, Mapping)
-            or goal.get("threadId", state.goal_thread_id) != state.goal_thread_id
+            or goal.get("threadId") != state.goal_thread_id
             or goal.get("status") != status
         ):
-            failure = (
-                LifecycleEvent(ProjectEvent.GOAL_COMPLETION_FAILED, {"error": "goal_ack_mismatch"})
-                if status == "completed"
-                else LifecycleEvent(ProjectEvent.GOAL_PAUSE_FAILED, {"error": "goal_ack_mismatch"})
-                if status == "paused"
-                else LifecycleEvent(ProjectEvent.PROJECT_INTERRUPTED, {"reason": "goal_ack_mismatch"})
+            return EffectResult(
+                state,
+                _goal_failure_event(status, "goal_ack_mismatch"),
             )
-            return EffectResult(state, failure)
         self._artifacts.put_effect(
             state.project_id, effect.effect_id, effect.kind, {"thread_id": state.goal_thread_id, "status": status}
         )
@@ -861,6 +865,22 @@ def _text(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ProjectEffectError("INVALID_STRUCTURED_PAYLOAD", f"{name} must be non-empty")
     return value
+
+
+def _goal_failure_event(status: str, error: str) -> LifecycleEvent:
+    events = {
+        "completed": ProjectEvent.GOAL_COMPLETION_FAILED,
+        "paused": ProjectEvent.GOAL_PAUSE_FAILED,
+        "active": ProjectEvent.GOAL_RESUME_FAILED,
+    }
+    try:
+        event = events[status]
+    except KeyError as exc:
+        raise ProjectEffectError(
+            "INVALID_GOAL_STATUS",
+            f"unsupported native Goal status: {status}",
+        ) from exc
+    return LifecycleEvent(event, {"error": error})
 
 
 def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:

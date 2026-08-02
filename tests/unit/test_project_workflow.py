@@ -50,6 +50,8 @@ class RecordingExecutor:
             self.effects.append((state.project_id, effect.effect_id))
         if effect.kind == "pause_goal":
             return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_PAUSED))
+        if effect.kind == "resume_goal":
+            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_RESUMED))
         return EffectResult(state, None)
 
 
@@ -71,6 +73,8 @@ class BlockingExecutor(RecordingExecutor):
             raise TimeoutError("test release was not signalled")
         if effect.kind == "pause_goal":
             return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_PAUSED))
+        if effect.kind == "resume_goal":
+            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_RESUMED))
         return EffectResult(state, None)
 
 
@@ -221,6 +225,34 @@ class ProjectWorkflowHostTests(unittest.TestCase):
         self.assertEqual(("active",), host.recover())
         self._wait_until(lambda: not self.registry.require("active").state.pending_effects)
         self.assertEqual([("active", "active-effect-0")], executor.effects)
+
+    def test_resuming_project_becomes_active_only_after_resume_effect_ack(self) -> None:
+        record = _record("p1")
+        record = ProjectRecord(
+            replace(
+                record.state,
+                status=ProjectStatus.RESUMING,
+                resume_status=ProjectStatus.EXECUTING_STAGE,
+                pending_effects=(PendingEffect("resume-effect", "resume_goal"),),
+            ),
+            record.authoritative_task_text,
+        )
+        self.registry.put(record)
+        executor = BlockingExecutor()
+        host = self._host(executor)
+
+        self.assertTrue(host.start("p1"))
+        self.assertTrue(executor.entered.wait(1))
+        self.assertEqual(
+            ProjectStatus.RESUMING,
+            self.registry.require("p1").state.status,
+        )
+        executor.release.set()
+        self._wait_until(
+            lambda: self.registry.require("p1").state.status
+            is ProjectStatus.EXECUTING_STAGE
+        )
+        self.assertEqual([("p1", "resume-effect")], executor.effects)
 
     def test_close_is_bounded_and_does_not_claim_running_rpc_was_cancelled(self) -> None:
         self.registry.put(_record("p1"))

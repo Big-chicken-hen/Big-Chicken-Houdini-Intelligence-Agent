@@ -88,8 +88,13 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.assertEqual(ProjectStatus.INTERRUPTED, state.status)
         self.assertEqual(ProjectCommand.VERIFY_RECOVERY, commands[0].kind)
         state, commands = self.apply(state, ProjectEvent.RECOVERY_VALIDATED)
-        self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.status)
+        self.assertEqual(ProjectStatus.RESUMING, state.status)
         self.assertEqual(ProjectCommand.RESUME_GOAL, commands[0].kind)
+        self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.resume_status)
+        state, commands = self.apply(state, ProjectEvent.GOAL_RESUMED)
+        self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.status)
+        self.assertIsNone(state.resume_status)
+        self.assertEqual((), commands)
 
     def test_budget_and_no_progress_need_attention_without_auto_pass(self) -> None:
         for event in (ProjectEvent.BUDGET_EXHAUSTED, ProjectEvent.NO_PROGRESS):
@@ -104,7 +109,10 @@ class ProjectLifecycleTests(unittest.TestCase):
                 self.assertNotIn(
                     ProjectCommand.COMPLETE_GOAL, [item.kind for item in commands]
                 )
-                state, _ = self.apply(state, ProjectEvent.USER_CONTINUE)
+                state, commands = self.apply(state, ProjectEvent.USER_CONTINUE)
+                self.assertEqual(ProjectStatus.RESUMING, state.status)
+                self.assertEqual(ProjectCommand.RESUME_GOAL, commands[0].kind)
+                state, _ = self.apply(state, ProjectEvent.GOAL_RESUMED)
                 self.assertEqual(ProjectStatus.REPAIRING_STAGE, state.status)
 
     def test_ineligible_and_unclear_do_not_provision_workers(self) -> None:
@@ -181,6 +189,54 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
         self.assertEqual("goal/update failed", state.last_error)
         self.assertEqual((), commands)
+
+    def test_resume_failure_never_claims_active_and_can_be_retried(self) -> None:
+        state = replace(
+            _state(ProjectStatus.NEEDS_ATTENTION),
+            resume_status=ProjectStatus.PLANNING,
+            attention_reason="budget",
+        )
+        state, commands = self.apply(state, ProjectEvent.USER_CONTINUE)
+        self.assertEqual(ProjectStatus.RESUMING, state.status)
+        self.assertEqual(ProjectCommand.RESUME_GOAL, commands[0].kind)
+
+        state, commands = self.apply(
+            state,
+            ProjectEvent.GOAL_RESUME_FAILED,
+            error="goal/update rejected",
+        )
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
+        self.assertEqual(ProjectStatus.PLANNING, state.resume_status)
+        self.assertEqual("goal/update rejected", state.last_error)
+        self.assertEqual((), commands)
+
+    def test_resume_ack_is_illegal_without_a_resuming_state(self) -> None:
+        for status in (
+            ProjectStatus.NEEDS_ATTENTION,
+            ProjectStatus.INTERRUPTED,
+            ProjectStatus.EXECUTING_STAGE,
+            ProjectStatus.COMPLETED,
+        ):
+            with self.subTest(status=status):
+                with self.assertRaises(InvalidTransition):
+                    self.apply(_state(status), ProjectEvent.GOAL_RESUMED)
+
+    def test_interrupted_resume_requires_a_confirmed_pause_before_retry(self) -> None:
+        state = replace(
+            _state(ProjectStatus.NEEDS_ATTENTION),
+            resume_status=ProjectStatus.AUTHORIZATION,
+        )
+        state, _ = self.apply(state, ProjectEvent.USER_CONTINUE)
+        state, commands = self.apply(
+            state,
+            ProjectEvent.PROJECT_INTERRUPTED,
+            reason="resume rpc timeout",
+        )
+        self.assertEqual(ProjectStatus.PAUSING, state.status)
+        self.assertEqual(ProjectCommand.PAUSE_GOAL, commands[0].kind)
+        state, _ = self.apply(state, ProjectEvent.GOAL_PAUSED)
+        self.assertEqual(ProjectStatus.INTERRUPTED, state.status)
+        self.assertEqual(ProjectStatus.AUTHORIZATION, state.resume_status)
 
 
 if __name__ == "__main__":

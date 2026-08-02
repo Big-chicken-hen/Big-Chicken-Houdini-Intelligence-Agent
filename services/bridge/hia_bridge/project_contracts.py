@@ -25,6 +25,7 @@ class ProjectStatus(str, Enum):
     REPAIRING_STAGE = "repairing_stage"
     COMPLETING = "completing"
     PAUSING = "pausing"
+    RESUMING = "resuming"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     INTERRUPTED = "interrupted"

@@ -86,6 +86,8 @@ class FakeProjectClient:
         self.wait_barrier: threading.Barrier | None = None
         self.on_wait = None
         self.timeout_actions: set[str] = set()
+        self.goal_ack_override: dict | None = None
+        self.goal_error: Exception | None = None
         self._turn_number = 0
         self._lock = threading.Lock()
 
@@ -107,6 +109,10 @@ class FakeProjectClient:
                 self.turns[turn_id] = (thread_id, role, envelope)
                 return {"turn": {"id": turn_id}}
             if method == "thread/goal/set":
+                if self.goal_error is not None:
+                    raise self.goal_error
+                if self.goal_ack_override is not None:
+                    return {"goal": dict(self.goal_ack_override)}
                 return {
                     "goal": {
                         "threadId": params["threadId"],
@@ -394,6 +400,73 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         self.assertFalse(any(method == "thread/start" for method, _ in self.client.calls))
         goal = [params for method, params in self.client.calls if method == "thread/goal/set"][-1]
         self.assertEqual("paused", goal["status"])
+
+    def test_resume_goal_returns_typed_ack_event_before_lifecycle_activation(self):
+        harness = EffectHarness(self.root, self.client)
+        state = replace(
+            harness.state,
+            status=ProjectStatus.RESUMING,
+            resume_status=ProjectStatus.PLANNING,
+            pending_effects=(PendingEffect("effect-resume", "resume_goal", {}),),
+        )
+        result = harness.executor.execute(state, state.pending_effects[0])
+
+        self.assertEqual(ProjectStatus.RESUMING, result.state.status)
+        self.assertEqual(ProjectEvent.GOAL_RESUMED, result.event.kind)
+        goal = [params for method, params in self.client.calls if method == "thread/goal/set"][-1]
+        self.assertEqual("active", goal["status"])
+
+    def test_resume_goal_rejects_missing_or_mismatched_native_goal_identity(self):
+        for goal in (
+            {"status": "active"},
+            {"threadId": "wrong-thread", "status": "active"},
+            {"threadId": "thread-supervisor", "status": "paused"},
+        ):
+            with self.subTest(goal=goal):
+                self.client.goal_ack_override = goal
+                harness = EffectHarness(self.root, self.client)
+                state = replace(
+                    harness.state,
+                    status=ProjectStatus.RESUMING,
+                    resume_status=ProjectStatus.EXECUTING_STAGE,
+                    pending_effects=(PendingEffect("effect-resume", "resume_goal", {}),),
+                )
+                result = harness.executor.execute(state, state.pending_effects[0])
+                self.assertEqual(ProjectEvent.GOAL_RESUME_FAILED, result.event.kind)
+                self.assertEqual("goal_ack_mismatch", result.event.data["error"])
+
+    def test_resume_goal_rpc_failure_is_needs_attention_not_active_or_completed(self):
+        self.client.goal_error = RuntimeError("transport rejected request")
+        harness = EffectHarness(self.root, self.client)
+        state = replace(
+            harness.state,
+            status=ProjectStatus.RESUMING,
+            resume_status=ProjectStatus.REVIEWING_STAGE,
+            pending_effects=(PendingEffect("effect-resume", "resume_goal", {}),),
+        )
+        result = harness.executor.execute(state, state.pending_effects[0])
+        next_state, commands = reduce_project(state, result.event)
+
+        self.assertEqual(ProjectEvent.GOAL_RESUME_FAILED, result.event.kind)
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, next_state.status)
+        self.assertEqual(ProjectStatus.REVIEWING_STAGE, next_state.resume_status)
+        self.assertEqual((), commands)
+
+    def test_resume_goal_timeout_requires_confirmed_pause(self):
+        self.client.goal_error = TimeoutError("unknown native result")
+        harness = EffectHarness(self.root, self.client)
+        state = replace(
+            harness.state,
+            status=ProjectStatus.RESUMING,
+            resume_status=ProjectStatus.EXECUTING_STAGE,
+            pending_effects=(PendingEffect("effect-resume", "resume_goal", {}),),
+        )
+        result = harness.executor.execute(state, state.pending_effects[0])
+        next_state, commands = reduce_project(state, result.event)
+
+        self.assertEqual(ProjectEvent.PROJECT_INTERRUPTED, result.event.kind)
+        self.assertEqual(ProjectStatus.PAUSING, next_state.status)
+        self.assertEqual("pause_goal", commands[0].kind.value)
 
     def test_repeated_schema_failure_exhausts_budget_and_never_passes(self):
         invalid = {"schema": "hia-project-eligibility/1", "disposition": "eligible"}

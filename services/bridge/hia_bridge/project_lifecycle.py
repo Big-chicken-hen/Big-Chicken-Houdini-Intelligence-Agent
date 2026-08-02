@@ -25,6 +25,8 @@ class ProjectEvent(str, Enum):
     GOAL_COMPLETION_FAILED = "goal_completion_failed"
     GOAL_PAUSED = "goal_paused"
     GOAL_PAUSE_FAILED = "goal_pause_failed"
+    GOAL_RESUMED = "goal_resumed"
+    GOAL_RESUME_FAILED = "goal_resume_failed"
     REPAIR_READY = "repair_ready"
     PROJECT_INTERRUPTED = "project_interrupted"
     RESTART_REQUESTED = "restart_requested"
@@ -214,6 +216,14 @@ def reduce_project(
             reason,
             resume_status=status,
         )
+    if kind is ProjectEvent.PROJECT_INTERRUPTED and status is ProjectStatus.RESUMING:
+        reason = str(data.get("reason") or "goal_resume_interrupted")
+        return _pause(
+            state,
+            ProjectStatus.INTERRUPTED,
+            reason,
+            resume_status=state.resume_status,
+        )
     if kind is ProjectEvent.GOAL_PAUSED and status is ProjectStatus.PAUSING:
         target = state.pause_target
         if target not in {
@@ -262,10 +272,9 @@ def reduce_project(
             raise InvalidTransition(status, kind)
         return _next(
             state,
-            target,
+            ProjectStatus.RESUMING,
             LifecycleCommand(ProjectCommand.RESUME_GOAL),
-            attention_reason=None,
-            last_error=None,
+            attention_reason="goal_resume_pending",
         )
     if kind is ProjectEvent.RECOVERY_FAILED and status is ProjectStatus.INTERRUPTED:
         error = str(data.get("error") or "recovery_validation_failed")
@@ -281,9 +290,28 @@ def reduce_project(
             raise InvalidTransition(status, kind)
         return _next(
             state,
-            target,
+            ProjectStatus.RESUMING,
             LifecycleCommand(ProjectCommand.RESUME_GOAL),
+            attention_reason="goal_resume_pending",
+        )
+    if kind is ProjectEvent.GOAL_RESUMED and status is ProjectStatus.RESUMING:
+        target = state.resume_status
+        if target not in _ACTIVE:
+            raise InvalidTransition(status, kind)
+        return _next(
+            state,
+            target,
+            resume_status=None,
             attention_reason=None,
+            last_error=None,
+        )
+    if kind is ProjectEvent.GOAL_RESUME_FAILED and status is ProjectStatus.RESUMING:
+        error = str(data.get("error") or "goal_resume_failed")
+        return _next(
+            state,
+            ProjectStatus.NEEDS_ATTENTION,
+            attention_reason=error,
+            last_error=error,
         )
     if kind in {ProjectEvent.BUDGET_EXHAUSTED, ProjectEvent.NO_PROGRESS} and status in _ACTIVE:
         reason = str(data.get("reason") or kind.value)
