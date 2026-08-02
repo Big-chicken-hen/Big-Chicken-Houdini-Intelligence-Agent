@@ -210,6 +210,7 @@ class ProjectEffectExecutor:
         self, state: ProjectState, effect: PendingEffect, deadline: float
     ) -> EffectResult:
         request = self._base_request(state, Role.SUPERVISOR, "scene_task_eligibility")
+        request["authoritative_task"] = self._authoritative_task_capsule(state)
         state, completed = self._run_structured(
             state,
             Role.SUPERVISOR,
@@ -238,6 +239,7 @@ class ProjectEffectExecutor:
         self, state: ProjectState, effect: PendingEffect, deadline: float
     ) -> EffectResult:
         request = self._base_request(state, Role.PLANNING, "create_plan_and_stage_cards")
+        request["authoritative_task"] = self._authoritative_task_capsule(state)
         state, completed = self._run_structured(
             state,
             Role.PLANNING,
@@ -348,6 +350,7 @@ class ProjectEffectExecutor:
         ):
             raise ProjectEffectError("STALE_BLUEPRINT", "current blueprint must be replanned")
         request = self._base_request(state, Role.SUPERVISOR, "authorize_plan")
+        request["authoritative_task"] = self._authoritative_task_capsule(state)
         request["plan"] = plan
         state, completed = self._run_structured(
             state,
@@ -981,7 +984,6 @@ class ProjectEffectExecutor:
                 "task_id": state.authoritative_task_id,
                 "sha256": state.authoritative_task_sha256,
             },
-            "authoritative_task": self._authoritative_task_capsule(state),
             "requirements": [
                 {
                     "requirement_id": item.requirement_id,

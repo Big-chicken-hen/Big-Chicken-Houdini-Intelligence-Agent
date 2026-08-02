@@ -525,10 +525,28 @@ class ProjectEffectExecutorTests(unittest.TestCase):
             if item["threadId"] != "thread-execution":
                 self.assertEqual("readOnly", item["sandboxPolicy"]["type"])
             envelope = json.loads(item["input"][0]["text"])
-            capsule = envelope["authoritative_task"]
-            self.assertEqual("hia-authoritative-task/1", capsule["schema"])
-            self.assertEqual("build a Houdini asset", capsule["task_text"])
-            self.assertEqual([], capsule["attachments"])
+            if envelope["action"] in {
+                "scene_task_eligibility",
+                "create_plan_and_stage_cards",
+                "authorize_plan",
+            }:
+                capsule = envelope["authoritative_task"]
+                self.assertEqual("hia-authoritative-task/1", capsule["schema"])
+                self.assertEqual("build a Houdini asset", capsule["task_text"])
+                self.assertEqual([], capsule["attachments"])
+            else:
+                self.assertNotIn("authoritative_task", envelope)
+                self.assertEqual(
+                    {
+                        "task_id": state.authoritative_task_id,
+                        "sha256": state.authoritative_task_sha256,
+                    },
+                    envelope["authoritative_task_ref"],
+                )
+        self.assertEqual(
+            "build a Houdini asset",
+            harness.registry.require("project-1").authoritative_task_text,
+        )
         goals = [params for method, params in self.client.calls if method == "thread/goal/set"]
         self.assertEqual("completed", goals[-1]["status"])
         self.assertEqual("thread-supervisor", goals[-1]["threadId"])
