@@ -270,6 +270,22 @@ class ProjectWorkflowHostTests(unittest.TestCase):
         executor.release.set()
         self._wait_until(lambda: not host.is_inflight("p1"))
 
+    def test_close_records_interrupt_failure_and_still_bounds_pool_shutdown(self) -> None:
+        self.registry.put(_record("p1"))
+        executor = BlockingExecutor()
+
+        def fail_interrupt(_project_id: str) -> None:
+            raise RuntimeError("interrupt rpc unavailable")
+
+        host = self._host(executor, interrupt_hook=fail_interrupt)
+        host.start("p1")
+        self.assertTrue(executor.entered.wait(1))
+
+        self.assertFalse(host.close(0.02))
+        self.assertRegex(str(host.host_error("p1")), "interrupt rpc unavailable")
+        executor.release.set()
+        self._wait_until(lambda: not host.is_inflight("p1"))
+
 
 if __name__ == "__main__":
     unittest.main()

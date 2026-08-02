@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from .events import EventBuffer
 from .project_effects import CompletedTurn
@@ -99,6 +99,32 @@ class ProjectEffectClient:
                 )
             self._turns[key] = _TurnCursor(cursor=cursor, started_at=started_at)
         return result
+
+    def interrupt_threads(
+        self, thread_ids: Iterable[str]
+    ) -> tuple[tuple[str, str], ...]:
+        """Request interruption for exact Turns currently tracked by this adapter.
+
+        A successful RPC acknowledgement is only an interruption request.  The
+        caller must not claim that an in-progress UI-thread or HIA write has
+        already stopped; ``wait_for_turn`` remains the completion authority.
+        """
+
+        allowed = {
+            thread_id
+            for thread_id in thread_ids
+            if isinstance(thread_id, str) and thread_id.strip()
+        }
+        with self._lock:
+            active = tuple(
+                sorted(key for key in self._turns if key[0] in allowed)
+            )
+        for thread_id, turn_id in active:
+            self._client.request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+            )
+        return active
 
     def wait_for_turn(
         self, thread_id: str, turn_id: str, timeout_seconds: float

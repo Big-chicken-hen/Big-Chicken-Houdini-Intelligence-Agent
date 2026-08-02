@@ -176,7 +176,13 @@ class ProjectWorkflowHost:
         if self._interrupt_hook is not None:
             for project_id, future in zip(project_ids, futures):
                 if not future.done():
-                    self._interrupt_hook(project_id)
+                    try:
+                        self._interrupt_hook(project_id)
+                    except BaseException as error:
+                        # Shutdown must still reap the pool and preserve later
+                        # Session cleanup.  The error remains observable.
+                        with self._lock:
+                            self._host_errors[project_id] = error
         _, unfinished = wait(futures, timeout=timeout_seconds)
         self._pool.shutdown(wait=False, cancel_futures=True)
         return not unfinished

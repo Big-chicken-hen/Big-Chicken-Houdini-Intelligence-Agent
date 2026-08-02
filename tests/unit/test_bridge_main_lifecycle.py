@@ -483,6 +483,68 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
         self.assertEqual("hia_v2", json.loads(stdout.getvalue())["mcp_backend"])
 
+    def test_project_runtime_recovers_after_session_start_and_closes_before_session(self) -> None:
+        order: list[str] = []
+        client = _Client(order)
+        session = _Session(order)
+        registry = SimpleNamespace(
+            manifest_digest="a" * 64,
+            schema_version="0.2.0",
+        )
+        scene_queue = SimpleNamespace(
+            shutdown=lambda: order.append("scene_queue_shutdown")
+        )
+        server = _Server(order)
+        project_runtime = SimpleNamespace(
+            service=object(),
+            recover=lambda: order.append("project_recover") or (),
+            close=lambda: order.append("project_close") or True,
+        )
+        stack, _ = self._common_patches(session, client)
+
+        with stack, mock.patch.object(
+            bridge_main.SchemaRegistry,
+            "b2_read_only",
+            return_value=registry,
+        ), mock.patch.object(
+            bridge_main,
+            "SceneQueue",
+            return_value=scene_queue,
+        ), mock.patch.object(
+            bridge_main,
+            "_build_project_runtime",
+            return_value=project_runtime,
+        ) as runtime_builder, mock.patch.object(
+            bridge_main,
+            "BridgeApplication",
+            return_value=object(),
+        ) as application_builder, mock.patch.object(
+            bridge_main,
+            "LoopbackHTTPServer",
+            return_value=server,
+        ), contextlib.redirect_stdout(io.StringIO()):
+            exit_code = bridge_main.run([])
+
+        self.assertEqual(0, exit_code)
+        self.assertLess(order.index("session_start"), order.index("project_recover"))
+        self.assertLess(order.index("project_recover"), order.index("serve_forever"))
+        self.assertLess(order.index("server_close"), order.index("project_close"))
+        self.assertLess(order.index("project_close"), order.index("session_close"))
+        self.assertIs(
+            project_runtime.service,
+            application_builder.call_args.kwargs["project_team"],
+        )
+        runtime_builder.assert_called_once_with(
+            client=client,
+            events=mock.ANY,
+            project_root=REPOSITORY_ROOT,
+            selected_backend=bridge_main.HIA_MCP_V2_SERVER_ID,
+            allowed_evidence_roots=(
+                REPOSITORY_ROOT / ".runtime",
+                REPOSITORY_ROOT / ".runtime" / "cache",
+            ),
+        )
+
     def test_http_provider_command_is_escaped_process_local_and_secret_free(self) -> None:
         mcp_python = 'E:\\runtime\\quoted "python"\\python.exe'
         with mock.patch.object(

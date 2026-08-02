@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hmac
 import json
 import os
@@ -23,7 +24,13 @@ from .events import EventBuffer
 from .http_server import BridgeApplication, LoopbackHTTPServer
 from .protocol import ProtocolPolicy
 from .project_registry import ProjectRegistry
+from .project_app_server import ProjectEffectClient
+from .project_artifacts import ProjectArtifactStore
+from .project_effects import ProjectEffectExecutor
+from .project_runner import ProjectRunner
 from .project_service import ProjectTeamService, ProjectTeamSettings
+from .project_thread_factory import ProjectThreadFactory
+from .project_workflow import ProjectWorkflowHost
 from .scene_queue import B2_READ_ONLY_PROFILE, SceneQueue
 from .session import BridgeSession
 
@@ -34,6 +41,15 @@ PINNED_CODEX_RELATIVE_PATH = Path(
 CODEX_HOME_RELATIVE_PATH = Path(".runtime/codex-home")
 CACHE_RELATIVE_PATH = Path(".runtime/cache")
 FOCUS_STATE_RELATIVE_PATH = Path(".runtime/bridge/focus-mode.json")
+PROJECT_REGISTRY_RELATIVE_PATH = Path(
+    ".runtime/bridge/project-team-registry.json"
+)
+PROJECT_SETTINGS_RELATIVE_PATH = Path(
+    ".runtime/bridge/project-team-settings.json"
+)
+PROJECT_ARTIFACTS_RELATIVE_PATH = Path(
+    ".runtime/bridge/project-team-artifacts.json"
+)
 HIA_MCP_V2_SERVICE_RELATIVE_PATH = Path("services/hia_mcp_v2")
 HIA_MCP_V2_RUNTIME_RELATIVE_PATH = Path(".runtime/hia-mcp-v2")
 HIA_MCP_V2_EXECUTOR_RELATIVE_PATH = Path(
@@ -155,6 +171,155 @@ def _cache_directory(project_root: Path, configured: str | None) -> Path:
             "HIA_CACHE_DIR must be the project .runtime/cache directory",
         )
     return expected
+
+
+def _project_evidence_roots(
+    project_root: Path, render_output_directory: str
+) -> tuple[Path, ...]:
+    """Allow project runtime artifacts and only the configured render root."""
+
+    runtime_root = validate_project_subpath(
+        project_root.resolve() / ".runtime",
+        project_root=project_root,
+    ).resolve()
+    if (
+        not isinstance(render_output_directory, str)
+        or not render_output_directory.strip()
+        or "\x00" in render_output_directory
+    ):
+        raise BridgeError(
+            "INVALID_RENDER_OUTPUT_DIR", "HIA_RENDER_OUTPUT_DIR is invalid"
+        )
+    configured = Path(render_output_directory)
+    if not configured.is_absolute():
+        raise BridgeError(
+            "INVALID_RENDER_OUTPUT_DIR", "HIA_RENDER_OUTPUT_DIR must be absolute"
+        )
+    try:
+        configured = configured.resolve()
+    except OSError as exc:
+        raise BridgeError(
+            "INVALID_RENDER_OUTPUT_DIR", "HIA_RENDER_OUTPUT_DIR cannot be resolved"
+        ) from exc
+    if configured == Path(configured.anchor):
+        raise BridgeError(
+            "INVALID_RENDER_OUTPUT_DIR", "HIA_RENDER_OUTPUT_DIR cannot be a drive root"
+        )
+    roots: list[Path] = []
+    for candidate in (runtime_root, configured):
+        if not any(_same_windows_path(candidate, existing) for existing in roots):
+            roots.append(candidate)
+    return tuple(roots)
+
+
+@dataclass(frozen=True)
+class ProjectRuntime:
+    service: ProjectTeamService
+    workflow: ProjectWorkflowHost
+    registry: ProjectRegistry
+    runner: ProjectRunner
+    effect_client: ProjectEffectClient
+    thread_factory: ProjectThreadFactory
+    artifacts: ProjectArtifactStore
+    events: EventBuffer
+
+    def recover(self) -> tuple[str, ...]:
+        scheduled = self.workflow.recover()
+        self.events.publish(
+            "project_team_updated",
+            project_team=self.service.snapshot(),
+            recovered_project_ids=list(scheduled),
+        )
+        return scheduled
+
+    def close(self, timeout_seconds: float = 5.0) -> bool:
+        completed = self.workflow.close(timeout_seconds)
+        self.events.publish(
+            "project_workflow_closed",
+            completed=completed,
+        )
+        return completed
+
+
+def _build_project_runtime(
+    *,
+    client: CodexStdioClient,
+    events: EventBuffer,
+    project_root: Path,
+    selected_backend: str,
+    allowed_evidence_roots: Sequence[Path],
+) -> ProjectRuntime:
+    """Compose the project runtime once around the owned app-server client."""
+
+    registry = ProjectRegistry(project_root / PROJECT_REGISTRY_RELATIVE_PATH)
+    runner = ProjectRunner(registry)
+    effect_client = ProjectEffectClient(client, events)
+    thread_factory = ProjectThreadFactory(
+        effect_client, project_root, selected_backend
+    )
+    artifacts = ProjectArtifactStore(
+        project_root / PROJECT_ARTIFACTS_RELATIVE_PATH
+    )
+    service_holder: list[ProjectTeamService] = []
+
+    def publish_snapshot(_: object) -> None:
+        if service_holder:
+            events.publish(
+                "project_team_updated",
+                project_team=service_holder[0].snapshot(),
+            )
+
+    def interrupt_project(project_id: str) -> None:
+        record = registry.require(project_id)
+        interrupted = effect_client.interrupt_threads(
+            binding.thread_id for binding in record.state.roles.values()
+        )
+        events.publish(
+            "project_interrupt_requested",
+            project_id=project_id,
+            turns=[
+                {"thread_id": thread_id, "turn_id": turn_id}
+                for thread_id, turn_id in interrupted
+            ],
+        )
+
+    def executor_factory(_: str) -> ProjectEffectExecutor:
+        return ProjectEffectExecutor(
+            client=effect_client,
+            registry=registry,
+            thread_factory=thread_factory,
+            artifacts=artifacts,
+            allowed_evidence_roots=allowed_evidence_roots,
+        )
+
+    workflow = ProjectWorkflowHost(
+        registry=registry,
+        runner=runner,
+        executor_factory=executor_factory,
+        interrupt_hook=interrupt_project,
+        on_snapshot=publish_snapshot,
+    )
+    service = ProjectTeamService(
+        client=effect_client,
+        project_root=project_root,
+        registry=registry,
+        settings=ProjectTeamSettings(
+            project_root / PROJECT_SETTINGS_RELATIVE_PATH
+        ),
+        selected_backend=selected_backend,
+        workflow=workflow,
+    )
+    service_holder.append(service)
+    return ProjectRuntime(
+        service=service,
+        workflow=workflow,
+        registry=registry,
+        runner=runner,
+        effect_client=effect_client,
+        thread_factory=thread_factory,
+        artifacts=artifacts,
+        events=events,
+    )
 
 
 def _required_launch_secret(name: str) -> str:
@@ -441,6 +606,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     session: BridgeSession | None = None
     server: LoopbackHTTPServer | None = None
     scene_queue: SceneQueue | None = None
+    project_runtime: ProjectRuntime | None = None
     sensitive_values: list[str] = []
     try:
         project_root, codex_exe, codex_home, temp_directory = _validated_paths(args)
@@ -599,21 +765,20 @@ def run(argv: Sequence[str] | None = None) -> int:
             mcp_backend=backend,
             focus_state_path=focus_state_path,
         )
-        project_team = ProjectTeamService(
+        project_runtime = _build_project_runtime(
             client=client,
+            events=events,
             project_root=project_root,
-            registry=ProjectRegistry(
-                project_root / ".runtime" / "bridge" / "project-team-registry.json"
-            ),
-            settings=ProjectTeamSettings(
-                project_root / ".runtime" / "bridge" / "project-team-settings.json"
-            ),
             selected_backend=(
                 HIA_MCP_V2_SERVER_ID
                 if backend == HIA_MCP_V2_BACKEND
                 else FXHOUDINI_MCP_SERVER_ID
             ),
+            allowed_evidence_roots=_project_evidence_roots(
+                project_root, render_output_directory
+            ),
         )
+        project_team = project_runtime.service
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
         houdini_process_nonce = f"houdini-{secrets.token_hex(16)}"
@@ -661,6 +826,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             }
         )
         session.start()
+        project_runtime.recover()
 
         def request_shutdown(*_: object) -> None:
             threading.Thread(
@@ -733,11 +899,15 @@ def run(argv: Sequence[str] | None = None) -> int:
                 server.server_close()
         finally:
             try:
-                if scene_queue is not None:
-                    scene_queue.shutdown()
+                if project_runtime is not None:
+                    project_runtime.close()
             finally:
-                if session is not None:
-                    session.close()
+                try:
+                    if scene_queue is not None:
+                        scene_queue.shutdown()
+                finally:
+                    if session is not None:
+                        session.close()
 
 
 def main() -> None:
