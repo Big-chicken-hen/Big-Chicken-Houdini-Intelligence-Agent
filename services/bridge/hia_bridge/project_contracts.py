@@ -138,6 +138,18 @@ class RoleThread:
 
 
 @dataclass(frozen=True)
+class PendingEffect:
+    effect_id: str
+    kind: str
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.effect_id or not self.kind:
+            raise ValueError("pending effect requires effect_id and kind")
+        object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+
+
+@dataclass(frozen=True)
 class ProjectState:
     project_id: str
     goal_thread_id: str
@@ -156,6 +168,7 @@ class ProjectState:
     resume_status: ProjectStatus | None = None
     attention_reason: str | None = None
     last_error: str | None = None
+    pending_effects: tuple[PendingEffect, ...] = ()
     revision: int = 0
 
     def __post_init__(self) -> None:
@@ -250,6 +263,14 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
         "resume_status": state.resume_status.value if state.resume_status else None,
         "attention_reason": state.attention_reason,
         "last_error": state.last_error,
+        "pending_effects": [
+            {
+                "effect_id": effect.effect_id,
+                "kind": effect.kind,
+                "data": dict(effect.data),
+            }
+            for effect in state.pending_effects
+        ],
         "revision": state.revision,
     }
 
@@ -362,6 +383,23 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
             ),
         )
     resume = value.get("resume_status")
+    raw_effects = value.get("pending_effects", [])
+    if not isinstance(raw_effects, list):
+        raise ValueError("pending_effects must be a list")
+    effects: list[PendingEffect] = []
+    for raw_effect in raw_effects:
+        if not isinstance(raw_effect, Mapping):
+            raise ValueError("pending effect is malformed")
+        raw_data = raw_effect.get("data", {})
+        if not isinstance(raw_data, Mapping):
+            raise ValueError("pending effect data must be an object")
+        effects.append(
+            PendingEffect(
+                effect_id=str(raw_effect.get("effect_id") or ""),
+                kind=str(raw_effect.get("kind") or ""),
+                data=raw_data,
+            )
+        )
     return ProjectState(
         project_id=required_text("project_id"),
         goal_thread_id=required_text("goal_thread_id"),
@@ -412,6 +450,7 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
             value.get("attention_reason"), "attention_reason"
         ),
         last_error=_optional_text(value.get("last_error"), "last_error"),
+        pending_effects=tuple(effects),
         revision=_non_negative_int(value.get("revision", 0), "revision"),
     )
 
