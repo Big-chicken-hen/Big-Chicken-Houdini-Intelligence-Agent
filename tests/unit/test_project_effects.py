@@ -25,6 +25,7 @@ from services.bridge.hia_bridge.project_effects import (
 )
 from services.bridge.hia_bridge.project_guidance import publish_guidance
 from services.bridge.hia_bridge.project_lifecycle import ProjectEvent, reduce_project
+from services.bridge.hia_bridge.project_payloads import FULL_BLUEPRINT_SECTION_IDS
 from services.bridge.hia_bridge.project_registry import (
     ProjectAttachment,
     ProjectRecord,
@@ -97,17 +98,24 @@ def _plan() -> dict:
         ],
         "blueprint_sections": [
             {
-                "section_id": "section-1",
-                "title": "Editable asset construction",
-                "description": _detail("blueprintsection", 3000),
+                "section_id": section_id,
+                "title": section_id.replace("_", " "),
+                "description": _detail(f"blueprintsection{section_id}", 350),
                 "source_anchors": [anchor],
                 "user_fact_ids": ["fact-1"],
                 "requirement_ids": ["req-1"],
                 "stage_ids": ["stage-1"],
             }
+            for section_id in FULL_BLUEPRINT_SECTION_IDS
         ],
         "requirements": [
-            {"requirement_id": "req-1", "kind": "hard_constraint", "source_ref": anchor}
+            {
+                "requirement_id": "req-1",
+                "kind": "hard_constraint",
+                "description": "Preserve the complete authoritative task constraint",
+                "source_ref": anchor,
+                "user_fact_ids": ["fact-1"],
+            }
         ],
         "stages": [_full_stage()],
     }
@@ -300,7 +308,14 @@ class EffectHarness:
             )
             next_state = replace(next_state, pending_effects=(*base.pending_effects, *effects))
         self.state = next_state
-        self.registry.put(ProjectRecord(self.state, "build a Houdini asset"))
+        current = self.registry.require(self.state.project_id)
+        self.registry.put(
+            ProjectRecord(
+                self.state,
+                "build a Houdini asset",
+                current.attachments,
+            )
+        )
         return result
 
     def run_to_terminal(self, limit=30):
@@ -520,7 +535,47 @@ class ProjectEffectExecutorTests(unittest.TestCase):
             },
             envelope["authoritative_task"]["attachments"][0],
         )
+        start = next(
+            params for method, params in self.client.calls if method == "turn/start"
+        )
+        self.assertEqual(
+            [{"type": "localImage", "path": str(self.root / "reference.png")}],
+            start["input"][1:],
+        )
         self.assertNotIn("authoritative_task", harness.artifacts.project("project-1"))
+
+    def test_reference_images_reach_intake_planning_and_full_plan_authorization(self):
+        self._queue_common()
+        harness = EffectHarness(self.root, self.client)
+        record = harness.registry.require("project-1")
+        image = ProjectAttachment(str(self.root / "brief.webp"), "b" * 64, 456)
+        harness.registry.put(
+            ProjectRecord(record.state, record.authoritative_task_text, (image,)),
+            expected_revision=record.state.revision,
+        )
+        for _ in range(4):
+            harness.run_one()
+        relevant = {
+            envelope["action"]: params["input"][1:]
+            for method, params in self.client.calls
+            if method == "turn/start"
+            for envelope in [json.loads(params["input"][0]["text"])]
+            if envelope["action"]
+            in {"scene_task_eligibility", "create_plan_and_stage_cards", "authorize_plan"}
+        }
+        self.assertEqual(
+            {
+                "scene_task_eligibility",
+                "create_plan_and_stage_cards",
+                "authorize_plan",
+            },
+            set(relevant),
+        )
+        for images in relevant.values():
+            self.assertEqual(
+                [{"type": "localImage", "path": str(self.root / "brief.webp")}],
+                images,
+            )
 
     def test_failed_reviews_drive_supervisor_repair_and_execution_repair(self):
         self._queue_common()

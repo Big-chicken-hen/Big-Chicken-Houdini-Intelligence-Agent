@@ -4,6 +4,7 @@ import hashlib
 import unittest
 
 from services.bridge.hia_bridge.project_payloads import (
+    FULL_BLUEPRINT_SECTION_IDS,
     FailedClaim,
     NotApplicableClaim,
     UnverifiedClaim,
@@ -61,7 +62,7 @@ def _full_step():
 
 def _plan_structure() -> dict:
     stage = {
-        "depth": "focused",
+        "depth": "full",
         "stage_id": "STAGE-1",
         "requirement_ids": ["REQ-1"],
         "ordered_steps": [_step()],
@@ -81,17 +82,24 @@ def _plan_structure() -> dict:
         ],
         "blueprint_sections": [
             {
-                "section_id": "SECTION-1",
-                "title": "Editable construction",
-                "description": "Construct and verify the editable native network",
+                "section_id": section_id,
+                "title": section_id.replace("_", " "),
+                "description": f"Task-specific content for {section_id}",
                 "source_anchors": ["task:TASK-1"],
                 "user_fact_ids": ["FACT-1"],
                 "requirement_ids": ["REQ-1"],
                 "stage_ids": ["STAGE-1"],
             }
+            for section_id in FULL_BLUEPRINT_SECTION_IDS
         ],
         "requirements": [
-            {"requirement_id": "REQ-1", "kind": "structure", "source_ref": "task:TASK-1"}
+            {
+                "requirement_id": "REQ-1",
+                "kind": "structure",
+                "description": "The asset remains editable",
+                "source_ref": "task:TASK-1",
+                "user_fact_ids": ["FACT-1"],
+            }
         ],
         "stages": [stage],
     }
@@ -220,6 +228,24 @@ class ProjectPayloadTests(unittest.TestCase):
                 (card,),
             )
 
+    def test_repeated_complete_paragraphs_do_not_inflate_overall_blueprint(self) -> None:
+        stage = {
+            "depth": "full",
+            "stage_id": "S1",
+            "requirement_ids": ["REQ-1"],
+            "ordered_steps": [_full_step()],
+            "evidence_contract": {"capture": "side and perspective"},
+            "reviewers": ["visual_review", "technical_review"],
+            "failure_minimum_repair": "repair only the failed claim",
+        }
+        card = parse_stage_card(stage)
+        paragraph = _detail("onecopiedparagraph", 900)
+        with self.assertRaisesRegex(ValueError, "10000 task-specific"):
+            validate_blueprint_information(
+                {"stages": [stage], "copied_sections": [paragraph] * 30},
+                (card,),
+            )
+
     def test_repeated_tokens_and_numbered_paragraphs_do_not_satisfy_full_floor(self) -> None:
         step = _step()
         repeated = ("same generic detail " * 2000) + " ".join(
@@ -245,10 +271,36 @@ class ProjectPayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown user fact"):
             validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
 
+    def test_plan_structure_rejects_missing_or_reordered_stable_section(self) -> None:
+        payload = _plan_structure()
+        payload["blueprint_sections"].pop(3)
+        with self.assertRaisesRegex(ValueError, "fourteen stable IDs"):
+            validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
+
+    def test_project_team_plan_cannot_downgrade_full_depth(self) -> None:
+        payload = _plan_structure()
+        payload["stages"][0]["depth"] = "focused"
+        with self.assertRaisesRegex(ValueError, "must all use full depth"):
+            validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
+
     def test_every_ordered_step_reverse_references_a_user_fact(self) -> None:
         payload = _plan_structure()
         payload["stages"][0]["ordered_steps"][0]["user_fact_ids"] = ["UNKNOWN"]
         with self.assertRaisesRegex(ValueError, "unknown user fact"):
+            validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
+
+    def test_requirements_and_steps_must_cover_every_authoritative_user_fact(self) -> None:
+        payload = _plan_structure()
+        payload["user_facts"].append(
+            {
+                "fact_id": "FACT-2",
+                "description": "The user also requires native controls",
+                "source_anchor": "task:TASK-1",
+            }
+        )
+        for section in payload["blueprint_sections"]:
+            section["user_fact_ids"].append("FACT-2")
+        with self.assertRaisesRegex(ValueError, "requirements do not cover"):
             validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
 
     def test_stage_steps_require_semantic_structure_and_exact_coverage(self) -> None:

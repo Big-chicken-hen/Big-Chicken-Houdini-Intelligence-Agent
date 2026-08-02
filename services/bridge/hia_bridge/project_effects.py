@@ -35,6 +35,7 @@ from .project_guidance import (
 )
 from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_payloads import (
+    FULL_BLUEPRINT_SECTION_IDS,
     parse_review_claim,
     parse_stage_card,
     validate_blueprint_information,
@@ -199,7 +200,12 @@ class ProjectEffectExecutor:
     ) -> EffectResult:
         request = self._base_request(state, Role.SUPERVISOR, "scene_task_eligibility")
         state, completed = self._run_structured(
-            state, Role.SUPERVISOR, request, "hia-project-eligibility/1", deadline
+            state,
+            Role.SUPERVISOR,
+            request,
+            "hia-project-eligibility/1",
+            deadline,
+            local_image_paths=self._authoritative_image_paths(state),
         )
         payload = completed.payload
         if set(payload) != {"schema", "disposition", "reason"}:
@@ -222,7 +228,12 @@ class ProjectEffectExecutor:
     ) -> EffectResult:
         request = self._base_request(state, Role.PLANNING, "create_plan_and_stage_cards")
         state, completed = self._run_structured(
-            state, Role.PLANNING, request, "hia-project-plan/1", deadline
+            state,
+            Role.PLANNING,
+            request,
+            "hia-project-plan/1",
+            deadline,
+            local_image_paths=self._authoritative_image_paths(state),
         )
         payload = completed.payload
         capsule = self._authoritative_task_capsule(state)
@@ -245,7 +256,13 @@ class ProjectEffectExecutor:
         requirements: list[Requirement] = []
         seen: set[str] = set()
         for raw in raw_requirements:
-            if not isinstance(raw, Mapping) or set(raw) != {"requirement_id", "kind", "source_ref"}:
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "requirement_id",
+                "kind",
+                "description",
+                "source_ref",
+                "user_fact_ids",
+            }:
                 raise ProjectEffectError("INVALID_PLAN_SCHEMA", "requirement fields are invalid")
             requirement_id = _text(raw.get("requirement_id"), "requirement_id")
             if requirement_id in seen:
@@ -290,7 +307,12 @@ class ProjectEffectExecutor:
         request = self._base_request(state, Role.SUPERVISOR, "authorize_plan")
         request["plan"] = plan
         state, completed = self._run_structured(
-            state, Role.SUPERVISOR, request, "hia-project-authorization/1", deadline
+            state,
+            Role.SUPERVISOR,
+            request,
+            "hia-project-authorization/1",
+            deadline,
+            local_image_paths=self._authoritative_image_paths(state),
         )
         payload = completed.payload
         if set(payload) != {"schema", "authorized", "stage_ids"}:
@@ -891,6 +913,16 @@ class ProjectEffectExecutor:
             ],
         }
 
+    def _authoritative_image_paths(self, state: ProjectState) -> tuple[str, ...]:
+        """Return only supported image attachments from the authoritative task."""
+
+        record = self._registry.require(state.project_id)
+        return tuple(
+            item.path
+            for item in record.attachments
+            if Path(item.path).suffix.casefold() in {".png", ".jpg", ".jpeg", ".webp"}
+        )
+
     def _set_goal(
         self,
         state: ProjectState,
@@ -1045,11 +1077,14 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             if not isinstance(item, Mapping) or set(item) != {
                 "requirement_id",
                 "kind",
+                "description",
                 "source_ref",
+                "user_fact_ids",
             }:
                 raise ValueError("requirement shape is invalid")
-            for value in item.values():
-                _plain_text(value)
+            for key in ("requirement_id", "kind", "description", "source_ref"):
+                _plain_text(item.get(key))
+            _text_list(item.get("user_fact_ids"))
         for item in stages:
             if not isinstance(item, Mapping):
                 raise ValueError("stage card must be an object")
@@ -1197,7 +1232,7 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
             ],
             "blueprint_sections": [
                 {
-                    "section_id": "stable visible section ID",
+                    "section_id": section_id,
                     "title": "user-visible section title",
                     "description": "complete task-specific section content",
                     "source_anchors": ["authoritative source anchors"],
@@ -1205,12 +1240,15 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                     "requirement_ids": ["covered requirement IDs"],
                     "stage_ids": ["covered stage IDs"],
                 }
+                for section_id in FULL_BLUEPRINT_SECTION_IDS
             ],
             "requirements": [
                 {
                     "requirement_id": "stable task-specific ID",
                     "kind": "hard_constraint|structure|visual|material|behavior|delivery",
+                    "description": "complete requirement meaning and observable consequence",
                     "source_ref": "authoritative task or attachment anchor",
+                    "user_fact_ids": ["authoritative facts represented by this requirement"],
                 }
             ],
             "stages": [

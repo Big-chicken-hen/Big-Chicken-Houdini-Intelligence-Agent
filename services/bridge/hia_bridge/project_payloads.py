@@ -17,6 +17,24 @@ FULL_BLUEPRINT_INFORMATION_UNITS = 10_000
 FULL_STAGE_INFORMATION_UNITS = 2_500
 FULL_STEP_INFORMATION_UNITS = 350
 
+# Stable, user-visible sections from the Full Goal blueprint reference.
+FULL_BLUEPRINT_SECTION_IDS = (
+    "goal_observable_completion",
+    "user_facts_hard_constraints",
+    "reference_observations",
+    "codex_assumptions",
+    "verified_scene_facts",
+    "conflicts_risks_unverified_claims",
+    "design_language_recognition_features",
+    "subsystems_responsibilities",
+    "editable_controls_parameter_dependencies",
+    "outputs_delivery_contract",
+    "stage_map",
+    "complete_stage_acceptance_cards",
+    "evidence_review_ledger",
+    "revision_history",
+)
+
 
 @dataclass(frozen=True)
 class VerifiedClaim:
@@ -249,7 +267,37 @@ def validate_plan_structure(
         raise ValueError("requirement source_ref is not authoritative")
     if len(stage_ids) != len(stages):
         raise ValueError("stages are malformed or duplicated")
+    if any(item.get("depth") != "full" for item in stages):
+        raise ValueError("project-team blueprint stages must all use full depth")
 
+    covered_requirement_facts: set[str] = set()
+    requirement_facts: dict[str, set[str]] = {}
+    for item in requirements:
+        if not isinstance(item, Mapping) or set(item) != {
+            "requirement_id",
+            "kind",
+            "description",
+            "source_ref",
+            "user_fact_ids",
+        }:
+            raise ValueError("requirement fields are invalid")
+        _required_text(item, "kind")
+        _required_text(item, "description")
+        facts = set(_text_tuple(item, "user_fact_ids"))
+        if not facts.issubset(fact_ids):
+            raise ValueError("requirement references an unknown user fact")
+        requirement_facts[str(item["requirement_id"])] = facts
+        covered_requirement_facts.update(facts)
+    if covered_requirement_facts != fact_ids:
+        raise ValueError("requirements do not cover every user fact")
+
+    observed_section_ids = tuple(
+        _required_text(section, "section_id")
+        for section in sections
+        if isinstance(section, Mapping)
+    )
+    if observed_section_ids != FULL_BLUEPRINT_SECTION_IDS:
+        raise ValueError("blueprint sections must use all fourteen stable IDs in order")
     section_ids: set[str] = set()
     covered_facts: set[str] = set()
     covered_requirements: set[str] = set()
@@ -291,11 +339,20 @@ def validate_plan_structure(
     if covered_stages != stage_ids:
         raise ValueError("blueprint sections do not cover every stage")
 
+    covered_step_facts: set[str] = set()
     for stage in stages:
         for step in stage["ordered_steps"]:
             refs = set(_text_tuple(step, "user_fact_ids"))
             if not refs.issubset(fact_ids):
                 raise ValueError("ordered step references an unknown user fact")
+            required_facts = set().union(
+                *(requirement_facts[item] for item in _text_tuple(step, "requirement_ids"))
+            )
+            if not required_facts.issubset(refs):
+                raise ValueError("ordered step omits a fact required by its requirements")
+            covered_step_facts.update(refs)
+    if covered_step_facts != fact_ids:
+        raise ValueError("ordered steps do not implement every user fact")
 
 
 def _validate_source_anchors(value: Mapping[str, Any], allowed: set[str]) -> None:
