@@ -191,3 +191,141 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
         "last_error": state.last_error,
         "revision": state.revision,
     }
+
+
+def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
+    """Parse a persisted state without guessing identities from display text."""
+
+    def required_text(name: str) -> str:
+        item = value.get(name)
+        if not isinstance(item, str) or not item:
+            raise ValueError(f"{name} must be a non-empty string")
+        return item
+
+    raw_roles = value.get("roles", {})
+    if not isinstance(raw_roles, Mapping):
+        raise ValueError("roles must be an object")
+    roles: dict[Role, RoleThread] = {}
+    for key, raw_binding in raw_roles.items():
+        if not isinstance(key, str) or not isinstance(raw_binding, Mapping):
+            raise ValueError("role bindings are malformed")
+        role = Role(key)
+        declared = Role(raw_binding.get("role"))
+        if role is not declared:
+            raise ValueError("role binding key does not match its role")
+        thread_id = raw_binding.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("role thread_id must be a non-empty string")
+        roles[role] = RoleThread(
+            role=role,
+            thread_id=thread_id,
+            model=_optional_text(raw_binding.get("model"), "model"),
+            effort=_optional_text(raw_binding.get("effort"), "effort"),
+            service_tier=_optional_text(
+                raw_binding.get("service_tier"), "service_tier"
+            ),
+        )
+
+    raw_requirements = value.get("requirements", [])
+    if not isinstance(raw_requirements, list):
+        raise ValueError("requirements must be a list")
+    requirements: list[Requirement] = []
+    for raw in raw_requirements:
+        if not isinstance(raw, Mapping):
+            raise ValueError("requirement is malformed")
+        requirement_id = raw.get("requirement_id")
+        kind = raw.get("kind")
+        if not isinstance(requirement_id, str) or not requirement_id:
+            raise ValueError("requirement_id must be a non-empty string")
+        if not isinstance(kind, str) or not kind:
+            raise ValueError("requirement kind must be a non-empty string")
+        requirements.append(
+            Requirement(
+                requirement_id=requirement_id,
+                kind=kind,
+                status=RequirementStatus(raw.get("status")),
+                source_ref=str(raw.get("source_ref") or ""),
+                superseded_by=_optional_text(
+                    raw.get("superseded_by"), "superseded_by"
+                ),
+            )
+        )
+
+    raw_stage = value.get("stage", {})
+    raw_turn = value.get("turn", {})
+    raw_budget = value.get("budget", {})
+    if not all(isinstance(item, Mapping) for item in (raw_stage, raw_turn, raw_budget)):
+        raise ValueError("stage, turn, and budget must be objects")
+    raw_evidence = raw_stage.get("latest_evidence_ids", [])
+    if not isinstance(raw_evidence, (list, tuple)) or not all(
+        isinstance(item, str) and item for item in raw_evidence
+    ):
+        raise ValueError("latest_evidence_ids must contain non-empty strings")
+    raw_turn_role = raw_turn.get("role")
+    resume = value.get("resume_status")
+    return ProjectState(
+        project_id=required_text("project_id"),
+        goal_thread_id=required_text("goal_thread_id"),
+        authoritative_task_id=required_text("authoritative_task_id"),
+        authoritative_task_sha256=required_text("authoritative_task_sha256"),
+        status=ProjectStatus(value.get("status")),
+        roles=roles,
+        requirements=tuple(requirements),
+        stage=StageState(
+            stage_id=_optional_text(raw_stage.get("stage_id"), "stage_id"),
+            ordinal=_non_negative_int(raw_stage.get("ordinal", 0), "ordinal"),
+            repair_count=_non_negative_int(
+                raw_stage.get("repair_count", 0), "repair_count"
+            ),
+            schema_correction_count=_non_negative_int(
+                raw_stage.get("schema_correction_count", 0),
+                "schema_correction_count",
+            ),
+            no_progress_rounds=_non_negative_int(
+                raw_stage.get("no_progress_rounds", 0), "no_progress_rounds"
+            ),
+            latest_evidence_ids=tuple(raw_evidence),
+            latest_defect_hash=_optional_text(
+                raw_stage.get("latest_defect_hash"), "latest_defect_hash"
+            ),
+            latest_repair_hash=_optional_text(
+                raw_stage.get("latest_repair_hash"), "latest_repair_hash"
+            ),
+        ),
+        turn=TurnState(
+            role=Role(raw_turn_role) if raw_turn_role is not None else None,
+            thread_id=_optional_text(raw_turn.get("thread_id"), "thread_id"),
+            turn_id=_optional_text(raw_turn.get("turn_id"), "turn_id"),
+            active=bool(raw_turn.get("active", False)),
+            consumed_turns=_non_negative_int(
+                raw_turn.get("consumed_turns", 0), "consumed_turns"
+            ),
+        ),
+        budget=RuntimeBudget(**dict(raw_budget)),
+        elapsed_seconds=_non_negative_int(
+            value.get("elapsed_seconds", 0), "elapsed_seconds"
+        ),
+        total_evidence_bytes=_non_negative_int(
+            value.get("total_evidence_bytes", 0), "total_evidence_bytes"
+        ),
+        resume_status=ProjectStatus(resume) if resume is not None else None,
+        attention_reason=_optional_text(
+            value.get("attention_reason"), "attention_reason"
+        ),
+        last_error=_optional_text(value.get("last_error"), "last_error"),
+        revision=_non_negative_int(value.get("revision", 0), "revision"),
+    )
+
+
+def _optional_text(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string or null")
+    return value
+
+
+def _non_negative_int(value: Any, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
