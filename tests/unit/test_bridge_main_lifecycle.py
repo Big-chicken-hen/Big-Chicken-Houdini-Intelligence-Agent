@@ -495,7 +495,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
         self.assertEqual("hia_v2", json.loads(stdout.getvalue())["mcp_backend"])
 
-    def test_project_runtime_publishes_after_session_start_and_closes_before_session(self) -> None:
+    def test_ordinary_server_lifecycle_does_not_construct_project_runtime(self) -> None:
         order: list[str] = []
         client = _Client(order)
         session = _Session(order)
@@ -538,27 +538,11 @@ class BridgeMainLifecycleTests(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         self.assertLess(order.index("session_start"), order.index("serve_forever"))
-        self.assertLess(order.index("server_close"), order.index("project_close"))
-        self.assertLess(order.index("project_close"), order.index("session_close"))
-        self.assertIs(
-            project_runtime.service,
-            application_builder.call_args.kwargs["project_team"],
-        )
-        runtime_builder.assert_called_once_with(
-            client=client,
-            events=mock.ANY,
-            project_root=REPOSITORY_ROOT,
-            selected_backend=bridge_main.HIA_MCP_V2_SERVER_ID,
-            server_transports=bridge_main._project_mcp_server_transports(
-                str(Path(sys.executable).resolve()),
-                backend=bridge_main.HIA_MCP_V2_BACKEND,
-                project_root=REPOSITORY_ROOT,
-            ),
-            allowed_evidence_roots=(
-                REPOSITORY_ROOT / ".runtime",
-                REPOSITORY_ROOT / ".runtime" / "cache",
-            ),
-        )
+        self.assertLess(order.index("server_close"), order.index("session_close"))
+        self.assertNotIn("project_close", order)
+        self.assertNotIn("project_team", application_builder.call_args.kwargs)
+        self.assertIn("project_team_factory", application_builder.call_args.kwargs)
+        runtime_builder.assert_not_called()
 
     def test_http_provider_command_is_escaped_process_local_and_secret_free(self) -> None:
         mcp_python = 'E:\\runtime\\quoted "python"\\python.exe'

@@ -142,7 +142,7 @@ class StageCard:
     stage_id: str
     requirement_ids: tuple[str, ...]
     ordered_steps: tuple[Mapping[str, Any], ...]
-    required_evidence: str | None = None
+    required_evidence: tuple[str, ...] = ()
     failure_minimum_repair: str | None = None
 
 
@@ -167,15 +167,24 @@ def parse_stage_card(value: Mapping[str, Any]) -> StageCard:
         raise ValueError("ordered_steps must be a non-empty list")
     steps = _validate_ordered_steps(raw_steps, set(requirement_ids))
     required_evidence = value.get("required_evidence")
-    if required_evidence not in {"visual", "technical", "both"}:
-        raise ValueError("required_evidence must be visual, technical, or both")
+    if (
+        not isinstance(required_evidence, list)
+        or not required_evidence
+        or len(required_evidence) > 2
+        or any(item not in {"visual", "technical"} for item in required_evidence)
+        or len(set(required_evidence)) != len(required_evidence)
+    ):
+        raise ValueError(
+            "required_evidence must be a unique non-empty list of visual and/or technical"
+        )
+    evidence_kinds = tuple(required_evidence)
     if depth != "full":
         return StageCard(
             depth,
             _required_text(value, "stage_id"),
             requirement_ids,
             steps,
-            required_evidence,
+            evidence_kinds,
         )
     if information_units(value) < FULL_STAGE_INFORMATION_UNITS:
         raise ValueError("full stage has fewer than 2500 task-specific information units")
@@ -189,7 +198,7 @@ def parse_stage_card(value: Mapping[str, Any]) -> StageCard:
         _required_text(value, "stage_id"),
         requirement_ids,
         steps,
-        required_evidence,
+        evidence_kinds,
         _required_text(value, "failure_minimum_repair"),
     )
 

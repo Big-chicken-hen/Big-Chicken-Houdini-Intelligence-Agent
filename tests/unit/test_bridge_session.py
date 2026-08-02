@@ -698,7 +698,10 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
 
         result = session.resume_thread("thread-current")
 
-        self.assertEqual(["thread/resume"], [method for method, _ in client.requests])
+        self.assertEqual(
+            ["thread/read", "thread/resume"],
+            [method for method, _ in client.requests],
+        )
         self.assertNotIn("resume", result)
         self.assertEqual("thread-current", result["thread_id"])
         self.assertEqual("thread-current", result["read"]["thread"]["id"])
@@ -2129,7 +2132,7 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
         self.assertEqual(409, raised.exception.http_status)
 
-    def test_late_ack_cannot_regress_a_newer_turn_generation(self) -> None:
+    def test_unknown_first_ack_keeps_exclusive_writer_ownership(self) -> None:
         client = _GenerationClient()
         session = self.make_session(client)
         outcomes: list[dict[str, Any]] = [{}, {}]
@@ -2146,28 +2149,18 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertFalse(session.snapshot()["turn_active"])
         self.assertEqual("completed", session.snapshot()["turn_status"])
 
-        second = threading.Thread(target=start_turn, args=(1, "second"))
-        second.start()
-        self.assertTrue(client.second_entered.wait(2.0))
-        self.assertEqual("starting", session.snapshot()["turn_status"])
+        start_turn(1, "second")
+        self.assertIsInstance(outcomes[1].get("error"), BridgeError)
+        self.assertEqual("SCENE_WRITER_BUSY", outcomes[1]["error"].code)
+        self.assertFalse(client.second_entered.is_set())
 
         client.release_first_ack.set()
         first.join(2.0)
         self.assertFalse(first.is_alive())
         after_late_ack = session.snapshot()
-        self.assertTrue(after_late_ack["turn_active"])
-        self.assertEqual("starting", after_late_ack["turn_status"])
-        self.assertIsNone(after_late_ack["turn_id"])
-
-        client.release_second_ack.set()
-        second.join(2.0)
-        self.assertFalse(second.is_alive())
+        self.assertFalse(after_late_ack["turn_active"])
+        self.assertEqual("completed", after_late_ack["turn_status"])
         self.assertNotIn("error", outcomes[0])
-        self.assertNotIn("error", outcomes[1])
-        current = session.snapshot()
-        self.assertTrue(current["turn_active"])
-        self.assertEqual("turn-2", current["turn_id"])
-        self.assertEqual("inProgress", current["turn_status"])
 
     def test_only_explicit_rpc_rejection_releases_an_uncreated_turn(self) -> None:
         rpc_client = _FailingTurnClient("rpc")
@@ -2386,7 +2379,8 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
 
         session.resume_thread("thread-existing", service_tier="priority")
 
-        method, params = client.requests[0]
+        self.assertEqual("thread/read", client.requests[0][0])
+        method, params = client.requests[1]
         self.assertEqual("thread/resume", method)
         self.assertEqual("workspace-write", params["sandbox"])
         self.assertEqual("on-request", params["approvalPolicy"])

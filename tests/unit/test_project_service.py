@@ -26,6 +26,7 @@ from tests.unit.project_test_support import observable_thread_response, server_t
 class _Client:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self.sources: dict[str, str] = {}
         self.active = False
         self.guidance_payload: dict = {
             "schema": "hia-project-guidance-recorded/1",
@@ -38,9 +39,19 @@ class _Client:
         self.calls.append((method, dict(params)))
         if method == "thread/start":
             role = params["threadSource"].rsplit("/", 1)[-1]
-            return observable_thread_response(params, f"thread-{role}")
+            thread_id = f"thread-{role}"
+            self.sources[thread_id] = params["threadSource"]
+            return observable_thread_response(params, thread_id)
         if method == "turn/start":
             return {"turn": {"id": "guidance-turn"}}
+        if method == "thread/read":
+            return {
+                "thread": {
+                    "id": params["threadId"],
+                    "threadSource": self.sources[params["threadId"]],
+                    "turns": [],
+                }
+            }
         raise AssertionError(f"unexpected RPC: {method}")
 
     def wait_for_turn(self, thread_id: str, turn_id: str, timeout_seconds: float):
@@ -59,7 +70,7 @@ class _Workflow:
     def __init__(self) -> None:
         self.started: list[str] = []
         self.stopped: list[str] = []
-        self.resumed: list[str] = []
+        self.resumed: list[tuple[str, dict[str, object]]] = []
 
     def start(self, project_id: str) -> bool:
         self.started.append(project_id)
@@ -69,8 +80,8 @@ class _Workflow:
         self.stopped.append(project_id)
         return False
 
-    def resume(self, project_id: str) -> bool:
-        self.resumed.append(project_id)
+    def resume(self, project_id: str, continuation: dict[str, object]) -> bool:
+        self.resumed.append((project_id, continuation))
         return True
 
 
@@ -218,13 +229,40 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual("stage-after-supervisor", final.stage.stage_id)
         self.assertEqual(ProjectStatus.PLANNING, final.status)
 
-    def test_continue_is_explicit_for_stopped_current_stage(self) -> None:
+    def test_continue_without_current_stage_history_waits_for_user_without_replay(self) -> None:
         project_id = self.start()
         record = self.registry.require(project_id)
         stopped = replace(record.state, status=ProjectStatus.STOPPED, revision=record.state.revision + 1)
         self.registry.put(ProjectRecord(stopped, record.authoritative_task_text), expected_revision=record.state.revision)
         self.service.continue_project(project_id=project_id)
-        self.assertEqual([project_id], self.workflow.resumed)
+        self.assertEqual([(project_id, {})], self.workflow.resumed)
+        self.assertNotIn("turn/start", [method for method, _ in self.client.calls])
+
+    def test_image_only_project_owns_its_attachment_without_an_ordinary_thread(self) -> None:
+        draft_id = "draft-image-only"
+        draft = (
+            self.root
+            / ".runtime"
+            / "project-attachments"
+            / "drafts"
+            / draft_id
+        )
+        draft.mkdir(parents=True)
+        source = draft / "reference.png"
+        source.write_bytes(b"project-reference")
+        result = self.service.start_team_project(
+            task_text="",
+            model="gpt-test",
+            local_image_paths=[str(source)],
+            attachment_draft_id=draft_id,
+        )
+        record = self.registry.require(result["project_id"])
+        self.assertEqual("", record.authoritative_task_text)
+        self.assertEqual(1, len(record.attachments))
+        resolved = self.registry.attachment_paths(record, self.root)
+        self.assertEqual(1, len(resolved))
+        self.assertIn("project-attachments", Path(resolved[0]).parts)
+        self.assertNotIn("attachments", Path(resolved[0]).parts)
 
     def test_snapshot_has_no_project_delete_action(self) -> None:
         project_id = self.start()

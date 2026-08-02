@@ -111,6 +111,7 @@ class ProjectRoleExecutor:
         client: ProjectRoleClient,
         registry: ProjectRegistry,
         scene_writer: SceneWriterOwnership,
+        project_root: str | Path,
         allowed_evidence_roots: Sequence[str | Path],
         total_timeout_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
@@ -122,6 +123,7 @@ class ProjectRoleExecutor:
         self._client = client
         self._registry = registry
         self._scene_writer = scene_writer
+        self._project_root = Path(project_root).resolve()
         self._allowed_roots = tuple(allowed_evidence_roots)
         self._timeout = float(total_timeout_seconds)
         self._clock = clock
@@ -1114,7 +1116,7 @@ class ProjectRoleExecutor:
                 "AUTHORITATIVE_TASK_MISMATCH",
                 "persisted authoritative task identity changed",
             )
-        attachment_paths = self._registry.attachment_paths(record)
+        attachment_paths = self._registry.attachment_paths(record, self._project_root)
         return {
             "schema": "hia-authoritative-task/1",
             "task_id": state.authoritative_task_id,
@@ -1133,7 +1135,7 @@ class ProjectRoleExecutor:
 
     def _authoritative_image_paths(self, state: ProjectState) -> tuple[str, ...]:
         record = self._registry.require(state.project_id)
-        return self._registry.attachment_paths(record)
+        return self._registry.attachment_paths(record, self._project_root)
 
     def _action_plan(
         self, state: ProjectState, action: ProjectAction
@@ -1544,7 +1546,9 @@ def _stage_evidence_needs(stage: Mapping[str, Any]) -> tuple[bool, bool]:
     """Return only the evidence kinds explicitly requested by the stage card."""
 
     required = stage.get("required_evidence")
-    return required in {"visual", "both"}, required in {"technical", "both"}
+    if not isinstance(required, list):
+        return False, False
+    return "visual" in required, "technical" in required
 
 
 def _stage_review_roles(stage: Mapping[str, Any]) -> tuple[Role, ...]:
@@ -1722,7 +1726,7 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                     "depth": "direct|focused|full",
                     "stage_id": "stable ordered ID",
                     "requirement_ids": ["covered requirement IDs"],
-                    "required_evidence": "visual|technical|both",
+                    "required_evidence": ["visual and/or technical"],
                     "ordered_steps": [
                         {
                             "step_id": "stable ID",

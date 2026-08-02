@@ -265,7 +265,7 @@ def _normalize_project(raw: Mapping[str, Any]) -> ProjectViewModel | None:
     ) if isinstance(raw.get("latest_evidence_ids"), list) else ()
     consumed = raw.get("consumed_turns")
     attention = AttentionViewModel(
-        visible=status == "needs_attention",
+        visible=status == "waiting_user",
         reason=_optional_text(raw.get("attention_reason"), limit=1200),
         stage=_optional_text(raw.get("stage"), limit=256),
         consumed_turns=(

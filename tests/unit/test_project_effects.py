@@ -4,7 +4,6 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
-import threading
 import time
 import unittest
 
@@ -25,6 +24,7 @@ from services.bridge.hia_bridge.project_effects import (
 from services.bridge.hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent
 from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
 from services.bridge.hia_bridge.project_runner import ProjectAction, ProjectActionResult
+from services.bridge.hia_bridge.scene_writer import SceneWriterOwnership
 
 
 def _state(status: ProjectStatus = ProjectStatus.PLANNING, *, guidance_revision: int = 0) -> ProjectState:
@@ -70,24 +70,6 @@ class _Client:
         return CompletedTurn(thread_id, turn_id, "completed", payload)
 
 
-class _OwnedExecutionProbe(ProjectRoleExecutor):
-    def __init__(self, *args, entered, release, active, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.entered = entered
-        self.release = release
-        self.active = active
-
-    def _execute_stage_owned(self, state, action, deadline):
-        with self.active["guard"]:
-            self.active["count"] += 1
-            self.active["maximum"] = max(self.active["maximum"], self.active["count"])
-        self.entered.set()
-        self.release.wait(1.0)
-        with self.active["guard"]:
-            self.active["count"] -= 1
-        return ProjectActionResult(state, LifecycleEvent(ProjectEvent.STAGE_EXECUTED))
-
-
 class ProjectRoleExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -98,11 +80,17 @@ class ProjectRoleExecutorTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def executor(self, client: _Client, *, lock=None) -> ProjectRoleExecutor:
+    def executor(
+        self,
+        client: _Client,
+        *,
+        writer: SceneWriterOwnership | None = None,
+    ) -> ProjectRoleExecutor:
         return ProjectRoleExecutor(
             client=client,
             registry=self.registry,
-            scene_write_lock=lock or threading.Lock(),
+            scene_writer=writer or SceneWriterOwnership(),
+            project_root=Path(self.temp.name),
             allowed_evidence_roots=(Path(self.temp.name),),
             total_timeout_seconds=2.0,
         )
@@ -124,9 +112,11 @@ class ProjectRoleExecutorTests(unittest.TestCase):
         self.assertEqual(1, correction["attempt"])
 
         client = _Client(({"schema": "wrong"}, {"schema": "still-wrong"}, valid))
-        with self.assertRaises(ProjectRoleError) as raised:
-            self.executor(client).execute(self.state, ProjectAction("start_supervisor", {}))
-        self.assertEqual("INVALID_STRUCTURED_OUTPUT", raised.exception.code)
+        result = self.executor(client).execute(
+            self.state,
+            ProjectAction("start_supervisor", {}),
+        )
+        self.assertEqual(ProjectEvent.PROJECT_BLOCKED, result.event.kind)
         self.assertEqual(2, len([call for call in client.calls if call[0] == "turn/start"]))
 
     def test_guidance_is_read_from_supervisor_native_history(self) -> None:
@@ -175,20 +165,33 @@ class ProjectRoleExecutorTests(unittest.TestCase):
         self.assertEqual("INVALID_GUIDANCE_HISTORY", conflict.exception.code)
 
     def test_direct_and_focused_do_not_inherit_full_dual_evidence_requirement(self) -> None:
-        self.assertEqual((False, False), _stage_evidence_needs({"depth": "direct"}))
-        self.assertEqual((False, False), _stage_evidence_needs({"depth": "focused"}))
+        self.assertEqual(
+            (True, False),
+            _stage_evidence_needs(
+                {"depth": "direct", "required_evidence": ["visual"]}
+            ),
+        )
+        self.assertEqual(
+            (False, True),
+            _stage_evidence_needs(
+                {"depth": "focused", "required_evidence": ["technical"]}
+            ),
+        )
         self.assertEqual(
             (True, True),
             _stage_evidence_needs(
                 {
                     "depth": "full",
-                    "evidence_contract": {"capture": True, "technical": True},
+                    "required_evidence": ["visual", "technical"],
                 }
             ),
         )
 
     def test_stage_review_coverage_requires_both_independent_reviewers(self) -> None:
-        stage = {"requirement_ids": ["REQ-1", "REQ-2"]}
+        stage = {
+            "requirement_ids": ["REQ-1", "REQ-2"],
+            "required_evidence": ["visual", "technical"],
+        }
         complete = [
             {
                 "reviewer": role.value,
@@ -209,69 +212,60 @@ class ProjectRoleExecutorTests(unittest.TestCase):
             _stage_evidence_needs(
                 {
                     "depth": "full",
-                    "evidence_contract": {"capture": False, "technical": True},
+                    "required_evidence": ["technical"],
                 }
             ),
         )
 
-    def test_two_projects_cannot_overlap_execution_scene_write(self) -> None:
-        lock = threading.Lock()
-        active = {"guard": threading.Lock(), "count": 0, "maximum": 0}
-        first_entered = threading.Event()
-        second_entered = threading.Event()
-        first_release = threading.Event()
-        second_release = threading.Event()
-        first = _OwnedExecutionProbe(
-            client=_Client(), registry=self.registry, scene_write_lock=lock,
-            allowed_evidence_roots=(Path(self.temp.name),), total_timeout_seconds=2,
-            entered=first_entered, release=first_release, active=active,
-        )
-        second = _OwnedExecutionProbe(
-            client=_Client(), registry=self.registry, scene_write_lock=lock,
-            allowed_evidence_roots=(Path(self.temp.name),), total_timeout_seconds=2,
-            entered=second_entered, release=second_release, active=active,
-        )
-        state = replace(self.state, status=ProjectStatus.EXECUTING)
-        threads = [
-            threading.Thread(target=first.execute, args=(state, ProjectAction("start_execution", {}))),
-            threading.Thread(target=second.execute, args=(state, ProjectAction("start_execution", {}))),
-        ]
-        threads[0].start()
-        self.assertTrue(first_entered.wait(0.5))
-        threads[1].start()
-        self.assertFalse(second_entered.wait(0.05))
-        first_release.set()
-        self.assertTrue(second_entered.wait(0.5))
-        second_release.set()
-        for thread in threads:
-            thread.join(1.0)
-        self.assertEqual(1, active["maximum"])
+    def test_project_execution_rejects_an_existing_scene_writer_without_queueing(self) -> None:
+        writer = SceneWriterOwnership()
+        reservation = writer.reserve("project", "project-other")
+        owner = writer.bind(reservation, "turn-other")
+        with self.assertRaisesRegex(Exception, "Another Turn already owns"):
+            self.executor(_Client(), writer=writer)._run_structured(
+                self.state,
+                Role.EXECUTION,
+                {"schema": "hia-project-role-request/1", "action": "probe"},
+                "hia-project-start/1",
+                time.monotonic() + 1.0,
+            )
+        self.assertEqual(owner, writer.snapshot()["owner"])
 
-    def test_all_read_only_role_turns_are_not_serialized_by_scene_write_lock(self) -> None:
-        lock = threading.Lock()
-        lock.acquire()
-        try:
-            for role in (
-                Role.SUPERVISOR,
-                Role.PLANNING,
-                Role.VISUAL_REVIEW,
-                Role.TECHNICAL_REVIEW,
-            ):
-                with self.subTest(role=role):
-                    client = _Client((
-                        {"schema": "hia-project-start/1", "route": "answered", "reply": "ok"},
-                    ))
-                    started = time.monotonic()
-                    self.executor(client, lock=lock)._run_structured(
-                        self.state,
-                        role,
-                        {"schema": "hia-project-role-request/1", "action": "probe"},
-                        "hia-project-start/1",
-                        time.monotonic() + 1.0,
-                    )
-                    self.assertLess(time.monotonic() - started, 0.5)
-        finally:
-            lock.release()
+    def test_execution_writer_releases_only_after_terminal_turn(self) -> None:
+        writer = SceneWriterOwnership()
+        payload = {"schema": "hia-project-start/1", "route": "answered", "reply": "ok"}
+        self.executor(_Client((payload,)), writer=writer)._run_structured(
+            self.state,
+            Role.EXECUTION,
+            {"schema": "hia-project-role-request/1", "action": "probe"},
+            "hia-project-start/1",
+            time.monotonic() + 1.0,
+        )
+        self.assertIsNone(writer.snapshot()["owner"])
+        self.assertFalse(writer.snapshot()["starting"])
+
+    def test_all_read_only_roles_ignore_scene_writer_ownership(self) -> None:
+        writer = SceneWriterOwnership()
+        reservation = writer.reserve("ordinary", "ordinary-thread")
+        owner = writer.bind(reservation, "ordinary-turn")
+        for role in (
+            Role.SUPERVISOR,
+            Role.PLANNING,
+            Role.VISUAL_REVIEW,
+            Role.TECHNICAL_REVIEW,
+        ):
+            with self.subTest(role=role):
+                client = _Client((
+                    {"schema": "hia-project-start/1", "route": "answered", "reply": "ok"},
+                ))
+                self.executor(client, writer=writer)._run_structured(
+                    self.state,
+                    role,
+                    {"schema": "hia-project-role-request/1", "action": "probe"},
+                    "hia-project-start/1",
+                    time.monotonic() + 1.0,
+                )
+        self.assertEqual(owner, writer.snapshot()["owner"])
 
 
 if __name__ == "__main__":

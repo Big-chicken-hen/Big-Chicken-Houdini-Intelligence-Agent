@@ -703,6 +703,17 @@ class ProjectTeamService:
     def _resolve_continuation(self, record: ProjectRecord) -> dict[str, object]:
         """Choose one new role Turn from native history; ambiguity stays user-visible."""
 
+        project_start = self._latest_role_payload(
+            record,
+            Role.SUPERVISOR,
+            "hia-project-start/1",
+        )
+        if project_start is None:
+            return {}
+        if project_start.get("route") == "answered":
+            return {}
+        if project_start.get("route") != "planning":
+            return {}
         plan = self._latest_role_payload(
             record,
             Role.PLANNING,

@@ -128,8 +128,8 @@ class ProjectHTTPTests(unittest.TestCase):
     def start_team(self) -> dict:
         return self.request(
             "POST",
-            "/v1/turn",
-            {"text": "build a Houdini cabin", "team_override": "team", "model": "gpt-test"},
+            "/v1/project-team/start",
+            {"text": "build a Houdini cabin", "model": "gpt-test"},
         )
 
     def test_mode_and_single_route_are_explicit(self) -> None:
@@ -138,17 +138,43 @@ class ProjectHTTPTests(unittest.TestCase):
         changed = self.request("POST", "/v1/project-team", {"mode": "team"})
         self.assertEqual("team", changed["project_team"]["settings"]["mode"])
         self.request("POST", "/v1/session", {"action": "start"})
-        result = self.request("POST", "/v1/turn", {"text": "ordinary", "team_override": "single"})
-        self.assertEqual("single", result["routing"])
+        result = self.request("POST", "/v1/turn", {"text": "ordinary"})
+        self.assertTrue(result["ok"])
+        self.assertNotIn("routing", result)
 
     def test_team_route_returns_five_role_project_without_goal_fields(self) -> None:
         result = self.start_team()
-        self.assertEqual("team", result["routing"])
         self.assertEqual("start_supervisor", result["next_action"])
         self.assertTrue(result["project_id"].startswith("project-"))
         project = result["project_team"]["projects"][0]
         self.assertEqual(5, len(project["threads"]))
         self.assertNotIn("goal_thread_id", json.dumps(result))
+
+    def test_image_only_project_start_may_omit_text_field(self) -> None:
+        draft_id = "http-image-only"
+        draft = (
+            Path(self.temp.name)
+            / ".runtime"
+            / "project-attachments"
+            / "drafts"
+            / draft_id
+        )
+        draft.mkdir(parents=True)
+        image = draft / "reference.png"
+        image.write_bytes(b"project-reference")
+
+        result = self.request(
+            "POST",
+            "/v1/project-team/start",
+            {
+                "attachment_draft_id": draft_id,
+                "local_image_paths": [str(image)],
+            },
+        )
+
+        project = result["project_team"]["projects"][0]
+        self.assertEqual(5, len(project["threads"]))
+        self.assertFalse(image.exists())
 
     def test_project_delete_action_is_not_exposed(self) -> None:
         started = self.start_team()

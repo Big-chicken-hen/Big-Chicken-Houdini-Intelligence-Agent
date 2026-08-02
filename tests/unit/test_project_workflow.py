@@ -109,10 +109,10 @@ class ProjectWorkflowTests(unittest.TestCase):
             registry=self.registry, runner=runner, executor_factory=lambda _: executor
         )
         try:
-            self.assertTrue(host.resume("p1"))
+            self.assertTrue(host.resume("p1", {"command": "start_execution"}))
             self.assertTrue(_wait(lambda: bool(executor.actions)))
             self.assertEqual("start_execution", executor.actions[0].kind)
-            self.assertEqual({"restart_stage": True}, dict(executor.actions[0].data))
+            self.assertEqual({}, dict(executor.actions[0].data))
             self.assertEqual("stage-current", self.registry.require("p1").state.stage.stage_id)
         finally:
             host.close()

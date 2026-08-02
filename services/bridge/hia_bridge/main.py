@@ -290,6 +290,7 @@ def _build_project_runtime(
             client=role_client,
             registry=registry,
             scene_writer=scene_writer,
+            project_root=project_root,
             allowed_evidence_roots=allowed_evidence_roots,
         )
 

@@ -234,23 +234,6 @@ class ProjectTeamController:
             return False
         return True
 
-    def submit_guidance(
-        self,
-        *,
-        project_id: str,
-        thread_id: str | None,
-        text: str,
-    ) -> bool:
-        """Route the central composer through the owned project workflow."""
-
-        return self._append_guidance(
-            project_id,
-            thread_id,
-            text,
-            None,
-            acknowledge_view=False,
-        )
-
     def _set_role_runtime(
         self,
         project_id: str,

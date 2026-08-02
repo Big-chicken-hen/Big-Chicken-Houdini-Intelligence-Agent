@@ -111,8 +111,7 @@ def finalize_project_attachments(
     _require_descendant(directory, root)
     if not candidates:
         return ()
-    directory.mkdir(parents=True, exist_ok=True)
-    references: list[ProjectAttachmentRef] = []
+    verified: list[tuple[ProjectAttachmentCandidate, Path, str]] = []
     for candidate in candidates:
         source = candidate.source_path.resolve(strict=True)
         if _sha256(source) != candidate.sha256:
@@ -121,6 +120,11 @@ def finalize_project_attachments(
         destination = directory / file_name
         if destination.exists():
             raise ValueError("project attachment destination already exists")
+        verified.append((candidate, source, file_name))
+    directory.mkdir(parents=True, exist_ok=True)
+    references: list[ProjectAttachmentRef] = []
+    for candidate, source, file_name in verified:
+        destination = directory / file_name
         os.replace(source, destination)
         references.append(
             ProjectAttachmentRef(

@@ -96,10 +96,13 @@ class ProjectRegistry:
             raise KeyError(project_id)
         return record
 
-    def attachment_paths(self, record: ProjectRecord) -> tuple[str, ...]:
+    def attachment_paths(
+        self,
+        record: ProjectRecord,
+        project_root: Path,
+    ) -> tuple[str, ...]:
         if self.get(record.state.project_id) != record:
             raise ValueError("project attachment record is not current")
-        project_root = self._path.parent.parent.parent
         return resolve_project_attachment_paths(
             project_root,
             record.state.project_id,

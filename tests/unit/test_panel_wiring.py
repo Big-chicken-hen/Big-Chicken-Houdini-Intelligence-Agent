@@ -227,6 +227,9 @@ class _Widget:
     def clearFocus(self) -> None:  # noqa: N802
         self.clear_focus_calls += 1
 
+    def setFocus(self) -> None:  # noqa: N802
+        pass
+
     def blockSignals(self, blocked: bool) -> bool:
         previous = self._signals_blocked
         self._signals_blocked = bool(blocked)
@@ -505,6 +508,15 @@ class _AttachmentStripShim:
         return self._enabled
 
 
+class _AttachmentStoreShim:
+    def __init__(self) -> None:
+        self.project_draft_counter = 0
+
+    def new_project_draft_id(self) -> str:
+        self.project_draft_counter += 1
+        return f"draft-{self.project_draft_counter}"
+
+
 class _BridgeClientShim:
     def __init__(self) -> None:
         self.turn_requests: list[
@@ -565,7 +577,6 @@ class _BridgeClientShim:
         effort: str | None,
         service_tier: str | None,
         local_image_paths: list[str],
-        team_override: str | None = None,
         context: str,
     ) -> str | None:
         self.turn_requests.append(
@@ -822,6 +833,12 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
         if isinstance(selected_thread_id, str)
         else []
     )
+    panel._project_team_controller = None
+    panel._project_draft_active = False
+    panel._project_draft_id = None
+    panel._ordinary_composer_draft = None
+    panel._project_start_pending = False
+    panel._pending_team_drafts = {}
     panel._thread_delete_confirm_id = None
     panel._thread_delete_confirm_not_before = None
     panel._thread_delete_pending = None
@@ -879,7 +896,9 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._attested_houdini_report_identity = None
     panel._pending_houdini_report_identity = None
     panel._selected_node_paths = ()
+    panel._attachment_store = _AttachmentStoreShim()
     panel._attachment_dialog = None
+    panel._attachment_dialog_owner = None
     panel._diagnostic_turn_key = None
     panel._diagnostic_draft_key = None
     panel._diagnostic_snapshot = {}
@@ -1514,10 +1533,10 @@ class PanelWiringTests(unittest.TestCase):
         for label in ("任务蓝图", "阶段进度", "审阅", "项目团队", "知识与记忆"):
             self.assertIn(f'"{label}"', panel_source)
         self.assertEqual(
-            4,
+            3,
             panel_source.count("AdjustToMinimumContentsLengthWithIcon"),
         )
-        self.assertEqual(4, panel_source.count("setMinimumContentsLength(0)"))
+        self.assertEqual(3, panel_source.count("setMinimumContentsLength(0)"))
         self.assertIn("project_memory_content.setMinimumWidth(0)", panel_source)
         self.assertIn("self.knowledge_group.setMinimumWidth(0)", panel_source)
         self.assertIn(
@@ -2128,8 +2147,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertTrue(panel.send_button.isEnabled())
         self.assertTrue(panel.input_edit.isEnabled())
         self.assertTrue(panel.add_image_button.isEnabled())
-        self.assertFalse(panel.new_thread_button.isEnabled())
-        self.assertFalse(panel.resume_thread_button.isEnabled())
         self.assertTrue(panel.model_combo.isEnabled())
         self.assertTrue(panel.effort_combo.isEnabled())
 
@@ -3879,8 +3896,6 @@ class PanelWiringTests(unittest.TestCase):
             r"^session_reconcile:\d+:\d+:[a-z_]+$",
         )
         self.assertIn(reconcile_context, panel._reconciliation_tokens)
-        self.assertFalse(panel.new_thread_button.isEnabled())
-        self.assertFalse(panel.resume_thread_button.isEnabled())
         self.assertFalse(panel.send_button.isEnabled())
 
         panel._on_action_completed(
@@ -4298,156 +4313,6 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertFalse(standard_panel.service_tier_combo.isVisible())
 
-    def test_history_refresh_waits_for_explicit_open_before_rendering(self) -> None:
-        panel = _make_panel(selected_thread_id=None)
-        threads = [
-            {
-                "thread_id": "019f-history-one",
-                "name": "售货机材质",
-                "preview": "cached preview",
-                "updated_at": 1_752_825_600,
-            },
-            {
-                "thread_id": "019f-history-two",
-                "name": None,
-                "preview": "检查当前节点网络",
-                "updated_at": 1_752_739_200,
-            },
-        ]
-
-        panel._apply_threads(threads)
-
-        self.assertEqual(3, panel.history_combo.count())
-        self.assertEqual("未选择历史会话", panel.history_combo.itemText(0))
-        self.assertIn("售货机材质", panel.history_combo.itemText(1))
-        self.assertNotIn("019f-history-one", panel.history_combo.itemText(1))
-        self.assertEqual([], panel._client.resume_requests)
-        self.assertEqual("", panel.conversation.toPlainText())
-        panel._refresh_threads()
-        self.assertEqual(1, panel._client.thread_list_requests)
-        self.assertEqual([], panel._client.resume_requests)
-        self.assertEqual([], panel._client.thread_read_requests)
-
-        panel.history_combo.setCurrentIndex(1)
-        panel._on_history_index_changed(1)
-        team_event = {
-            "type": "codex_notification",
-            "method": "item/completed",
-            "params": {
-                "threadId": "019f-history-one",
-                "item": {
-                    "type": "subAgentActivity",
-                    "agentThreadId": "thread-review",
-                    "agentPath": "review/material",
-                    "kind": "started",
-                },
-            },
-        }
-        panel._render_event(
-            {
-                "type": "codex_notification",
-                "method": "thread/goal/updated",
-                "params": {
-                    "threadId": "019f-history-one",
-                    "goal": {
-                        "threadId": "019f-history-one",
-                        "objective": "完成材质审阅",
-                        "status": "active",
-                    },
-                },
-            }
-        )
-        panel._render_event(team_event)
-        self.assertEqual([], panel._client.resume_requests)
-        self.assertEqual([], panel._client.goal_get_requests)
-        self.assertIsNone(panel._current_goal)
-        self.assertEqual({}, panel._team_records)
-        self.assertEqual("", panel.conversation.toPlainText())
-        panel._resume_thread()
-        self.assertEqual(
-            ("019f-history-one", None, "session_resume"),
-            panel._client.resume_requests[-1],
-        )
-
-        panel._on_action_completed(
-            "session_resume",
-            {
-                "thread_id": "019f-history-one",
-                "focus_mode": True,
-                "read": {
-                    "thread": {
-                        "id": "019f-history-one",
-                        "turns": [
-                            {
-                                "items": [
-                                    {
-                                        "type": "userMessage",
-                                        "content": [
-                                            {"type": "text", "text": "继续调整材质"},
-                                            {
-                                                "type": "localImage",
-                                                "path": r"E:\refs\look.png",
-                                            },
-                                        ],
-                                    },
-                                    {
-                                        "type": "userMessage",
-                                        "content": [
-                                            {
-                                                "type": "text",
-                                                "text": "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。",
-                                            }
-                                        ],
-                                    },
-                                    {
-                                        "type": "userMessage",
-                                        "content": [
-                                            {
-                                                "type": "text",
-                                                "text": "请继续推进当前 Goal，这是我亲自发送的补充。",
-                                            }
-                                        ],
-                                    },
-                                    {"type": "agentMessage", "text": "已经完成。"},
-                                    {"type": "commandExecution", "command": "ignored"},
-                                ]
-                            }
-                        ],
-                    }
-                }
-            },
-        )
-        self.assertEqual(1, panel.conversation.clear_calls)
-        self.assertIn("继续调整材质", panel.conversation.toPlainText())
-        self.assertNotIn(
-            "继续推进当前 Goal；先核对上一轮真实结果，再执行下一项未完成工作。",
-            panel.conversation.toPlainText(),
-        )
-        self.assertIn(
-            "请继续推进当前 Goal，这是我亲自发送的补充。",
-            panel.conversation.toPlainText(),
-        )
-        self.assertIn("已经完成", panel.conversation.toPlainText())
-        self.assertNotIn("ignored", panel.conversation.toPlainText())
-        self.assertEqual(["019f-history-one"], panel._client.goal_get_requests)
-
-        panel._on_action_completed(
-            "goal_get",
-            {
-                "thread_id": "019f-history-one",
-                "goal": {
-                    "threadId": "019f-history-one",
-                    "objective": "完成材质审阅",
-                    "status": "active",
-                },
-                "focus_mode": True,
-            },
-        )
-        panel._render_event(team_event)
-        self.assertEqual("完成材质审阅", panel.goal_objective_edit.toPlainText())
-        self.assertIn("thread-review", panel._team_records)
-        self.assertEqual(1, len(panel._client.turn_requests))
-
     def test_session_wait_timeouts_are_accurate_and_unlock_retry(self) -> None:
         cases = (
             ("session_resume", "CODEX_REQUEST_TIMEOUT", "会话恢复超时"),
@@ -4506,70 +4371,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("INVALID_THREAD_LIST_RESPONSE", text)
         self.assertIn("field=preview", text)
         self.assertNotIn("must-not-be-shown", text)
-
-    def test_history_click_and_rename_use_codex_thread_identity(self) -> None:
-        panel = _make_panel()
-        panel._apply_threads(
-            [
-                {
-                    "thread_id": "019f-history-one",
-                    "name": "旧名称",
-                    "preview": "",
-                    "updated_at": 1_752_825_600,
-                }
-            ]
-        )
-        panel.history_combo.setCurrentIndex(1)
-        panel._on_history_index_changed(1)
-        self.assertEqual([], panel._client.resume_requests)
-        panel._resume_thread()
-        self.assertEqual(
-            [("019f-history-one", None, "session_resume")],
-            panel._client.resume_requests,
-        )
-        panel._session_action_pending = False
-        panel.thread_name_edit.setText("用户命名")
-        panel._rename_thread()
-        thread_id, name, context = panel._client.thread_rename_requests[-1]
-        self.assertEqual("019f-history-one", thread_id)
-        self.assertEqual("用户命名", name)
-        self.assertTrue(context.startswith("thread_rename:"))
-        panel._on_action_completed(
-            context,
-            {"thread_id": thread_id, "name": name},
-        )
-        self.assertIn("用户命名", panel.history_combo.itemText(1))
-
-    def test_thread_delete_ignores_double_click_and_requires_deliberate_second_click(
-        self,
-    ) -> None:
-        panel = _make_panel()
-        panel_time = HoudiniIntelligencePanel._delete_thread.__globals__["time"]
-
-        with mock.patch.object(
-            panel_time,
-            "monotonic",
-            side_effect=(10.0, 10.1, 10.8),
-        ):
-            panel._delete_thread()
-
-            self.assertEqual([], panel._client.thread_delete_requests)
-            self.assertEqual("thread-1", panel._thread_delete_confirm_id)
-            self.assertEqual("再次点击删除", panel.delete_thread_button.text())
-            self.assertTrue(panel._thread_delete_confirm_timer.isActive())
-
-            panel._delete_thread()
-            self.assertEqual([], panel._client.thread_delete_requests)
-            self.assertEqual("再次点击删除", panel.delete_thread_button.text())
-
-            panel._delete_thread()
-        self.assertEqual(1, len(panel._client.thread_delete_requests))
-        thread_id, context = panel._client.thread_delete_requests[0]
-        self.assertEqual("thread-1", thread_id)
-        self.assertTrue(context.startswith("thread_delete:"))
-        self.assertTrue(panel._session_action_pending)
-        self.assertIsNone(panel._thread_delete_confirm_id)
-        self.assertEqual(context, panel._thread_delete_pending["context"])
 
     def test_project_memory_list_search_and_details_use_stable_contract(self) -> None:
         panel = _make_panel()
@@ -5331,18 +5132,6 @@ class PanelWiringTests(unittest.TestCase):
             panel.knowledge_log_label.text(),
         )
 
-    def test_active_turn_rejects_thread_delete_and_prompts_stop(self) -> None:
-        panel = _make_panel()
-        self.assertTrue(panel._turn_state.begin_start("thread-1"))
-
-        panel._delete_thread()
-
-        self.assertEqual([], panel._client.thread_delete_requests)
-        self.assertIn(
-            "请先停止并等待结束",
-            panel.conversation.toPlainText(),
-        )
-
     def test_deleting_current_thread_clears_only_panel_memory_references(self) -> None:
         panel = _make_panel()
         panel.input_edit.setPlainText("draft")
@@ -5390,7 +5179,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertFalse(panel._focus_mode)
         self.assertIsNone(panel._thread_delete_pending)
         self.assertEqual("Thread：未选择", panel.thread_status_label.text())
-        self.assertEqual("暂无历史会话", panel.history_combo.itemText(0))
         deleted_notification = {
             "type": "codex_notification",
             "method": "thread/deleted",
@@ -5523,8 +5311,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("thread-1", panel._stream_thread_id)
         self.assertEqual(turn_id, panel._stream_turn_id)
         self.assertTrue(panel.stop_button.isEnabled())
-        self.assertFalse(panel.new_thread_button.isEnabled())
-        self.assertFalse(panel.resume_thread_button.isEnabled())
         self.assertEqual([], panel._client.turn_requests)
         self.assertEqual([], panel._client.resume_requests)
         self.assertEqual(["thread-1"], panel._client.goal_get_requests)
@@ -5720,68 +5506,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual([], panel._client.goal_get_requests)
         self.assertEqual({}, panel._team_records)
 
-    def test_long_history_is_complete_and_missing_name_does_not_clear(self) -> None:
-        panel = _make_panel()
-        panel._apply_threads(
-            [
-                {
-                    "thread_id": "thread-1",
-                    "name": "保留名称",
-                    "preview": "preview",
-                    "updated_at": 1_752_825_600,
-                },
-                {
-                    "thread_id": "thread-2",
-                    "name": "候选会话",
-                    "preview": "preview two",
-                    "updated_at": 1_752_739_200,
-                },
-            ]
-        )
-        panel.history_combo.setCurrentIndex(2)
-        panel._on_history_index_changed(2)
-        panel._apply_threads(panel._thread_history)
-        self.assertEqual("thread-2", panel._selected_history_record()["thread_id"])
-
-        panel._render_event(
-            {
-                "type": "codex_notification",
-                "method": "thread/name/updated",
-                "params": {"threadId": "thread-1"},
-            }
-        )
-        self.assertEqual("保留名称", panel._thread_history[0]["name"])
-
-        panel._selected_thread_id = "thread-1"
-        panel._turn_state = PanelTurnState()
-        panel._render_thread_read(
-            {
-                "read": {
-                    "thread": {
-                        "id": "thread-1",
-                        "turns": [
-                            {
-                                "items": [
-                                    {
-                                        "type": "agentMessage",
-                                        "text": f"message-{index}",
-                                    }
-                                    for index in range(172)
-                                ]
-                            }
-                        ],
-                    }
-                }
-            }
-        )
-        codex_entries = [
-            entry for entry in panel.conversation.entries if entry["role"] == "codex"
-        ]
-        self.assertEqual(172, len(codex_entries))
-        self.assertIn("message-0", panel.conversation.toPlainText())
-        self.assertIn("message-171", panel.conversation.toPlainText())
-        self.assertNotIn("仅展示最近 100 条", panel.conversation.toPlainText())
-
     def test_bridge_reconnect_is_bounded_and_never_replays_turn(self) -> None:
         panel = _make_panel()
         panel.input_edit.setPlainText("保留的草稿")
@@ -5817,7 +5541,6 @@ class PanelWiringTests(unittest.TestCase):
         context = "session_reconcile:1:1:network"
         panel._reconciliation_tokens[context] = panel._turn_state.capture_token()
         panel._refresh_controls()
-        self.assertFalse(panel.new_thread_button.isEnabled())
 
         panel._on_request_failed(
             context,
@@ -5842,7 +5565,6 @@ class PanelWiringTests(unittest.TestCase):
                 },
             }
         )
-        self.assertFalse(panel.new_thread_button.isEnabled())
         self.assertEqual(["thread-1"], panel._client.goal_get_requests)
         panel._on_action_completed(
             "goal_get",
@@ -5882,56 +5604,6 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertEqual(1, panel._client.model_requests)
         self.assertEqual(1, panel._client.thread_list_requests)
-
-    def test_live_model_tiers_do_not_auto_open_history(self) -> None:
-        panel = _make_panel()
-        panel._selected_thread_id = None
-        panel._models_resolved = False
-        panel._thread_history = []
-        panel._apply_threads(
-            [
-                {
-                    "thread_id": "thread-fast",
-                    "name": "Fast history",
-                    "preview": "",
-                    "updated_at": 1_752_825_600,
-                }
-            ]
-        )
-        self.assertEqual([], panel._client.resume_requests)
-
-        panel._on_action_completed(
-            "models",
-            {
-                "models": [
-                    {
-                        "model": "dynamic-model",
-                        "displayName": "Dynamic Model",
-                        "description": "",
-                        "isDefault": True,
-                        "inputModalities": ["text"],
-                        "supportedReasoningEfforts": [],
-                        "defaultReasoningEffort": None,
-                        "serviceTiers": [
-                            {
-                                "id": "live-fast",
-                                "name": "快速",
-                                "description": "live model/list tier",
-                            }
-                        ],
-                        "defaultServiceTier": "live-fast",
-                    }
-                ]
-            },
-        )
-        self.assertEqual([], panel._client.resume_requests)
-        panel.history_combo.setCurrentIndex(1)
-        panel._on_history_index_changed(1)
-        panel._resume_thread()
-        self.assertEqual(
-            [("thread-fast", "live-fast", "session_resume")],
-            panel._client.resume_requests,
-        )
 
     def test_process_exit_freezes_active_turn_without_marking_terminal(self) -> None:
         panel = _make_panel()
@@ -7950,11 +7622,6 @@ class PanelWiringTests(unittest.TestCase):
         panel._request_goal()
 
         self.assertEqual("goal_get", panel._goal_action_context)
-        self.assertFalse(panel.new_thread_button.isEnabled())
-        self.assertFalse(panel.resume_thread_button.isEnabled())
-        self.assertFalse(panel.history_combo.isEnabled())
-        self.assertFalse(panel.thread_id_edit.isEnabled())
-
         panel._new_thread()
         panel._request_thread_resume("thread-2", context="session_resume")
         self.assertEqual([], panel._client.thread_requests)

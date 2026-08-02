@@ -123,7 +123,11 @@ class ProjectLifecycleTests(unittest.TestCase):
         with self.assertRaises(InvalidTransition):
             self.apply(stopped, ProjectEvent.PROJECT_STARTED)
 
-        resumed, commands = self.apply(stopped, ProjectEvent.USER_CONTINUE)
+        resumed, commands = self.apply(
+            stopped,
+            ProjectEvent.USER_CONTINUE,
+            command="start_execution",
+        )
         self.assertEqual(ProjectStatus.EXECUTING, resumed.status)
         self.assertEqual("stage-current", resumed.stage.stage_id)
         self.assertEqual([ProjectCommand.START_EXECUTION], [item.kind for item in commands])
@@ -133,7 +137,11 @@ class ProjectLifecycleTests(unittest.TestCase):
             _state(ProjectStatus.EXECUTING), ProjectEvent.PROJECT_BLOCKED, reason="need input"
         )
         self.assertEqual(ProjectStatus.WAITING_USER, state.status)
-        state, commands = self.apply(state, ProjectEvent.USER_CONTINUE)
+        state, commands = self.apply(
+            state,
+            ProjectEvent.USER_CONTINUE,
+            command="request_plan",
+        )
         self.assertEqual(ProjectStatus.PLANNING, state.status)
         self.assertEqual([ProjectCommand.REQUEST_PLAN], [item.kind for item in commands])
 

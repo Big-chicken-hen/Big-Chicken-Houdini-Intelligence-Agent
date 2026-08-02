@@ -168,8 +168,7 @@ class ProjectPayloadTests(unittest.TestCase):
             "stage_id": "S1",
             "requirement_ids": ["REQ-1"],
             "ordered_steps": [step],
-            "evidence_contract": {"capture": garbage, "technical": garbage},
-            "reviewers": ["visual_review", "technical_review"],
+            "required_evidence": ["visual", "technical"],
             "failure_minimum_repair": garbage,
         }
         with self.assertRaisesRegex(ValueError, "2500 task-specific"):
@@ -235,7 +234,6 @@ class ProjectPayloadTests(unittest.TestCase):
     def test_not_applicable_requires_structured_reason_and_real_evidence_refs(self) -> None:
         for exemption in (
             {"reason": "", "evidence_refs": ["E1"]},
-            {"reason": "outside this stage", "evidence_refs": []},
             {"reason": "outside this stage"},
         ):
             with self.subTest(exemption=exemption), self.assertRaises(ValueError):
@@ -254,10 +252,11 @@ class ProjectPayloadTests(unittest.TestCase):
                 "stage_id": "S1",
                 "requirement_ids": ["REQ-1"],
                 "ordered_steps": [_step()],
+                "required_evidence": ["technical"],
             }
         )
         self.assertEqual("direct", card.depth)
-        self.assertIsNone(card.evidence_contract)
+        self.assertEqual(("technical",), card.required_evidence)
 
     def test_full_card_requires_both_reviews_and_evidence_contract(self) -> None:
         payload = {
@@ -265,13 +264,12 @@ class ProjectPayloadTests(unittest.TestCase):
             "stage_id": "S1",
             "requirement_ids": ["REQ-1"],
             "ordered_steps": [_full_step()],
-            "evidence_contract": {"capture": "side and perspective"},
-            "reviewers": ["visual_review", "technical_review"],
+            "required_evidence": ["visual", "technical"],
             "failure_minimum_repair": "repair only the failed claim",
         }
         self.assertEqual("full", parse_stage_card(payload).depth)
-        payload["reviewers"] = ["visual_review"]
-        with self.assertRaisesRegex(ValueError, "both"):
+        payload["required_evidence"] = []
+        with self.assertRaisesRegex(ValueError, "unique non-empty"):
             parse_stage_card(payload)
 
     def test_focused_card_has_no_full_information_floor(self) -> None:
@@ -281,6 +279,7 @@ class ProjectPayloadTests(unittest.TestCase):
                 "stage_id": "S",
                 "requirement_ids": ["R"],
                 "ordered_steps": [_step(requirement_id="R")],
+                "required_evidence": ["technical"],
             }
         )
         self.assertEqual("S", card.stage_id)
@@ -291,8 +290,7 @@ class ProjectPayloadTests(unittest.TestCase):
             "stage_id": "S1",
             "requirement_ids": ["REQ-1"],
             "ordered_steps": [_step()],
-            "evidence_contract": {"capture": "side and perspective"},
-            "reviewers": ["visual_review", "technical_review"],
+            "required_evidence": ["visual", "technical"],
             "failure_minimum_repair": "repair only the failed claim",
         }
         with self.assertRaisesRegex(ValueError, "2500 task-specific"):
@@ -304,8 +302,7 @@ class ProjectPayloadTests(unittest.TestCase):
             "stage_id": "S1",
             "requirement_ids": ["REQ-1"],
             "ordered_steps": [_full_step()],
-            "evidence_contract": {"capture": "side and perspective"},
-            "reviewers": ["visual_review", "technical_review"],
+            "required_evidence": ["visual", "technical"],
             "failure_minimum_repair": "repair only the failed claim",
         }
         card = parse_stage_card(payload)
@@ -321,8 +318,7 @@ class ProjectPayloadTests(unittest.TestCase):
             "stage_id": "S1",
             "requirement_ids": ["REQ-1"],
             "ordered_steps": [_full_step()],
-            "evidence_contract": {"capture": "side and perspective"},
-            "reviewers": ["visual_review", "technical_review"],
+            "required_evidence": ["visual", "technical"],
             "failure_minimum_repair": "repair only the failed claim",
         }
         card = parse_stage_card(stage)
@@ -344,8 +340,7 @@ class ProjectPayloadTests(unittest.TestCase):
             "stage_id": "S1",
             "requirement_ids": ["REQ-1"],
             "ordered_steps": [step],
-            "evidence_contract": {"capture": repeated},
-            "reviewers": ["visual_review", "technical_review"],
+            "required_evidence": ["visual"],
             "failure_minimum_repair": repeated,
         }
         with self.assertRaisesRegex(ValueError, "2500 task-specific"):
@@ -407,6 +402,7 @@ class ProjectPayloadTests(unittest.TestCase):
             "stage_id": "S",
             "requirement_ids": ["R1", "R2"],
             "ordered_steps": [_step(requirement_id="R1")],
+            "required_evidence": ["technical"],
         }
         with self.assertRaisesRegex(ValueError, "do not cover"):
             parse_stage_card(base)

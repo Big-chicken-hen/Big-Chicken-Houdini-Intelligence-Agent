@@ -19,7 +19,7 @@ from hia_panel.project_team import (  # noqa: E402
 from hia_panel.project_team_controller import ProjectTeamController  # noqa: E402
 
 
-def project_snapshot(*, role_thread_id: str = "thread-supervisor", status: str = "needs_attention"):
+def project_snapshot(*, role_thread_id: str = "thread-supervisor", status: str = "waiting_user"):
     return {
         "schema": "hia-project-team/2",
         "settings": {"mode": "team", "writable": True},
@@ -40,14 +40,8 @@ def project_snapshot(*, role_thread_id: str = "thread-supervisor", status: str =
                 ],
                 "actions": {
                     "append_guidance": True,
-                    "continue": status == "needs_attention",
+                    "continue": status in {"waiting_user", "stopped"},
                     "stop": True,
-                    "delete": status in {
-                        "needs_attention",
-                        "interrupted",
-                        "failed",
-                        "completed",
-                    },
                 },
                 "threads": [
                     {
@@ -128,7 +122,7 @@ class ProjectTeamViewModelTests(unittest.TestCase):
         state.select("thread:ordinary")
         self.assertEqual("ordinary", state.selected_chat_thread_id())
 
-    def test_selection_and_role_draft_survive_verified_role_thread_transfer(self) -> None:
+    def test_selection_and_role_draft_survive_an_ordinary_snapshot_refresh(self) -> None:
         state = ProjectPanelState()
         state.apply_snapshot(project_snapshot())
         stable_key = "role:project-house:supervisor"
@@ -136,9 +130,9 @@ class ProjectTeamViewModelTests(unittest.TestCase):
         draft = RoleRuntimeDraft("gpt-next", "ultra", "priority")
         state.set_runtime_draft(stable_key, draft)
 
-        state.apply_snapshot(project_snapshot(role_thread_id="thread-supervisor-new"))
+        state.apply_snapshot(project_snapshot())
         self.assertEqual(stable_key, state.selected_key)
-        self.assertEqual("thread-supervisor-new", state.selected_chat_thread_id())
+        self.assertEqual("thread-supervisor", state.selected_chat_thread_id())
         role = find_tree_item(state.tree, stable_key)
         self.assertIsInstance(role, RoleViewModel)
         self.assertEqual(draft, state.runtime_draft_for(role))
@@ -189,7 +183,7 @@ class ProjectTeamViewModelTests(unittest.TestCase):
             },
         )
 
-    def test_needs_attention_exposes_reason_evidence_repair_and_actions(self) -> None:
+    def test_waiting_user_exposes_reason_evidence_repair_and_actions(self) -> None:
         project = normalize_workspace_tree(project_snapshot()).projects[0]
         self.assertTrue(project.attention.visible)
         self.assertEqual("structure", project.attention.stage)
@@ -247,6 +241,8 @@ class FakeView:
         self.newTaskRequested = FakeSignal()
         self.openThreadRequested = FakeSignal()
         self.deleteThreadRequested = FakeSignal()
+        self.renameThreadRequested = FakeSignal()
+        self.copyThreadIdRequested = FakeSignal()
         self.appendGuidanceRequested = FakeSignal()
         self.roleRuntimeRequested = FakeSignal()
         self.modelCatalogRefreshRequested = FakeSignal()
@@ -318,6 +314,8 @@ class ProjectTeamControllerTests(unittest.TestCase):
             self.view.newTaskRequested,
             self.view.openThreadRequested,
             self.view.deleteThreadRequested,
+            self.view.renameThreadRequested,
+            self.view.copyThreadIdRequested,
             self.view.appendGuidanceRequested,
             self.view.roleRuntimeRequested,
             self.view.modelCatalogRefreshRequested,
@@ -330,7 +328,7 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.assertEqual(1, self.gateway.actionCompleted.connect_count)
         self.assertEqual(1, self.gateway.requestFailed.connect_count)
         self.assertEqual(
-            ["get_project_team", "get_threads", "get_models"],
+            ["get_project_team", "get_models"],
             [call[0] for call in self.gateway.calls],
         )
 
@@ -378,13 +376,8 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.gateway.actionCompleted.emit(
             "project_team_refresh", {"project_team": project_snapshot()}
         )
-        self.gateway.actionCompleted.emit(
-            "project_history_refresh",
-            {
-                "threads": [
-                    {"thread_id": "ordinary", "name": "普通", "updated_at": 1}
-                ]
-            },
+        self.controller.consume_ordinary_threads(
+            [{"thread_id": "ordinary", "name": "普通", "updated_at": 1}]
         )
         self.assertEqual(1, len(self.view.state.tree.projects))
         self.assertEqual(1, len(self.view.state.tree.ordinary_threads))
@@ -395,45 +388,12 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.gateway.actionCompleted.emit(
             "project_team_refresh", {"project_team": project_snapshot()}
         )
-        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
-        self.assertEqual("新普通任务", self.view.state.tree.ordinary_threads[0].title)
+        self.assertIsNone(self.view.state.selected_key)
         self.controller.consume_ordinary_threads(
             [{"thread_id": "ordinary-new", "name": "新普通任务", "updated_at": 2}]
         )
         self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
         self.assertEqual("ordinary-new", self.view.state.selected_chat_thread_id())
-
-    def test_delayed_history_does_not_make_acknowledged_ordinary_thread_disappear(self) -> None:
-        self.controller.show()
-        self.gateway.actionCompleted.emit(
-            "project_team_refresh", {"project_team": project_snapshot()}
-        )
-        self.controller.select_ordinary_thread_when_available("ordinary-new")
-        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
-
-        self.controller.consume_ordinary_threads([])
-
-        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
-        self.assertEqual(
-            ["ordinary-new"],
-            [item.thread_id for item in self.view.state.tree.ordinary_threads],
-        )
-
-    def test_delayed_history_does_not_steal_a_later_explicit_project_selection(self) -> None:
-        self.controller.show()
-        self.gateway.actionCompleted.emit(
-            "project_team_refresh", {"project_team": project_snapshot()}
-        )
-        self.controller.select_ordinary_thread_when_available("ordinary-new")
-        self.view.state.select("project:project-house")
-
-        self.controller.consume_ordinary_threads([])
-
-        self.assertEqual("project:project-house", self.view.state.selected_key)
-        self.assertEqual(
-            ["ordinary-new"],
-            [item.thread_id for item in self.view.state.tree.ordinary_threads],
-        )
 
     def test_new_ordinary_selection_survives_history_then_project_order(self) -> None:
         self.controller.show()
@@ -453,9 +413,8 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.gateway.actionCompleted.emit(
             "project_team_refresh", {"project_team": project_snapshot()}
         )
-        self.gateway.actionCompleted.emit(
-            "project_history_refresh",
-            {"threads": [{"thread_id": "ordinary", "name": "普通", "updated_at": 1}]},
+        self.controller.consume_ordinary_threads(
+            [{"thread_id": "ordinary", "name": "普通", "updated_at": 1}]
         )
         updated = project_snapshot(status="completed")
         self.assertTrue(

@@ -934,7 +934,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             result = application.require_project_team().start_team_project(
-                task_text=body.get("text"),
+                task_text=body.get("text", ""),
                 model=body.get("model"),
                 effort=body.get("effort"),
                 service_tier=body.get("service_tier"),

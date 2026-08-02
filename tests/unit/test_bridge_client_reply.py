@@ -277,7 +277,6 @@ class BridgeClientQueueTests(unittest.TestCase):
             effort="high",
             service_tier="priority",
             local_image_paths=image_paths,
-            team_override="team",
         )
 
         submission = transport.submissions[-1]
@@ -290,7 +289,6 @@ class BridgeClientQueueTests(unittest.TestCase):
                 "effort": "high",
                 "service_tier": "priority",
                 "local_image_paths": image_paths,
-                "team_override": "team",
             },
             submission["payload"],
         )

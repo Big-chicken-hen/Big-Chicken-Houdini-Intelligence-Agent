@@ -9,6 +9,7 @@ from services.bridge.hia_bridge.main import _build_project_runtime
 from services.bridge.hia_bridge.project_app_server import ProjectRoleClient
 from services.bridge.hia_bridge.project_effects import ProjectRoleExecutor
 from services.bridge.hia_bridge.project_runner import ProjectRunner
+from services.bridge.hia_bridge.scene_writer import SceneWriterOwnership
 from services.bridge.hia_bridge.project_service import ProjectTeamService
 from services.bridge.hia_bridge.project_workflow import ProjectWorkflowHost
 from tests.unit.project_test_support import server_transports
@@ -30,6 +31,7 @@ class ProjectMainWiringTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             events = EventBuffer()
+            scene_writer = SceneWriterOwnership()
             runtime = _build_project_runtime(
                 client=_Client(),
                 events=events,
@@ -38,6 +40,7 @@ class ProjectMainWiringTests(unittest.TestCase):
                 server_transports=server_transports(),
                 allowed_evidence_roots=(root,),
                 model_catalog=_catalog,
+                scene_writer=scene_writer,
             )
             try:
                 self.assertIsInstance(runtime.service, ProjectTeamService)
@@ -53,6 +56,7 @@ class ProjectMainWiringTests(unittest.TestCase):
     def test_all_project_executors_share_one_scene_write_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            scene_writer = SceneWriterOwnership()
             runtime = _build_project_runtime(
                 client=_Client(),
                 events=EventBuffer(),
@@ -61,12 +65,14 @@ class ProjectMainWiringTests(unittest.TestCase):
                 server_transports=server_transports(),
                 allowed_evidence_roots=(root,),
                 model_catalog=_catalog,
+                scene_writer=scene_writer,
             )
             try:
                 first = runtime.workflow._executor_factory("project-a")
                 second = runtime.workflow._executor_factory("project-b")
                 self.assertIsInstance(first, ProjectRoleExecutor)
-                self.assertIs(first._scene_write_lock, second._scene_write_lock)
+                self.assertIs(first._scene_writer, scene_writer)
+                self.assertIs(second._scene_writer, scene_writer)
             finally:
                 runtime.close()
 

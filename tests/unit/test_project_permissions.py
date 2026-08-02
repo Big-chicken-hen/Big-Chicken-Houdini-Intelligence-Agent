@@ -50,7 +50,7 @@ class ProjectPermissionTests(unittest.TestCase):
         for role, instruction in ROLE_INSTRUCTIONS.items():
             with self.subTest(role=role):
                 self.assertIn("hia-project-role-request/1", instruction)
-                self.assertIn("five native project-role Threads", instruction)
+                self.assertIn("five native project role Threads", instruction)
                 self.assertIn("do not call update_goal", instruction)
                 self.assertNotIn("spawn_agent", instruction)
                 self.assertNotIn("collabAgentToolCall", instruction)

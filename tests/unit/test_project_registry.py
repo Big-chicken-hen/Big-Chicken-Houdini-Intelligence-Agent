@@ -16,6 +16,7 @@ from services.bridge.hia_bridge.project_contracts import (
     authoritative_task_identity,
 )
 from services.bridge.hia_bridge.project_guidance import RequirementDelta, publish_guidance
+from services.bridge.hia_bridge.project_attachments import ProjectAttachmentRef
 from services.bridge.hia_bridge.project_registry import (
     REGISTRY_SCHEMA,
     ProjectRecord,
@@ -70,6 +71,10 @@ class ProjectRegistryTests(unittest.TestCase):
             set(document["projects"][0]),
         )
         self.assertEqual({role.value for role in Role}, set(document["projects"][0]["role_thread_ids"]))
+        self.assertEqual(
+            {"text", "attachments"},
+            set(document["projects"][0]["authoritative_task"]),
+        )
         serialized = json.dumps(document, ensure_ascii=False)
         for forbidden in (
             "plan_history",
@@ -143,6 +148,25 @@ class ProjectRegistryTests(unittest.TestCase):
         self.path.write_text(json.dumps(document), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "unsupported fields"):
             ProjectRegistry(self.path)
+
+    def test_image_only_identity_round_trips_without_invented_text(self) -> None:
+        digest = "a" * 64
+        task_id, task_hash = authoritative_task_identity("", (digest,))
+        record = ProjectRecord(
+            ProjectState(
+                project_id="project-image-only",
+                authoritative_task_id=task_id,
+                authoritative_task_sha256=task_hash,
+                status=ProjectStatus.STOPPED,
+                roles={role: RoleThread(role, f"image-{role.value}") for role in Role},
+            ),
+            "",
+            (ProjectAttachmentRef(digest, f"{digest}.png"),),
+        )
+        self.registry.put(record)
+        loaded = ProjectRegistry(self.path).require("project-image-only")
+        self.assertEqual("", loaded.authoritative_task_text)
+        self.assertEqual((digest,), tuple(item.sha256 for item in loaded.attachments))
 
 
 if __name__ == "__main__":
