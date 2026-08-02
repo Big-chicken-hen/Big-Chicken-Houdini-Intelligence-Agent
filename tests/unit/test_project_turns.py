@@ -19,7 +19,6 @@ def _state() -> ProjectState:
     }
     return ProjectState(
         project_id="p1",
-        goal_thread_id="thread-supervisor",
         authoritative_task_id=task_id,
         authoritative_task_sha256=digest,
         roles=roles,

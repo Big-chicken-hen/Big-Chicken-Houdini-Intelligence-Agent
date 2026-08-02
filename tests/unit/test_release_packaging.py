@@ -122,7 +122,6 @@ class ReleasePackagingTests(unittest.TestCase):
             "houdini_package/python_panels/houdini_intelligence.pypanel",
             "houdini_package/python_libs/hia_mcp_runtime/deterministic_sources.py",
             "houdini_package/python_libs/hia_mcp_runtime/embedding_client.py",
-            "houdini_package/python_libs/hia_mcp_runtime/viewport_quality.py",
             "houdini_package/python_libs/hia_mcp_runtime/hybrid_knowledge.py",
             "houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py",
             "houdini_package/python_libs/hia_mcp_runtime/knowledge_index_cli.py",
@@ -209,27 +208,12 @@ class ReleasePackagingTests(unittest.TestCase):
             source.index("$releaseFileAllowlist")
             : source.index("$releaseDenyPatterns")
         ]
-        self.assertIn(
-            "'houdini_package/python_libs/hia_mcp_runtime/viewport_quality.py'",
-            allowlist_source,
-        )
         for python_version in ("3.10", "3.11", "3.13"):
             self.assertIn(
                 f"'houdini_package/python{python_version}libs/uiready.py'",
                 allowlist_source,
             )
         self.assertIn("'docs/PROJECT_TEAM_LIVE_ACCEPTANCE.md'", allowlist_source)
-        executor_source = (
-            REPOSITORY_ROOT
-            / "houdini_package"
-            / "python_libs"
-            / "hia_mcp_runtime"
-            / "executor.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            "from .viewport_quality import analyze_png_quality",
-            executor_source,
-        )
         self.assertNotIn("'.runtime", allowlist_source)
         self.assertNotIn('".runtime', allowlist_source)
         self.assertNotIn("'.venv", allowlist_source)

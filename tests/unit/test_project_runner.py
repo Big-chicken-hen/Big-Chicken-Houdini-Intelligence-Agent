@@ -6,258 +6,117 @@ import tempfile
 import unittest
 
 from services.bridge.hia_bridge.project_contracts import (
-    PendingEffect,
     ProjectState,
     ProjectStatus,
+    Role,
+    RoleThread,
+    StageState,
     authoritative_task_identity,
 )
-from services.bridge.hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent
-from services.bridge.hia_bridge.project_effects import EffectResult
 from services.bridge.hia_bridge.project_guidance import publish_guidance
+from services.bridge.hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent
 from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
-from services.bridge.hia_bridge.project_runner import ProjectRunner
+from services.bridge.hia_bridge.project_runner import (
+    ProjectAction,
+    ProjectActionResult,
+    ProjectRunner,
+)
 
 
-def _record(status: ProjectStatus) -> ProjectRecord:
+def _record(status: ProjectStatus = ProjectStatus.PLANNING) -> ProjectRecord:
     text = "build a Houdini scene"
     task_id, digest = authoritative_task_identity(text)
     return ProjectRecord(
         ProjectState(
             project_id="p1",
-            goal_thread_id="supervisor",
             authoritative_task_id=task_id,
             authoritative_task_sha256=digest,
             status=status,
+            roles={role: RoleThread(role, f"thread-{role.value}") for role in Role},
         ),
         text,
     )
 
 
-class FakeExecutor:
-    def __init__(self, event: ProjectEvent) -> None:
+class _Executor:
+    def __init__(self, event: LifecycleEvent | None, mutate=None) -> None:
         self.event = event
-        self.effects = []
+        self.mutate = mutate
+        self.actions: list[ProjectAction] = []
 
-    def execute(self, state, effect):
-        self.effects.append(effect)
-        return EffectResult(state, LifecycleEvent(self.event))
+    def execute(self, state: ProjectState, action: ProjectAction) -> ProjectActionResult:
+        self.actions.append(action)
+        if self.mutate is not None:
+            state = self.mutate(state)
+        return ProjectActionResult(state, self.event)
 
 
 class ProjectRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.registry = ProjectRegistry(Path(self.temp.name) / "projects.json")
+        self.registry.put(_record())
         self.runner = ProjectRunner(self.registry)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_role_provisioning_is_persisted_before_rpc_and_plan_waits_for_ack(self) -> None:
-        self.registry.put(_record(ProjectStatus.INTAKE))
-        pending = self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.SCENE_ELIGIBLE))
-        self.assertEqual(ProjectStatus.PROVISIONING_ROLES, pending.state.status)
-        self.assertEqual("provision_workers", pending.state.pending_effects[0].kind)
-        executor = FakeExecutor(ProjectEvent.ROLES_PROVISIONED)
+    def test_actions_are_process_local_and_restart_does_not_replay(self) -> None:
+        self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
+        self.assertTrue(self.runner.has_pending("p1"))
+        restarted = ProjectRunner(ProjectRegistry(self.registry.path))
+        self.assertFalse(restarted.has_pending("p1"))
+        self.assertEqual(ProjectStatus.STOPPED, restarted._registry.require("p1").state.status)
+
+    def test_one_action_must_finish_before_the_next_lifecycle_step(self) -> None:
+        self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
+        with self.assertRaisesRegex(ValueError, "in progress"):
+            self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_ACCEPTED))
+        executor = _Executor(LifecycleEvent(ProjectEvent.PROJECT_ACCEPTED))
         updated = self.runner.execute_next("p1", executor)
+        self.assertEqual(["start_supervisor"], [item.kind for item in executor.actions])
+        self.assertEqual("request_plan", self.runner.next_action("p1").kind)
         self.assertEqual(ProjectStatus.PLANNING, updated.state.status)
-        self.assertEqual("request_plan", updated.state.pending_effects[0].kind)
-        self.assertEqual(1, len(executor.effects))
 
-    def test_final_review_never_completes_before_goal_ack(self) -> None:
-        self.registry.put(_record(ProjectStatus.REVIEWING_STAGE))
-        pending = self.runner.dispatch(
-            "p1", LifecycleEvent(ProjectEvent.REVIEWS_PASSED, {"final_stage": True})
-        )
-        self.assertEqual(ProjectStatus.COMPLETING, pending.state.status)
-        self.assertEqual("complete_goal", pending.state.pending_effects[0].kind)
-        updated = self.runner.execute_next("p1", FakeExecutor(ProjectEvent.GOAL_COMPLETED))
-        self.assertEqual(ProjectStatus.COMPLETED, updated.state.status)
-        self.assertEqual((), updated.state.pending_effects)
+    def test_repair_event_queues_execution_directly(self) -> None:
+        reviewing = replace(_record(ProjectStatus.REVIEWING).state, revision=1)
+        self.registry.put(ProjectRecord(reviewing, "build a Houdini scene"), expected_revision=0)
+        updated = self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.REVIEWS_FAILED))
+        action = self.runner.next_action("p1")
+        self.assertEqual(ProjectStatus.EXECUTING, updated.state.status)
+        self.assertEqual("start_execution", action.kind)
+        self.assertEqual({"repair": True}, dict(action.data))
 
-    def test_goal_completion_failure_needs_attention(self) -> None:
-        self.registry.put(_record(ProjectStatus.REVIEWING_STAGE))
-        pending = self.runner.dispatch(
-            "p1", LifecycleEvent(ProjectEvent.REVIEWS_PASSED, {"final_stage": True})
-        )
-        effect = pending.state.pending_effects[0]
-        updated = self.runner.acknowledge(
-            "p1",
-            effect.effect_id,
-            LifecycleEvent(ProjectEvent.GOAL_COMPLETION_FAILED, {"error": "rpc"}),
-        )
-        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, updated.state.status)
+    def test_concurrent_guidance_revision_is_merged_after_role_turn(self) -> None:
+        self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
 
-    def test_continue_persists_resuming_until_goal_resume_effect_ack(self) -> None:
-        record = _record(ProjectStatus.NEEDS_ATTENTION)
-        record = ProjectRecord(
-            replace(record.state, resume_status=ProjectStatus.PLANNING),
-            record.authoritative_task_text,
-        )
-        self.registry.put(record)
+        def mutate(state: ProjectState) -> ProjectState:
+            current = self.registry.require("p1")
+            guided = publish_guidance(current.state, "new native guidance")
+            self.registry.put(ProjectRecord(guided, current.authoritative_task_text), expected_revision=current.state.revision)
+            return replace(state, stage=StageState(stage_id="stage-from-role"))
 
-        pending = self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.USER_CONTINUE))
-        self.assertEqual(ProjectStatus.RESUMING, pending.state.status)
-        self.assertEqual("resume_goal", pending.state.pending_effects[0].kind)
+        updated = self.runner.execute_next(
+            "p1", _Executor(LifecycleEvent(ProjectEvent.PROJECT_ACCEPTED), mutate)
+        )
+        self.assertEqual(1, updated.state.guidance_revision)
+        self.assertEqual("stage-from-role", updated.state.stage.stage_id)
 
-        updated = self.runner.execute_next("p1", FakeExecutor(ProjectEvent.GOAL_RESUMED))
-        self.assertEqual(ProjectStatus.PLANNING, updated.state.status)
-        self.assertIsNone(updated.state.resume_status)
-        self.assertEqual(1, len(updated.state.pending_effects))
-        self.assertEqual("request_plan", updated.state.pending_effects[0].kind)
-        self.assertEqual(
-            {"recovery": True}, dict(updated.state.pending_effects[0].data)
+    def test_role_action_cannot_change_identity_phase_or_thread_binding(self) -> None:
+        self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
+        bad = _Executor(
+            None,
+            lambda state: replace(state, status=ProjectStatus.EXECUTING),
         )
+        with self.assertRaisesRegex(ValueError, "identity or phase"):
+            self.runner.execute_next("p1", bad)
 
-    def test_persist_recovery_failure_holds_original_effect_for_revalidation(self) -> None:
-        original = PendingEffect("original", "start_execution", {"repair": True})
-        record = _record(ProjectStatus.EXECUTING_STAGE)
-        record = ProjectRecord(
-            replace(
-                record.state,
-                resume_status=ProjectStatus.AUTHORIZATION,
-                pending_effects=(original,),
-            ),
-            record.authoritative_task_text,
-        )
-        self.registry.put(record)
-
-        updated = self.runner.persist_recovery_failure("p1", "identity missing")
-        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, updated.state.status)
-        self.assertEqual("identity missing", updated.state.attention_reason)
-        self.assertEqual(ProjectStatus.AUTHORIZATION, updated.state.resume_status)
-        self.assertEqual((original,), updated.state.recovery_pending_effects)
-        self.assertEqual((), updated.state.pending_effects)
-
-        reloaded = self.registry.require("p1")
-        self.assertTrue(reloaded.state.recovery_required)
-        self.assertEqual((original,), reloaded.state.recovery_pending_effects)
-
-    def test_resume_effect_failure_is_persisted_as_needs_attention(self) -> None:
-        record = _record(ProjectStatus.NEEDS_ATTENTION)
-        record = ProjectRecord(
-            replace(record.state, resume_status=ProjectStatus.AUTHORIZATION),
-            record.authoritative_task_text,
-        )
-        self.registry.put(record)
-        pending = self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.USER_CONTINUE))
-        effect = pending.state.pending_effects[0]
-
-        updated = self.runner.acknowledge(
-            "p1",
-            effect.effect_id,
-            LifecycleEvent(
-                ProjectEvent.GOAL_RESUME_FAILED,
-                {"error": "native goal stayed paused"},
-            ),
-        )
-        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, updated.state.status)
-        self.assertEqual(ProjectStatus.AUTHORIZATION, updated.state.resume_status)
-        self.assertEqual("native goal stayed paused", updated.state.last_error)
-
-    def test_wrong_or_duplicate_effect_ack_is_rejected(self) -> None:
-        self.registry.put(_record(ProjectStatus.INTAKE))
-        pending = self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.SCENE_ELIGIBLE))
-        effect = pending.state.pending_effects[0]
-        with self.assertRaisesRegex(ValueError, "oldest"):
-            self.runner.acknowledge(
-                "p1", "wrong", LifecycleEvent(ProjectEvent.ROLES_PROVISIONED)
-            )
-        self.runner.acknowledge(
-            "p1", effect.effect_id, LifecycleEvent(ProjectEvent.ROLES_PROVISIONED)
-        )
-        with self.assertRaisesRegex(ValueError, "oldest"):
-            self.runner.acknowledge(
-                "p1", effect.effect_id, LifecycleEvent(ProjectEvent.ROLES_PROVISIONED)
-            )
-
-    def test_new_event_cannot_bypass_pending_effect(self) -> None:
-        self.registry.put(_record(ProjectStatus.INTAKE))
-        self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.SCENE_ELIGIBLE))
-        with self.assertRaisesRegex(ValueError, "pending"):
-            self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_FAILED))
-
-    def test_explicit_idle_stop_cancels_pending_work_and_requires_pause_ack(self) -> None:
-        record = _record(ProjectStatus.EXECUTING_STAGE)
-        record = ProjectRecord(
-            replace(
-                record.state,
-                pending_effects=(PendingEffect("write-next", "start_execution"),),
-            ),
-            record.authoritative_task_text,
-        )
-        self.registry.put(record)
-        stopped = self.runner.cancel_pending_and_dispatch(
-            "p1",
-            LifecycleEvent(ProjectEvent.PROJECT_INTERRUPTED, {"reason": "user_stop"}),
-        )
-        self.assertEqual(ProjectStatus.PAUSING, stopped.state.status)
-        self.assertEqual("pause_goal", stopped.state.pending_effects[0].kind)
-
-    def test_state_only_effect_ack_persists_stage_advance_without_auto_pass(self) -> None:
-        record = _record(ProjectStatus.EXECUTING_STAGE)
-        effect = PendingEffect("effect-advance", "advance_stage", {})
-        record = ProjectRecord(
-            replace(record.state, pending_effects=(effect,)),
-            record.authoritative_task_text,
-        )
-        self.registry.put(record)
-        advanced = replace(
-            record.state,
-            stage=replace(record.state.stage, stage_id="stage-2", ordinal=2),
-            revision=record.state.revision + 1,
-        )
-        updated = self.runner.acknowledge_effect(
-            "p1", effect.effect_id, EffectResult(advanced, None)
-        )
-        self.assertEqual(ProjectStatus.EXECUTING_STAGE, updated.state.status)
-        self.assertEqual("stage-2", updated.state.stage.stage_id)
-        self.assertEqual((), updated.state.pending_effects)
-
-    def test_effect_ack_preserves_guidance_added_while_rpc_was_running(self) -> None:
-        record = _record(ProjectStatus.EXECUTING_STAGE)
-        effect = PendingEffect("effect-long-rpc", "advance_stage", {})
-        started = replace(record.state, pending_effects=(effect,))
-        self.registry.put(ProjectRecord(started, record.authoritative_task_text))
-        outcome = replace(
-            started,
-            stage=replace(started.stage, stage_id="stage-2", ordinal=2),
-            revision=started.revision + 1,
-        )
-
-        latest = publish_guidance(started, "remove the optional antenna")
-        self.registry.put(
-            ProjectRecord(latest, record.authoritative_task_text),
-            expected_revision=started.revision,
-        )
-        updated = self.runner.acknowledge_effect(
-            "p1", effect.effect_id, EffectResult(outcome, None)
-        )
-
-        self.assertEqual("stage-2", updated.state.stage.stage_id)
-        self.assertEqual(
-            ["remove the optional antenna"],
-            [item.text for item in updated.state.guidance],
-        )
-
-    def test_material_delta_at_effect_boundary_discards_old_execution_and_replans(self) -> None:
-        record = _record(ProjectStatus.EXECUTING_STAGE)
-        effect = PendingEffect("old-execution", "start_execution", {})
-        state = replace(
-            record.state,
-            pending_effects=(effect, PendingEffect("old-review", "start_reviews", {})),
-            plan_stale=True,
-            blueprint_revision=1,
-            authorized_blueprint_revision=1,
-        )
-        self.registry.put(ProjectRecord(state, record.authoritative_task_text))
-        updated = self.runner.acknowledge_effect(
-            "p1",
-            effect.effect_id,
-            EffectResult(state, LifecycleEvent(ProjectEvent.STAGE_EXECUTED)),
-        )
-        self.assertEqual(ProjectStatus.PLANNING, updated.state.status)
-        self.assertEqual(["request_plan"], [item.kind for item in updated.state.pending_effects])
-        self.assertTrue(updated.state.plan_stale)
+    def test_fail_clears_queue_and_marks_failed(self) -> None:
+        self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
+        failed = self.runner.fail("p1", RuntimeError("rpc failed"))
+        self.assertEqual(ProjectStatus.FAILED, failed.state.status)
+        self.assertFalse(self.runner.has_pending("p1"))
+        self.assertIn("rpc failed", failed.state.last_error)
 
 
 if __name__ == "__main__":

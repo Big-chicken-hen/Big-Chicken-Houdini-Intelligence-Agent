@@ -563,8 +563,9 @@ class HoudiniSkillContractTests(unittest.TestCase):
             "use a short cohesive HOM batch",
             "create geometry directly or use an in-scene Python/script node only when",
             "Record the reason for an exception",
-            "follow the `rollback.status` and `automatic_retry_safe` rule",
-            "do not assume either a complete rollback or a partial scene change",
+            "inspect `errors[*].partial_scene_changes_possible` and `scene_change_status`",
+            "requires targeted scene inspection or `hia_scene_diff` before another write",
+            "HIA does not automatically undo a failed batch",
             "A successful Python return is not completion",
             "verify the actual live-scene nodes or geometry",
         ):
@@ -584,11 +585,11 @@ class HoudiniSkillContractTests(unittest.TestCase):
 
     def test_retry_and_runtime_identity_contracts_match_mcp_behavior(self) -> None:
         for marker in (
-            "only verified `rolled_back` plus `automatic_retry_safe=true`",
-            "`unknown` or `partial` validation and `NO_OBSERVED_EFFECT` do not "
-            "trigger Undo",
-            "`not_proven`, timeout, or possible external side effects require a "
-            "targeted inspect/diff first",
+            "read `errors[*].partial_scene_changes_possible` and `scene_change_status`",
+            "A syntax or undo-group setup failure reported as unchanged",
+            "A possible, changed, or unknown scene state requires targeted inspection",
+            "HIA does not automatically undo a failed batch",
+            "`unknown`, `partial`, or `NO_OBSERVED_EFFECT` validation does not prove completion",
         ):
             with self.subTest(recovery_marker=marker):
                 self.assertIn(marker, self.validation)
@@ -602,10 +603,9 @@ class HoudiniSkillContractTests(unittest.TestCase):
             with self.subTest(identity_marker=marker):
                 self.assertIn(marker, self.visual)
         for marker in (
-            "`expected_outputs` 只隐式补目标存在性和节点错误检查",
-            "`unknown`、`partial` 与 `NO_OBSERVED_EFFECT`",
-            "`rollback.status`",
-            "`automatic_retry_safe=true`",
+            "`partial_scene_changes_possible`",
+            "`scene_change_status`",
+            "HIA 自身不请求 Undo",
             "运行时身份绑定 launcher session、Houdini PID",
             "health 和只读工具仍可用于确认实际连接",
         ):
@@ -731,26 +731,26 @@ class HoudiniSkillContractTests(unittest.TestCase):
             self.review,
         )
 
-    def test_capture_quality_and_display_match_gate_visual_evidence(self) -> None:
+    def test_capture_returns_objective_facts_for_codex_visual_judgment(self) -> None:
         for marker in (
-            "quality_status",
-            "quality_reasons",
-            "quality_metrics",
-            "display_match",
-            "hdr_display_mismatch_risk",
+            "actual returned image content",
+            "objective `source_state`",
+            "exact frame lock",
+            "capture success",
+            "cook evidence",
+            "temporal coverage",
+            "runtime does not score them",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.validation)
-        self.assertIn("capture-quality and display-match interpretation", self.visual)
+        self.assertIn("objective source-state, frame-lock, capture, cook, and temporal facts", self.visual)
         self.assertIn("selective preview and display-match contract", self.material)
         self.assertIn("capture-quality and display-match rule", self.review)
-        self.assertNotIn("capture_quality", self.validation)
         for runtime_marker in (
-            '"quality_status"',
-            '"quality_reasons"',
-            '"quality_metrics"',
-            '"display_match": "unverified"',
-            '"hdr_display_mismatch_risk": "unverified"',
+            '"source_state"',
+            '"frame_lock"',
+            '"capture_ok"',
+            '"cook_cache_evidence"',
         ):
             with self.subTest(runtime_marker=runtime_marker):
                 self.assertIn(runtime_marker, self.hia_runtime_executor)
@@ -775,7 +775,7 @@ class HoudiniSkillContractTests(unittest.TestCase):
             "actual returned frame or bounded sequence covers what was requested",
             "original frame and view state were restored",
             "low-resolution preview as bounded review evidence",
-            "frame coverage or restoration is unproven",
+            "frame, view, cook, or restoration evidence is unproven",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.validation)
@@ -785,12 +785,12 @@ class HoudiniSkillContractTests(unittest.TestCase):
         )
         self.assertNotIn("low-resolution same-frame preview", self.procedural)
 
-    def test_subjective_effect_experiment_is_goal_scoped_and_direct_tasks_are_exempt(
+    def test_subjective_comparison_is_task_scoped_and_direct_tasks_are_exempt(
         self,
     ) -> None:
         for marker in (
-            "temporary, bounded EffectSpec experiment contract",
-            "current task context or existing Goal state",
+            "temporary, bounded comparison contract",
+            "only in the current task context",
             "Direct deterministic work never enters this loop",
         ):
             with self.subTest(marker=marker):
@@ -811,7 +811,8 @@ class HoudiniSkillContractTests(unittest.TestCase):
         self,
     ) -> None:
         for marker in (
-            "one low-cost baseline and two or three bounded candidates",
+            "one low-cost baseline",
+            "two or three bounded candidates one at a time",
             "actual previews for every specified frame and view together with the "
             "relevant returned Houdini data",
             "explicit ranking and best candidate",
@@ -829,28 +830,20 @@ class HoudiniSkillContractTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.validation)
 
-    def test_effect_experiment_separates_codex_runtime_and_knowledge_responsibilities(
+    def test_bounded_comparison_separates_codex_runtime_and_knowledge_responsibilities(
         self,
     ) -> None:
         for marker in (
-            "`hia_run_effect_experiment` live tool contract",
-            "runtime executes candidates and returns observed previews and Houdini "
-            "facts only",
-            "it does not rank them or create the EffectSpec or Evaluation",
-            "Skill defines workflow and completion evidence only",
-            "does not execute candidates, clear caches, assemble contact sheets",
-            "copy the tool's input schema",
-            "knowledge may inform control direction, version evidence, failure causes, "
-            "and comparable cases",
+            "capture it under fixed comparison conditions",
+            "evaluate two or three bounded candidates one at a time",
+            "one explicit `hia_execute_hom` call",
+            "followed by explicit capture and claim-specific validation",
+            "return to or adjust the baseline only through another deliberate bounded HOM call",
+            "does not automatically rank candidates, restore a baseline, clear caches",
             "does not prewrite this task's scoring criteria",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.validation)
-        self.assertIn('"hia_run_effect_experiment"', self.hia_tools_schema)
-        self.assertIn(
-            "It never scores candidates, builds EffectSpec",
-            self.hia_tools_schema,
-        )
 
         experiment = self.validation.split(
             "## Bounded subjective effect experiments", 1

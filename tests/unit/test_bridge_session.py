@@ -23,10 +23,8 @@ from hia_bridge.session import (  # noqa: E402
     MODEL_LIST_PAGE_SIZE,
     MAX_LOCAL_IMAGES,
     STOP_INTERRUPT_GRACE_SECONDS,
-    STOP_RECOVERY_TOTAL_SECONDS,
     THREAD_PREVIEW_MAX_LENGTH,
     BridgeSession,
-    _requires_system_drive_approval,
     _thread_cwd_filters,
 )
 
@@ -442,222 +440,21 @@ class BridgeSessionApprovalRoutingTests(unittest.TestCase):
             "turnId": "turn-approval",
         }
 
-    def test_only_explicit_system_drive_changes_require_manual_approval(self) -> None:
-        project_file = str(REPOSITORY_ROOT / ".runtime" / "tmp" / "approval.txt")
-        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
-        auto_commands = (
-            "[DateTimeOffset]::FromUnixTimeSeconds(1).ToString('u')",
-            (
-                "$r = Invoke-WebRequest -UseBasicParsing "
-                "'https://www.shadertoy.com/view/ltffzl'; "
-                "$r.Content.Substring(0, [Math]::Min(5000, $r.Content.Length))"
-            ),
-            (
-                "$r = Invoke-WebRequest -UseBasicParsing "
-                "'https://www.sidefx.com/docs/houdini/nodes/cop/wrangle.html'; "
-                "$r.Content | Select-String -Pattern 'VEX|kernel|pixel'"
-            ),
-            f"Get-Content -LiteralPath '{system_file}'",
-            f"Get-Content -LiteralPath '{self.system_drive}\\README.md'",
-            f"Set-Content -LiteralPath '{project_file}' -Value test",
-            (
-                f"Set-Content -LiteralPath '{project_file}' "
-                "-Value '$env:USERPROFILE'"
-            ),
-            f"Get-Content '{system_file}' > '{project_file}'",
-            "curl.exe 'https://www.shadertoy.com/view/ltffzl'",
-            (
-                f"Copy-Item -LiteralPath '{system_file}' -Destination "
-                f"'{project_file}'"
-            ),
-            (
-                "Copy-Item -LiteralPath '$env:USERPROFILE\\input.png' "
-                f"-Destination '{project_file}'"
-            ),
-        )
-        for command in auto_commands:
-            with self.subTest(command=command):
-                self.assertFalse(
-                    _requires_system_drive_approval(
-                        "item/commandExecution/requestApproval",
-                        self.command_params(command),
-                        project_root=REPOSITORY_ROOT,
-                        system_drive=self.system_drive,
-                    )
-                )
-
-        for command in (
-            f"Set-Content -LiteralPath '{system_file}' -Value test",
-            f"Remove-Item -LiteralPath '{system_file}'",
-            f"rm '{system_file}'",
-            f"rd '{self.system_drive}\\Users\\Public\\HIA-Test'",
-            f"python -c \"import os; os.remove(r'{system_file}')\"",
-            f"Set-Item -LiteralPath '{system_file}' -Value test",
-            (
-                "Invoke-RestMethod 'https://example.com/data' -OutFile "
-                f"'{system_file}'"
-            ),
-            f"curl.exe 'https://example.com/data' -o '{system_file}'",
-            f"[IO.File]::AppendAllText('{system_file}', 'test')",
-            f"shutil.copyfile(r'{project_file}', r'{system_file}')",
-            f"'test' | Tee-Object -FilePath '{system_file}'",
-            f"open(r'{system_file}', 'wb')",
-            f"'test' > '{system_file}'",
-            "Set-Content -LiteralPath '$env:SystemDrive\\HIA-Test.txt' -Value test",
-            "Set-Content -LiteralPath '${env:SystemDrive}\\HIA-Test.txt' -Value test",
-            "Set-Content -LiteralPath '%SystemDrive%\\HIA-Test.txt' -Value test",
-            "Set-Content -LiteralPath '~\\HIA-Test.txt' -Value test",
-            (
-                f"Copy-Item -LiteralPath '{project_file}' -Destination "
-                "'$env:SystemDrive\\HIA-Test.txt'"
-            ),
-            (
-                f"Move-Item -LiteralPath '{system_file}' -Destination "
-                f"'{project_file}'"
-            ),
-        ):
-            with self.subTest(command=command):
-                self.assertTrue(
-                    _requires_system_drive_approval(
-                        "item/commandExecution/requestApproval",
-                        self.command_params(command),
-                        project_root=REPOSITORY_ROOT,
-                        system_drive=self.system_drive,
-                    )
-                )
-
-    def test_command_actions_take_precedence_over_broken_serialized_command(self) -> None:
-        params = self.command_params(
-            "broken fallback; Set-Content C:\\Users\\Public\\wrong.txt"
-        )
-        params["commandActions"] = [
-            {
-                "command": (
-                    "Invoke-WebRequest -UseBasicParsing "
-                    "'https://www.shadertoy.com/view/ltffzl'"
-                )
-            }
-        ]
-
-        self.assertFalse(
-            _requires_system_drive_approval(
-                "item/commandExecution/requestApproval",
-                params,
-                project_root=REPOSITORY_ROOT,
-                system_drive=self.system_drive,
-            )
+    def test_native_approval_is_published_and_never_auto_resolved(self) -> None:
+        session, client, events = self.make_session()
+        client.emit_approval(
+            "approval-pending",
+            "item/commandExecution/requestApproval",
+            self.command_params("Get-ChildItem -LiteralPath ."),
         )
 
-    def test_project_root_remains_auto_allowed_when_it_is_on_system_drive(self) -> None:
-        project_root = Path(self.system_drive + "\\HIA-Portable")
-        params = self.command_params(
-            "Set-Content -LiteralPath "
-            f"'{project_root}\\.runtime\\tmp\\approval.txt' -Value test",
-            cwd=str(project_root),
-        )
-        self.assertFalse(
-            _requires_system_drive_approval(
-                "item/commandExecution/requestApproval",
-                params,
-                project_root=project_root,
-                system_drive=self.system_drive,
-            )
-        )
-
-    def test_file_and_permission_approvals_only_prompt_for_system_write(self) -> None:
-        system_root = self.system_drive + "\\ProgramData\\HIA"
-        project_root = str(REPOSITORY_ROOT / ".runtime")
-        self.assertTrue(
-            _requires_system_drive_approval(
-                "item/fileChange/requestApproval",
-                {"grantRoot": system_root},
-                project_root=REPOSITORY_ROOT,
-                system_drive=self.system_drive,
-            )
-        )
-        for grant_root in (None, project_root):
-            self.assertFalse(
-                _requires_system_drive_approval(
-                    "item/fileChange/requestApproval",
-                    {"grantRoot": grant_root},
-                    project_root=REPOSITORY_ROOT,
-                    system_drive=self.system_drive,
-                )
-            )
-
-        def permission(access: str, path: str) -> dict[str, Any]:
-            return {
-                "cwd": str(REPOSITORY_ROOT),
-                "permissions": {
-                    "fileSystem": {
-                        "entries": [
-                            {
-                                "access": access,
-                                "path": {"type": "path", "path": path},
-                            }
-                        ]
-                    }
-                },
-            }
-
-        self.assertTrue(
-            _requires_system_drive_approval(
-                "item/permissions/requestApproval",
-                permission("write", system_root),
-                project_root=REPOSITORY_ROOT,
-                system_drive=self.system_drive,
-            )
-        )
-        for params in (
-            permission("read", system_root),
-            permission("write", project_root),
-            {
-                "cwd": str(REPOSITORY_ROOT),
-                "permissions": {"network": {"enabled": True}},
-            },
-        ):
-            self.assertFalse(
-                _requires_system_drive_approval(
-                    "item/permissions/requestApproval",
-                    params,
-                    project_root=REPOSITORY_ROOT,
-                    system_drive=self.system_drive,
-                )
-            )
-
-    def test_auto_allow_uses_existing_accept_and_never_publishes_card(self) -> None:
-        _session, client, events = self.make_session()
-        for request_id, url in (
-            ("approval-auto-shadertoy", "https://www.shadertoy.com/view/ltffzl"),
-            (
-                "approval-auto-sidefx",
-                "https://www.sidefx.com/docs/houdini/nodes/cop/wrangle.html",
-            ),
-        ):
-            client.emit_approval(
-                request_id,
-                "item/commandExecution/requestApproval",
-                self.command_params(
-                    f"Invoke-WebRequest -UseBasicParsing '{url}'"
-                ),
-            )
-
-        self.assertEqual(
-            [
-                ("approval-auto-shadertoy", {"decision": "accept"}),
-                ("approval-auto-sidefx", {"decision": "accept"}),
-            ],
-            client.approval_responses,
-        )
-        self.assertEqual({}, client.pending)
+        self.assertEqual([], client.approval_responses)
+        self.assertIn("approval-pending", client.pending)
         published = events.poll(0, timeout=0)["events"]
-        self.assertFalse(
-            any(event.get("type") == "server_request" for event in published)
-        )
         self.assertTrue(
             any(
-                event.get("type") == "approval_resolved"
-                and event.get("decision") == "allow"
+                event.get("type") == "server_request"
+                and event.get("request_id") == "approval-pending"
                 for event in published
             )
         )
@@ -713,43 +510,6 @@ class BridgeSessionApprovalRoutingTests(unittest.TestCase):
             session.resolve_approval("approval-no-rule", "allow_rule")
         self.assertEqual("INVALID_APPROVAL_DECISION", raised.exception.code)
         self.assertIn("approval-no-rule", client.pending)
-
-    def test_system_write_and_auto_response_failure_fall_back_to_panel(self) -> None:
-        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
-        _session, client, events = self.make_session()
-        client.emit_approval(
-            "approval-manual-system",
-            "item/commandExecution/requestApproval",
-            self.command_params(
-                f"Set-Content -LiteralPath '{system_file}' -Value test"
-            ),
-        )
-        self.assertEqual([], client.approval_responses)
-        self.assertIn("approval-manual-system", client.pending)
-        self.assertTrue(
-            any(
-                event.get("type") == "server_request"
-                for event in events.poll(0, timeout=0)["events"]
-            )
-        )
-
-        _session, failed_client, failed_events = self.make_session(
-            fail_response=True
-        )
-        failed_client.emit_approval(
-            "approval-auto-failed",
-            "item/commandExecution/requestApproval",
-            self.command_params("[DateTimeOffset]::FromUnixTimeSeconds(1)"),
-        )
-        self.assertIn("approval-auto-failed", failed_client.pending)
-        self.assertTrue(
-            any(
-                event.get("type") == "server_request"
-                and event.get("request_id") == "approval-auto-failed"
-                for event in failed_events.poll(0, timeout=0)["events"]
-            )
-        )
-
 
 class _BlockingTurnClient(_ClientStub):
     def __init__(self) -> None:
@@ -1286,61 +1046,6 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
             1,
             sum(method == "thread/delete" for method, _params in client.requests),
         )
-
-    def test_delete_is_rejected_during_stop_recovery(self) -> None:
-        client = _ThreadHistoryClient({"data": []})
-        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
-        session.start_thread()
-        client.requests.clear()
-        with session._lock:
-            session._turn_status = "stopRecovering"
-            session._stop_recovery_thread = threading.current_thread()
-
-        with self.assertRaises(BridgeError) as caught:
-            session.delete_thread("thread-test")
-
-        self.assertEqual("STOP_RECOVERY_IN_PROGRESS", caught.exception.code)
-        self.assertEqual(409, caught.exception.http_status)
-        self.assertEqual([], client.requests)
-
-    def test_deleted_thread_is_not_resumed_by_stop_recovery(self) -> None:
-        client = _StopRecoveryClient(complete_during_interrupt=False)
-        events = EventBuffer()
-        session = BridgeSession(REPOSITORY_ROOT, client, events)
-        session.start_thread()
-        with session._turn_condition:
-            session._connected = False
-            session._turn_generation += 1
-            recovery_generation = session._turn_generation
-            session._turn_status = "stopRecovering"
-            session._turn_active = False
-            session._stop_recovery_thread = threading.current_thread()
-
-        def initialize_and_delete(timeout_seconds: float) -> dict[str, Any]:
-            client.initialize_timeouts.append(timeout_seconds)
-            client.emit_notification(
-                "thread/deleted",
-                {"threadId": "thread-test"},
-            )
-            return {"userAgent": "fake-codex/0.144.3"}
-
-        with mock.patch.object(
-            client,
-            "initialize_with_timeout",
-            side_effect=initialize_and_delete,
-        ):
-            session._recover_app_server_after_stop(
-                "thread-test",
-                recovery_generation,
-            )
-
-        self.assertIsNone(session.snapshot()["thread_id"])
-        self.assertTrue(session.snapshot()["connected"])
-        self.assertIsNone(session._stop_recovery_thread)
-        self.assertFalse(any(
-            method == "thread/resume"
-            for method, _params, _timeout in client.timed_requests
-        ))
 
     def test_focus_write_failure_after_delete_returns_success_warning(self) -> None:
         client = _ThreadHistoryClient({"data": []})
@@ -2293,7 +1998,6 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
 
         result = session.interrupt_turn()
 
-        self.assertFalse(result["restarted_app_server"])
         self.assertEqual(0, client.restart_count)
         self.assertEqual("thread-test", result["thread_id"])
         self.assertEqual(turn_id, result["turn_id"])
@@ -2301,172 +2005,39 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertEqual("interrupted", result["session"]["turn_status"])
         self.assertEqual(STOP_INTERRUPT_GRACE_SECONDS, client.timed_requests[0][2])
 
-    def test_interrupt_timeout_restarts_and_resumes_exact_thread_without_replay(self) -> None:
-        client = _StopRecoveryClient(
-            complete_during_interrupt=False,
-        )
-        events = EventBuffer()
-        session = BridgeSession(REPOSITORY_ROOT, client, events)
-        session.start_thread()
-        turn_id = session.start_turn("stop and recover")["turn_id"]
-        client.emit_notification(
-            "item/started",
-            {
-                "threadId": "thread-test",
-                "turnId": turn_id,
-                "item": {
-                    "type": "mcpToolCall",
-                    "tool": "hia_execute_hom",
-                    "status": "inProgress",
-                },
-            },
-        )
-
-        with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
-            result = session.interrupt_turn()
-
-        self.assertTrue(result["recovery_pending"])
-        self.assertFalse(result["restarted_app_server"])
-        self.assertTrue(result["houdini_may_still_be_finishing"])
-        self.assertEqual("stopRecovering", result["session"]["turn_status"])
-        self.assertFalse(result["session"]["turn_active"])
-        self.assertTrue(client.resume_finished.wait(2.0))
-        worker = session._stop_recovery_thread
-        if worker is not None:
-            worker.join(2.0)
-        self.assertEqual(1, client.restart_count)
-        self.assertEqual(1, len(client.restart_deadlines))
-        self.assertIsNotNone(client.restart_deadlines[0])
-        self.assertEqual(1, len(client.initialize_timeouts))
-        timed_methods = [method for method, _params, _timeout in client.timed_requests]
-        self.assertEqual(["turn/interrupt", "thread/resume"], timed_methods)
-        resume_params = client.timed_requests[1][1]
-        self.assertEqual("thread-test", resume_params["threadId"])
-        self.assertEqual(
-            1,
-            sum(method == "turn/start" for method, _params in client.requests),
-        )
-        snapshot = session.snapshot()
-        self.assertEqual("thread-test", snapshot["thread_id"])
-        self.assertIsNone(snapshot["turn_id"])
-        self.assertTrue(snapshot["connected"])
-        self.assertFalse(snapshot["turn_active"])
-        self.assertEqual("interrupted", snapshot["turn_status"])
-        session_states = [
-            event["session"]
-            for event in events.poll(0, timeout=0)["events"]
-            if event.get("type") == "session_state"
-        ]
-        self.assertEqual("stopRequested", session_states[0]["turn_status"])
-        self.assertIn(
-            "stopRecovering",
-            [state["turn_status"] for state in session_states],
-        )
-        self.assertEqual("interrupted", session_states[-1]["turn_status"])
-
-    def test_stop_background_recovery_failure_is_bounded_and_releases_the_turn(self) -> None:
-        client = _StopRecoveryClient(
-            complete_during_interrupt=False,
-            timeout_during_resume=True,
-        )
-        events = EventBuffer()
-        session = BridgeSession(REPOSITORY_ROOT, client, events)
-        session.start_thread()
-        turn_id = session.start_turn("resume must stay bounded")["turn_id"]
-
-        with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
-            result = session.interrupt_turn()
-
-        self.assertTrue(result["recovery_pending"])
-        self.assertTrue(client.resume_finished.wait(2.0))
-        worker = session._stop_recovery_thread
-        if worker is not None:
-            worker.join(2.0)
-        self.assertEqual(50.0, STOP_RECOVERY_TOTAL_SECONDS)
-        self.assertEqual(1.0, STOP_INTERRUPT_GRACE_SECONDS)
-        self.assertEqual(1, client.restart_count)
-        resume_timeout = next(
-            timeout
-            for method, _params, timeout in client.timed_requests
-            if method == "thread/resume"
-        )
-        self.assertLessEqual(resume_timeout, STOP_RECOVERY_TOTAL_SECONDS)
-        snapshot = session.snapshot()
-        self.assertFalse(snapshot["connected"])
-        self.assertFalse(snapshot["turn_active"])
-        self.assertEqual("stopRecoveryFailed", snapshot["turn_status"])
-        self.assertIsNone(snapshot["turn_id"])
-        self.assertIsNone(session._stop_recovery_thread)
-        session_states = [
-            event["session"]
-            for event in events.poll(0, timeout=0)["events"]
-            if event.get("type") == "session_state"
-        ]
-        self.assertFalse(session_states[-1]["connected"])
-        self.assertFalse(session_states[-1]["turn_active"])
-
-    def test_old_completion_during_restart_cannot_revive_the_stopped_turn(self) -> None:
-        client = _StopRecoveryClient(
-            complete_during_interrupt=False,
-            complete_during_resume=True,
-        )
+    def test_interrupt_timeout_is_explicit_and_never_restarts_codex(self) -> None:
+        client = _StopRecoveryClient(complete_during_interrupt=False)
         session = self.make_session(client)
-        turn_id = session.start_turn("complete while restarting")["turn_id"]
+        turn_id = session.start_turn("stop without confirmation")["turn_id"]
 
         with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
-            result = session.interrupt_turn()
-
-        self.assertTrue(result["recovery_pending"])
-        self.assertTrue(client.resume_finished.wait(2.0))
-        worker = session._stop_recovery_thread
-        if worker is not None:
-            worker.join(2.0)
-        snapshot = session.snapshot()
-        self.assertIsNone(snapshot["turn_id"])
-        self.assertFalse(snapshot["turn_active"])
-        self.assertEqual("interrupted", snapshot["turn_status"])
-
-    def test_slow_stop_recovery_has_one_worker_and_one_exact_resume(self) -> None:
-        resume_gate = threading.Event()
-        client = _StopRecoveryClient(
-            complete_during_interrupt=False,
-            resume_gate=resume_gate,
-        )
-        session = self.make_session(client)
-        session.start_turn("recover once")
-
-        try:
-            with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
-                result = session.interrupt_turn()
-            self.assertTrue(result["recovery_pending"])
-            self.assertTrue(client.resume_entered.wait(2.0))
-            recovering = session.snapshot()
-            self.assertFalse(recovering["connected"])
-            self.assertFalse(recovering["turn_active"])
-            self.assertEqual("stopRecovering", recovering["turn_status"])
             with self.assertRaises(BridgeError) as raised:
                 session.interrupt_turn()
-            self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
-            self.assertEqual(1, client.restart_count)
-        finally:
-            resume_gate.set()
-        self.assertTrue(client.resume_finished.wait(2.0))
-        worker = session._stop_recovery_thread
-        if worker is not None:
-            worker.join(2.0)
-        self.assertEqual(1, client.restart_count)
+
+        self.assertEqual("INTERRUPT_NOT_CONFIRMED", raised.exception.code)
+        self.assertEqual(0, client.restart_count)
         self.assertEqual(
-            ["thread-test"],
-            [
-                params["threadId"]
-                for method, params, _timeout in client.timed_requests
-                if method == "thread/resume"
-            ],
+            ["turn/interrupt"],
+            [method for method, _params, _timeout in client.timed_requests],
         )
-        self.assertEqual(
-            1,
-            sum(method == "turn/start" for method, _params in client.requests),
-        )
+        snapshot = session.snapshot()
+        self.assertEqual(turn_id, snapshot["turn_id"])
+        self.assertTrue(snapshot["turn_active"])
+        self.assertEqual("inProgress", snapshot["turn_status"])
+
+    def test_interrupt_without_bounded_transport_is_not_confirmed(self) -> None:
+        client = _RecordingClient()
+        session = self.make_session(client)
+        turn_id = session.start_turn("stop without transport")["turn_id"]
+
+        with self.assertRaises(BridgeError) as raised:
+            session.interrupt_turn()
+
+        self.assertEqual("INTERRUPT_NOT_CONFIRMED", raised.exception.code)
+        snapshot = session.snapshot()
+        self.assertEqual(turn_id, snapshot["turn_id"])
+        self.assertTrue(snapshot["turn_active"])
+        self.assertEqual("inProgress", snapshot["turn_status"])
 
     def test_turn_start_claim_is_atomic_and_completion_must_match(self) -> None:
         client = _BlockingTurnClient()
@@ -2737,9 +2308,9 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "hia_capture_viewport，不固定尺寸",
             "动画/模拟用代表帧或短序列",
             "材质验收读取绑定、MaterialX 连接和正确输入",
-            "Stop 后已发 HOM 仍可能收尾",
-            "失败读 rollback.status/automatic_retry_safe",
-            "仅 rolled_back+true 可修正重试一次",
+            "Stop 后已提交的 HOM 仍可能收尾",
+            "失败后先显式 inspect、diff、validate",
+            "根据新证据决定下一步，禁止自动重试",
             "unknown/partial/NO_OBSERVED_EFFECT 不 Undo 也不算完成",
             "session/source drift 停写并正常重启，不热加载",
             "仅主任务串行调用 hia_*/HOM 并写 HIP",
@@ -2749,8 +2320,8 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "多个关键词合并为一次批量查询",
             "同类读取不并发扇出",
             "QUEUE_FULL 不立即重试",
-            "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label",
-            "聊天、关闭专注和逐参数操作不设",
+            "阶段结果只按实际场景证据报告",
+            "失败阶段先检查当前场景再修正",
             "主任务只保留原生 Goal、决定和子任务短摘要",
             "子任务详情按需查看",
             "不塞入主上下文",

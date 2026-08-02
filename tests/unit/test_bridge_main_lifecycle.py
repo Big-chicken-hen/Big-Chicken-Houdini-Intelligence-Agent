@@ -152,9 +152,8 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             mock.patch.object(bridge_main, "BridgeSession", return_value=session)
         )
         isolated_project_runtime = SimpleNamespace(
-            service=object(),
+            service=SimpleNamespace(snapshot=lambda: {"projects": []}),
             observe_codex_event=lambda *_args, **_kwargs: None,
-            recover=lambda: (),
             close=lambda *_args, **_kwargs: True,
         )
         stack.enter_context(
@@ -496,7 +495,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
         self.assertEqual("hia_v2", json.loads(stdout.getvalue())["mcp_backend"])
 
-    def test_project_runtime_recovers_after_session_start_and_closes_before_session(self) -> None:
+    def test_project_runtime_publishes_after_session_start_and_closes_before_session(self) -> None:
         order: list[str] = []
         client = _Client(order)
         session = _Session(order)
@@ -509,8 +508,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
         server = _Server(order)
         project_runtime = SimpleNamespace(
-            service=object(),
-            recover=lambda: order.append("project_recover") or (),
+            service=SimpleNamespace(snapshot=lambda: {"projects": []}),
             close=lambda: order.append("project_close") or True,
         )
         stack, _ = self._common_patches(session, client)
@@ -539,8 +537,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             exit_code = bridge_main.run([])
 
         self.assertEqual(0, exit_code)
-        self.assertLess(order.index("session_start"), order.index("project_recover"))
-        self.assertLess(order.index("project_recover"), order.index("serve_forever"))
+        self.assertLess(order.index("session_start"), order.index("serve_forever"))
         self.assertLess(order.index("server_close"), order.index("project_close"))
         self.assertLess(order.index("project_close"), order.index("session_close"))
         self.assertIs(
@@ -561,7 +558,6 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                 REPOSITORY_ROOT / ".runtime",
                 REPOSITORY_ROOT / ".runtime" / "cache",
             ),
-            thread_deleter=None,
         )
 
     def test_http_provider_command_is_escaped_process_local_and_secret_free(self) -> None:

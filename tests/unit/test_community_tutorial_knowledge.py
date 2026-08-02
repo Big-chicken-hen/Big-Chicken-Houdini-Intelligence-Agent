@@ -183,7 +183,6 @@ class FakeEmbedder:
             "dim": self.dim,
             "normalized": True,
             "status": "ready",
-            "fallback_reason": "",
             "repair": {},
         }
 
@@ -198,7 +197,6 @@ class FakeEmbedder:
             "requested_profile": self.requested_profile,
             "dim": self.dim,
             "normalized": True,
-            "fallback_reason": "",
             "repair": {},
             "device": "fake-cpu",
         }
@@ -559,7 +557,7 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=5,
-            mode="hybrid",
+            mode="lexical",
             source_kinds={COMMUNITY_TUTORIAL_SOURCE},
         )
         for mode, results in (
@@ -668,7 +666,7 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=10,
-            mode="hybrid",
+            mode="lexical",
             allow_index_updates=False,
             source_kinds={COMMUNITY_TUTORIAL_SOURCE},
         )[0]

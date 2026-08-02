@@ -198,6 +198,7 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
 
     def _dispatch(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        arguments = {"mode": "lexical", **arguments}
         original_read_text = Path.read_text
 
         def tracked_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
@@ -366,25 +367,18 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
             / "knowledge.sqlite3"
         )
 
-        absent = self._dispatch(
-            {
-                "query": "Needle",
-                "sources": ["project"],
-                "mode": "lexical",
-            }
-        )
+        with self.assertRaises(HiaRuntimeError) as raised:
+            self._dispatch(
+                {
+                    "query": "Needle",
+                    "sources": ["project"],
+                    "mode": "lexical",
+                }
+            )
 
-        self.assertTrue(absent["ok"])
+        self.assertEqual("LOCAL_HELP_INDEX_UNAVAILABLE", raised.exception.code)
         self.assertFalse(database.exists())
         self.assertEqual([], self.file_read_states)
-        self.assertEqual(
-            "read_only",
-            absent["result"]["index"]["refresh_reason"],
-        )
-        self.assertFalse(
-            absent["result"]["index"]["corpus"]["available"]
-        )
-        self.assertTrue(absent["warnings"])
 
         self._dispatch(
             {
@@ -1183,7 +1177,22 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
             "UserPreservationToken must survive built-in upgrades.",
         )
         index.refresh({"user"}, {"houdini_version": "21.0"}, force=True)
-        store = HybridKnowledgeStore(root, index=index, embedder=object())
+        vector = [1.0, *([0.0] * 31)]
+        embedder = mock.Mock()
+        embedder.encode.side_effect = lambda *, documents, queries: {
+            "document_vectors": [vector for _ in documents],
+            "query_vectors": [vector for _ in queries],
+            "model_id": "test/local",
+            "model_revision": "test-revision",
+            "profile_id": "test-profile",
+            "active_profile": "test-profile",
+            "requested_profile": "test-profile",
+            "dim": 32,
+            "normalized": True,
+            "status": "ready",
+            "repair": {},
+        }
+        store = HybridKnowledgeStore(root, index=index, embedder=embedder)
         memory = store.project_memory(
             {
                 "action": "record",
@@ -1557,7 +1566,6 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
                 "dim": 32,
                 "normalized": True,
                 "status": "ready",
-                "fallback_reason": "",
                 "repair": {},
             }
 

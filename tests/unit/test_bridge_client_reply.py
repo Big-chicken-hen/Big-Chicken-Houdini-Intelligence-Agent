@@ -312,7 +312,6 @@ class BridgeClientQueueTests(unittest.TestCase):
         )
         client.continue_project(project_id="project-a")
         client.stop_project(project_id="project-a")
-        client.delete_project(project_id="project-a")
         client.set_project_role_runtime(
             "project-a",
             "thread-review",
@@ -321,7 +320,7 @@ class BridgeClientQueueTests(unittest.TestCase):
             service_tier="priority",
         )
 
-        requests = transport.submissions[-8:]
+        requests = transport.submissions[-7:]
         self.assertEqual(
             [
                 ("GET", "/v1/project-team", "project_team_get", None),
@@ -368,12 +367,6 @@ class BridgeClientQueueTests(unittest.TestCase):
                 (
                     "POST",
                     "/v1/project-team/actions",
-                    "project_team_delete",
-                    {"action": "delete", "project_id": "project-a"},
-                ),
-                (
-                    "POST",
-                    "/v1/project-team/actions",
                     "project_team_role_runtime",
                     {
                         "action": "set_role_runtime",
@@ -397,19 +390,17 @@ class BridgeClientQueueTests(unittest.TestCase):
         )
         self.assertTrue(all(item["timeout_ms"] == 15_000 for item in requests))
 
-    def test_project_guidance_can_explicitly_force_blueprint_revision(self) -> None:
+    def test_project_guidance_uses_the_single_append_path(self) -> None:
         client, transport = _load_transport_bridge_client()
         client.append_project_guidance(
             "project-a",
             "改成三层钢结构并重新安排所有阶段",
-            force_replan=True,
         )
         self.assertEqual(
             {
                 "action": "append_guidance",
                 "project_id": "project-a",
                 "text": "改成三层钢结构并重新安排所有阶段",
-                "force_replan": True,
             },
             transport.submissions[-1]["payload"],
         )

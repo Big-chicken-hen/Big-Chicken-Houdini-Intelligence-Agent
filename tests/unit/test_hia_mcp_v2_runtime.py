@@ -290,37 +290,52 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
         self.assertEqual("21.0.440", response["result"]["houdini_build"])
         self.assertEqual(12.0, response["result"]["frame"])
 
-    def test_execute_hom_returns_the_full_structured_contract(self) -> None:
+    def test_execute_hom_returns_only_direct_execution_facts(self) -> None:
         response = self.executor.dispatch(
             "hia_execute_hom",
             {
-                "script": "print('hello')\nhia_mark_changed('/obj/test')\nhia_result = {'frame': hou.frame()}",
-                "capture_diff": True,
+                "script": "print('hello')\nhia_result = {'frame': hou.frame()}",
             },
         )
-        self.assertFalse(response["ok"])
+        self.assertTrue(response["ok"])
         self.assertEqual({"frame": 12.0}, response["result"])
         self.assertEqual("hello\n", response["stdout"])
-        self.assertEqual([], response["created_or_changed_paths"])
-        self.assertEqual(["/obj/test"], response["diff"]["unverified_paths"])
-        self.assertEqual("unknown", response["scene_change_status"])
+        self.assertEqual("unchanged", response["scene_change_status"])
         self.assertEqual(0, response["revision"])
-        self.assertEqual("NO_OBSERVED_EFFECT", response["errors"][0]["code"])
-        self.assertEqual("not_needed", response["rollback"]["status"])
+        self.assertEqual([], response["errors"])
+        self.assertEqual(
+            {
+                "ok",
+                "result",
+                "stdout",
+                "warnings",
+                "errors",
+                "revision",
+                "dirty",
+                "elapsed_seconds",
+                "script_sha256",
+                "scene_change_status",
+            },
+            set(response),
+        )
         self.assertEqual(0, self.hou.undos.undo_calls)
-        self.assertIn("interruptible_after_main_thread_entry", response["execution_limit"])
-        self.assertFalse(response["execution_limit"]["interruptible_after_main_thread_entry"])
+        self.assertEqual(["HIA MCP V2 execute"], self.hou.undos.labels)
 
     def test_execute_hom_failure_preserves_traceback_and_redacts_credentials(self) -> None:
         response = self.executor.dispatch(
             "hia_execute_hom",
-            {"script": "raise RuntimeError('Bearer SUPERSECRETVALUE')", "capture_diff": False},
+            {"script": "raise RuntimeError('Bearer SUPERSECRETVALUE')"},
         )
         self.assertFalse(response["ok"])
         self.assertEqual("HOM_EXECUTION_FAILED", response["errors"][0]["code"])
         self.assertIn("Traceback", response["errors"][0]["traceback"])
         self.assertNotIn("SUPERSECRETVALUE", str(response))
         self.assertIn("[REDACTED]", str(response))
+        self.assertTrue(
+            response["errors"][0]["partial_scene_changes_possible"]
+        )
+        self.assertEqual("unknown", response["scene_change_status"])
+        self.assertEqual(0, self.hou.undos.undo_calls)
 
     def test_unknown_tool_has_a_stable_error(self) -> None:
         with self.assertRaises(HiaRuntimeError) as raised:
@@ -457,42 +472,6 @@ class HiaMcpV2RuntimeTests(unittest.TestCase):
         self.assertEqual("layer#name", parm["template_name"])
         self.assertTrue(parm["multiparm_instance"])
         self.assertEqual([0], parm["multiparm_indices"])
-
-    def test_viewport_defaults_to_portable_timestamped_screenshot_cache(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY_ROOT / "tests") as temporary:
-            project_root = Path(temporary) / "portable-project"
-            project_root.mkdir()
-            cache_root = project_root / ".runtime" / "cache"
-            with mock.patch.dict(
-                os.environ,
-                {"HIA_CACHE_DIR": str(cache_root)},
-                clear=False,
-            ):
-                executor = HoudiniExecutor(
-                    hou_module=FakeHou(),
-                    main_thread_runner=lambda callback: callback(),
-                    project_root=project_root,
-                )
-                first = executor.dispatch("hia_capture_viewport", {})
-                second = executor.dispatch("hia_capture_viewport", {})
-
-            first_relative = first["result"]["path"]
-            second_relative = second["result"]["path"]
-            self.assertEqual("runtime_fallback", first["result"]["storage_scope"])
-            self.assertEqual(
-                str((project_root / first_relative).resolve()),
-                first["result"]["absolute_path"],
-            )
-            self.assertRegex(
-                first_relative,
-                re.compile(
-                    r"^\.runtime/cache/screenshots/"
-                    r"viewport-\d{8}T\d{12}Z-[0-9a-f]{8}-0012\.png$"
-                ),
-            )
-            self.assertNotEqual(first_relative, second_relative)
-            self.assertTrue((project_root / first_relative).is_file())
-            self.assertTrue((project_root / second_relative).is_file())
 
     def test_runtime_rejects_cache_root_outside_the_project_cache(self) -> None:
         project_root = REPOSITORY_ROOT / ".runtime" / "portable-runtime-root"

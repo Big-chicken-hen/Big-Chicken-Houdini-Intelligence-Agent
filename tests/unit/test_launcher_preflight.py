@@ -1936,15 +1936,15 @@ $preflightEmbedding = @(
         payload = json.loads(output)
         self.assertEqual("green", payload["auto"]["level"])
         self.assertEqual("green", payload["cpu"]["level"])
-        self.assertEqual("yellow", payload["cuda_cpu_only"]["level"])
+        self.assertEqual("red", payload["cuda_cpu_only"]["level"])
         self.assertIn(
-            "torch.cuda.is_available()=false",
+            "所选 CUDA 设备不可用",
             payload["cuda_cpu_only"]["message"],
         )
-        self.assertIn("安装/修复", payload["cuda_cpu_only"]["advice"])
-        self.assertIn("Houdini 仍可启动", payload["cuda_cpu_only"]["advice"])
+        self.assertIn("CUDA PyTorch", payload["cuda_cpu_only"]["advice"])
+        self.assertIn("明确选择 CPU", payload["cuda_cpu_only"]["advice"])
         self.assertEqual("green", payload["cuda"]["level"])
-        self.assertEqual("yellow", payload["preflight_check"]["level"])
+        self.assertEqual("red", payload["preflight_check"]["level"])
         self.assertEqual("cuda", payload["preflight_device"])
 
         launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
@@ -1986,7 +1986,7 @@ $preflightEmbedding = @(
             busy_function,
         )
 
-    def test_embedding_preflight_is_nonblocking_and_explains_fallback_states(self) -> None:
+    def test_embedding_preflight_requires_the_exact_selected_profile(self) -> None:
         launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8")
         core_source = MODULE_PATH.read_text(encoding="utf-8")
         self.assertIn(
@@ -2015,7 +2015,7 @@ $missing = Get-HiaEmbeddingCheckResult `
         probe_passed = $false
         probe_message = 'missing'
     }})
-$fallback = Get-HiaEmbeddingCheckResult `
+$wrongProfileInstalled = Get-HiaEmbeddingCheckResult `
     -ProjectRoot {_ps_literal(REPOSITORY_ROOT)} `
     -EmbeddingData $data `
     -EmbeddingProfile $alternate `
@@ -2047,7 +2047,7 @@ $broken = Get-HiaEmbeddingCheckResult `
     }})
 [pscustomobject]@{{
     missing = $missing
-    fallback = $fallback
+    wrong_profile_installed = $wrongProfileInstalled
     ready = $ready
     broken = $broken
     missing_overall = Get-HiaOverallLevel -Checks @($missing)
@@ -2055,16 +2055,14 @@ $broken = Get-HiaEmbeddingCheckResult `
 """
         )
         payload = json.loads(output)
-        self.assertEqual("yellow", payload["missing"]["level"])
-        self.assertEqual("yellow", payload["missing_overall"])
-        self.assertIn("FTS5", payload["missing"]["message"])
-        self.assertIn("Houdini 仍可启动", payload["missing"]["advice"])
-        self.assertEqual("yellow", payload["fallback"]["level"])
-        self.assertIn("降级", payload["fallback"]["message"])
-        self.assertIn("FTS5", payload["fallback"]["message"])
+        self.assertEqual("red", payload["missing"]["level"])
+        self.assertEqual("red", payload["missing_overall"])
+        self.assertIn("未安装", payload["missing"]["message"])
+        self.assertEqual("red", payload["wrong_profile_installed"]["level"])
+        self.assertIn("不会改用其他模型", payload["wrong_profile_installed"]["message"])
         self.assertEqual("green", payload["ready"]["level"])
         self.assertIn("预检不会加载模型", payload["ready"]["message"])
-        self.assertEqual("yellow", payload["broken"]["level"])
+        self.assertEqual("red", payload["broken"]["level"])
         self.assertIn("import failed", payload["broken"]["message"])
 
     def test_knowledge_index_process_plan_uses_bridge_contract_and_project_paths(
@@ -3185,10 +3183,6 @@ $fxResult = Invoke-HiaPreflight `
             "OverviewEmbeddingDot": "System.Windows.Shapes.Ellipse",
             "OverviewEmbeddingValueText": "System.Windows.Controls.TextBlock",
             "OverviewEmbeddingDetailText": "System.Windows.Controls.TextBlock",
-            "RecoveryCard": "System.Windows.Controls.Border",
-            "RecoveryCheckpointText": "System.Windows.Controls.TextBlock",
-            "RecoverCheckpointOption": "System.Windows.Controls.RadioButton",
-            "NormalLaunchOption": "System.Windows.Controls.RadioButton",
             "OverviewQuickActionsPanel": "System.Windows.Controls.Border",
             "QuickRescanButton": "System.Windows.Controls.Button",
             "QuickRepairButton": "System.Windows.Controls.Button",
@@ -3298,17 +3292,13 @@ try {{
         if ($null -eq $control) {{ throw "Missing control: $name" }}
         $types[$name] = $control.GetType().FullName
     }}
-    $recoveryTransform = $window.FindName('RecoveryCard').RenderTransform
     $quickActionsTransform = (
         $window.FindName('OverviewQuickActionsPanel').RenderTransform
     )
     $knowledgeIndexTransform = $window.FindName('KnowledgeIndexPanel').RenderTransform
     if (
-        $recoveryTransform -isnot [Windows.Media.ScaleTransform] -or
         $quickActionsTransform -isnot [Windows.Media.ScaleTransform] -or
         $knowledgeIndexTransform -isnot [Windows.Media.ScaleTransform] -or
-        [object]::ReferenceEquals($recoveryTransform, $quickActionsTransform) -or
-        [object]::ReferenceEquals($recoveryTransform, $knowledgeIndexTransform) -or
         [object]::ReferenceEquals($quickActionsTransform, $knowledgeIndexTransform)
     ) {{
         throw 'Hover cards must own independent layout-neutral transforms.'
@@ -3826,11 +3816,7 @@ try {{
             == "{StaticResource SubtleInteractiveCardStyle}"
         }
         self.assertEqual(
-            {
-                "RecoveryCard",
-                "OverviewQuickActionsPanel",
-                "KnowledgeIndexPanel",
-            },
+            {"OverviewQuickActionsPanel", "KnowledgeIndexPanel"},
             animated_cards,
         )
         for name in animated_cards:
@@ -4033,14 +4019,12 @@ try {{
             for element in root.iter()
             if "TabIndex" in element.attrib
         )
-        self.assertEqual(list(range(39)), tab_indices)
+        self.assertEqual([*range(4), *range(6, 39)], tab_indices)
         expected_tab_order = {
             "OverviewNavButton": 0,
             "EnvironmentNavButton": 1,
             "PreflightNavButton": 2,
             "ReportsSettingsNavButton": 3,
-            "RecoverCheckpointOption": 4,
-            "NormalLaunchOption": 5,
             "QuickRescanButton": 6,
             "QuickRepairButton": 7,
             "QuickCleanupScreenshotsButton": 8,
@@ -4357,12 +4341,12 @@ Update-HiaCacheActions
             if key.endswith("_enabled"):
                 self.assertFalse(value, key)
 
-    def test_optional_artwork_and_recovery_ui_are_nonblocking_and_explicit(self) -> None:
+    def test_optional_artwork_is_nonblocking_and_launcher_has_no_recovery_ui(self) -> None:
         tree = ET.parse(XAML_PATH)
         root = tree.getroot()
         xaml_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
         named = {
-            element.attrib.get(xaml_name): element
+            element.attrib[xaml_name]: element
             for element in root.iter()
             if xaml_name in element.attrib
         }
@@ -4370,413 +4354,25 @@ Update-HiaCacheActions
         self.assertIn("OptionalArtworkImage", named)
         self.assertEqual("Collapsed", named["OptionalArtworkPanel"].attrib["Visibility"])
         self.assertEqual("False", named["OptionalArtworkPanel"].attrib["IsHitTestVisible"])
-        self.assertEqual(
-            "UniformToFill",
-            named["OptionalArtworkImage"].attrib["Stretch"],
-        )
-        self.assertNotIn("Source", named["OptionalArtworkImage"].attrib)
-        xaml_source = XAML_PATH.read_text(encoding="utf-8-sig")
-        self.assertIn("BIG-CHICKEN", xaml_source)
-        self.assertIn("Houdini Intelligence Agent", xaml_source)
-        self.assertEqual(
-            "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}TextBlock",
-            named["BrandTitleText"].tag,
-        )
-        self.assertEqual(
-            "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}TextBlock",
-            named["BrandSubtitleText"].tag,
-        )
-        self.assertNotIn("BrandNodeMotif", named)
-        self.assertNotIn("AssistantAvatarSlot", named)
-        header_source = ET.tostring(named["MainShellHeader"], encoding="unicode")
-        overview_source = ET.tostring(named["OverviewPage"], encoding="unicode")
-        right_rail_source = ET.tostring(named["RightVisualRail"], encoding="unicode")
-        for abstract_visual in ("Canvas", "Path", "Viewbox"):
-            self.assertNotIn(abstract_visual, header_source)
-            self.assertNotIn(abstract_visual, overview_source)
-            self.assertNotIn(abstract_visual, right_rail_source)
-        for forbidden_brand_element in (
-            "ChickenHead",
-            "ChickenComb",
-            "ChickenBeak",
-            "ChickenEye",
-            "Mascot",
-            "CharacterArtwork",
-            "BrandNodeMotif",
-            "AssistantAvatarSlot",
-        ):
-            self.assertNotIn(forbidden_brand_element, xaml_source)
-        self.assertNotIn("STEAM WINTER", xaml_source.upper())
-        self.assertEqual("Collapsed", named["RecoveryCard"].attrib["Visibility"])
-        self.assertEqual("True", named["RecoverCheckpointOption"].attrib["IsChecked"])
-        self.assertNotIn("IsChecked", named["NormalLaunchOption"].attrib)
-        self.assertEqual(
-            named["RecoverCheckpointOption"].attrib["GroupName"],
-            named["NormalLaunchOption"].attrib["GroupName"],
-        )
+        self.assertNotIn("RecoveryCard", named)
+        self.assertNotIn("RecoverCheckpointOption", named)
+        self.assertNotIn("NormalLaunchOption", named)
 
-        wpf_source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
-        launcher_source = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
-        self.assertNotIn("Get-HiaLauncherArtworkPath", wpf_source)
-        self.assertNotIn("steam-winter-sale", wpf_source)
-        artwork_function = wpf_source[
-            wpf_source.index("function Initialize-HiaOptionalArtwork"):
-            wpf_source.index("function Set-OverallState")
-        ]
-        for required in (
-            "$projectRoot",
-            "'assets'",
-            "'launcher'",
-            "'launcher-hero.png'",
-            "BitmapCacheOption]::OnLoad",
-            "BitmapCreateOptions]::IgnoreImageCache",
-            "FileAttributes]::ReparsePoint",
-            "$optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Visible",
-            "$optionalArtworkPanel.Visibility = [System.Windows.Visibility]::Collapsed",
-        ):
-            self.assertIn(required, artwork_function)
-        self.assertIn("try {", artwork_function)
-        self.assertIn("} catch {", artwork_function)
-        for required in (
-            "Get-HiaRecoverableLauncherSession -ProjectRoot $projectRoot",
-            "$recoverCheckpointOption.IsChecked = $true",
-            "'RecoverySessionId'",
-            "'RecoveryDecision'",
-            "'RecoveryCheckpoint'",
-            "Start-ExistingHoudiniLauncher @launchParameters",
-        ):
-            self.assertIn(required, wpf_source)
-        for name in ("RecoverySessionId", "RecoveryCheckpoint", "RecoveryDecision"):
-            self.assertIn(f"[string]${name} = ''", launcher_source)
-
-    def test_recovery_discovery_selects_latest_safe_checkpoint_once(self) -> None:
-        fake_root = self.sandbox / "recovery-project"
-        sessions_root = fake_root / ".runtime" / "launcher-sessions"
-        (fake_root / "scripts").mkdir(parents=True)
-        sessions_root.mkdir(parents=True)
-        (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
-        (fake_root / "scripts" / "launch-houdini.ps1").write_text(
-            "# lifecycle marker\n", encoding="utf-8"
+        combined = "\n".join(
+            path.read_text(encoding="utf-8-sig")
+            for path in (XAML_PATH, WPF_SCRIPT_PATH, MODULE_PATH, LIFECYCLE_PATH)
         )
-
-        def write_session(
-            session_id: str,
-            *,
-            state: str,
-            checkpoint: str | None = None,
-            timestamp: float = 1_700_000_000,
-            exit_code: int | None = None,
-            process_id: int | None = None,
-        ) -> Path:
-            session = sessions_root / session_id
-            checkpoints = session / "checkpoints"
-            checkpoints.mkdir(parents=True)
-            manifest = {
-                "schema_version": 1,
-                "session_id": session_id,
-                "state": state,
-                "selected_houdini": str(fake_root / "fake" / "houdini.exe"),
-                "hip_path": str(fake_root / "scene.hip"),
-                "started_at_utc": "2026-07-20T01:00:00.0000000Z",
-                "ended_at_utc": "2026-07-20T01:05:00Z" if exit_code is not None else None,
-                "process_exit_code": exit_code,
-                "houdini_process_id": process_id,
-            }
-            (session / "session.json").write_text(
-                json.dumps(manifest), encoding="utf-8"
-            )
-            if checkpoint:
-                checkpoint_path = checkpoints / checkpoint
-                checkpoint_path.write_bytes(b"fake hip checkpoint")
-                os.utime(checkpoint_path, (timestamp, timestamp))
-                return checkpoint_path
-            return checkpoints
-
-        write_session("a" * 32, state="completed", checkpoint="complete.hip", exit_code=0)
-        corrupt = sessions_root / ("b" * 32)
-        (corrupt / "checkpoints").mkdir(parents=True)
-        (corrupt / "session.json").write_text("{not-json", encoding="utf-8")
-        (corrupt / "checkpoints" / "corrupt.hip").write_bytes(b"ignored")
-        write_session("c" * 32, state="abnormal_exit", exit_code=9)
-        write_session(
-            "d" * 32,
-            state="abnormal_exit",
-            checkpoint="older.hip_bak1",
-            timestamp=1_700_000_100,
-            exit_code=7,
-        )
-        expected = write_session(
-            "e" * 32,
-            state="launch_failed",
-            checkpoint="newest-recoverable.hiplc",
-            timestamp=1_700_000_200,
-        )
-        write_session(
-            "f" * 32,
-            state="running",
-            checkpoint="active-process.hipnc",
-            timestamp=1_700_000_300,
-            process_id=os.getpid(),
-        )
-        output = self.run_powershell(
-            f"""
-$items = @(Get-HiaRecoverableLauncherSession -ProjectRoot {_ps_literal(fake_root)})
-[pscustomobject]@{{
-    count = $items.Count
-    session_id = if ($items.Count) {{ $items[0].session_id }} else {{ '' }}
-    checkpoint_path = if ($items.Count) {{ $items[0].checkpoint_path }} else {{ '' }}
-}} | ConvertTo-Json -Compress
-"""
-        )
-        candidate = json.loads(output)
-        self.assertEqual(1, candidate["count"])
-        self.assertEqual("e" * 32, candidate["session_id"])
-        self.assertEqual(str(expected), candidate["checkpoint_path"])
-        session = sessions_root / ("e" * 32)
-        manifest_path = session / "session.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest.update(api_key="must-be-removed", unexpected="must-be-removed")
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        output = self.run_powershell(
-            f"""
-Set-HiaLauncherRecoveryDecision `
-    -ProjectRoot {_ps_literal(fake_root)} `
-    -SessionId '{'e' * 32}' `
-    -Decision recover | Out-Null
-$manifest = [System.IO.File]::ReadAllText({_ps_literal(manifest_path)}) | ConvertFrom-Json
-[pscustomobject]@{{
-    names = @($manifest.PSObject.Properties.Name)
-    decision = $manifest.recovery_decision
-    remaining = @(Get-HiaRecoverableLauncherSession -ProjectRoot {_ps_literal(fake_root)}).Count
-}} | ConvertTo-Json -Depth 4 -Compress
-"""
-        )
-        result = json.loads(output)
-        self.assertEqual("recover", result["decision"])
-        self.assertEqual(1, result["remaining"])
-        for forbidden in ("api_key", "unexpected"):
-            self.assertNotIn(forbidden, result["names"])
-
-    def test_current_session_crash_hip_is_pid_bound_and_copied_read_only(self) -> None:
-        session = (
-            self.sandbox
-            / "portable-project"
-            / ".runtime"
-            / "launcher-sessions"
-            / ("d" * 32)
-        )
-        temporary = session / "tmp"
-        checkpoints = session / "checkpoints"
-        temporary.mkdir(parents=True)
-        checkpoints.mkdir()
-        expected = temporary / "crash.asset.Developer_4321.hip"
-        expected.write_bytes(b"crash hip remains unchanged")
-        (temporary / "crash.asset.Developer_9999.hip").write_bytes(b"wrong pid")
-        (temporary / "crash.asset.Developer_4321_log.txt").write_bytes(b"log")
-        (temporary / "crash.empty.Developer_4321.hip").write_bytes(b"")
-        nested = temporary / "nested"
-        nested.mkdir()
-        (nested / "crash.nested.Developer_4321.hip").write_bytes(b"nested")
-
-        output = self.run_powershell(
-            f"""
-$file = Get-Item -LiteralPath {_ps_literal(expected)} -Force
-$candidate = Get-HiaLatestLauncherCrashHip `
-    -TempDirectory {_ps_literal(temporary)} `
-    -HoudiniProcessId 4321 `
-    -StartedAtUtcTicks ($file.LastWriteTimeUtc.Ticks - 1) `
-    -EndedAtUtcTicks ($file.LastWriteTimeUtc.Ticks + 1)
-$copy = Copy-HiaLauncherRecoveryHip `
-    -SessionRoot {_ps_literal(session)} `
-    -SourcePath $candidate.path `
-    -Attempt 2
-[pscustomobject]@{{
-    candidate = $candidate.path
-    copied = $copy.path
-    source = $copy.source_path
-}} | ConvertTo-Json -Compress
-"""
-        )
-        result = json.loads(output)
-        self.assertEqual(str(expected), result["candidate"])
-        self.assertEqual(str(expected), result["source"])
-        copied = Path(result["copied"])
-        self.assertEqual(session / "recovery", copied.parent)
-        self.assertEqual(expected.read_bytes(), copied.read_bytes())
-        self.assertEqual(b"crash hip remains unchanged", expected.read_bytes())
-
-    def test_ai_checkpoint_sidecar_requires_the_exact_thread(self) -> None:
-        goal_binding = "b" * 64
-        checkpoints = (
-            self.sandbox
-            / "portable-project"
-            / ".runtime"
-            / "launcher-sessions"
-            / ("c" * 32)
-            / "checkpoints"
-        )
-        checkpoints.mkdir(parents=True)
-        checkpoint = checkpoints / "stage-1.hip"
-        checkpoint.write_bytes(b"stage checkpoint")
-        (checkpoints / ".hia-stage-checkpoint.json").write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "thread_id": "thread-exact",
-                    "goal_binding": goal_binding,
-                    "checkpoint_file": checkpoint.name,
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        output = self.run_powershell(
-            f"""
-$matching = Get-HiaLatestLauncherCheckpoint `
-    -CheckpointDirectory {_ps_literal(checkpoints)} `
-    -ThreadId 'thread-exact' `
-    -GoalBinding '{goal_binding}'
-$foreign = Get-HiaLatestLauncherCheckpoint `
-    -CheckpointDirectory {_ps_literal(checkpoints)} `
-    -ThreadId 'thread-other' `
-    -GoalBinding '{goal_binding}'
-$staleGoal = Get-HiaLatestLauncherCheckpoint `
-    -CheckpointDirectory {_ps_literal(checkpoints)} `
-    -ThreadId 'thread-exact' `
-    -GoalBinding '{"c" * 64}'
-[pscustomobject]@{{
-    matching_path = $matching.path
-    matching_thread = $matching.thread_id
-    matching_goal = $matching.goal_binding
-    foreign_missing = $null -eq $foreign
-    stale_goal_missing = $null -eq $staleGoal
-}} | ConvertTo-Json -Compress
-"""
-        )
-        result = json.loads(output)
-        self.assertEqual(str(checkpoint), result["matching_path"])
-        self.assertEqual("thread-exact", result["matching_thread"])
-        self.assertEqual(goal_binding, result["matching_goal"])
-        self.assertTrue(result["foreign_missing"])
-        self.assertTrue(result["stale_goal_missing"])
-
-        checkpoint.write_bytes(b"")
-        output = self.run_powershell(
-            f"""
-$candidate = Get-HiaLatestLauncherCheckpoint `
-    -CheckpointDirectory {_ps_literal(checkpoints)} `
-    -ThreadId 'thread-exact' `
-    -GoalBinding '{goal_binding}'
-$null -eq $candidate
-"""
-        )
-        self.assertEqual("True", output)
-
-    def test_crash_recovery_policy_is_bounded_and_requires_focus_and_idle(self) -> None:
-        output = self.run_powershell(
-            """
-$normal = Get-HiaCrashRecoveryDecision -ExitCode 0 -FocusVerified $false -ThreadIdle $false
-$off = Get-HiaCrashRecoveryDecision -ExitCode 9 -FocusVerified $false -ThreadIdle $true
-$busy = Get-HiaCrashRecoveryDecision -ExitCode 9 -FocusVerified $true -ThreadIdle $false
-$recoveries = 0
-$stops = 0
-$lastReason = ''
-foreach ($count in 1..4) {
-    $decision = Get-HiaCrashRecoveryDecision `
-        -ExitCode 9 `
-        -FocusVerified $true `
-        -ThreadIdle $true `
-        -ConsecutiveCrashCount $count `
-        -AutomaticRestartCount ([Math]::Min($count - 1, 3))
-    if ($decision.recover) { $recoveries += 1 } else { $stops += 1 }
-    $lastReason = $decision.reason
-}
-[pscustomobject]@{
-    normal = $normal.reason
-    off = $off.reason
-    busy = $busy.reason
-    recoveries = $recoveries
-    stops = $stops
-    final = $lastReason
-} | ConvertTo-Json -Compress
-"""
-        )
-        result = json.loads(output)
-        self.assertEqual("normal_exit", result["normal"])
-        self.assertEqual("focus_not_verified", result["off"])
-        self.assertEqual("thread_not_idle", result["busy"])
-        self.assertEqual(3, result["recoveries"])
-        self.assertEqual(1, result["stops"])
-        self.assertEqual("bounded_limit", result["final"])
-
-    def test_lifecycle_focus_gate_and_bounded_crash_recovery_are_explicit(self) -> None:
-        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
-        self.assertIn("$exitDecision = Get-HiaCrashRecoveryDecision", source)
-        self.assertIn("$maxConsecutiveCrashes = 3", source)
-        self.assertIn("$maxAutomaticRestarts = 6", source)
-        self.assertIn("$session.focus_mode -ne $true", source)
-        self.assertIn("[string]$goal.status -ne 'active'", source)
-        self.assertIn("-Path '/v1/interrupt'", source)
-        self.assertIn("-Path '/v1/turn'", source)
-        self.assertIn("Wait-FocusedThreadIdle", source)
-        self.assertIn("Wait-FocusedRecoveryReady", source)
-        self.assertIn("Test-RecoveryHipWithHython", source)
-        self.assertIn("did not reset the crash counter", source)
-        self.assertLess(
-            source.index("$idleContext = Wait-FocusedThreadIdle"),
-            source.index("$progressCopy = Copy-HiaLauncherRecoveryHip"),
-        )
-        probe = source.index("$progressCopy = Copy-HiaLauncherRecoveryHip")
-        self.assertLess(
-            source.index("Test-RecoveryHipWithHython", probe),
-            source.index("$consecutiveCrashCount = 0", probe),
-        )
-        self.assertIn("-ThreadId $recoveryThreadId", source)
-        self.assertIn("-GoalBinding $recoveryGoalBinding", source)
-        self.assertIn("-ExpectedGoalBinding $recoveryGoalBinding", source)
-        self.assertIn("Do not replay the old write or its arguments", source)
-        self.assertIn("$attemptedRecoveryPrompts.Add", source)
-        self.assertNotIn("Stop-Process", source)
-
-    def test_crash_recovery_marker_is_scoped_to_one_pending_houdini_child(self) -> None:
-        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
-        marker_names = (
+        for removed in (
+            "Get-HiaRecoverableLauncherSession",
+            "Get-HiaCrashRecoveryDecision",
+            "Copy-HiaLauncherRecoveryHip",
             "HIA_CRASH_RECOVERY_THREAD_ID",
-            "HIA_CRASH_RECOVERY_GOAL_BINDING",
-            "HIA_CRASH_RECOVERY_PROMPT_ID",
-        )
-        base_environment = source[
-            source.index("$houdiniEnvironment = @{") : source.index(
-                "$stableCheckpoint = $null"
-            )
-        ]
-        child_setup = source[
-            source.index("$houdiniInfo = [System.Diagnostics.ProcessStartInfo]::new()") : source.index(
-                "$houdiniProcess = [System.Diagnostics.Process]::new()"
-            )
-        ]
+            "RecoverySessionId",
+            "RecoveryCheckpoint",
+            "RecoveryDecision",
+        ):
+            self.assertNotIn(removed, combined)
 
-        for name in marker_names:
-            self.assertNotIn(name, base_environment)
-            self.assertIn(f"'{name}'", child_setup)
-            self.assertEqual(2, source.count(f"'{name}'"))
-        self.assertIn("if ($null -ne $pendingRecovery)", child_setup)
-        self.assertIn(
-            "'HIA_CRASH_RECOVERY_THREAD_ID' = [string]$pendingRecovery.thread_id",
-            child_setup,
-        )
-        self.assertIn(
-            "'HIA_CRASH_RECOVERY_GOAL_BINDING' = [string]$pendingRecovery.goal_binding",
-            child_setup,
-        )
-        self.assertIn(
-            "'HIA_CRASH_RECOVERY_PROMPT_ID' = [string]$pendingRecovery.prompt_id",
-            child_setup,
-        )
-        self.assertLess(
-            child_setup.index("Remove-ChildEnvironment"),
-            child_setup.index("if ($null -ne $pendingRecovery)"),
-        )
 
     def test_exe_project_root_locator_works_after_project_move(self) -> None:
         fake_root = self.sandbox / "moved-launcher-project"
@@ -5090,67 +4686,17 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertNotIn(r"E:\houdini-intelligence-agent", source)
         self.assertIn(".runtime/", gitignore.splitlines())
 
-    def test_lifecycle_sessions_are_portable_redacted_and_recover_by_copy(self) -> None:
-        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
-        for required in (
-            'Join-Path $ResolvedRoot ".runtime\\launcher-sessions\\$sessionId"',
-            "Join-Path $sessionRoot 'tmp'",
-            "Join-Path $sessionRoot 'checkpoints'",
-            "Join-Path $sessionRoot 'session.json'",
-            "selected_houdini = $HoudiniExe",
-            "hip_path = $knownHipPath",
-            "started_at_utc = [DateTime]::UtcNow.ToString('o')",
-            "ended_at_utc = $null",
-            "process_exit_code = $null",
-            "latest_checkpoint = $knownHipPath",
-            "Write-LauncherSessionManifest -ManifestPath $sessionManifest",
-            "Get-HiaLatestLauncherCheckpoint -CheckpointDirectory $sessionCheckpoints",
-        ):
-            self.assertIn(required, source)
+    def test_lifecycle_sessions_are_portable_redacted_and_do_not_recover_scenes(self) -> None:
+        source = LIFECYCLE_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn("Write-LauncherSessionManifest", source)
+        self.assertIn("'HOUDINI_BACKUP_DIR' = $sessionTemp", source)
+        self.assertNotIn("latest_checkpoint", source)
+        self.assertNotIn("RecoverySessionId", source)
+        self.assertNotIn("RecoveryCheckpoint", source)
+        self.assertNotIn("RecoveryDecision", source)
+        self.assertNotIn("Get-HiaLatestLauncherCheckpoint", source)
+        self.assertNotIn("Copy-HiaLauncherRecoveryHip", source)
 
-        writer = source[
-            source.index("function Write-LauncherSessionManifest") :
-            source.index("function Get-HoudiniCandidatePaths")
-        ]
-        self.assertIn("ConvertTo-HiaRedactedJson", writer)
-        for forbidden in (
-            "HIA_BRIDGE_TOKEN",
-            "HIA_SCENE_EXECUTOR_TOKEN",
-            "FXHOUDINIMCP_TOKEN",
-            "HIA_MCP_V2_TOKEN",
-        ):
-            self.assertNotIn(forbidden, writer)
-
-        self.assertEqual(1, source.count("'HOUDINI_BACKUP_DIR' = $sessionCheckpoints"))
-        bridge_environment = source[
-            source.index("$bridgeEnvironment = @{") :
-            source.index("$bridgeProcess = [System.Diagnostics.Process]::new()")
-        ]
-        houdini_environment = source[
-            source.index("$houdiniEnvironment = @{") :
-            source.index(
-                "foreach ($entry in $houdiniBackendEnvironment.GetEnumerator())"
-            )
-        ]
-        self.assertNotIn("HOUDINI_BACKUP_DIR", bridge_environment)
-        self.assertIn("'HOUDINI_BACKUP_DIR' = $sessionCheckpoints", houdini_environment)
-
-        self.assertIn("[AllowEmptyString()][string]$RecoverySessionId = ''", source)
-        self.assertIn("[AllowEmptyString()][string]$RecoveryCheckpoint = ''", source)
-        self.assertIn("[AllowEmptyString()][string]$RecoveryDecision = ''", source)
-        self.assertIn("$sourceFile -isnot [System.IO.FileInfo]", source)
-        self.assertIn("$sourceSessionCheckpoints", source)
-        self.assertIn("$validatedRecoveryCheckpoint", source)
-        self.assertIn(
-            "Recovery checkpoint is not bound to the selected launcher session.",
-            source,
-        )
-        self.assertIn(
-            "[System.IO.File]::Copy($recoverySourceCheckpoint, $knownHipPath, $false)",
-            source,
-        )
-        self.assertNotIn("Copy-Item", source)
-        self.assertNotIn("Move-Item", source)
 
     def test_lifecycle_selects_mutually_exclusive_backend_paths_and_environment(self) -> None:
         source = LIFECYCLE_PATH.read_text(encoding="utf-8")

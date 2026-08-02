@@ -8,363 +8,139 @@ import time
 import unittest
 
 from services.bridge.hia_bridge.project_contracts import (
-    PendingEffect,
     ProjectState,
     ProjectStatus,
+    Role,
+    RoleThread,
+    StageState,
     authoritative_task_identity,
 )
-from services.bridge.hia_bridge.project_effects import EffectResult
 from services.bridge.hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent
 from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
-from services.bridge.hia_bridge.project_runner import ProjectRunner
+from services.bridge.hia_bridge.project_runner import ProjectActionResult, ProjectRunner
 from services.bridge.hia_bridge.project_workflow import ProjectWorkflowHost
 
 
-def _record(project_id: str, effect_count: int = 1) -> ProjectRecord:
-    text = f"task for {project_id}"
+def _record(project_id: str, status: ProjectStatus = ProjectStatus.PLANNING, *, stage: str | None = None):
+    text = f"scene task {project_id}"
     task_id, digest = authoritative_task_identity(text)
-    effects = tuple(
-        PendingEffect(f"{project_id}-effect-{index}", f"effect-{index}")
-        for index in range(effect_count)
-    )
     return ProjectRecord(
         ProjectState(
             project_id=project_id,
-            goal_thread_id=f"{project_id}-supervisor",
             authoritative_task_id=task_id,
             authoritative_task_sha256=digest,
-            status=ProjectStatus.EXECUTING_STAGE,
-            pending_effects=effects,
+            status=status,
+            roles={role: RoleThread(role, f"{project_id}-{role.value}") for role in Role},
+            stage=StageState(stage_id=stage),
         ),
         text,
     )
 
 
-class RecordingExecutor:
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.effects: list[tuple[str, str]] = []
+class _Executor:
+    def __init__(self, *, entered=None, release=None, event=None):
+        self.entered = entered
+        self.release = release
+        self.event = event
+        self.actions = []
 
-    def execute(self, state, effect):
-        with self.lock:
-            self.effects.append((state.project_id, effect.effect_id))
-        if effect.kind == "pause_goal":
-            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_PAUSED))
-        if effect.kind == "resume_goal":
-            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_RESUMED))
-        return EffectResult(state, None)
-
-
-class BlockingExecutor(RecordingExecutor):
-    def __init__(self, expected: int = 1) -> None:
-        super().__init__()
-        self.entered = threading.Event()
-        self.all_entered = threading.Event()
-        self.release = threading.Event()
-        self.expected = expected
-
-    def execute(self, state, effect):
-        with self.lock:
-            self.effects.append((state.project_id, effect.effect_id))
-            if len(self.effects) >= self.expected:
-                self.all_entered.set()
-        self.entered.set()
-        if not self.release.wait(5):
-            raise TimeoutError("test release was not signalled")
-        if effect.kind == "pause_goal":
-            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_PAUSED))
-        if effect.kind == "resume_goal":
-            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_RESUMED))
-        return EffectResult(state, None)
+    def execute(self, state, action):
+        self.actions.append(action)
+        if self.entered is not None:
+            self.entered.set()
+        if self.release is not None:
+            self.release.wait(1.0)
+        return ProjectActionResult(state, self.event)
 
 
-class FailingExecutor:
-    def execute(self, state, effect):
-        raise RuntimeError("external rpc failed")
-
-
-class RecoveryReplanExecutor(RecordingExecutor):
-    def __init__(self) -> None:
-        super().__init__()
-        self.replan_seen = threading.Event()
-
-    def execute(self, state, effect):
-        with self.lock:
-            self.effects.append((state.project_id, effect.kind))
-        if effect.kind == "verify_recovery":
-            return EffectResult(
-                state, LifecycleEvent(ProjectEvent.RECOVERY_VALIDATED)
-            )
-        if effect.kind == "resume_goal":
-            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_RESUMED))
-        if effect.kind == "request_plan":
-            self.replan_seen.set()
-            return EffectResult(
-                replace(state, plan_stale=False),
-                LifecycleEvent(ProjectEvent.PLAN_READY),
-            )
-        return EffectResult(state, None)
-
-
-class ProjectWorkflowHostTests(unittest.TestCase):
+class ProjectWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.registry = ProjectRegistry(Path(self.temp.name) / "projects.json")
-        self.runner = ProjectRunner(self.registry)
-        self.hosts: list[ProjectWorkflowHost] = []
 
     def tearDown(self) -> None:
-        for host in self.hosts:
-            host.close(0.1)
         self.temp.cleanup()
 
-    def _host(self, executor, **kwargs) -> ProjectWorkflowHost:
+    def test_start_runs_only_an_explicit_process_local_action(self) -> None:
+        self.registry.put(_record("p1"))
+        runner = ProjectRunner(self.registry)
+        executor = _Executor(event=LifecycleEvent(ProjectEvent.PROJECT_ANSWERED))
+        host = ProjectWorkflowHost(
+            registry=self.registry, runner=runner, executor_factory=lambda _: executor
+        )
+        try:
+            self.assertFalse(host.start("p1"))
+            runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
+            self.assertTrue(host.start("p1"))
+            self.assertTrue(_wait(lambda: self.registry.require("p1").state.status is ProjectStatus.COMPLETED))
+            self.assertEqual(["start_supervisor"], [item.kind for item in executor.actions])
+        finally:
+            host.close()
+
+    def test_stop_interrupts_once_and_marks_project_stopped_after_turn_returns(self) -> None:
+        self.registry.put(_record("p1"))
+        runner = ProjectRunner(self.registry)
+        runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
+        entered = threading.Event()
+        release = threading.Event()
+        interrupted: list[str] = []
         host = ProjectWorkflowHost(
             registry=self.registry,
-            runner=self.runner,
-            executor_factory=lambda _project_id: executor,
-            **kwargs,
+            runner=runner,
+            executor_factory=lambda _: _Executor(entered=entered, release=release),
+            interrupt_hook=interrupted.append,
         )
-        self.hosts.append(host)
-        return host
+        try:
+            self.assertTrue(host.start("p1"))
+            self.assertTrue(entered.wait(0.5))
+            self.assertTrue(host.stop("p1"))
+            self.assertEqual(["p1"], interrupted)
+            release.set()
+            self.assertTrue(_wait(lambda: self.registry.require("p1").state.status is ProjectStatus.STOPPED))
+        finally:
+            release.set()
+            host.close()
 
-    def _wait_until(self, predicate, timeout: float = 2.0) -> None:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if predicate():
-                return
-            time.sleep(0.01)
-        self.fail("condition was not reached")
-
-    def test_chains_every_persisted_effect_in_order(self) -> None:
-        self.registry.put(_record("p1", 4))
-        executor = RecordingExecutor()
-        snapshots = []
-        host = self._host(executor, on_snapshot=snapshots.append)
-
-        self.assertTrue(host.start("p1"))
-        self._wait_until(lambda: not self.registry.require("p1").state.pending_effects)
-
-        self.assertEqual(
-            [("p1", f"p1-effect-{index}") for index in range(4)],
-            executor.effects,
+    def test_explicit_resume_continues_current_stage_without_recovery_replay(self) -> None:
+        self.registry.put(_record("p1", ProjectStatus.STOPPED, stage="stage-current"))
+        runner = ProjectRunner(self.registry)
+        executor = _Executor()
+        host = ProjectWorkflowHost(
+            registry=self.registry, runner=runner, executor_factory=lambda _: executor
         )
-        self.assertEqual(4, len(snapshots))
+        try:
+            self.assertTrue(host.resume("p1"))
+            self.assertTrue(_wait(lambda: bool(executor.actions)))
+            self.assertEqual("start_execution", executor.actions[0].kind)
+            self.assertEqual({"restart_stage": True}, dict(executor.actions[0].data))
+            self.assertEqual("stage-current", self.registry.require("p1").state.stage.stage_id)
+        finally:
+            host.close()
 
-    def test_same_project_start_is_deduplicated(self) -> None:
-        self.registry.put(_record("p1", 2))
-        executor = BlockingExecutor()
-        host = self._host(executor)
-
-        self.assertTrue(host.start("p1"))
-        self.assertTrue(executor.entered.wait(1))
-        self.assertFalse(host.start("p1"))
-        self.assertEqual(1, len(executor.effects))
-        executor.release.set()
-        self._wait_until(lambda: not self.registry.require("p1").state.pending_effects)
-
-    def test_different_projects_can_execute_in_parallel(self) -> None:
-        self.registry.put(_record("p1"))
-        self.registry.put(_record("p2"))
-        executor = BlockingExecutor(expected=2)
-        host = self._host(executor, max_workers=2)
-
-        self.assertTrue(host.start("p1"))
-        self.assertTrue(host.start("p2"))
-        self.assertTrue(executor.all_entered.wait(1))
-        self.assertEqual({"p1", "p2"}, {project for project, _ in executor.effects})
-        executor.release.set()
-        self._wait_until(
-            lambda: not host.is_inflight("p1") and not host.is_inflight("p2")
+    def test_bridge_restart_does_not_auto_resume_or_recreate_queue(self) -> None:
+        self.registry.put(_record("p1", ProjectStatus.EXECUTING, stage="stage-1"))
+        restarted_registry = ProjectRegistry(self.registry.path)
+        restarted_runner = ProjectRunner(restarted_registry)
+        host = ProjectWorkflowHost(
+            registry=restarted_registry,
+            runner=restarted_runner,
+            executor_factory=lambda _: _Executor(),
         )
+        try:
+            self.assertEqual(ProjectStatus.STOPPED, restarted_registry.require("p1").state.status)
+            self.assertFalse(restarted_runner.has_pending("p1"))
+            self.assertFalse(host.start("p1"))
+        finally:
+            host.close()
 
-    def test_stop_interrupts_current_rpc_and_does_not_start_next_effect(self) -> None:
-        self.registry.put(_record("p1", 2))
-        executor = BlockingExecutor()
-        interrupted: list[str] = []
-        host = self._host(executor, interrupt_hook=interrupted.append)
 
-        host.start("p1")
-        self.assertTrue(executor.entered.wait(1))
-        self.assertTrue(host.stop("p1"))
-        self.assertEqual(["p1"], interrupted)
-        executor.release.set()
-        self._wait_until(lambda: not host.is_inflight("p1"))
-
-        self._wait_until(
-            lambda: self.registry.require("p1").state.status
-            is ProjectStatus.INTERRUPTED
-        )
-        record = self.registry.require("p1")
-        self.assertEqual((), record.state.pending_effects)
-        self.assertEqual(2, len(executor.effects))
-        self.assertNotIn(("p1", "p1-effect-1"), executor.effects)
-
-    def test_idle_stop_replaces_unstarted_work_with_confirmed_goal_pause(self) -> None:
-        self.registry.put(_record("p1", 2))
-        executor = RecordingExecutor()
-        host = self._host(executor)
-
-        self.assertFalse(host.stop("p1"))
-        self._wait_until(
-            lambda: self.registry.require("p1").state.status
-            is ProjectStatus.INTERRUPTED
-        )
-
-        self.assertNotIn(("p1", "p1-effect-0"), executor.effects)
-        self.assertNotIn(("p1", "p1-effect-1"), executor.effects)
-        self.assertEqual(1, len(executor.effects))
-
-    def test_executor_exception_is_persisted_as_project_failure(self) -> None:
-        self.registry.put(_record("p1"))
-        snapshots = []
-        host = self._host(FailingExecutor(), on_snapshot=snapshots.append)
-
-        host.start("p1")
-        self._wait_until(lambda: self.registry.require("p1").state.status is ProjectStatus.FAILED)
-
-        record = self.registry.require("p1")
-        self.assertIn("RuntimeError: external rpc failed", record.state.last_error)
-        self.assertEqual("record_failure", record.state.pending_effects[0].kind)
-        self.assertIsNone(host.host_error("p1"))
-        self.assertEqual(ProjectStatus.FAILED, snapshots[-1].state.status)
-
-    def test_recover_only_schedules_nonterminal_projects_with_pending_work(self) -> None:
-        self.registry.put(_record("active"))
-        completed = _record("completed")
-        completed = ProjectRecord(
-            replace(completed.state, status=ProjectStatus.COMPLETED),
-            completed.authoritative_task_text,
-        )
-        self.registry.put(completed)
-        empty = _record("empty")
-        empty = ProjectRecord(
-            replace(empty.state, pending_effects=()), empty.authoritative_task_text
-        )
-        self.registry.put(empty)
-        executor = RecordingExecutor()
-        host = self._host(executor)
-
-        self.assertEqual(("active",), host.recover())
-        self._wait_until(lambda: not self.registry.require("active").state.pending_effects)
-        self.assertEqual([("active", "active-effect-0")], executor.effects)
-
-    def test_recovery_replaces_persisted_old_plan_work_with_replanning(self) -> None:
-        record = _record("stale", 2)
-        record = ProjectRecord(
-            replace(
-                record.state,
-                plan_stale=True,
-                blueprint_revision=1,
-                authorized_blueprint_revision=1,
-            ),
-            record.authoritative_task_text,
-        )
-        self.registry.put(record)
-        executor = BlockingExecutor()
-        host = self._host(executor)
-
-        self.assertEqual(("stale",), host.recover())
-        self.assertTrue(executor.entered.wait(1))
-        current = self.registry.require("stale")
-        self.assertEqual(ProjectStatus.PLANNING, current.state.status)
-        self.assertNotEqual("stale-effect-0", executor.effects[0][1])
-        self.assertEqual("request_plan", current.state.pending_effects[0].kind)
-        executor.release.set()
-        self._wait_until(lambda: not host.is_inflight("stale"))
-        self.assertEqual(1, len(executor.effects))
-
-    def test_recovery_continue_with_empty_stale_plan_schedules_replan(self) -> None:
-        record = _record("stale-attention", 0)
-        record = ProjectRecord(
-            replace(
-                record.state,
-                status=ProjectStatus.NEEDS_ATTENTION,
-                plan_stale=True,
-                recovery_required=True,
-                recovery_return_status=ProjectStatus.EXECUTING_STAGE,
-                attention_reason="identity missing",
-            ),
-            record.authoritative_task_text,
-        )
-        self.registry.put(record)
-        self.runner.dispatch(
-            "stale-attention", LifecycleEvent(ProjectEvent.USER_CONTINUE)
-        )
-        executor = RecoveryReplanExecutor()
-        host = self._host(executor)
-
-        self.assertTrue(host.start("stale-attention"))
-        self.assertTrue(executor.replan_seen.wait(1))
-        self._wait_until(lambda: not host.is_inflight("stale-attention"))
-        self.assertEqual(
-            ["verify_recovery", "resume_goal", "request_plan", "request_authorization"],
-            [kind for _project_id, kind in executor.effects],
-        )
-        final = self.registry.require("stale-attention").state
-        self.assertEqual(ProjectStatus.AUTHORIZATION, final.status)
-        self.assertFalse(final.plan_stale)
-        self.assertEqual((), final.pending_effects)
-
-    def test_resuming_project_becomes_active_only_after_resume_effect_ack(self) -> None:
-        record = _record("p1")
-        record = ProjectRecord(
-            replace(
-                record.state,
-                status=ProjectStatus.RESUMING,
-                resume_status=ProjectStatus.EXECUTING_STAGE,
-                pending_effects=(PendingEffect("resume-effect", "resume_goal"),),
-            ),
-            record.authoritative_task_text,
-        )
-        self.registry.put(record)
-        executor = BlockingExecutor()
-        host = self._host(executor)
-
-        self.assertTrue(host.start("p1"))
-        self.assertTrue(executor.entered.wait(1))
-        self.assertEqual(
-            ProjectStatus.RESUMING,
-            self.registry.require("p1").state.status,
-        )
-        executor.release.set()
-        self._wait_until(
-            lambda: self.registry.require("p1").state.status
-            is ProjectStatus.EXECUTING_STAGE
-        )
-        self.assertEqual([("p1", "resume-effect")], executor.effects)
-
-    def test_close_is_bounded_and_does_not_claim_running_rpc_was_cancelled(self) -> None:
-        self.registry.put(_record("p1"))
-        executor = BlockingExecutor()
-        interrupted: list[str] = []
-        host = self._host(executor, interrupt_hook=interrupted.append)
-        host.start("p1")
-        self.assertTrue(executor.entered.wait(1))
-
-        started = time.monotonic()
-        self.assertFalse(host.close(0.02))
-        self.assertLess(time.monotonic() - started, 0.5)
-        self.assertEqual(["p1"], interrupted)
-        self.assertTrue(host.is_inflight("p1"))
-        executor.release.set()
-        self._wait_until(lambda: not host.is_inflight("p1"))
-
-    def test_close_records_interrupt_failure_and_still_bounds_pool_shutdown(self) -> None:
-        self.registry.put(_record("p1"))
-        executor = BlockingExecutor()
-
-        def fail_interrupt(_project_id: str) -> None:
-            raise RuntimeError("interrupt rpc unavailable")
-
-        host = self._host(executor, interrupt_hook=fail_interrupt)
-        host.start("p1")
-        self.assertTrue(executor.entered.wait(1))
-
-        self.assertFalse(host.close(0.02))
-        self.assertRegex(str(host.host_error("p1")), "interrupt rpc unavailable")
-        executor.release.set()
-        self._wait_until(lambda: not host.is_inflight("p1"))
+def _wait(predicate, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
 
 
 if __name__ == "__main__":

@@ -292,6 +292,30 @@ class BridgeKnowledgeCliTests(unittest.TestCase):
         self.assertIsNone(result["sources"]["total"])
         self.assertEqual(1, len(run.calls))
 
+    def test_missing_embedding_observation_stays_unavailable(self) -> None:
+        run = _RunFactory(
+            [
+                _Completed(
+                    {
+                        "ok": True,
+                        "action": "status",
+                        "result": {
+                            "environment": {},
+                            "index": {"available": False},
+                            "sources": {"items": [], "total": None},
+                        },
+                    }
+                )
+            ]
+        )
+        runner = self._runner(run_factory=run)
+
+        result = runner.handle({"action": "status"})
+
+        self.assertEqual("missing", result["environment"]["state"])
+        self.assertEqual("unavailable", result["environment"]["embedding_mode"])
+        self.assertNotIn("fallback_non_blocking", result["environment"])
+
     def test_repair_required_uses_public_pack_metadata_without_claiming_install(
         self,
     ) -> None:

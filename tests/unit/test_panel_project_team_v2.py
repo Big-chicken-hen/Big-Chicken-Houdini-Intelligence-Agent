@@ -247,7 +247,6 @@ class FakeView:
         self.newTaskRequested = FakeSignal()
         self.openThreadRequested = FakeSignal()
         self.deleteThreadRequested = FakeSignal()
-        self.deleteProjectRequested = FakeSignal()
         self.appendGuidanceRequested = FakeSignal()
         self.roleRuntimeRequested = FakeSignal()
         self.modelCatalogRefreshRequested = FakeSignal()
@@ -258,7 +257,6 @@ class FakeView:
         self.guidance_ack_count = 0
         self.guidance_text = ""
         self.guidance_requirement_change = None
-        self.guidance_force_replan = False
         self.model_catalogs = []
 
     def refresh_view(self) -> None:
@@ -268,18 +266,15 @@ class FakeView:
         self,
         submitted_text: str,
         requirement_change=None,
-        force_replan: bool = False,
     ) -> bool:
         if (
             self.guidance_text != submitted_text
             or self.guidance_requirement_change != requirement_change
-            or self.guidance_force_replan != force_replan
         ):
             return False
         self.guidance_ack_count += 1
         self.guidance_text = ""
         self.guidance_requirement_change = None
-        self.guidance_force_replan = False
         return True
 
     def set_model_catalog(self, models) -> None:
@@ -323,7 +318,6 @@ class ProjectTeamControllerTests(unittest.TestCase):
             self.view.newTaskRequested,
             self.view.openThreadRequested,
             self.view.deleteThreadRequested,
-            self.view.deleteProjectRequested,
             self.view.appendGuidanceRequested,
             self.view.roleRuntimeRequested,
             self.view.modelCatalogRefreshRequested,
@@ -348,9 +342,6 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.view.deleteThreadRequested.emit("thread-ordinary")
         self.assertEqual(["thread-ordinary"], self.deleted)
 
-        self.view.deleteProjectRequested.emit("project-house")
-        self.assertEqual("delete_project", self.gateway.calls[-1][0])
-        self.assertEqual("project-house", self.gateway.calls[-1][2]["project_id"])
 
     def test_close_reopen_reconnects_gateway_once_without_reconnecting_view(self) -> None:
         self.controller.show()
@@ -565,10 +556,9 @@ class ProjectTeamControllerTests(unittest.TestCase):
         )
         self.assertEqual(1, self.view.guidance_ack_count)
 
-    def test_force_replan_is_explicit_and_acknowledges_the_exact_mode(self) -> None:
+    def test_requirement_removal_is_explicit_and_acknowledges_exact_delta(self) -> None:
         self.controller.show()
         self.view.guidance_text = "改成三层钢结构并重新安排所有阶段"
-        self.view.guidance_force_replan = True
         self.view.guidance_requirement_change = {
             "operation": "remove",
             "target_requirement_id": "REQ-animation",
@@ -578,29 +568,26 @@ class ProjectTeamControllerTests(unittest.TestCase):
             None,
             self.view.guidance_text,
             self.view.guidance_requirement_change,
-            True,
         )
         guidance = [
             call
             for call in self.gateway.calls
             if call[0] == "append_project_guidance"
         ][-1]
-        self.assertTrue(guidance[2]["force_replan"])
+        self.assertNotIn("force_replan", guidance[2])
         self.assertEqual(
             {"remove": ["REQ-animation"]}, guidance[2]["requirement_delta"]
         )
         context = guidance[2]["context"]
-        self.view.guidance_force_replan = False
         self.gateway.actionCompleted.emit(
             context, {"project_team": project_snapshot()}
         )
-        self.assertEqual("改成三层钢结构并重新安排所有阶段", self.view.guidance_text)
-        self.assertEqual(0, self.view.guidance_ack_count)
+        self.assertEqual("", self.view.guidance_text)
+        self.assertEqual(1, self.view.guidance_ack_count)
 
     def test_replacing_requirement_sends_explicit_add_and_supersede_delta(self) -> None:
         self.controller.show()
         self.view.guidance_text = "缩小材质范围，只保留基础木材"
-        self.view.guidance_force_replan = True
         self.view.guidance_requirement_change = {
             "operation": "replace",
             "target_requirement_id": "REQ-structure",
@@ -610,7 +597,6 @@ class ProjectTeamControllerTests(unittest.TestCase):
             None,
             self.view.guidance_text,
             self.view.guidance_requirement_change,
-            True,
         )
         guidance = [
             call for call in self.gateway.calls if call[0] == "append_project_guidance"
@@ -629,7 +615,7 @@ class ProjectTeamControllerTests(unittest.TestCase):
             call for call in self.gateway.calls if call[0] == "append_project_guidance"
         ][-1]
         self.assertIsNone(guidance[2]["requirement_delta"])
-        self.assertFalse(guidance[2]["force_replan"])
+        self.assertNotIn("force_replan", guidance[2])
 
     def test_old_guidance_ack_never_clears_new_draft(self) -> None:
         self.controller.show()

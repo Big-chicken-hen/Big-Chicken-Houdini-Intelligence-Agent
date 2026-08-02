@@ -37,9 +37,11 @@ class FakeTransport:
                 "stdout": "built network\n",
                 "warnings": [],
                 "errors": [],
-                "created_or_changed_paths": ["/obj/hia_asset"],
                 "revision": 4,
                 "dirty": True,
+                "elapsed_seconds": 0.01,
+                "script_sha256": "a" * 64,
+                "scene_change_status": "changed",
             }
         if tool_name == "hia_capture_viewport":
             return {
@@ -81,35 +83,17 @@ def initialize(adapter: HiaMcpAdapter) -> None:
 
 
 class HiaMcpV2ProtocolTests(unittest.TestCase):
-    def test_capture_tool_describes_quality_and_display_boundary(self) -> None:
+    def test_capture_tool_requires_project_local_flipbook(self) -> None:
         capture = next(
             spec for spec in TOOL_SPECS if spec.name == "hia_capture_viewport"
         )
         description = capture.description.casefold()
-        self.assertIn("documented flipbook path", description)
-        self.assertIn("capture quality", description)
-        self.assertIn("unverified os hdr", description)
+        self.assertIn("sceneviewer.flipbook", description)
+        self.assertIn(".runtime/cache/screenshots", description)
+        self.assertIn("viewport_capture_unavailable", description)
 
-    def test_effect_experiment_is_one_bounded_domain_neutral_tool(self) -> None:
-        experiment = next(
-            spec
-            for spec in TOOL_SPECS
-            if spec.name == "hia_run_effect_experiment"
-        )
-        properties = experiment.input_schema["properties"]
-
-        self.assertEqual("effect_experiment", experiment.domain)
-        self.assertFalse(experiment.read_only)
-        self.assertEqual(2, properties["candidates"]["minItems"])
-        self.assertEqual(3, properties["candidates"]["maxItems"])
-        self.assertEqual(6, properties["sample_frames"]["maxItems"])
-        self.assertEqual(
-            ["contact_sheet"],
-            properties["capture_mode"]["enum"],
-        )
-        self.assertIn("cache-reset button", experiment.description)
-        self.assertIn("never scores", experiment.description)
-        self.assertNotIn("effectspec", properties)
+    def test_effect_experiment_is_not_exposed(self) -> None:
+        self.assertNotIn("hia_run_effect_experiment", TOOL_NAMES)
 
     def test_initialize_identifies_the_independent_server(self) -> None:
         adapter = HiaMcpAdapter(FakeTransport())
@@ -145,7 +129,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                 capability["parameters"],
             )
             self.assertEqual(list(spec.aliases), capability["aliases"])
-        self.assertEqual(18, len(names))
+        self.assertEqual(17, len(names))
         self.assertNotIn("hia_create_node", names)
         self.assertNotIn("hia_set_parameter", names)
         self.assertNotIn("hia_connect_nodes", names)
@@ -240,7 +224,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         )
         local_help_description = local_help_tool["description"].casefold()
         self.assertIn("qwen only encodes text", local_help_description)
-        self.assertIn("degrades completely to lexical", local_help_description)
+        self.assertIn("return an explicit error when it is unavailable", local_help_description)
         self.assertIn("each query's own lexical candidates", local_help_description)
         self.assertIn("index reports complete", local_help_description)
         self.assertIn("independent cli operation", local_help_description)
@@ -291,47 +275,20 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         memory_description = memory_tool["description"].casefold()
         self.assertIn("nothing is saved automatically", memory_description)
         self.assertIn("qwen only encodes text", memory_description)
-        self.assertIn("lexical fallback", memory_description)
-        self.assertIn("requested/active embedding profiles", memory_description)
+        self.assertIn("lexical search must be requested explicitly", memory_description)
+        self.assertIn("requires the selected qwen encoder profile", memory_description)
 
         execute_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_execute_hom"
         )
         execute_description = execute_tool["description"].casefold()
         execute_properties = execute_tool["inputSchema"]["properties"]
-        self.assertIn("targeted", execute_description)
-        self.assertIn("must not be retried automatically", execute_description)
-        self.assertIn("checkpoint", execute_description)
-        self.assertIn("diff_paths", execute_properties)
-        self.assertIn("checkpoint_label", execute_properties)
-        self.assertIn("task", execute_properties)
-        self.assertIn("mutable_root", execute_properties)
-        self.assertIn("protected_paths", execute_properties)
-        self.assertIn("expected_outputs", execute_properties)
-        self.assertIn("expected_deletions", execute_properties)
-        self.assertIn("fresh_validation", execute_properties)
-        self.assertIn("require_scene_change", execute_properties)
-        self.assertIn("checks", execute_properties)
-        self.assertIn("semantic_checks", execute_properties)
-        self.assertIn("not an ir", execute_description)
-        self.assertIn("native houdini nodes", execute_description)
-        self.assertIn("suitable existing nodes", execute_description)
+        self.assertEqual({"script", "timeout_seconds"}, set(execute_properties))
         self.assertIn("undo group", execute_description)
-        self.assertIn("external file/render", execute_description)
-        self.assertIn("unknown or partial evidence", execute_description)
-        self.assertIn("no_observed_effect do not trigger undo", execute_description)
-        self.assertIn("only a verified rolled-back batch", execute_description)
-        self.assertIn("critical-path existence and node-error checks", execute_description)
-        self.assertIn("changed or stale runtime rejects the write", execute_description)
-        self.assertIn("read-only tools remain available", execute_description)
-        self.assertNotIn(
-            "failed requested postconditions are undone",
-            execute_description,
-        )
-        self.assertIn("before/after local-network facts", execute_description)
-        self.assertIn("not an execution gate", execute_description)
-        self.assertIn("bare successful script", execute_description)
-        self.assertIn("fully observed structural assertions", execute_description)
+        self.assertIn("never calls performundo", execute_description)
+        self.assertIn("does not validate", execute_description)
+        self.assertIn("hia_scene_diff", execute_description)
+        self.assertIn("hia_validate", execute_description)
 
         inspect_tool = next(
             item for item in response["result"]["tools"] if item["name"] == "hia_inspect"
@@ -360,7 +317,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             ],
             validate_properties["checks"]["items"]["enum"],
         )
-        self.assertIn("protected_paths", validate_properties)
+        self.assertNotIn("protected_paths", validate_properties)
         self.assertIn("semantic_checks", validate_properties)
         self.assertIn("spatial intersection", validate_tool["description"].casefold())
         self.assertIn(
@@ -383,7 +340,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         capture_properties = capture_tool["inputSchema"]["properties"]
         self.assertIn("derive from the live viewport", capture_description)
         self.assertIn("at most 24 frames", capture_description)
-        self.assertIn("requested versus actual frames", capture_description)
+        self.assertIn("objective capture and frame evidence", capture_description)
         self.assertIn("camera lock", capture_description)
         self.assertNotIn("default", capture_properties["width"])
         self.assertNotIn("default", capture_properties["height"])
@@ -416,7 +373,6 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                     "name": "hia_execute_hom",
                     "arguments": {
                         "script": "node = hou.node('/obj').createNode('geo')\nhia_result = node.path()",
-                        "capture_diff": True,
                     },
                 },
             )
@@ -425,7 +381,21 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertEqual("hia_execute_hom", transport.calls[0][0])
         structured = response["result"]["structuredContent"]
         self.assertTrue(structured["ok"])
-        self.assertEqual(["/obj/hia_asset"], structured["created_or_changed_paths"])
+        self.assertEqual(
+            {
+                "ok",
+                "result",
+                "stdout",
+                "warnings",
+                "errors",
+                "revision",
+                "dirty",
+                "elapsed_seconds",
+                "script_sha256",
+                "scene_change_status",
+            },
+            set(structured),
+        )
         self.assertEqual(4, structured["revision"])
         self.assertTrue(structured["dirty"])
 
@@ -684,13 +654,16 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         solaris = search("composed USD stage")["result"]
         self.assertEqual("solaris_usd_understanding", solaris["capabilities"][0]["domain"])
         self.assertEqual(
-            {"registered": 18, "catalogued": 18, "missing": [], "orphaned": []},
+            {"registered": 17, "catalogued": 17, "missing": [], "orphaned": []},
             solaris["catalog_health"],
         )
         self.assertIsNone(solaris["empty_reason"])
-        self.assertEqual(
+        self.assertIn(
             ["hia_scene_diff"],
-            search("hia_scene_diff")["result"]["capabilities"][0]["tools"],
+            [
+                item["tools"]
+                for item in search("hia_scene_diff")["result"]["capabilities"]
+            ],
         )
         scene_tools = {
             name
@@ -702,7 +675,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             scene_tools,
         )
 
-        for query in ("checkpoint", "检查点", "备份", "checkpoint_label"):
+        for query in ("execute HOM", "manual Undo", "Python/HOM batch"):
             with self.subTest(query=query):
                 names = {
                     name
@@ -714,9 +687,6 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             "runtime",
             "recovery",
             "recover",
-            "运行时",
-            "恢复",
-            "崩溃恢复",
         ):
             with self.subTest(query=query):
                 names = {
@@ -725,28 +695,6 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
                     for name in item["tools"]
                 }
                 self.assertIn("hia_context", names)
-
-        for query in (
-            "runtime recovery checkpoint",
-            "runtime/recovery/checkpoint",
-            "运行时 恢复 检查点",
-            "运行时/恢复/检查点",
-            "运行时恢复检查点",
-        ):
-            with self.subTest(query=query):
-                combined = search(query)["result"]
-                names = [
-                    name
-                    for item in combined["capabilities"]
-                    for name in item["tools"]
-                ]
-                self.assertIn("hia_context", names)
-                self.assertIn("hia_execute_hom", names)
-                self.assertLess(
-                    names.index("hia_context"),
-                    names.index("hia_execute_hom"),
-                )
-                self.assertIsNone(combined["empty_reason"])
 
         page_past_end = search("Solaris", offset=999)["result"]
         self.assertEqual(1, page_past_end["total"])
@@ -792,8 +740,8 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertEqual("CATALOG_INCOMPLETE", payload["result"]["empty_reason"])
         self.assertEqual(
             {
-                "registered": 18,
-                "catalogued": 18,
+                "registered": 17,
+                "catalogued": 17,
                 "missing": ["hia_uncatalogued"],
                 "orphaned": ["hia_context"],
             },

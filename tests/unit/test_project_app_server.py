@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import unittest
 
 from services.bridge.hia_bridge.events import EventBuffer
 from services.bridge.hia_bridge.project_app_server import (
     ProjectAppServerError,
-    ProjectEffectClient,
+    ProjectRoleClient,
     ProjectTurnTimeout,
 )
 
@@ -62,7 +64,7 @@ def _terminal(
     )
 
 
-def _start(adapter: ProjectEffectClient, client: _Client, thread: str, turn: str) -> None:
+def _start(adapter: ProjectRoleClient, client: _Client, thread: str, turn: str) -> None:
     client.next_turn = turn
     result = adapter.request("turn/start", {"threadId": thread, "input": []})
     assert result["turn"]["id"] == turn
@@ -78,7 +80,7 @@ class ProjectAppServerTests(unittest.TestCase):
     def test_captures_agent_events_that_arrive_before_turn_start_ack(self) -> None:
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events)
+        adapter = ProjectRoleClient(client, events)
         body = json.dumps({"schema": "example/1", "ok": True})
 
         def pre_ack() -> None:
@@ -95,7 +97,7 @@ class ProjectAppServerTests(unittest.TestCase):
     def test_concurrent_turns_are_isolated_without_consuming_each_other(self) -> None:
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events)
+        adapter = ProjectRoleClient(client, events)
         _start(adapter, client, "thread-visual", "turn-visual")
         _start(adapter, client, "thread-technical", "turn-technical")
         _agent(events, "thread-technical", "turn-technical", '{"role":"technical"}')
@@ -109,10 +111,39 @@ class ProjectAppServerTests(unittest.TestCase):
         self.assertEqual("visual", visual.payload["role"])
         self.assertEqual("technical", technical.payload["role"])
 
+    def test_same_thread_workflow_waits_while_guidance_start_fails_fast(self) -> None:
+        events = EventBuffer()
+        client = _Client(events)
+        adapter = ProjectRoleClient(client, events, poll_interval_seconds=0.002)
+        _start(adapter, client, "thread-supervisor", "turn-first")
+
+        with self.assertRaises(ProjectAppServerError) as busy:
+            adapter.request("turn/start", {"threadId": "thread-supervisor", "input": []})
+        self.assertEqual("PROJECT_THREAD_BUSY", busy.exception.code)
+
+        result: dict[str, object] = {}
+
+        def start_second() -> None:
+            client.next_turn = "turn-second"
+            result["ack"] = adapter.start_turn_when_idle(
+                {"threadId": "thread-supervisor", "input": []}, 0.5
+            )
+
+        worker = threading.Thread(target=start_second)
+        worker.start()
+        time.sleep(0.03)
+        self.assertTrue(worker.is_alive())
+        _agent(events, "thread-supervisor", "turn-first", '{"schema":"first/1"}')
+        _terminal(events, "thread-supervisor", "turn-first")
+        adapter.wait_for_turn("thread-supervisor", "turn-first", 0.2)
+        worker.join(0.5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("turn-second", result["ack"]["turn"]["id"])
+
     def test_keeps_only_current_turn_completed_hia_items(self) -> None:
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events)
+        adapter = ProjectRoleClient(client, events)
         _publish(
             events,
             "item/completed",
@@ -155,7 +186,7 @@ class ProjectAppServerTests(unittest.TestCase):
     def test_event_ring_gap_fails_closed(self) -> None:
         events = EventBuffer(max_events=2)
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events)
+        adapter = ProjectRoleClient(client, events)
         _start(adapter, client, "thread-a", "turn-a")
         events.publish("noise", value=1)
         events.publish("noise", value=2)
@@ -168,7 +199,7 @@ class ProjectAppServerTests(unittest.TestCase):
     def test_timeout_is_bounded_and_removes_turn_registration(self) -> None:
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events, poll_interval_seconds=0.002)
+        adapter = ProjectRoleClient(client, events, poll_interval_seconds=0.002)
         _start(adapter, client, "thread-a", "turn-a")
 
         with self.assertRaises(ProjectTurnTimeout):
@@ -182,7 +213,7 @@ class ProjectAppServerTests(unittest.TestCase):
             with self.subTest(body=body):
                 events = EventBuffer()
                 client = _Client(events)
-                adapter = ProjectEffectClient(client, events)
+                adapter = ProjectRoleClient(client, events)
                 _start(adapter, client, "thread-a", "turn-a")
                 _agent(events, "thread-a", "turn-a", body)
                 _terminal(events, "thread-a", "turn-a")
@@ -196,7 +227,7 @@ class ProjectAppServerTests(unittest.TestCase):
     def test_rejects_conflicting_or_oversized_agent_messages(self) -> None:
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events)
+        adapter = ProjectRoleClient(client, events)
         _start(adapter, client, "thread-a", "turn-a")
         _agent(events, "thread-a", "turn-a", '{"value":1}')
         _agent(events, "thread-a", "turn-a", '{"value":2}')
@@ -206,7 +237,7 @@ class ProjectAppServerTests(unittest.TestCase):
 
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events, max_agent_message_bytes=8)
+        adapter = ProjectRoleClient(client, events, max_agent_message_bytes=8)
         _start(adapter, client, "thread-b", "turn-b")
         _delta(events, "thread-b", "turn-b", '{"long":')
         _delta(events, "thread-b", "turn-b", '"value"}')
@@ -217,7 +248,7 @@ class ProjectAppServerTests(unittest.TestCase):
     def test_process_exit_and_failed_terminal_are_explicit_failures(self) -> None:
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events)
+        adapter = ProjectRoleClient(client, events)
         _start(adapter, client, "thread-a", "turn-a")
         events.publish("process_exit", returncode=7)
         with self.assertRaises(ProjectAppServerError) as raised:
@@ -226,63 +257,12 @@ class ProjectAppServerTests(unittest.TestCase):
 
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectEffectClient(client, events)
+        adapter = ProjectRoleClient(client, events)
         _start(adapter, client, "thread-b", "turn-b")
         _terminal(events, "thread-b", "turn-b", "failed")
         with self.assertRaises(ProjectAppServerError) as raised:
             adapter.wait_for_turn("thread-b", "turn-b", 0.2)
         self.assertEqual("PROJECT_TURN_NOT_COMPLETED", raised.exception.code)
-
-    def test_counts_only_unique_current_turn_native_subagents(self) -> None:
-        events = EventBuffer()
-        client = _Client(events)
-        adapter = ProjectEffectClient(client, events)
-        _start(adapter, client, "thread-a", "turn-a")
-        collab = {
-            "id": "collab-call",
-            "type": "collabAgentToolCall",
-            "receiverThreadIds": ["child-1", "child-2"],
-            "agentsStates": {"child-1": {"status": "running"}},
-        }
-        for method in ("item/started", "item/completed"):
-            _publish(
-                events,
-                method,
-                {"threadId": "thread-a", "turnId": "turn-a", "item": collab},
-            )
-        _publish(
-            events,
-            "item/completed",
-            {
-                "threadId": "thread-a",
-                "turnId": "turn-a",
-                "item": {
-                    "id": "activity-1",
-                    "type": "subAgentActivity",
-                    "agentThreadId": "child-1",
-                },
-            },
-        )
-        _publish(
-            events,
-            "item/completed",
-            {
-                "threadId": "other",
-                "turnId": "other-turn",
-                "item": {
-                    "id": "activity-other",
-                    "type": "subAgentActivity",
-                    "agentThreadId": "child-other",
-                },
-            },
-        )
-        _agent(events, "thread-a", "turn-a", '{"schema":"review/1"}')
-        _terminal(events, "thread-a", "turn-a")
-
-        completed = adapter.wait_for_turn("thread-a", "turn-a", 0.2)
-
-        self.assertEqual(2, completed.native_subagents)
-
 
 if __name__ == "__main__":
     unittest.main()

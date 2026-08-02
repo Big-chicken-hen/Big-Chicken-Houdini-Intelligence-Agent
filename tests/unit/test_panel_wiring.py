@@ -789,11 +789,6 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._mcp_backend = "hia_v2"
     panel._authenticated = True
     panel._selected_thread_id = selected_thread_id
-    panel._crash_recovery_marker = None
-    panel._crash_recovery_health_session = None
-    panel._crash_recovery_goal_payload = None
-    panel._crash_recovery_thread_payload = None
-    panel._crash_recovery_observation = None
     panel._session_action_pending = False
     panel._turn_start_request_pending = False
     panel._interrupt_pending = False
@@ -810,7 +805,6 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._interrupt_tokens = {}
     panel._active_interrupt_context = None
     panel._stopping_turn_token = None
-    panel._stop_recovery_state = None
     panel._stopped_source_turn = None
     panel._reconciliation_tokens = {}
     panel._models_requested = False
@@ -1183,100 +1177,6 @@ def _houdini_item_notification(
     }
 
 
-_RECOVERY_GOAL_BINDING = "a" * 64
-_RECOVERY_PROMPT_ID = "launcher-session-1"
-
-
-def _recovery_session(
-    *,
-    turn_id: str = "pre-crash-turn",
-    turn_status: str = "completed",
-    turn_active: bool = False,
-    focus_mode: bool = True,
-    thread_id: str = "thread-1",
-) -> dict[str, Any]:
-    return {
-        "connected": True,
-        "authentication": "authenticated",
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "turn_status": turn_status,
-        "turn_active": turn_active,
-        "focus_mode": focus_mode,
-    }
-
-
-def _recovery_goal_payload(
-    *,
-    thread_id: str = "thread-1",
-    focus_mode: bool = True,
-    status: str = "active",
-    goal_binding: str = _RECOVERY_GOAL_BINDING,
-) -> dict[str, Any]:
-    return {
-        "thread_id": thread_id,
-        "focus_mode": focus_mode,
-        "goal_binding": goal_binding,
-        "goal": {
-            "threadId": thread_id,
-            "objective": "Finish the recovered asset",
-            "status": status,
-        },
-    }
-
-
-def _recovery_read_payload(*, include_launcher_prompt: bool = False) -> dict[str, Any]:
-    text = (
-        f"[HIA launcher recovery {_RECOVERY_PROMPT_ID}] recovered"
-        if include_launcher_prompt
-        else "Work completed before the crash"
-    )
-    return {
-        "thread_id": "thread-1",
-        "result": {
-            "thread": {
-                "id": "thread-1",
-                "turns": [
-                    {
-                        "items": [
-                            {
-                                "type": "userMessage",
-                                "content": [{"type": "text", "text": text}],
-                            },
-                            {"type": "agentMessage", "text": "Recovered history"},
-                        ]
-                    }
-                ],
-            }
-        },
-    }
-
-
-def _prime_crash_recovery_panel(
-    panel: Any,
-    *,
-    initial_session: dict[str, Any] | None = None,
-    include_launcher_prompt: bool = False,
-) -> None:
-    panel._crash_recovery_marker = {
-        "thread_id": "thread-1",
-        "goal_binding": _RECOVERY_GOAL_BINDING,
-        "prompt_id": _RECOVERY_PROMPT_ID,
-    }
-    panel._on_health(
-        {
-            "houdini_mcp": {"backend": "hia_v2", "available": True},
-            "session": initial_session or _recovery_session(),
-        }
-    )
-    panel._on_action_completed("goal_get", _recovery_goal_payload())
-    panel._on_action_completed(
-        "thread_read:crash_recovery",
-        _recovery_read_payload(include_launcher_prompt=include_launcher_prompt),
-    )
-    panel._on_action_completed("goal_get", _recovery_goal_payload())
-
-
 def _complete_steer_sync(
     panel: Any,
     *,
@@ -1357,11 +1257,11 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("近未来住宅", rendered)
         self.assertNotIn("hia-project-role-request", rendered)
 
-    def test_project_role_protocol_response_is_not_raw_json(self) -> None:
+    def test_project_start_response_renders_only_the_natural_reply(self) -> None:
         response = {
-            "schema": "hia-project-eligibility/1",
-            "disposition": "eligible",
-            "reason": "任务适合项目团队执行",
+            "schema": "hia-project-start/1",
+            "route": "non_scene_reply",
+            "reply": "你好！请告诉我需要处理的 Houdini 场景任务。",
         }
 
         rendered = HoudiniIntelligencePanel._project_role_agent_text(
@@ -1369,66 +1269,11 @@ class PanelWiringTests(unittest.TestCase):
             "监督 AI",
         )
 
-        self.assertIn("监督 AI已完成本轮工作", rendered)
-        self.assertIn("任务适合项目团队执行", rendered)
-        self.assertNotIn("\"schema\"", rendered)
-
-    def test_ineligible_project_response_reads_as_a_supervisor_reply(self) -> None:
-        response = {
-            "schema": "hia-project-eligibility/1",
-            "disposition": "ineligible",
-            "reason": "你好！有什么 Houdini 场景任务需要我帮忙？",
-        }
-
-        rendered = HoudiniIntelligencePanel._project_role_agent_text(
-            json.dumps(response, ensure_ascii=False),
-            "监督 AI",
-        )
-
-        self.assertIn("你好！有什么 Houdini 场景任务需要我帮忙？", rendered)
-        self.assertIn("未创建其他角色", rendered)
-        self.assertNotIn("任务判定", rendered)
-        self.assertNotIn("已完成本轮工作", rendered)
-        self.assertNotIn("\"schema\"", rendered)
-
-    def test_project_role_response_safely_handles_fenced_or_invalid_protocol(self) -> None:
-        response = {
-            "schema": "hia-project-eligibility/1",
-            "disposition": "ineligible",
-            "reason": "你好！请告诉我需要处理的 Houdini 场景任务。",
-        }
-        fenced = HoudiniIntelligencePanel._project_role_agent_text(
-            "```json\n" + json.dumps(response, ensure_ascii=False) + "\n```",
-            "监督 AI",
-        )
-        invalid = HoudiniIntelligencePanel._project_role_agent_text(
-            '{"schema":"hia-project-eligibility/1","disposition":',
-            "监督 AI",
-        )
-
-        self.assertIn("你好！请告诉我需要处理的 Houdini 场景任务。", fenced)
-        self.assertNotIn("```", fenced)
-        self.assertIn("结构化响应无效", invalid)
-        self.assertNotIn("hia-project-eligibility", invalid)
-
-    def test_supervisor_project_remains_writable_after_non_scene_reply(self) -> None:
-        panel = _make_panel(selected_thread_id="thread-supervisor")
-        role = types.SimpleNamespace(thread_id="thread-supervisor")
-        project = types.SimpleNamespace(
-            status="not_applicable",
-            can_guide=False,
-            roles=(role,),
-        )
-        panel.project_team_view = types.SimpleNamespace(
-            state=types.SimpleNamespace(
-                tree=types.SimpleNamespace(projects=(project,))
-            )
-        )
-
-        panel._refresh_controls()
-
-        self.assertTrue(panel.input_edit.isEnabled())
-        self.assertTrue(panel.send_button.isEnabled())
+        self.assertIn("监督 AI", rendered)
+        self.assertIn("你好！请告诉我需要处理的 Houdini 场景任务。", rendered)
+        self.assertNotIn("reply", rendered)
+        self.assertNotIn("non_scene_reply", rendered)
+        self.assertNotIn("hia-project-start", rendered)
 
     def test_project_role_plan_keeps_complete_human_readable_content(self) -> None:
         response = {
@@ -2332,7 +2177,7 @@ class PanelWiringTests(unittest.TestCase):
             "把顶部再缩短一些", panel._diagnostic_snapshot["user_goal"]
         )
 
-    def test_no_active_steer_falls_back_once_with_exact_snapshot(self) -> None:
+    def test_no_active_steer_restores_draft_without_starting_turn(self) -> None:
         panel = _make_panel()
         _context, turn_id = _start_active_turn(panel, 1)
         goal = {
@@ -2378,26 +2223,35 @@ class PanelWiringTests(unittest.TestCase):
         panel._on_request_failed(steer_context, failure)
 
         self.assertEqual(1, len(panel._client.session_contexts))
-        _complete_steer_sync(
-            panel,
-            turn_active=False,
-            turn_id=turn_id,
-            turn_status="completed",
-        )
-        self.assertEqual(2, len(panel._client.turn_requests))
-        fallback_text, _model, _effort, images, fallback_context = (
-            panel._client.turn_requests[-1]
-        )
-        self.assertEqual(request_text, fallback_text)
-        self.assertEqual([original_attachment], images)
-        self.assertEqual("后来新增的草稿", panel.input_edit.toPlainText())
+        with mock.patch.object(
+            panel._client,
+            "start_turn",
+            wraps=panel._client.start_turn,
+        ) as start_turn:
+            _complete_steer_sync(
+                panel,
+                turn_active=False,
+                turn_id=turn_id,
+                turn_status="completed",
+            )
+            start_turn.assert_not_called()
+        self.assertEqual(1, len(panel._client.turn_requests))
+        restored_text = panel.input_edit.toPlainText()
+        self.assertTrue(restored_text.startswith("继续调整屋顶\n\n"))
+        self.assertIn("后来新增的草稿", restored_text)
         self.assertEqual(
             [original_attachment, later_attachment],
             panel.attachment_strip.paths(),
         )
-        self.assertEqual("继续调整屋顶", panel._diagnostic_snapshot["user_goal"])
+        self.assertNotIn(
+            "继续调整屋顶", panel._diagnostic_snapshot.get("user_goal", "")
+        )
         self.assertEqual(goal, panel._current_goal)
         self.assertEqual([], panel._client.goal_set_requests)
+        self.assertIn(
+            "请再次点击发送",
+            panel.conversation.toPlainText(),
+        )
 
         panel._render_event(
             {
@@ -2410,31 +2264,13 @@ class PanelWiringTests(unittest.TestCase):
             }
         )
         panel._render_event(_completed_notification(turn_id, sequence=3))
-        self.assertEqual(TurnPhase.STARTING, panel._turn_state.phase)
+        self.assertEqual(TurnPhase.IDLE, panel._turn_state.phase)
         self.assertIsNone(panel._turn_state.turn_id)
 
         panel._on_request_failed(steer_context, failure)
-        self.assertEqual(2, len(panel._client.turn_requests))
-        panel._on_action_completed(
-            fallback_context,
-            {
-                "thread_id": "thread-1",
-                "turn_id": "turn-fallback",
-                "turn_active": True,
-                "turn_status": "inProgress",
-            },
-        )
-        self.assertIn(
-            "上一轮已结束，已作为新消息发送。",
-            panel.conversation.toPlainText(),
-        )
-        self.assertEqual("后来新增的草稿", panel.input_edit.toPlainText())
-        self.assertEqual(
-            [original_attachment, later_attachment],
-            panel.attachment_strip.paths(),
-        )
+        self.assertEqual(1, len(panel._client.turn_requests))
 
-    def test_no_active_steer_fallback_has_strict_error_boundaries(self) -> None:
+    def test_no_active_steer_has_strict_error_boundaries(self) -> None:
         cases = (
             (
                 "CODEX_RPC_ERROR",
@@ -2476,7 +2312,7 @@ class PanelWiringTests(unittest.TestCase):
                 self.assertEqual("保留这条追加", panel.input_edit.toPlainText())
                 self.assertEqual([], panel._client.goal_set_requests)
 
-    def test_stale_steer_syncs_new_active_turn_and_retries_once(self) -> None:
+    def test_stale_steer_syncs_new_active_turn_without_retry(self) -> None:
         panel = _make_panel()
         _context, old_turn_id = _start_active_turn(panel, 1)
         attachment = (
@@ -2530,24 +2366,20 @@ class PanelWiringTests(unittest.TestCase):
 
         self.assertEqual(TurnPhase.IN_PROGRESS, panel._turn_state.phase)
         self.assertEqual("turn-authoritative", panel._turn_state.turn_id)
-        self.assertEqual(2, len(panel._client.steer_requests))
-        retry_context = panel._client.steer_requests[-1][-1]
+        self.assertEqual(1, len(panel._client.steer_requests))
         self.assertEqual("同步后追加", panel.input_edit.toPlainText())
         self.assertEqual([attachment], panel.attachment_strip.paths())
         self.assertNotIn("旧 Turn 不得显示", panel.conversation.toPlainText())
+        self.assertIn("请确认后再次发送", panel.conversation.toPlainText())
+        self.assertNotIn(old_context, panel._pending_steer_drafts)
 
         panel._on_action_completed(
             old_context,
             {"thread_id": "thread-1", "turn_id": old_turn_id},
         )
-        panel._on_action_completed(
-            retry_context,
-            {"thread_id": "thread-1", "turn_id": "turn-authoritative"},
-        )
-        self.assertEqual(2, len(panel._client.steer_requests))
-        self.assertEqual("", panel.input_edit.toPlainText())
-        self.assertEqual([], panel.attachment_strip.paths())
-        self.assertNotIn(retry_context, panel._pending_steer_drafts)
+        self.assertEqual(1, len(panel._client.steer_requests))
+        self.assertEqual("同步后追加", panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
 
     def test_goal_text_survives_late_stale_steer_reconciliation(self) -> None:
         panel = _make_panel()
@@ -2647,74 +2479,6 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertNotIn(old_context, panel._pending_steer_drafts)
 
-    def test_stale_steer_retry_conflict_preserves_draft_without_loop(self) -> None:
-        panel = _make_panel()
-        _context, old_turn_id = _start_active_turn(panel, 1)
-        original_attachment = (
-            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\retry.png"
-        )
-        later_attachment = (
-            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\later.png"
-        )
-        panel.input_edit.setPlainText("只能重试一次")
-        panel.attachment_strip.add_path(original_attachment)
-        panel._send()
-        old_context = panel._client.steer_requests[-1][-1]
-        panel._on_request_failed(
-            old_context,
-            {
-                "structured_error": {
-                    "code": "STALE_ACTIVE_TURN",
-                    "message": "The active Turn changed",
-                    "details": {
-                        "thread_id": "thread-1",
-                        "expected_turn_id": old_turn_id,
-                        "active_turn_id": "turn-authoritative",
-                        "turn_active": True,
-                        "turn_status": "inProgress",
-                    },
-                }
-            },
-        )
-        _complete_steer_sync(
-            panel,
-            turn_active=True,
-            turn_id="turn-authoritative",
-            turn_status="inProgress",
-        )
-        retry_context = panel._client.steer_requests[-1][-1]
-        panel.input_edit.setPlainText("重试期间的新草稿")
-        panel.attachment_strip.clear()
-        panel.attachment_strip.add_path(later_attachment)
-        panel._on_request_failed(
-            retry_context,
-            {
-                "structured_error": {
-                    "code": "STALE_ACTIVE_TURN",
-                    "message": "The active Turn changed again",
-                    "details": {
-                        "thread_id": "thread-1",
-                        "expected_turn_id": "turn-authoritative",
-                        "active_turn_id": "turn-third",
-                        "turn_active": True,
-                        "turn_status": "inProgress",
-                    },
-                }
-            },
-        )
-
-        self.assertEqual(1, len(panel._client.session_contexts))
-        self.assertEqual(2, len(panel._client.steer_requests))
-        restored_text = panel.input_edit.toPlainText()
-        self.assertTrue(restored_text.startswith("只能重试一次\n\n"))
-        self.assertIn("重试期间的新草稿", restored_text)
-        self.assertCountEqual(
-            [original_attachment, later_attachment],
-            panel.attachment_strip.paths(),
-        )
-        self.assertNotIn(retry_context, panel._pending_steer_drafts)
-        self.assertIn("未再次重试", panel.conversation.toPlainText())
-
     def test_stale_steer_session_failure_restores_draft_and_attachments(self) -> None:
         panel = _make_panel()
         _context, old_turn_id = _start_active_turn(panel, 1)
@@ -2770,7 +2534,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual(1, len(panel._client.steer_requests))
         self.assertEqual(1, len(panel._client.session_contexts))
 
-    def test_stop_permanently_cancels_pending_steer_fallback(self) -> None:
+    def test_stop_discards_pending_steer_reconciliation(self) -> None:
         panel = _make_panel()
         _context, turn_id = _start_active_turn(panel, 1)
         cancelled_attachment = (
@@ -2805,9 +2569,7 @@ class PanelWiringTests(unittest.TestCase):
         panel.attachment_strip.add_path(later_attachment)
 
         panel._stop()
-        self.assertTrue(
-            panel._pending_steer_drafts[steer_context]["fallback_cancelled"]
-        )
+        self.assertNotIn(steer_context, panel._pending_steer_drafts)
         panel._on_request_failed(
             sync_context,
             {
@@ -2823,110 +2585,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual([later_attachment], panel.attachment_strip.paths())
         self.assertNotIn("已取消的追加", panel.input_edit.toPlainText())
         self.assertNotIn(steer_context, panel._pending_steer_drafts)
-
-    def test_fallback_reservation_failure_preserves_original_and_later_draft(self) -> None:
-        panel = _make_panel()
-        _context, turn_id = _start_active_turn(panel, 1)
-        original_attachment = (
-            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\original.png"
-        )
-        later_attachment = (
-            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\later.png"
-        )
-        panel.input_edit.setPlainText("原追加文字")
-        panel.attachment_strip.add_path(original_attachment)
-        panel._send()
-        _text, _images, steer_context = panel._client.steer_requests[-1]
-        panel.input_edit.setPlainText("后来编辑内容")
-        panel.attachment_strip.add_path(later_attachment)
-
-        with mock.patch.object(panel._turn_state, "begin_start", return_value=False):
-            panel._on_request_failed(
-                steer_context,
-                {
-                    "structured_error": {
-                        "code": "NO_ACTIVE_TURN",
-                        "message": "The previous Turn ended",
-                        "details": {
-                            "thread_id": "thread-1",
-                            "turn_id": turn_id,
-                            "turn_active": False,
-                            "turn_status": "completed",
-                        },
-                    }
-                },
-            )
-            _complete_steer_sync(
-                panel,
-                turn_active=False,
-                turn_id=turn_id,
-                turn_status="completed",
-            )
-
-        self.assertEqual(1, len(panel._client.turn_requests))
-        self.assertIn("原追加文字", panel.input_edit.toPlainText())
-        self.assertIn("后来编辑内容", panel.input_edit.toPlainText())
-        self.assertEqual(
-            [original_attachment, later_attachment],
-            panel.attachment_strip.paths(),
-        )
-
-    def test_stale_fallback_active_conflict_clears_pending_without_replay(self) -> None:
-        panel = _make_panel()
-        _context, turn_id = _start_active_turn(panel, 1)
-        attachment = (
-            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\conflict.png"
-        )
-        panel.input_edit.setPlainText("只发送一次")
-        panel.attachment_strip.add_path(attachment)
-        panel._send()
-        _text, _images, steer_context = panel._client.steer_requests[-1]
-        panel._on_request_failed(
-            steer_context,
-            {
-                "structured_error": {
-                    "code": "NO_ACTIVE_TURN",
-                    "message": "The previous Turn ended",
-                    "details": {
-                        "thread_id": "thread-1",
-                        "turn_id": turn_id,
-                        "turn_active": False,
-                        "turn_status": "completed",
-                    },
-                }
-            },
-        )
-        _complete_steer_sync(
-            panel,
-            turn_active=False,
-            turn_id=turn_id,
-            turn_status="completed",
-        )
-        fallback_context = panel._client.turn_requests[-1][-1]
-        panel._turn_state._generation += 1
-
-        panel._on_request_failed(
-            fallback_context,
-            {
-                "structured_error": {
-                    "code": "TURN_ALREADY_ACTIVE",
-                    "message": "another caller started a Turn",
-                    "details": {
-                        "thread_id": "thread-1",
-                        "turn_id": "turn-other",
-                        "turn_created": False,
-                        "turn_active": True,
-                        "turn_status": "inProgress",
-                    },
-                }
-            },
-        )
-
-        self.assertEqual(2, len(panel._client.turn_requests))
-        self.assertEqual("只发送一次", panel.input_edit.toPlainText())
-        self.assertEqual([attachment], panel.attachment_strip.paths())
-        self.assertNotIn(fallback_context, panel._pending_turn_drafts)
-        self.assertEqual(2, len(panel._client.turn_requests))
 
     def test_active_session_snapshot_restores_stream_correlation_for_steer(self) -> None:
         panel = _make_panel()
@@ -3940,7 +3598,7 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertIn("场景版本：12", panel.houdini_scene_label.text())
 
-    def test_no_active_interrupt_is_authoritative_after_final_delta(self) -> None:
+    def test_unconfirmed_interrupt_keeps_turn_busy_and_requests_reconciliation(self) -> None:
         panel = _make_panel()
         _context, turn_id = _start_active_turn(panel, 1)
         panel._render_event(
@@ -3960,7 +3618,7 @@ class PanelWiringTests(unittest.TestCase):
 
         panel._stop()
         self.assertEqual(1, len(panel._client.interrupt_contexts))
-        self.assertEqual("Turn：已停止", panel.turn_status_label.text())
+        self.assertEqual("Turn：正在停止", panel.turn_status_label.text())
         self.assertEqual(1, panel.conversation.freeze_calls)
         self.assertEqual(1, panel._client.houdini_status_requests)
         self.assertFalse(panel.send_button.isEnabled())
@@ -3973,8 +3631,8 @@ class PanelWiringTests(unittest.TestCase):
             {
                 "ok": False,
                 "structured_error": {
-                    "code": "NO_ACTIVE_TURN",
-                    "message": "No interruptible active Turn is available",
+                    "code": "INTERRUPT_NOT_CONFIRMED",
+                    "message": "Codex did not confirm the interrupt",
                     "details": {
                         "thread_id": "thread-1",
                         "turn_status": "completed",
@@ -3984,17 +3642,11 @@ class PanelWiringTests(unittest.TestCase):
             },
         )
 
-        self.assert_idle_controls(panel)
+        self.assertEqual(TurnPhase.IN_PROGRESS, panel._turn_state.phase)
+        self.assertFalse(panel.send_button.isEnabled())
         rendered = panel.conversation.toPlainText()
-        self.assertEqual("Turn：已停止", panel.turn_status_label.text())
-        self.assertEqual(
-            1,
-            rendered.count(
-                "Codex 已停止；当前没有已知的 in-flight Houdini 操作。"
-            ),
-        )
-        self.assertNotIn("NO_ACTIVE_TURN", rendered)
-        self.assertNotIn("No interruptible active Turn", rendered)
+        self.assertIn("停止请求未获确认", rendered)
+        self.assertEqual(1, len(panel._client.session_contexts))
 
     def test_stop_freezes_visible_stream_and_sends_one_interrupt(self) -> None:
         panel = _make_panel()
@@ -4042,7 +3694,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual(1, len(panel._client.interrupt_contexts))
         self.assertEqual(1, panel._client.houdini_status_requests)
         self.assertEqual(1, panel.conversation.freeze_calls)
-        self.assertEqual("Turn：已停止", panel.turn_status_label.text())
+        self.assertEqual("Turn：正在停止", panel.turn_status_label.text())
         self.assertEqual([], panel._client.session_contexts)
         self.assertIn("停止前文本", panel.conversation.toPlainText())
         self.assertNotIn("不应出现的迟到文本", panel.conversation.toPlainText())
@@ -4082,7 +3734,7 @@ class PanelWiringTests(unittest.TestCase):
             [entry for entry in panel.conversation.entries if entry["role"] == "codex"],
         )
 
-    def test_stop_response_unlocks_on_idle_or_disconnects_on_recovery_failure(self) -> None:
+    def test_stop_response_unlocks_on_confirmed_idle(self) -> None:
         panel = _make_panel()
         _context, turn_id = _start_active_turn(panel, 1)
         panel._stop()
@@ -4108,206 +3760,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("Turn：已停止", panel.turn_status_label.text())
         self.assertIsNone(panel._stopping_turn_token)
         self.assertEqual([], panel._client.session_contexts)
-
-        failed = _make_panel()
-        _context, failed_turn_id = _start_active_turn(failed, 2)
-        failed.input_edit.setPlainText("保留的草稿")
-        failed._stop()
-        failed_context = failed._client.interrupt_contexts[0]
-        failed._on_request_failed(
-            failed_context,
-            {
-                "structured_error": {
-                    "code": "CODEX_STOP_RECOVERY_TIMEOUT",
-                    "message": "Stop recovery reached its deadline",
-                    "details": {
-                        "thread_id": "thread-1",
-                        "turn_id": failed_turn_id,
-                        "turn_active": False,
-                        "turn_status": "stopRecoveryFailed",
-                        "connected": False,
-                        "recoverable": True,
-                    },
-                }
-            },
-        )
-        self.assertEqual(TurnPhase.IDLE, failed._turn_state.phase)
-        self.assertIsNone(failed._stopping_turn_token)
-        self.assertFalse(failed._connected)
-        self.assertFalse(failed.send_button.isEnabled())
-        self.assertTrue(failed.input_edit.isEnabled())
-        self.assertEqual("保留的草稿", failed.input_edit.toPlainText())
-        self.assertIn("未连接", failed.connection_label.text())
-
-    def test_stop_background_recovery_preserves_draft_and_reconnects_same_thread(self) -> None:
-        panel = _make_panel()
-        panel._current_goal = {
-            "threadId": "thread-1",
-            "objective": "完成木屋",
-            "status": "active",
-        }
-        panel._focus_mode = True
-        panel.service_tier_combo.addItem("快速", "priority")
-        _context, turn_id = _start_active_turn(panel, 1)
-
-        panel._stop()
-        panel.input_edit.setPlainText("恢复后再发送")
-        panel.attachment_strip.add_path("E:/houdini-intelligence-agent/.runtime/attachments/a.png")
-
-        self.assertEqual(TurnPhase.IDLE, panel._turn_state.phase)
-        self.assertEqual("recovering", panel._stop_recovery_state)
-        self.assertIn("恢复中", panel.connection_label.text())
-        self.assertIn("暂停", panel.goal_activity_label.text())
-        self.assertNotIn("正在推进", panel.goal_activity_label.text())
-        self.assertFalse(panel.send_button.isEnabled())
-        self.assertTrue(panel.model_combo.isEnabled())
-        self.assertTrue(panel.effort_combo.isEnabled())
-        self.assertTrue(panel.service_tier_combo.isEnabled())
-        self.assertEqual(1, len(panel._client.turn_requests))
-
-        panel._polling_enabled = True
-        panel._render_event({"type": "process_exit", "returncode": 1})
-        self.assertTrue(panel._polling_enabled)
-        self.assertEqual("recovering", panel._stop_recovery_state)
-        self.assertNotIn("请重启 launcher", panel.conversation.toPlainText())
-
-        interrupt_context = panel._client.interrupt_contexts[0]
-        panel._on_action_completed(
-            interrupt_context,
-            {
-                "thread_id": "thread-1",
-                "turn_id": turn_id,
-                "recovery_pending": True,
-                "session": {
-                    "connected": False,
-                    "authentication": "authenticated",
-                    "thread_id": "thread-1",
-                    "turn_id": None,
-                    "turn_status": "stopRecovering",
-                    "turn_active": False,
-                    "focus_mode": True,
-                },
-            },
-        )
-        self.assertFalse(panel._interrupt_pending)
-        self.assertEqual("recovering", panel._stop_recovery_state)
-
-        panel._render_event(
-            {
-                "type": "session_state",
-                "session": {
-                    "connected": True,
-                    "authentication": "authenticated",
-                    "thread_id": "thread-1",
-                    "turn_id": None,
-                    "turn_status": "interrupted",
-                    "turn_active": False,
-                    "focus_mode": True,
-                },
-            }
-        )
-
-        self.assertIsNone(panel._stop_recovery_state)
-        self.assertTrue(panel._connected)
-        self.assertTrue(panel.send_button.isEnabled())
-        self.assertTrue(panel.model_combo.isEnabled())
-        self.assertEqual("恢复后再发送", panel.input_edit.toPlainText())
-        self.assertEqual(
-            ["E:/houdini-intelligence-agent/.runtime/attachments/a.png"],
-            panel.attachment_strip.paths(),
-        )
-        self.assertEqual("active", panel._current_goal["status"])
-        self.assertTrue(panel._focus_mode)
-        self.assertIn("已暂停", panel.goal_activity_label.text())
-        self.assertEqual("active", panel._current_goal["status"])
-        self.assertEqual(1, len(panel._client.turn_requests))
-
-    def test_stop_background_recovery_failure_is_final_once_without_losing_draft(self) -> None:
-        panel = _make_panel()
-        panel._current_goal = {
-            "threadId": "thread-1",
-            "objective": "完成木屋",
-            "status": "active",
-        }
-        _context, _turn_id = _start_active_turn(panel, 1)
-        panel._stop()
-        panel.input_edit.setPlainText("不要丢失")
-        attachment = "E:/houdini-intelligence-agent/.runtime/attachments/failure.png"
-        panel.attachment_strip.add_path(attachment)
-        failure_event = {
-            "type": "session_state",
-            "session": {
-                "connected": False,
-                "authentication": "unavailable",
-                "thread_id": "thread-1",
-                "turn_id": None,
-                "turn_status": "stopRecoveryFailed",
-                "turn_active": False,
-                "focus_mode": False,
-            },
-        }
-
-        panel._render_event(failure_event)
-        panel._render_event(failure_event)
-
-        self.assertEqual("failed", panel._stop_recovery_state)
-        self.assertFalse(panel._connected)
-        self.assertFalse(panel._interrupt_pending)
-        self.assertIsNone(panel._active_interrupt_context)
-        self.assertFalse(panel.send_button.isEnabled())
-        self.assertTrue(panel.model_combo.isEnabled())
-        self.assertTrue(panel.input_edit.isEnabled())
-        self.assertEqual("不要丢失", panel.input_edit.toPlainText())
-        self.assertEqual([attachment], panel.attachment_strip.paths())
-        self.assertIn("已暂停", panel.goal_activity_label.text())
-        self.assertEqual("active", panel._current_goal["status"])
-        self.assertEqual(
-            1,
-            panel.conversation.toPlainText().count("请重启 launcher"),
-        )
-
-    def test_lost_stop_http_response_uses_existing_health_reconnect(self) -> None:
-        panel = _make_panel()
-        _context, _turn_id = _start_active_turn(panel, 1)
-        panel._stop()
-        panel.input_edit.setPlainText("网络恢复后保留")
-        interrupt_context = panel._client.interrupt_contexts[0]
-
-        panel._on_request_failed(
-            interrupt_context,
-            {
-                "structured_error": {
-                    "code": "NETWORK_TIMEOUT",
-                    "message": "interrupt response timed out",
-                }
-            },
-        )
-
-        self.assertTrue(panel._reconnecting)
-        self.assertTrue(panel._reconnect_timer.isActive())
-        self.assertEqual("recovering", panel._stop_recovery_state)
-        self.assertIn("恢复中", panel.connection_label.text())
-        self.assertEqual("网络恢复后保留", panel.input_edit.toPlainText())
-        self.assertFalse(panel.send_button.isEnabled())
-
-        panel._on_health(
-            {
-                "session": {
-                    "connected": True,
-                    "authentication": "authenticated",
-                    "thread_id": "thread-1",
-                    "turn_id": None,
-                    "turn_status": "interrupted",
-                    "turn_active": False,
-                    "focus_mode": False,
-                }
-            }
-        )
-
-        self.assertFalse(panel._reconnecting)
-        self.assertIsNone(panel._stop_recovery_state)
-        self.assertTrue(panel.send_button.isEnabled())
-        self.assertEqual("网络恢复后保留", panel.input_edit.toPlainText())
 
     def test_stop_session_state_stays_static_then_authoritative_idle_unlocks(self) -> None:
         panel = _make_panel()
@@ -4360,7 +3812,7 @@ class PanelWiringTests(unittest.TestCase):
         old_interrupt_context = panel._client.interrupt_contexts[0]
         panel._render_event(_completed_notification(first_turn_id, sequence=1))
         self.assertEqual(TurnPhase.IDLE, panel._turn_state.phase)
-        self.assertFalse(panel.send_button.isEnabled())
+        self.assertTrue(panel.send_button.isEnabled())
         panel._render_event(
             {
                 "type": "session_state",
@@ -4559,7 +4011,7 @@ class PanelWiringTests(unittest.TestCase):
             "method": "item/commandExecution/requestApproval",
             "params": {
                 "cwd": str(REPOSITORY_ROOT),
-                "command": "serialized fallback with broken PowerShell quoting",
+                "command": "serialized command with broken PowerShell quoting",
                 "commandActions": [
                     {
                         "type": "unknown",
@@ -4852,7 +4304,7 @@ class PanelWiringTests(unittest.TestCase):
             {
                 "thread_id": "019f-history-one",
                 "name": "售货机材质",
-                "preview": "fallback preview",
+                "preview": "cached preview",
                 "updated_at": 1_752_825_600,
             },
             {
@@ -5913,10 +5365,6 @@ class PanelWiringTests(unittest.TestCase):
             "thread_id": "thread-1",
             "notification_seen": False,
         }
-        panel._crash_recovery_observation = {
-            "thread_id": "thread-1",
-            "prompt_id": "launcher-prompt",
-        }
 
         panel._on_action_completed(
             "thread_delete:request",
@@ -5940,7 +5388,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual([], panel._review_records)
         self.assertIsNone(panel._current_goal)
         self.assertFalse(panel._focus_mode)
-        self.assertIsNone(panel._crash_recovery_observation)
         self.assertIsNone(panel._thread_delete_pending)
         self.assertEqual("Thread：未选择", panel.thread_status_label.text())
         self.assertEqual("暂无历史会话", panel.history_combo.itemText(0))
@@ -6043,38 +5490,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("Thread 已永久删除", text)
         self.assertIn("无需重试删除", text)
         self.assertNotIn("删除 Thread 失败", text)
-
-    def test_deleted_or_switched_thread_ignores_late_crash_recheck(self) -> None:
-        panel = _make_panel()
-        panel._crash_recovery_observation = {
-            "thread_id": "thread-1",
-            "prompt_id": _RECOVERY_PROMPT_ID,
-            "terminal_turn_id": "launcher-recovery-turn",
-            "terminal_status": "completed",
-        }
-
-        panel._apply_deleted_thread("thread-1")
-        self.assertIsNone(panel._crash_recovery_observation)
-
-        panel._selected_thread_id = "thread-2"
-        panel._crash_recovery_observation = {
-            "thread_id": "thread-1",
-            "prompt_id": _RECOVERY_PROMPT_ID,
-            "terminal_turn_id": "launcher-recovery-turn",
-            "terminal_status": "completed",
-        }
-        panel._on_action_completed(
-            "thread_read:crash_recovery_recheck",
-            _recovery_read_payload(include_launcher_prompt=True),
-        )
-        panel._on_action_completed(
-            "thread_read:crash_recovery_recheck",
-            _recovery_read_payload(include_launcher_prompt=True),
-        )
-
-        self.assertIsNone(panel._crash_recovery_observation)
-        self.assertEqual([], panel._client.turn_requests)
-        self.assertIsNone(panel._goal_continuation_boundary)
 
     def test_reopened_panel_recovers_active_turn_and_buffered_message(self) -> None:
         old_panel = _make_panel()
@@ -6269,295 +5684,6 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual("Thread：未选择", panel.thread_status_label.text())
         self.assertEqual("Turn：空闲", panel.turn_status_label.text())
         self.assertEqual("", panel.conversation.toPlainText())
-
-    def test_crash_recovery_marker_is_validated_and_consumed_once(self) -> None:
-        environment = {
-            "HIA_CRASH_RECOVERY_THREAD_ID": "thread-1",
-            "HIA_CRASH_RECOVERY_GOAL_BINDING": _RECOVERY_GOAL_BINDING,
-            "HIA_CRASH_RECOVERY_PROMPT_ID": _RECOVERY_PROMPT_ID,
-        }
-        with mock.patch.dict(os.environ, environment, clear=False):
-            marker = HoudiniIntelligencePanel._take_crash_recovery_marker()
-            second = HoudiniIntelligencePanel._take_crash_recovery_marker()
-
-        self.assertEqual("thread-1", marker["thread_id"])
-        self.assertEqual(_RECOVERY_GOAL_BINDING, marker["goal_binding"])
-        self.assertEqual(_RECOVERY_PROMPT_ID, marker["prompt_id"])
-        self.assertIsNone(second)
-
-        invalid = dict(environment)
-        invalid["HIA_CRASH_RECOVERY_GOAL_BINDING"] = "not-a-binding"
-        with mock.patch.dict(os.environ, invalid, clear=False):
-            self.assertIsNone(
-                HoudiniIntelligencePanel._take_crash_recovery_marker()
-            )
-
-    def test_crash_recovery_binds_exact_thread_without_resume_or_duplicate_turn(self) -> None:
-        panel = _make_panel(selected_thread_id=None)
-
-        _prime_crash_recovery_panel(panel)
-
-        self.assertEqual(["thread-1", "thread-1"], panel._client.goal_get_requests)
-        self.assertEqual(
-            [("thread-1", "thread_read:crash_recovery")],
-            panel._client.thread_read_requests,
-        )
-        self.assertEqual([], panel._client.resume_requests)
-        self.assertEqual([], panel._client.turn_requests)
-        self.assertEqual("thread-1", panel._selected_thread_id)
-        self.assertEqual("active", panel._current_goal["status"])
-        self.assertTrue(panel._focus_mode)
-        self.assertIn("Recovered history", panel.conversation.toPlainText())
-        self.assertNotIn("HIA launcher recovery", panel.conversation.toPlainText())
-        self.assertEqual(["session"], panel._client.session_contexts)
-
-    def test_crash_recovery_rejects_stale_thread_focus_goal_or_binding(self) -> None:
-        for case in ("session-thread", "session-focus"):
-            with self.subTest(case=case):
-                panel = _make_panel(selected_thread_id=None)
-                panel._crash_recovery_marker = {
-                    "thread_id": "thread-1",
-                    "goal_binding": _RECOVERY_GOAL_BINDING,
-                    "prompt_id": _RECOVERY_PROMPT_ID,
-                }
-                session = _recovery_session(
-                    thread_id="thread-other" if case == "session-thread" else "thread-1",
-                    focus_mode=case != "session-focus",
-                )
-                panel._on_health(
-                    {
-                        "houdini_mcp": {"backend": "hia_v2", "available": True},
-                        "session": session,
-                    }
-                )
-                self.assertIsNone(panel._selected_thread_id)
-                self.assertEqual([], panel._client.goal_get_requests)
-                self.assertEqual([], panel._client.thread_read_requests)
-                self.assertEqual([], panel._client.turn_requests)
-
-        goal_cases = {
-            "goal-thread": {"thread_id": "thread-other"},
-            "goal-focus": {"focus_mode": False},
-            "goal-complete": {"status": "complete"},
-            "goal-blocked": {"status": "blocked"},
-            "goal-binding": {"goal_binding": "b" * 64},
-        }
-        for case, overrides in goal_cases.items():
-            with self.subTest(case=case):
-                panel = _make_panel(selected_thread_id=None)
-                panel._crash_recovery_marker = {
-                    "thread_id": "thread-1",
-                    "goal_binding": _RECOVERY_GOAL_BINDING,
-                    "prompt_id": _RECOVERY_PROMPT_ID,
-                }
-                panel._on_health(
-                    {
-                        "houdini_mcp": {"backend": "hia_v2", "available": True},
-                        "session": _recovery_session(),
-                    }
-                )
-                panel._on_action_completed(
-                    "goal_get",
-                    _recovery_goal_payload(**overrides),
-                )
-                self.assertIsNone(panel._selected_thread_id)
-                self.assertEqual([], panel._client.thread_read_requests)
-                self.assertEqual([], panel._client.resume_requests)
-                self.assertEqual([], panel._client.turn_requests)
-
-    def test_crash_recovery_rechecks_goal_after_history_read(self) -> None:
-        cases = {
-            "thread": {"thread_id": "thread-other"},
-            "focus": {"focus_mode": False},
-            "status": {"status": "blocked"},
-            "binding": {"goal_binding": "b" * 64},
-        }
-        for case, overrides in cases.items():
-            with self.subTest(case=case):
-                panel = _make_panel(selected_thread_id=None)
-                panel._crash_recovery_marker = {
-                    "thread_id": "thread-1",
-                    "goal_binding": _RECOVERY_GOAL_BINDING,
-                    "prompt_id": _RECOVERY_PROMPT_ID,
-                }
-                panel._on_health(
-                    {
-                        "houdini_mcp": {"backend": "hia_v2", "available": True},
-                        "session": _recovery_session(),
-                    }
-                )
-                panel._on_action_completed("goal_get", _recovery_goal_payload())
-                panel._on_action_completed(
-                    "thread_read:crash_recovery",
-                    _recovery_read_payload(),
-                )
-
-                self.assertEqual(["thread-1", "thread-1"], panel._client.goal_get_requests)
-                self.assertIsNone(panel._selected_thread_id)
-                panel._on_action_completed(
-                    "goal_get",
-                    _recovery_goal_payload(**overrides),
-                )
-
-                self.assertIsNone(panel._selected_thread_id)
-                self.assertIsNone(panel._current_goal)
-                self.assertEqual([], panel._client.turn_requests)
-                self.assertEqual("", panel.conversation.toPlainText())
-
-    def test_crash_recovery_bind_does_not_reapply_the_initial_session(self) -> None:
-        panel = _make_panel(selected_thread_id=None)
-        panel._crash_recovery_marker = {
-            "thread_id": "thread-1",
-            "goal_binding": _RECOVERY_GOAL_BINDING,
-            "prompt_id": _RECOVERY_PROMPT_ID,
-        }
-        panel._on_health(
-            {
-                "houdini_mcp": {"backend": "hia_v2", "available": True},
-                "session": _recovery_session(turn_id="initial-turn"),
-            }
-        )
-        panel._on_action_completed("goal_get", _recovery_goal_payload())
-        panel._on_action_completed(
-            "thread_read:crash_recovery",
-            _recovery_read_payload(),
-        )
-
-        with mock.patch.object(
-            panel,
-            "_apply_session",
-            wraps=panel._apply_session,
-        ) as apply_session:
-            panel._on_action_completed("goal_get", _recovery_goal_payload())
-
-        apply_session.assert_not_called()
-        self.assertEqual(["session"], panel._client.session_contexts)
-        self.assertEqual("thread-1", panel._selected_thread_id)
-
-    def test_recovered_launcher_turn_continues_two_rounds_once_each(self) -> None:
-        panel = _make_panel(selected_thread_id=None)
-        _prime_crash_recovery_panel(panel)
-        self.assertEqual([], panel._client.turn_requests)
-
-        panel._on_events(
-            {
-                "events": [
-                    {
-                        "seq": 1,
-                        "type": "codex_notification",
-                        "method": "turn/started",
-                        "params": {
-                            "threadId": "thread-1",
-                            "turn": {
-                                "id": "launcher-recovery-turn",
-                                "status": "inProgress",
-                            },
-                        },
-                    },
-                    _completed_notification("launcher-recovery-turn", sequence=2),
-                ],
-                "gap": False,
-            }
-        )
-        self.assertEqual(1, len(panel._client.turn_requests))
-        first_context = panel._client.turn_requests[-1][-1]
-
-        panel._on_events(
-            {
-                "events": [
-                    _completed_notification("launcher-recovery-turn", sequence=3),
-                    {
-                        "seq": 4,
-                        "type": "session_state",
-                        "session": _recovery_session(
-                            turn_id="launcher-recovery-turn"
-                        ),
-                    },
-                ],
-                "gap": False,
-            }
-        )
-        self.assertEqual(1, len(panel._client.turn_requests))
-
-        panel._on_action_completed(
-            first_context,
-            {
-                "thread_id": "thread-1",
-                "turn_id": "auto-turn-1",
-                "turn_active": True,
-                "turn_status": "inProgress",
-            },
-        )
-        panel._on_events(
-            {
-                "events": [
-                    {
-                        "seq": 5,
-                        "type": "codex_notification",
-                        "method": "item/agentMessage/delta",
-                        "params": {
-                            "threadId": "thread-1",
-                            "turnId": "auto-turn-1",
-                            "itemId": "message-1",
-                            "delta": "Finished another meaningful stage.",
-                        },
-                    },
-                    _completed_notification("auto-turn-1", sequence=6),
-                ],
-                "gap": False,
-            }
-        )
-        self.assertEqual(2, len(panel._client.turn_requests))
-        self.assertTrue(
-            all(request[0] == panel._client.turn_requests[0][0] for request in panel._client.turn_requests)
-        )
-        self.assertEqual([], panel._client.resume_requests)
-
-    def test_late_panel_bind_recovers_completed_launcher_turn_without_duplication(self) -> None:
-        panel = _make_panel(selected_thread_id=None)
-        completed = _recovery_session(
-            turn_id="launcher-recovery-turn",
-            turn_status="completed",
-            turn_active=False,
-        )
-        _prime_crash_recovery_panel(
-            panel,
-            initial_session=completed,
-            include_launcher_prompt=True,
-        )
-        self.assertEqual([], panel._client.turn_requests)
-        self.assertNotIn("HIA launcher recovery", panel.conversation.toPlainText())
-
-        panel._on_session({"session": completed})
-        panel._on_session({"session": completed})
-
-        self.assertEqual(1, len(panel._client.turn_requests))
-        self.assertIsNone(panel._crash_recovery_observation)
-        self.assertEqual([], panel._client.resume_requests)
-
-    def test_recovery_completion_between_reads_is_correlated_once(self) -> None:
-        panel = _make_panel(selected_thread_id=None)
-        _prime_crash_recovery_panel(panel)
-
-        completed = _recovery_session(turn_id="launcher-recovery-turn")
-        panel._on_session({"session": completed})
-        self.assertEqual(
-            ("thread-1", "thread_read:crash_recovery_recheck"),
-            panel._client.thread_read_requests[-1],
-        )
-        self.assertEqual([], panel._client.turn_requests)
-
-        panel._on_action_completed(
-            "thread_read:crash_recovery_recheck",
-            _recovery_read_payload(include_launcher_prompt=True),
-        )
-        panel._on_action_completed(
-            "thread_read:crash_recovery_recheck",
-            _recovery_read_payload(include_launcher_prompt=True),
-        )
-
-        self.assertEqual(1, len(panel._client.turn_requests))
-        self.assertIsNone(panel._crash_recovery_observation)
 
     def test_unselected_panel_network_timeout_does_not_restore_or_render(self) -> None:
         panel = _make_panel(selected_thread_id=None)
@@ -7157,10 +6283,10 @@ class PanelWiringTests(unittest.TestCase):
         self.assertTrue(panel.send_button.isEnabled())
         self.assertIn("继续使用 Codex 默认", panel.conversation.toPlainText())
 
-        panel.input_edit.setPlainText("fallback chat remains available")
+        panel.input_edit.setPlainText("ordinary chat remains available")
         panel._send()
         text, model, effort, images, _context = panel._client.turn_requests[-1]
-        self.assertEqual("fallback chat remains available", text)
+        self.assertEqual("ordinary chat remains available", text)
         self.assertIsNone(model)
         self.assertIsNone(effort)
         self.assertEqual([], images)
@@ -8370,7 +7496,6 @@ class PanelWiringTests(unittest.TestCase):
             "goal-cleared",
             "goal-completes-same-batch",
             "disconnected",
-            "recovering",
             "approval",
             "goal-action",
             "session-action",
@@ -8400,8 +7525,6 @@ class PanelWiringTests(unittest.TestCase):
                     panel._apply_goal("thread-1", None)
                 elif case == "disconnected":
                     panel._connected = False
-                elif case == "recovering":
-                    panel._stop_recovery_state = "recovering"
                 elif case == "approval":
                     panel._current_approval = {"request_id": "approval-1"}
                 elif case == "goal-action":
@@ -8467,12 +7590,16 @@ class PanelWiringTests(unittest.TestCase):
             "objective": "project objective",
             "status": "paused",
         }
+        panel.goal_objective_edit.setPlainText("stale ordinary goal")
 
+        panel._request_goal()
         panel._save_goal()
         panel._clear_goal()
         panel._set_focus_mode(True)
         panel._continue_goal()
 
+        self.assertEqual([], panel._client.goal_get_requests)
+        self.assertEqual("", panel.goal_objective_edit.toPlainText())
         self.assertEqual([], panel._client.goal_set_requests)
         self.assertEqual([], panel._client.goal_clear_requests)
         self.assertEqual([], panel._client.focus_mode_requests)
@@ -8714,7 +7841,7 @@ class PanelWiringTests(unittest.TestCase):
             {"thread_id": "thread-1", "focus_mode": True},
         )
         self.assertTrue(panel.goal_focus_checkbox.isChecked())
-        self.assertIn("异常退出后会尝试恢复", panel.goal_focus_hint_label.text())
+        self.assertIn("每轮完成后会继续推进", panel.goal_focus_hint_label.text())
 
         restored = _make_panel()
         token = restored._turn_state.capture_token()
@@ -8815,26 +7942,6 @@ class PanelWiringTests(unittest.TestCase):
         panel.goal_focus_checkbox.setChecked(True)
         panel._set_focus_mode(True)
         self.assertEqual([("thread-1", True)], panel._client.focus_mode_requests)
-
-    def test_project_goal_hides_internal_task_suffix_but_preserves_it_on_save(self) -> None:
-        panel = _make_panel(selected_thread_id="thread-1")
-        objective = "Build a cabin · task-670d9743542cae3ea7ebe36a"
-
-        self.assertTrue(
-            panel._apply_goal(
-                "thread-1",
-                {
-                    "threadId": "thread-1",
-                    "objective": objective,
-                    "status": "active",
-                },
-            )
-        )
-        self.assertEqual("Build a cabin", panel.goal_objective_edit.toPlainText())
-
-        panel._save_goal()
-
-        self.assertEqual(objective, panel._client.goal_set_requests[-1][1])
 
     def test_goal_inflight_blocks_thread_switch_and_rebinds_after_resume(self) -> None:
         panel = _make_panel()
