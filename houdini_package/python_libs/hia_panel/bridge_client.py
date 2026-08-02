@@ -200,6 +200,42 @@ class BridgeClient(QtCore.QObject):
             context=context,
         )
 
+    def read_project_role_thread(
+        self,
+        thread_id: str,
+        *,
+        context: str = "project_role_read",
+    ) -> str | None:
+        return self._request(
+            "GET",
+            f"/v1/project-team/threads/{quote(thread_id, safe='')}",
+            context=context,
+        )
+
+    def start_project(
+        self,
+        text: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        local_image_paths: list[str] | None = None,
+        context: str = "project_team_start",
+    ) -> str | None:
+        payload: dict[str, Any] = {"text": text, "service_tier": service_tier}
+        if model is not None:
+            payload["model"] = model
+        if effort is not None:
+            payload["effort"] = effort
+        if local_image_paths is not None:
+            payload["local_image_paths"] = list(local_image_paths)
+        return self._request(
+            "POST",
+            "/v1/project-team/start",
+            payload,
+            context=context,
+        )
+
     def get_goal(self, thread_id: str) -> str | None:
         return self._request(
             "GET",
@@ -355,7 +391,6 @@ class BridgeClient(QtCore.QObject):
         effort: str | None = None,
         service_tier: str | None = None,
         local_image_paths: list[str] | None = None,
-        team_override: str | None = None,
         context: str = "turn_start",
     ) -> str | None:
         payload: dict[str, Any] = {
@@ -368,8 +403,6 @@ class BridgeClient(QtCore.QObject):
             payload["effort"] = effort
         if local_image_paths is not None:
             payload["local_image_paths"] = list(local_image_paths)
-        if team_override is not None:
-            payload["team_override"] = team_override
         return self._request(
             "POST",
             "/v1/turn",
