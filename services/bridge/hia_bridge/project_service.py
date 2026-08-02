@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import threading
 from typing import Any, Mapping
+from typing import Protocol
 import uuid
 
 from .project_contracts import (
@@ -31,6 +32,14 @@ PROJECT_MODES = frozenset({"single", "team"})
 _TERMINAL = frozenset(
     {ProjectStatus.COMPLETED, ProjectStatus.FAILED, ProjectStatus.NOT_APPLICABLE}
 )
+
+
+class ProjectWorkflowControl(Protocol):
+    def start(self, project_id: str) -> bool: ...
+
+    def stop(self, project_id: str) -> bool: ...
+
+    def resume(self, project_id: str) -> bool: ...
 
 
 class ProjectTeamSettings:
@@ -71,6 +80,7 @@ class ProjectTeamService:
         registry: ProjectRegistry,
         settings: ProjectTeamSettings,
         selected_backend: str = "hia_mcp_v2",
+        workflow: ProjectWorkflowControl | None = None,
     ) -> None:
         self._client = client
         self._project_root = project_root.resolve()
@@ -78,6 +88,7 @@ class ProjectTeamService:
         self._settings = settings
         self._factory = ProjectThreadFactory(client, project_root, selected_backend)
         self._runner = ProjectRunner(registry)
+        self._workflow = workflow
         self._lock = threading.RLock()
 
     def set_mode(self, mode: str) -> dict[str, Any]:
@@ -143,6 +154,8 @@ class ProjectTeamService:
         record = self._runner.dispatch(
             project_id, LifecycleEvent(ProjectEvent.INTAKE_STARTED)
         )
+        if self._workflow is not None:
+            self._workflow.start(project_id)
         return {
             "project_id": project_id,
             "root_thread_id": supervisor_id,
@@ -187,6 +200,30 @@ class ProjectTeamService:
             )
         return self.snapshot()
 
+    def continue_project(self, *, project_id: str) -> dict[str, Any]:
+        with self._lock:
+            record = self._registry.require(project_id)
+            if record.state.status is not ProjectStatus.NEEDS_ATTENTION:
+                raise ValueError("only a needs_attention project can continue")
+            if record.state.pending_effects:
+                raise ValueError("project attention transition is not fully acknowledged")
+            self._runner.dispatch(
+                project_id,
+                LifecycleEvent(ProjectEvent.USER_CONTINUE),
+            )
+        if self._workflow is not None:
+            self._workflow.resume(project_id)
+        return self.snapshot()
+
+    def stop_project(self, *, project_id: str) -> dict[str, Any]:
+        record = self._registry.require(project_id)
+        if record.state.status in _TERMINAL:
+            raise ValueError("terminal project cannot be stopped")
+        if self._workflow is None:
+            raise ValueError("project workflow is unavailable")
+        self._workflow.stop(project_id)
+        return self.snapshot()
+
     def set_role_runtime(
         self,
         *,
@@ -225,9 +262,12 @@ class ProjectTeamService:
         return self.snapshot()
 
     def snapshot(self) -> dict[str, Any]:
-        projects = [self._public_project(record) for record in self._registry.list()]
+        records = self._registry.list()
+        projects = [self._public_project(record) for record in records]
         return {
             "schema": PROJECT_TEAM_SCHEMA,
+            "revision": max((record.state.revision for record in records), default=0),
+            "state_status": "ready",
             "settings": {"mode": self._settings.get(), "writable": True},
             "projects": projects,
         }

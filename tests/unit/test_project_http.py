@@ -23,6 +23,23 @@ from hia_bridge.protocol import ProtocolPolicy  # noqa: E402
 from hia_bridge.session import BridgeSession  # noqa: E402
 
 
+class _Workflow:
+    def __init__(self):
+        self.started = []
+        self.stopped = []
+
+    def start(self, project_id):
+        self.started.append(project_id)
+        return True
+
+    def stop(self, project_id):
+        self.stopped.append(project_id)
+        return False
+
+    def resume(self, project_id):
+        return True
+
+
 class ProjectHTTPTests(unittest.TestCase):
     TOKEN = "project-http-token-with-at-least-thirty-two-chars"
 
@@ -41,11 +58,13 @@ class ProjectHTTPTests(unittest.TestCase):
         self.events = EventBuffer()
         self.session = BridgeSession(ROOT, self.client, self.events)
         self.session.start()
+        self.workflow = _Workflow()
         self.project_team = ProjectTeamService(
             client=self.client,
             project_root=runtime,
             registry=ProjectRegistry(runtime / "registry.json"),
             settings=ProjectTeamSettings(runtime / "settings.json"),
+            workflow=self.workflow,
         )
         application = BridgeApplication(
             self.session,
@@ -149,6 +168,13 @@ class ProjectHTTPTests(unittest.TestCase):
         )
         role = runtime["project_team"]["projects"][0]["threads"][0]
         self.assertEqual("gpt-next", role["model"])
+        stopped = self.request(
+            "POST",
+            "/v1/project-team/actions",
+            {"action": "stop", "project_id": started["project_id"]},
+        )
+        self.assertIn("project_team", stopped)
+        self.assertEqual([started["project_id"]], self.workflow.stopped)
 
 
 if __name__ == "__main__":

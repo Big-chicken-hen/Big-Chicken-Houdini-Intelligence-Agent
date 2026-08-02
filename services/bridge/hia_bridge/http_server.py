@@ -944,10 +944,20 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     effort=body.get("effort"),
                     service_tier=body.get("service_tier"),
                 )
+            elif action in {"continue", "stop"}:
+                self._require_exact_fields(body, {"action", "project_id"})
+                if action == "continue":
+                    snapshot = application.project_team.continue_project(
+                        project_id=body.get("project_id")
+                    )
+                else:
+                    snapshot = application.project_team.stop_project(
+                        project_id=body.get("project_id")
+                    )
             else:
                 raise BridgeError(
                     "INVALID_PROJECT_ACTION",
-                    "Project action must be append_guidance or set_role_runtime",
+                    "Project action must be append_guidance, set_role_runtime, continue, or stop",
                 )
             return {"ok": True, "project_team": snapshot}, HTTPStatus.OK
         if path == "/v1/project-memory":

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
 
-from services.bridge.hia_bridge.project_contracts import Role
+from services.bridge.hia_bridge.project_contracts import ProjectStatus, Role
 from services.bridge.hia_bridge.project_registry import ProjectRegistry
 from services.bridge.hia_bridge.project_service import ProjectTeamService, ProjectTeamSettings
 
@@ -39,6 +40,25 @@ class GoalAndCleanupFailingClient(FakeClient):
         if method == "thread/delete":
             raise RuntimeError("delete rpc failed")
         return super().request(method, params)
+
+
+class FakeWorkflow:
+    def __init__(self) -> None:
+        self.started = []
+        self.stopped = []
+        self.resumed = []
+
+    def start(self, project_id):
+        self.started.append(project_id)
+        return True
+
+    def stop(self, project_id):
+        self.stopped.append(project_id)
+        return False
+
+    def resume(self, project_id):
+        self.resumed.append(project_id)
+        return True
 
 
 class ProjectServiceTests(unittest.TestCase):
@@ -130,6 +150,37 @@ class ProjectServiceTests(unittest.TestCase):
             "goal rpc failed.*delete rpc failed",
         ):
             service.start_team_project(task_text="build a scene")
+
+    def test_workflow_is_started_and_stop_is_routed_by_project_identity(self) -> None:
+        root = Path(self.temp.name)
+        workflow = FakeWorkflow()
+        service = ProjectTeamService(
+            client=self.client,
+            project_root=root,
+            registry=ProjectRegistry(root / "workflow-projects.json"),
+            settings=self.settings,
+            workflow=workflow,
+        )
+        result = service.start_team_project(task_text="build a scene")
+        project_id = result["project_id"]
+        self.assertEqual([project_id], workflow.started)
+        service.stop_project(project_id=project_id)
+        self.assertEqual([project_id], workflow.stopped)
+
+        record = service._registry.require(project_id)
+        attention = replace(
+            record.state,
+            status=ProjectStatus.NEEDS_ATTENTION,
+            resume_status=ProjectStatus.PLANNING,
+            pending_effects=(),
+            revision=record.state.revision + 1,
+        )
+        service._registry.put(
+            type(record)(attention, record.authoritative_task_text, record.attachments),
+            expected_revision=record.state.revision,
+        )
+        service.continue_project(project_id=project_id)
+        self.assertEqual([project_id], workflow.resumed)
 
 
 if __name__ == "__main__":

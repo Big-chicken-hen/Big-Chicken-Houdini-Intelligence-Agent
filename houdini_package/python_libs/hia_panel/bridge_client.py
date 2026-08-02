@@ -174,6 +174,32 @@ class BridgeClient(QtCore.QObject):
             context=context,
         )
 
+    def continue_project(
+        self,
+        *,
+        project_id: str,
+        context: str = "project_team_continue",
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/project-team/actions",
+            {"action": "continue", "project_id": project_id},
+            context=context,
+        )
+
+    def stop_project(
+        self,
+        *,
+        project_id: str,
+        context: str = "project_team_stop",
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/project-team/actions",
+            {"action": "stop", "project_id": project_id},
+            context=context,
+        )
+
     def get_goal(self, thread_id: str) -> str | None:
         return self._request(
             "GET",
