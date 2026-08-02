@@ -52,6 +52,11 @@ class RequirementStatus(str, Enum):
     REMOVED_BY_USER = "removed_by_user"
 
 
+class GuidanceScope(str, Enum):
+    PROJECT = "project"
+    ROLE = "role"
+
+
 @dataclass(frozen=True)
 class RuntimeBudget:
     """Finite defaults prevent an unattended project from consuming forever."""
@@ -77,6 +82,23 @@ class Requirement:
     status: RequirementStatus = RequirementStatus.ACTIVE
     source_ref: str = ""
     superseded_by: str | None = None
+
+
+@dataclass(frozen=True)
+class GuidanceRecord:
+    guidance_id: str
+    revision: int
+    text: str
+    scope: GuidanceScope = GuidanceScope.PROJECT
+    target_role: Role | None = None
+
+    def __post_init__(self) -> None:
+        if not self.guidance_id or not self.text.strip() or self.revision < 1:
+            raise ValueError("guidance requires an ID, text, and positive revision")
+        if self.scope is GuidanceScope.ROLE and self.target_role is None:
+            raise ValueError("role guidance requires target_role")
+        if self.scope is GuidanceScope.PROJECT and self.target_role is not None:
+            raise ValueError("project guidance cannot have target_role")
 
 
 @dataclass(frozen=True)
@@ -118,6 +140,8 @@ class ProjectState:
     status: ProjectStatus = ProjectStatus.PROVISIONING
     roles: Mapping[Role, RoleThread] = field(default_factory=dict)
     requirements: tuple[Requirement, ...] = ()
+    guidance: tuple[GuidanceRecord, ...] = ()
+    guidance_consumed: Mapping[Role, int] = field(default_factory=dict)
     stage: StageState = field(default_factory=StageState)
     turn: TurnState = field(default_factory=TurnState)
     budget: RuntimeBudget = field(default_factory=RuntimeBudget)
@@ -178,6 +202,20 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
             }
             for item in state.requirements
         ],
+        "guidance": [
+            {
+                "guidance_id": item.guidance_id,
+                "revision": item.revision,
+                "text": item.text,
+                "scope": item.scope.value,
+                "target_role": item.target_role.value if item.target_role else None,
+            }
+            for item in state.guidance
+        ],
+        "guidance_consumed": {
+            role.value: revision
+            for role, revision in state.guidance_consumed.items()
+        },
         "stage": asdict(state.stage),
         "turn": {
             **asdict(state.turn),
@@ -251,6 +289,28 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
             )
         )
 
+    raw_guidance = value.get("guidance", [])
+    raw_consumed = value.get("guidance_consumed", {})
+    if not isinstance(raw_guidance, list) or not isinstance(raw_consumed, Mapping):
+        raise ValueError("guidance state is malformed")
+    guidance: list[GuidanceRecord] = []
+    for raw in raw_guidance:
+        if not isinstance(raw, Mapping):
+            raise ValueError("guidance record is malformed")
+        target = raw.get("target_role")
+        guidance.append(
+            GuidanceRecord(
+                guidance_id=str(raw.get("guidance_id") or ""),
+                revision=_non_negative_int(raw.get("revision"), "guidance revision"),
+                text=str(raw.get("text") or ""),
+                scope=GuidanceScope(raw.get("scope")),
+                target_role=Role(target) if target is not None else None,
+            )
+        )
+    consumed: dict[Role, int] = {}
+    for key, raw_revision in raw_consumed.items():
+        consumed[Role(key)] = _non_negative_int(raw_revision, "consumed revision")
+
     raw_stage = value.get("stage", {})
     raw_turn = value.get("turn", {})
     raw_budget = value.get("budget", {})
@@ -271,6 +331,8 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
         status=ProjectStatus(value.get("status")),
         roles=roles,
         requirements=tuple(requirements),
+        guidance=tuple(guidance),
+        guidance_consumed=consumed,
         stage=StageState(
             stage_id=_optional_text(raw_stage.get("stage_id"), "stage_id"),
             ordinal=_non_negative_int(raw_stage.get("ordinal", 0), "ordinal"),
