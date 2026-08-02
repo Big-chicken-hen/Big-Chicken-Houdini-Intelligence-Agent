@@ -103,6 +103,17 @@ class ProjectGuidanceTests(unittest.TestCase):
         self.assertFalse(updated.plan_stale)
         self.assertIsNone(updated.guidance[-1].requirement_delta)
 
+    def test_explicit_replan_invalidates_blueprint_without_fake_requirement(self) -> None:
+        state = replace(
+            _state(), blueprint_revision=1, authorized_blueprint_revision=1
+        )
+        text = "改成三层钢结构并重新安排所有阶段"
+        updated = publish_guidance(state, text, force_replan=True)
+        self.assertTrue(updated.plan_stale)
+        self.assertEqual(text, updated.guidance[-1].text)
+        self.assertTrue(updated.guidance[-1].force_replan)
+        self.assertIsNone(updated.guidance[-1].requirement_delta)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -390,6 +390,23 @@ class BridgeClientQueueTests(unittest.TestCase):
         )
         self.assertTrue(all(item["timeout_ms"] == 15_000 for item in requests))
 
+    def test_project_guidance_can_explicitly_force_blueprint_revision(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        client.append_project_guidance(
+            "project-a",
+            "改成三层钢结构并重新安排所有阶段",
+            force_replan=True,
+        )
+        self.assertEqual(
+            {
+                "action": "append_guidance",
+                "project_id": "project-a",
+                "text": "改成三层钢结构并重新安排所有阶段",
+                "force_replan": True,
+            },
+            transport.submissions[-1]["payload"],
+        )
+
     def test_thread_start_and_resume_forward_dynamic_service_tier(self) -> None:
         client, transport = _load_transport_bridge_client()
 

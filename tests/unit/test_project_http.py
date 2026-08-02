@@ -206,6 +206,21 @@ class ProjectHTTPTests(unittest.TestCase):
         self.assertIn("project_team", guided)
         record = self.project_team._registry.require(started["project_id"])
         self.assertEqual("REQ-simple-material", record.state.requirements[0].requirement_id)
+
+        replanned = self.request(
+            "POST",
+            "/v1/project-team/actions",
+            {
+                "action": "append_guidance",
+                "project_id": started["project_id"],
+                "text": "改成三层钢结构并重新安排所有阶段",
+                "force_replan": True,
+            },
+        )
+        self.assertIn("project_team", replanned)
+        record = self.project_team._registry.require(started["project_id"])
+        self.assertTrue(record.state.guidance[-1].force_replan)
+        self.assertIsNone(record.state.guidance[-1].requirement_delta)
         runtime = self.request(
             "POST",
             "/v1/project-team/actions",

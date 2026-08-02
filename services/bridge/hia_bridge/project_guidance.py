@@ -37,9 +37,12 @@ def publish_guidance(
     *,
     target_role: Role | None = None,
     requirement_delta: RequirementDelta | None = None,
+    force_replan: bool = False,
 ) -> ProjectState:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("guidance text must be non-empty")
+    if not isinstance(force_replan, bool):
+        raise ValueError("force_replan must be boolean")
     revision = max((item.revision for item in state.guidance), default=0) + 1
     digest = hashlib.sha256(
         f"{state.project_id}\0{revision}\0{text}".encode("utf-8")
@@ -52,6 +55,7 @@ def publish_guidance(
         scope=GuidanceScope.ROLE if target_role is not None else GuidanceScope.PROJECT,
         target_role=target_role,
         requirement_delta=_delta_payload(delta) if delta.is_material else None,
+        force_replan=force_replan,
     )
     requirements = _apply_requirement_delta(
         state.requirements, delta
@@ -60,7 +64,8 @@ def publish_guidance(
         state,
         guidance=(*state.guidance, record),
         requirements=requirements,
-        plan_stale=state.plan_stale or (delta.is_material and state.blueprint_revision > 0),
+        plan_stale=state.plan_stale
+        or ((delta.is_material or force_replan) and state.blueprint_revision > 0),
         revision=state.revision + 1,
     )
 

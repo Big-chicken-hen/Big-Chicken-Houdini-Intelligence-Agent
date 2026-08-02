@@ -18,6 +18,7 @@ from .project_contracts import (
     Role,
     RoleThread,
     authoritative_task_identity,
+    native_goal_objective,
 )
 from .project_guidance import RequirementDelta, publish_guidance
 from .project_lifecycle import LifecycleEvent, ProjectEvent
@@ -190,7 +191,7 @@ class ProjectTeamService:
                 "thread/goal/set",
                 {
                     "threadId": supervisor_id,
-                    "objective": f"Houdini project {task_id}",
+                    "objective": native_goal_objective(task_text, task_id),
                     "status": "active",
                     "tokenBudget": None,
                 },
@@ -231,8 +232,13 @@ class ProjectTeamService:
         text: str,
         thread_id: str | None = None,
         requirement_delta: RequirementDelta | None = None,
+        force_replan: bool = False,
     ) -> dict[str, Any]:
-        material = requirement_delta is not None and requirement_delta.is_material
+        if not isinstance(force_replan, bool):
+            raise ValueError("force_replan must be boolean")
+        material = force_replan or (
+            requirement_delta is not None and requirement_delta.is_material
+        )
         with self._lock:
             record = self._registry.require(project_id)
             if (
@@ -249,12 +255,13 @@ class ProjectTeamService:
                 ]
                 if len(matches) != 1:
                     raise ValueError("thread_id is not an explicit member of this project")
-                target_role = matches[0]
+                target_role = None if force_replan else matches[0]
             state = publish_guidance(
                 record.state,
                 text,
                 target_role=target_role,
                 requirement_delta=requirement_delta,
+                force_replan=force_replan,
             )
             self._registry.put(
                 ProjectRecord(

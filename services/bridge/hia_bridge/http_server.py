@@ -941,10 +941,14 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     "thread_id",
                     "text",
                     "requirement_delta",
+                    "force_replan",
                 }
                 if set(body) - allowed:
                     raise BridgeError("INVALID_REQUEST", "Unexpected guidance fields")
                 try:
+                    force_replan = body.get("force_replan", False)
+                    if not isinstance(force_replan, bool):
+                        raise ValueError("force_replan must be boolean")
                     snapshot = application.project_team.append_guidance(
                         project_id=body.get("project_id"),
                         thread_id=body.get("thread_id"),
@@ -952,6 +956,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                         requirement_delta=_parse_requirement_delta(
                             body.get("requirement_delta")
                         ),
+                        force_replan=force_replan,
                     )
                 except ProjectGuidanceUnavailable as exc:
                     raise BridgeError(

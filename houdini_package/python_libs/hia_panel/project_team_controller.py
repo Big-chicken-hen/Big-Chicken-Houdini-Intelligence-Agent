@@ -37,6 +37,7 @@ class ProjectTeamGateway(Protocol):
         project_id: str,
         thread_id: str | None,
         text: str,
+        force_replan: bool = False,
         context: str,
     ) -> str | None: ...
 
@@ -75,7 +76,7 @@ class ProjectTeamController:
         self._closed = True
         self._ordinary_threads: Any = None
         self._project_snapshot: Any = None
-        self._pending_guidance: dict[str, tuple[str, str | None, str]] = {}
+        self._pending_guidance: dict[str, tuple[str, str | None, str, bool]] = {}
         self._connect_view_once()
 
     @property
@@ -155,15 +156,22 @@ class ProjectTeamController:
         project_id: str,
         thread_id: str | None,
         text: str,
+        force_replan: bool = False,
     ) -> None:
         if not self.active:
             return
         context = f"project_guidance:{uuid.uuid4().hex}"
-        self._pending_guidance[context] = (project_id, thread_id, text)
+        self._pending_guidance[context] = (
+            project_id,
+            thread_id,
+            text,
+            force_replan,
+        )
         self.gateway.append_project_guidance(
             project_id=project_id,
             thread_id=thread_id,
             text=text,
+            force_replan=force_replan,
             context=context,
         )
 
@@ -216,8 +224,10 @@ class ProjectTeamController:
         if context.startswith("project_guidance:") and project_snapshot_received:
             pending = self._pending_guidance.pop(context, None)
             if pending is not None:
-                _project_id, _thread_id, submitted_text = pending
-                if not self.view.acknowledge_guidance(submitted_text):
+                _project_id, _thread_id, submitted_text, force_replan = pending
+                if not self.view.acknowledge_guidance(
+                    submitted_text, force_replan
+                ):
                     self._on_error(
                         "先前版本的追加指导已发送；当前正在编辑的内容已保留。"
                     )

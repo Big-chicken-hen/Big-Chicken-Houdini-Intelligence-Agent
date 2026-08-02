@@ -188,6 +188,45 @@ class ProjectServiceTests(unittest.TestCase):
                 project_id=project_id, thread_id="guessed", text="x"
             )
 
+    def test_force_replan_keeps_original_text_and_invalidates_existing_plan(self) -> None:
+        result = self.service.start_team_project(
+            task_text="建造一栋克制写实的近未来住宅\n后续正文不能进入 Goal 标题"
+        )
+        project_id = result["project_id"]
+        record = self.registry.require(project_id)
+        self.registry.put(
+            replace(
+                record,
+                state=replace(
+                    record.state,
+                    blueprint_revision=1,
+                    authorized_blueprint_revision=1,
+                    revision=record.state.revision + 1,
+                ),
+            ),
+            expected_revision=record.state.revision,
+        )
+        text = "改成三层钢结构并重新安排所有阶段"
+        self.service.append_guidance(
+            project_id=project_id,
+            thread_id=result["root_thread_id"],
+            text=text,
+            force_replan=True,
+        )
+        state = self.registry.require(project_id).state
+        self.assertTrue(state.plan_stale)
+        self.assertEqual(text, state.guidance[-1].text)
+        self.assertTrue(state.guidance[-1].force_replan)
+        self.assertIsNone(state.guidance[-1].target_role)
+
+        goal_call = next(
+            params
+            for method, params in self.client.calls
+            if method == "thread/goal/set"
+        )
+        self.assertTrue(goal_call["objective"].startswith("建造一栋克制写实的近未来住宅 · task-"))
+        self.assertNotIn("后续正文", goal_call["objective"])
+
     def test_role_runtime_rejects_unknown_or_incompatible_catalog_combinations(self) -> None:
         result = self.service.start_team_project(task_text="build")
         arguments = {

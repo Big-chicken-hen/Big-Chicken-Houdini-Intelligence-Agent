@@ -35,7 +35,7 @@ if PYSIDE_AVAILABLE:
         newTaskRequested = QtCore.Signal(str)
         openThreadRequested = QtCore.Signal(str)
         projectSelected = QtCore.Signal(str)
-        appendGuidanceRequested = QtCore.Signal(str, object, str)
+        appendGuidanceRequested = QtCore.Signal(str, object, str, bool)
         continueProjectRequested = QtCore.Signal(str)
         stopProjectRequested = QtCore.Signal(str)
         collapsedChanged = QtCore.Signal(bool)
@@ -190,8 +190,25 @@ if PYSIDE_AVAILABLE:
             self.guidance_edit.setPlaceholderText("为所选项目或角色追加指导")
             self.guidance_edit.setMinimumHeight(64)
             self.guidance_edit.setMaximumHeight(120)
+            guidance_scope = QtWidgets.QHBoxLayout()
+            self.current_step_guidance_button = QtWidgets.QToolButton()
+            self.current_step_guidance_button.setText("补充当前步骤")
+            self.current_step_guidance_button.setCheckable(True)
+            self.replan_guidance_button = QtWidgets.QToolButton()
+            self.replan_guidance_button.setText("修改整体方案")
+            self.replan_guidance_button.setCheckable(True)
+            self.guidance_scope_group = QtWidgets.QButtonGroup(self)
+            self.guidance_scope_group.setExclusive(True)
+            self.guidance_scope_group.addButton(
+                self.current_step_guidance_button, 0
+            )
+            self.guidance_scope_group.addButton(self.replan_guidance_button, 1)
+            self.current_step_guidance_button.setChecked(True)
+            guidance_scope.addWidget(self.current_step_guidance_button, 1)
+            guidance_scope.addWidget(self.replan_guidance_button, 1)
             self.guidance_button = QtWidgets.QPushButton("发送追加指导")
             detail.addWidget(self.guidance_edit)
+            detail.addLayout(guidance_scope)
             detail.addWidget(self.guidance_button)
             root.addWidget(self.detail_surface)
 
@@ -544,15 +561,27 @@ if PYSIDE_AVAILABLE:
             project = self._selected_project(selected)
             if not text or project is None or not project.can_guide:
                 return
-            thread_id = selected.thread_id if isinstance(selected, RoleViewModel) else None
-            self.appendGuidanceRequested.emit(project.project_id, thread_id, text)
+            force_replan = self.replan_guidance_button.isChecked()
+            thread_id = (
+                selected.thread_id
+                if isinstance(selected, RoleViewModel) and not force_replan
+                else None
+            )
+            self.appendGuidanceRequested.emit(
+                project.project_id, thread_id, text, force_replan
+            )
 
-        def acknowledge_guidance(self, submitted_text: str) -> bool:
+        def acknowledge_guidance(
+            self, submitted_text: str, force_replan: bool = False
+        ) -> bool:
             """Clear only the exact draft acknowledged by this response."""
 
             if self.guidance_edit.toPlainText().strip() != submitted_text:
                 return False
+            if self.replan_guidance_button.isChecked() != force_replan:
+                return False
             self.guidance_edit.clear()
+            self.current_step_guidance_button.setChecked(True)
             return True
 
         def _continue_project(self) -> None:

@@ -177,6 +177,49 @@ class ProjectTeamQtTests(unittest.TestCase):
             self.state.runtime_draft_for(self.state.tree.projects[0].roles[0]).model,
         )
 
+    def test_guidance_scope_is_mutually_exclusive_and_ack_matches_mode(self) -> None:
+        emitted = []
+        self.view.appendGuidanceRequested.connect(
+            lambda project_id, thread_id, text, force_replan: emitted.append(
+                (project_id, thread_id, text, force_replan)
+            )
+        )
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.assertTrue(self.view.current_step_guidance_button.isChecked())
+        self.assertFalse(self.view.replan_guidance_button.isChecked())
+        self.view.replan_guidance_button.click()
+        self.assertFalse(self.view.current_step_guidance_button.isChecked())
+        self.assertTrue(self.view.replan_guidance_button.isChecked())
+        self.view.guidance_edit.setPlainText("改成三层钢结构并重新安排所有阶段")
+        self.view._send_guidance()
+        self.assertEqual(
+            [
+                (
+                    "project-a",
+                    None,
+                    "改成三层钢结构并重新安排所有阶段",
+                    True,
+                )
+            ],
+            emitted,
+        )
+        self.assertFalse(
+            self.view.acknowledge_guidance(
+                "改成三层钢结构并重新安排所有阶段", False
+            )
+        )
+        self.assertEqual(
+            "改成三层钢结构并重新安排所有阶段",
+            self.view.guidance_edit.toPlainText(),
+        )
+        self.assertTrue(
+            self.view.acknowledge_guidance(
+                "改成三层钢结构并重新安排所有阶段", True
+            )
+        )
+        self.assertTrue(self.view.current_step_guidance_button.isChecked())
+
     def test_complete_panel_goal_card_renders_dark_instead_of_white(self) -> None:
         from hia_panel.panel import HoudiniIntelligencePanel
 

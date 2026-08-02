@@ -98,6 +98,7 @@ class GuidanceRecord:
     scope: GuidanceScope = GuidanceScope.PROJECT
     target_role: Role | None = None
     requirement_delta: Mapping[str, Any] | None = None
+    force_replan: bool = False
 
     def __post_init__(self) -> None:
         if not self.guidance_id or not self.text.strip() or self.revision < 1:
@@ -112,6 +113,8 @@ class GuidanceRecord:
                 "requirement_delta",
                 MappingProxyType(dict(self.requirement_delta)),
             )
+        if not isinstance(self.force_replan, bool):
+            raise ValueError("guidance force_replan must be boolean")
 
 
 @dataclass(frozen=True)
@@ -242,6 +245,23 @@ def authoritative_task_identity(task_text: str) -> tuple[str, str]:
     return f"task-{digest[:24]}", digest
 
 
+def native_goal_objective(task_text: str, task_id: str, *, limit: int = 180) -> str:
+    """Build a readable, bounded Goal title without copying the whole request."""
+
+    if not isinstance(task_text, str) or not task_text.strip():
+        raise ValueError("task_text must be non-empty")
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError("task_id must be non-empty")
+    title = " ".join(task_text.strip().splitlines()[0].split())
+    suffix = f" · {task_id}"
+    available = limit - len(suffix)
+    if available < 2:
+        raise ValueError("goal objective limit is too small")
+    if len(title) > available:
+        title = title[: available - 1].rstrip() + "…"
+    return title + suffix
+
+
 def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
     """Serialize enums and role-keyed mappings into a stable JSON object."""
 
@@ -285,6 +305,7 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
                     if item.requirement_delta is not None
                     else None
                 ),
+                "force_replan": item.force_replan,
             }
             for item in state.guidance
         ],
@@ -409,6 +430,9 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
                 scope=GuidanceScope(raw.get("scope")),
                 target_role=Role(target) if target is not None else None,
                 requirement_delta=raw_delta,
+                force_replan=_boolean(
+                    raw.get("force_replan", False), "guidance force_replan"
+                ),
             )
         )
     consumed: dict[Role, int] = {}

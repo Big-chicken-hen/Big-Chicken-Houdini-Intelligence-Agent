@@ -244,16 +244,23 @@ class FakeView:
         self.render_count = 0
         self.guidance_ack_count = 0
         self.guidance_text = ""
+        self.guidance_force_replan = False
         self.model_catalogs = []
 
     def refresh_view(self) -> None:
         self.render_count += 1
 
-    def acknowledge_guidance(self, submitted_text: str) -> bool:
-        if self.guidance_text != submitted_text:
+    def acknowledge_guidance(
+        self, submitted_text: str, force_replan: bool = False
+    ) -> bool:
+        if (
+            self.guidance_text != submitted_text
+            or self.guidance_force_replan != force_replan
+        ):
             return False
         self.guidance_ack_count += 1
         self.guidance_text = ""
+        self.guidance_force_replan = False
         return True
 
     def set_model_catalog(self, models) -> None:
@@ -449,6 +456,27 @@ class ProjectTeamControllerTests(unittest.TestCase):
             {"project_team": project_snapshot()},
         )
         self.assertEqual(1, self.view.guidance_ack_count)
+
+    def test_force_replan_is_explicit_and_acknowledges_the_exact_mode(self) -> None:
+        self.controller.show()
+        self.view.guidance_text = "改成三层钢结构并重新安排所有阶段"
+        self.view.guidance_force_replan = True
+        self.view.appendGuidanceRequested.emit(
+            "project-house", None, self.view.guidance_text, True
+        )
+        guidance = [
+            call
+            for call in self.gateway.calls
+            if call[0] == "append_project_guidance"
+        ][-1]
+        self.assertTrue(guidance[2]["force_replan"])
+        context = guidance[2]["context"]
+        self.view.guidance_force_replan = False
+        self.gateway.actionCompleted.emit(
+            context, {"project_team": project_snapshot()}
+        )
+        self.assertEqual("改成三层钢结构并重新安排所有阶段", self.view.guidance_text)
+        self.assertEqual(0, self.view.guidance_ack_count)
 
     def test_old_guidance_ack_never_clears_new_draft(self) -> None:
         self.controller.show()
