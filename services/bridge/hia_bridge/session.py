@@ -464,6 +464,7 @@ class BridgeSession:
         self._last_tool_status: str | None = None
         self._stop_recovery_thread: threading.Thread | None = None
         self._project_event_observer: Callable[[dict[str, Any]], bool] | None = None
+        self._ordinary_transfer: Any | None = None
         self._closed = False
         self._client.set_event_sink(self._on_client_event)
 
@@ -477,6 +478,36 @@ class BridgeSession:
         """Attach the non-blocking project compaction observer after composition."""
 
         self._project_event_observer = observer
+
+    def set_ordinary_thread_transfer(self, transfer: Any) -> None:
+        """Attach ordinary-Thread migration after the Session is composed."""
+
+        self._ordinary_transfer = transfer
+
+    def rebind_transferred_thread(self, old_thread_id: str, new_thread_id: str) -> bool:
+        """Atomically move selected/focus identity after a verified native fork."""
+
+        old_thread_id = self._validated_identifier(old_thread_id, "old_thread_id")
+        new_thread_id = self._validated_identifier(new_thread_id, "new_thread_id")
+        with self._turn_condition:
+            selected = self._thread_id == old_thread_id
+            if selected and self._turn_active:
+                raise BridgeError(
+                    "THREAD_TRANSFER_ACTIVE",
+                    "An active ordinary Thread cannot be rebound",
+                    http_status=409,
+                )
+            if old_thread_id in self._focus_enabled_threads:
+                self._focus_enabled_threads.discard(old_thread_id)
+                self._focus_enabled_threads.add(new_thread_id)
+            binding = self._focus_goal_bindings.pop(old_thread_id, None)
+            if binding is not None:
+                self._focus_goal_bindings[new_thread_id] = binding
+            if selected:
+                self._thread_id = new_thread_id
+                self._reset_turn_locked()
+            self._write_focus_state_locked()
+            return selected
 
     def start(self) -> dict[str, Any]:
         try:
@@ -792,6 +823,14 @@ class BridgeSession:
             self._reset_turn_locked()
             self._write_focus_state_locked()
         self._events.publish("thread_selected", action="start", thread_id=thread_id)
+        transfer = self._ordinary_transfer
+        if transfer is not None:
+            transfer.record_profile(
+                thread_id,
+                model=result.get("model") if isinstance(result, dict) else model,
+                effort=None,
+                service_tier=service_tier,
+            )
         return {
             "thread_id": thread_id,
             "focus_mode": False,
@@ -829,6 +868,22 @@ class BridgeSession:
             self._reset_turn_locked()
             self._write_focus_state_locked()
         self._events.publish("thread_selected", action="resume", thread_id=resolved_id)
+        transfer = self._ordinary_transfer
+        if transfer is not None:
+            transfer.record_profile(
+                resolved_id,
+                model=resumed.get("model") if isinstance(resumed, dict) else None,
+                effort=(
+                    resumed.get("reasoningEffort")
+                    if isinstance(resumed, dict)
+                    else None
+                ),
+                service_tier=(
+                    resumed.get("serviceTier")
+                    if isinstance(resumed, dict)
+                    else service_tier
+                ),
+            )
         return {
             "thread_id": resolved_id,
             "focus_mode": self._focus_mode_locked(resolved_id),
@@ -1342,6 +1397,14 @@ class BridgeSession:
                 "turn_selected",
                 thread_id=thread_id,
                 turn_id=turn_id,
+            )
+        transfer = self._ordinary_transfer
+        if transfer is not None:
+            transfer.record_profile(
+                thread_id,
+                model=model,
+                effort=effort,
+                service_tier=service_tier,
             )
         return {"thread_id": thread_id, "turn_id": turn_id, "result": result}
 
@@ -2673,12 +2736,26 @@ class BridgeSession:
                 self._connected = False
                 self._turn_condition.notify_all()
         observer = self._project_event_observer
+        consumed = False
         if observer is not None and event_type == "codex_notification":
             try:
-                observer(dict(event))
+                consumed = observer(dict(event)) is True
             except Exception as exc:
                 self._events.publish(
                     "project_event_observer_failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+        ordinary = self._ordinary_transfer
+        if (
+            ordinary is not None
+            and not consumed
+            and event_type == "codex_notification"
+        ):
+            try:
+                ordinary.observe_codex_event(dict(event))
+            except Exception as exc:
+                self._events.publish(
+                    "ordinary_transfer_observer_failed",
                     error=f"{type(exc).__name__}: {exc}",
                 )
         fields = {key: value for key, value in event.items() if key != "type"}

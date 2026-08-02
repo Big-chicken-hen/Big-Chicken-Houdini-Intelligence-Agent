@@ -22,6 +22,7 @@ from .codex_stdio import CodexStdioClient
 from .errors import BridgeError
 from .events import EventBuffer
 from .http_server import BridgeApplication, LoopbackHTTPServer
+from .ordinary_transfer import OrdinaryThreadTransfer
 from .protocol import ProtocolPolicy
 from .project_contracts import ProjectState, Role
 from .project_registry import ProjectRecord, ProjectRegistry
@@ -51,6 +52,9 @@ PROJECT_SETTINGS_RELATIVE_PATH = Path(
 )
 PROJECT_ARTIFACTS_RELATIVE_PATH = Path(
     ".runtime/bridge/project-team-artifacts.json"
+)
+ORDINARY_TRANSFER_RELATIVE_PATH = Path(
+    ".runtime/bridge/ordinary-thread-transfers.json"
 )
 HIA_MCP_V2_SERVICE_RELATIVE_PATH = Path("services/hia_mcp_v2")
 HIA_MCP_V2_RUNTIME_RELATIVE_PATH = Path(".runtime/hia-mcp-v2")
@@ -842,6 +846,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     server: LoopbackHTTPServer | None = None
     scene_queue: SceneQueue | None = None
     project_runtime: ProjectRuntime | None = None
+    ordinary_transfer: OrdinaryThreadTransfer | None = None
     sensitive_values: list[str] = []
     try:
         project_root, codex_exe, codex_home, temp_directory = _validated_paths(args)
@@ -1021,6 +1026,21 @@ def run(argv: Sequence[str] | None = None) -> int:
         observer_setter = getattr(session, "set_project_event_observer", None)
         if callable(observer_setter):
             observer_setter(project_runtime.observe_codex_event)
+        rebind_transferred = getattr(session, "rebind_transferred_thread", None)
+        ordinary_transfer = OrdinaryThreadTransfer(
+            client,
+            project_root=project_root,
+            ledger_path=project_root / ORDINARY_TRANSFER_RELATIVE_PATH,
+            publish=events.publish,
+            rebind=(
+                rebind_transferred
+                if callable(rebind_transferred)
+                else lambda _old, _new: False
+            ),
+        )
+        transfer_setter = getattr(session, "set_ordinary_thread_transfer", None)
+        if callable(transfer_setter):
+            transfer_setter(ordinary_transfer)
         project_team = project_runtime.service
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
@@ -1070,6 +1090,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         session.start()
         project_runtime.recover()
+        if ordinary_transfer is not None:
+            ordinary_transfer.recover()
 
         def request_shutdown(*_: object) -> None:
             threading.Thread(
@@ -1146,11 +1168,15 @@ def run(argv: Sequence[str] | None = None) -> int:
                     project_runtime.close()
             finally:
                 try:
-                    if scene_queue is not None:
-                        scene_queue.shutdown()
+                    if ordinary_transfer is not None:
+                        ordinary_transfer.close()
                 finally:
-                    if session is not None:
-                        session.close()
+                    try:
+                        if scene_queue is not None:
+                            scene_queue.shutdown()
+                    finally:
+                        if session is not None:
+                            session.close()
 
 
 def main() -> None:
