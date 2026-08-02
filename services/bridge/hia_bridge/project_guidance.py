@@ -26,6 +26,10 @@ class RequirementDelta:
     supersede: Mapping[str, str] | None = None
     remove: tuple[str, ...] = ()
 
+    @property
+    def is_material(self) -> bool:
+        return bool(self.add or self.supersede or self.remove)
+
 
 def publish_guidance(
     state: ProjectState,
@@ -40,20 +44,23 @@ def publish_guidance(
     digest = hashlib.sha256(
         f"{state.project_id}\0{revision}\0{text}".encode("utf-8")
     ).hexdigest()
+    delta = requirement_delta or RequirementDelta()
     record = GuidanceRecord(
         guidance_id=f"guidance-{digest[:24]}",
         revision=revision,
         text=text,
         scope=GuidanceScope.ROLE if target_role is not None else GuidanceScope.PROJECT,
         target_role=target_role,
+        requirement_delta=_delta_payload(delta) if delta.is_material else None,
     )
     requirements = _apply_requirement_delta(
-        state.requirements, requirement_delta or RequirementDelta()
+        state.requirements, delta
     )
     return replace(
         state,
         guidance=(*state.guidance, record),
         requirements=requirements,
+        plan_stale=state.plan_stale or (delta.is_material and state.blueprint_revision > 0),
         revision=state.revision + 1,
     )
 
@@ -133,3 +140,20 @@ def _apply_requirement_delta(
             superseded_by=None,
         )
     return tuple(records[key] for key in sorted(records))
+
+
+def _delta_payload(delta: RequirementDelta) -> dict[str, object]:
+    return {
+        "add": [
+            {
+                "requirement_id": item.requirement_id,
+                "kind": item.kind,
+                "status": item.status.value,
+                "source_ref": item.source_ref,
+                "superseded_by": item.superseded_by,
+            }
+            for item in delta.add
+        ],
+        "supersede": dict(delta.supersede or {}),
+        "remove": list(delta.remove),
+    }

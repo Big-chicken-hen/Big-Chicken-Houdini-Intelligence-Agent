@@ -211,6 +211,26 @@ class ProjectRunnerTests(unittest.TestCase):
             [item.text for item in updated.state.guidance],
         )
 
+    def test_material_delta_at_effect_boundary_discards_old_execution_and_replans(self) -> None:
+        record = _record(ProjectStatus.EXECUTING_STAGE)
+        effect = PendingEffect("old-execution", "start_execution", {})
+        state = replace(
+            record.state,
+            pending_effects=(effect, PendingEffect("old-review", "start_reviews", {})),
+            plan_stale=True,
+            blueprint_revision=1,
+            authorized_blueprint_revision=1,
+        )
+        self.registry.put(ProjectRecord(state, record.authoritative_task_text))
+        updated = self.runner.acknowledge_effect(
+            "p1",
+            effect.effect_id,
+            EffectResult(state, LifecycleEvent(ProjectEvent.STAGE_EXECUTED)),
+        )
+        self.assertEqual(ProjectStatus.PLANNING, updated.state.status)
+        self.assertEqual(["request_plan"], [item.kind for item in updated.state.pending_effects])
+        self.assertTrue(updated.state.plan_stale)
+
 
 if __name__ == "__main__":
     unittest.main()

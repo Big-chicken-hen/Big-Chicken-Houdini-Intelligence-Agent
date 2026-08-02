@@ -97,6 +97,7 @@ class GuidanceRecord:
     text: str
     scope: GuidanceScope = GuidanceScope.PROJECT
     target_role: Role | None = None
+    requirement_delta: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.guidance_id or not self.text.strip() or self.revision < 1:
@@ -105,6 +106,12 @@ class GuidanceRecord:
             raise ValueError("role guidance requires target_role")
         if self.scope is GuidanceScope.PROJECT and self.target_role is not None:
             raise ValueError("project guidance cannot have target_role")
+        if self.requirement_delta is not None:
+            object.__setattr__(
+                self,
+                "requirement_delta",
+                MappingProxyType(dict(self.requirement_delta)),
+            )
 
 
 @dataclass(frozen=True)
@@ -182,6 +189,9 @@ class ProjectState:
     attention_reason: str | None = None
     last_error: str | None = None
     pending_effects: tuple[PendingEffect, ...] = ()
+    plan_stale: bool = False
+    blueprint_revision: int = 0
+    authorized_blueprint_revision: int = 0
     revision: int = 0
 
     def __post_init__(self) -> None:
@@ -194,6 +204,19 @@ class ProjectState:
             raise ValueError("authoritative_task_sha256 must be a SHA-256 hex digest")
         if self.elapsed_seconds < 0 or self.total_evidence_bytes < 0:
             raise ValueError("project counters cannot be negative")
+        revision_values = (
+            self.blueprint_revision,
+            self.authorized_blueprint_revision,
+        )
+        if any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 0
+            for item in revision_values
+        ):
+            raise ValueError("blueprint revisions must be non-negative integers")
+        if self.authorized_blueprint_revision > self.blueprint_revision:
+            raise ValueError("authorized blueprint revision cannot exceed current revision")
+        if not isinstance(self.plan_stale, bool):
+            raise ValueError("plan_stale must be boolean")
         role_values = dict(self.roles)
         thread_ids = [binding.thread_id for binding in role_values.values()]
         if len(thread_ids) != len(set(thread_ids)):
@@ -257,6 +280,11 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
                 "text": item.text,
                 "scope": item.scope.value,
                 "target_role": item.target_role.value if item.target_role else None,
+                "requirement_delta": (
+                    dict(item.requirement_delta)
+                    if item.requirement_delta is not None
+                    else None
+                ),
             }
             for item in state.guidance
         ],
@@ -287,6 +315,9 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
             }
             for effect in state.pending_effects
         ],
+        "plan_stale": state.plan_stale,
+        "blueprint_revision": state.blueprint_revision,
+        "authorized_blueprint_revision": state.authorized_blueprint_revision,
         "revision": state.revision,
     }
 
@@ -367,6 +398,9 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
         if not isinstance(raw, Mapping):
             raise ValueError("guidance record is malformed")
         target = raw.get("target_role")
+        raw_delta = raw.get("requirement_delta")
+        if raw_delta is not None and not isinstance(raw_delta, Mapping):
+            raise ValueError("guidance requirement_delta is malformed")
         guidance.append(
             GuidanceRecord(
                 guidance_id=str(raw.get("guidance_id") or ""),
@@ -374,6 +408,7 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
                 text=str(raw.get("text") or ""),
                 scope=GuidanceScope(raw.get("scope")),
                 target_role=Role(target) if target is not None else None,
+                requirement_delta=raw_delta,
             )
         )
     consumed: dict[Role, int] = {}
@@ -480,6 +515,14 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
         ),
         last_error=_optional_text(value.get("last_error"), "last_error"),
         pending_effects=tuple(effects),
+        plan_stale=_boolean(value.get("plan_stale", False), "plan_stale"),
+        blueprint_revision=_non_negative_int(
+            value.get("blueprint_revision", 0), "blueprint revision"
+        ),
+        authorized_blueprint_revision=_non_negative_int(
+            value.get("authorized_blueprint_revision", 0),
+            "authorized blueprint revision",
+        ),
         revision=_non_negative_int(value.get("revision", 0), "revision"),
     )
 
@@ -495,4 +538,10 @@ def _optional_text(value: Any, name: str) -> str | None:
 def _non_negative_int(value: Any, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _boolean(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be boolean")
     return value

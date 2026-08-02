@@ -74,6 +74,18 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.status)
         self.assertTrue(commands[0].data["repair"])
 
+    def test_material_requirement_change_returns_to_existing_plan_and_authorization(self) -> None:
+        state = replace(
+            _state(ProjectStatus.EXECUTING_STAGE),
+            plan_stale=True,
+            blueprint_revision=2,
+            authorized_blueprint_revision=2,
+        )
+        state, commands = self.apply(state, ProjectEvent.MATERIAL_REPLAN_REQUIRED)
+        self.assertEqual(ProjectStatus.PLANNING, state.status)
+        self.assertEqual([ProjectCommand.REQUEST_PLAN], [item.kind for item in commands])
+        self.assertNotIn(ProjectCommand.PAUSE_GOAL, [item.kind for item in commands])
+
     def test_interruption_and_exact_restart(self) -> None:
         state = _state(ProjectStatus.EXECUTING_STAGE)
         state, commands = self.apply(

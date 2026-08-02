@@ -101,6 +101,11 @@ class _Interrupted(Exception):
         self.reason = reason
 
 
+class _MaterialReplan(Exception):
+    def __init__(self, state: ProjectState) -> None:
+        self.state = state
+
+
 class ProjectEffectExecutor:
     """Execute one persisted effect with exact ownership and finite waiting."""
 
@@ -147,6 +152,11 @@ class ProjectEffectExecutor:
             return EffectResult(
                 stop.state,
                 LifecycleEvent(ProjectEvent.PROJECT_INTERRUPTED, {"reason": stop.reason}),
+            )
+        except _MaterialReplan as stop:
+            return EffectResult(
+                stop.state,
+                LifecycleEvent(ProjectEvent.MATERIAL_REPLAN_REQUIRED),
             )
         except TimeoutError:
             return EffectResult(
@@ -288,13 +298,40 @@ class ProjectEffectExecutor:
             ) from exc
         covered = tuple(item for card in cards for item in card.requirement_ids)
         validate_requirement_coverage(requirements, covered)
+        if state.requirements:
+            validate_requirement_coverage(state.requirements, (item.requirement_id for item in requirements))
+        previous = self._artifacts.get_named(state.project_id, "plan")
+        blueprint_revision = state.blueprint_revision + 1
+        guidance_revision = max((item.revision for item in state.guidance), default=0)
+        stored_plan = json.loads(json.dumps(payload, ensure_ascii=False))
+        stored_plan["_blueprint_revision"] = blueprint_revision
+        stored_plan["_guidance_revision"] = guidance_revision
+        stored_plan["_previous_blueprint_sha256"] = (
+            previous.get("_blueprint_sha256") if isinstance(previous, Mapping) else None
+        )
+        stored_plan["_blueprint_sha256"] = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         state = replace(
             state,
             requirements=tuple(requirements),
             stage=StageState(stage_id=cards[0].stage_id, ordinal=1),
+            plan_stale=False,
+            blueprint_revision=blueprint_revision,
             revision=state.revision + 1,
         )
-        self._artifacts.put_named(state.project_id, "plan", payload)
+        history = self._artifacts.get_named(state.project_id, "plan_history")
+        history = list(history) if isinstance(history, list) else []
+        history.append(
+            {
+                "blueprint_revision": blueprint_revision,
+                "blueprint_sha256": stored_plan["_blueprint_sha256"],
+                "previous_blueprint_sha256": stored_plan["_previous_blueprint_sha256"],
+                "guidance_revision": guidance_revision,
+            }
+        )
+        self._artifacts.put_named(state.project_id, "plan", stored_plan)
+        self._artifacts.put_named(state.project_id, "plan_history", history)
         self._artifacts.put_effect(
             state.project_id, effect.effect_id, effect.kind, {"stage_ids": [c.stage_id for c in cards]}
         )
@@ -304,6 +341,11 @@ class ProjectEffectExecutor:
         self, state: ProjectState, effect: PendingEffect, deadline: float
     ) -> EffectResult:
         plan = self._require_plan(state)
+        if (
+            state.plan_stale
+            or plan.get("_blueprint_revision") != state.blueprint_revision
+        ):
+            raise ProjectEffectError("STALE_BLUEPRINT", "current blueprint must be replanned")
         request = self._base_request(state, Role.SUPERVISOR, "authorize_plan")
         request["plan"] = plan
         state, completed = self._run_structured(
@@ -323,11 +365,24 @@ class ProjectEffectExecutor:
                 "PLAN_NOT_AUTHORIZED", "Supervisor did not authorize the exact persisted stage set"
             )
         self._artifacts.put_effect(state.project_id, effect.effect_id, effect.kind, payload)
-        return EffectResult(state, LifecycleEvent(ProjectEvent.PLAN_AUTHORIZED))
+        return EffectResult(
+            replace(
+                state,
+                authorized_blueprint_revision=state.blueprint_revision,
+                revision=state.revision + 1,
+            ),
+            LifecycleEvent(ProjectEvent.PLAN_AUTHORIZED),
+        )
 
     def _execute_stage(
         self, state: ProjectState, effect: PendingEffect, deadline: float
     ) -> EffectResult:
+        if (
+            state.plan_stale
+            or state.blueprint_revision == 0
+            or state.authorized_blueprint_revision != state.blueprint_revision
+        ):
+            raise ProjectEffectError("STALE_BLUEPRINT", "Execution requires the latest authorized blueprint")
         stage = self._current_stage(state)
         repair = bool(effect.data.get("repair", False))
         request = self._base_request(
@@ -753,6 +808,27 @@ class ProjectEffectExecutor:
         guidance = pending_guidance(state, role)
         envelope = dict(request)
         action = str(envelope.get("action") or "")
+        if state.plan_stale and action != "create_plan_and_stage_cards":
+            raise _MaterialReplan(state)
+        if action == "create_plan_and_stage_cards":
+            current_plan = self._artifacts.get_named(state.project_id, "plan")
+            previous_guidance_revision = (
+                int(current_plan.get("_guidance_revision", 0))
+                if isinstance(current_plan, Mapping)
+                else 0
+            )
+            envelope["current_blueprint"] = current_plan
+            envelope["target_blueprint_revision"] = state.blueprint_revision + 1
+            envelope["material_requirement_deltas"] = [
+                {
+                    "guidance_id": item.guidance_id,
+                    "revision": item.revision,
+                    "delta": dict(item.requirement_delta),
+                }
+                for item in state.guidance
+                if item.revision > previous_guidance_revision
+                and item.requirement_delta is not None
+            ]
         envelope["guidance"] = [
             {"guidance_id": item.guidance_id, "revision": item.revision, "text": item.text}
             for item in guidance
@@ -853,6 +929,7 @@ class ProjectEffectExecutor:
             state,
             guidance=(*state.guidance, *additions),
             requirements=external.requirements,
+            plan_stale=external.plan_stale,
             revision=max(state.revision, external.revision) + 1,
         )
 

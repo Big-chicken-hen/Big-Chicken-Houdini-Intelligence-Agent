@@ -18,6 +18,7 @@ class ProjectEvent(str, Enum):
     INTAKE_UNCLEAR = "intake_unclear"
     PLAN_READY = "plan_ready"
     PLAN_AUTHORIZED = "plan_authorized"
+    MATERIAL_REPLAN_REQUIRED = "material_replan_required"
     STAGE_EXECUTED = "stage_executed"
     REVIEWS_PASSED = "reviews_passed"
     REVIEWS_FAILED = "reviews_failed"
@@ -127,6 +128,13 @@ def reduce_project(
     kind = event.kind
     data = dict(event.data or {})
     status = state.status
+
+    if kind is ProjectEvent.MATERIAL_REPLAN_REQUIRED and status in _ACTIVE:
+        return _next(
+            state,
+            ProjectStatus.PLANNING,
+            LifecycleCommand(ProjectCommand.REQUEST_PLAN, {"revision": True}),
+        )
 
     if kind is ProjectEvent.INTAKE_STARTED and status is ProjectStatus.PROVISIONING:
         return _next(state, ProjectStatus.INTAKE, LifecycleCommand(ProjectCommand.START_INTAKE))

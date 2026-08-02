@@ -13,7 +13,7 @@ from typing import Any, Mapping, Protocol
 
 from .project_contracts import PendingEffect, ProjectState
 from .project_effects import EffectResult
-from .project_lifecycle import LifecycleEvent, reduce_project
+from .project_lifecycle import LifecycleEvent, ProjectEvent, reduce_project
 from .project_registry import ProjectRecord, ProjectRegistry
 
 
@@ -104,7 +104,24 @@ class ProjectRunner:
             pending_effects=effects[1:],
             revision=record.state.revision,
         )
-        if outcome.event is None:
+        safe_replan = outcome.event is None or outcome.event.kind in {
+            ProjectEvent.PLAN_READY,
+            ProjectEvent.PLAN_AUTHORIZED,
+            ProjectEvent.STAGE_EXECUTED,
+            ProjectEvent.REVIEWS_PASSED,
+            ProjectEvent.REVIEWS_FAILED,
+            ProjectEvent.REPAIR_READY,
+        }
+        if (
+            base.plan_stale
+            and safe_replan
+            and not (effects[0].kind == "request_plan" and outcome.event is None)
+        ):
+            base = replace(base, pending_effects=())
+            next_state, commands = reduce_project(
+                base, LifecycleEvent(ProjectEvent.MATERIAL_REPLAN_REQUIRED)
+            )
+        elif outcome.event is None:
             next_state = replace(base, revision=record.state.revision + 1)
             commands = ()
         else:
@@ -185,6 +202,11 @@ def _reconcile_effect_state(
         if latest_current_revision > latest_outcome_revision
         else outcome.requirements
     )
+    plan_stale = (
+        current.plan_stale
+        if latest_current_revision > latest_outcome_revision
+        else outcome.plan_stale
+    )
     consumed = dict(outcome.guidance_consumed)
     for role, revision in current.guidance_consumed.items():
         consumed[role] = max(consumed.get(role, 0), revision)
@@ -194,6 +216,7 @@ def _reconcile_effect_state(
         guidance=ordered_guidance,
         guidance_consumed=consumed,
         requirements=requirements,
+        plan_stale=plan_stale,
     )
 
 

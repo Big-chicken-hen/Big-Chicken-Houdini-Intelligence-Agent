@@ -13,6 +13,7 @@ from services.bridge.hia_bridge.project_contracts import (
     PendingEffect,
     ProjectState,
     ProjectStatus,
+    Requirement,
     Role,
     RoleThread,
     RuntimeBudget,
@@ -23,8 +24,12 @@ from services.bridge.hia_bridge.project_effects import (
     ProjectEffectError,
     ProjectEffectExecutor,
 )
-from services.bridge.hia_bridge.project_guidance import publish_guidance
-from services.bridge.hia_bridge.project_lifecycle import ProjectEvent, reduce_project
+from services.bridge.hia_bridge.project_guidance import RequirementDelta, publish_guidance
+from services.bridge.hia_bridge.project_lifecycle import (
+    LifecycleEvent,
+    ProjectEvent,
+    reduce_project,
+)
 from services.bridge.hia_bridge.project_payloads import FULL_BLUEPRINT_SECTION_IDS
 from services.bridge.hia_bridge.project_registry import (
     ProjectAttachment,
@@ -841,6 +846,75 @@ class ProjectEffectExecutorTests(unittest.TestCase):
             planning_starts[1]["guidance"][0]["text"],
         )
         self.assertEqual(1, harness.state.guidance_consumed[Role.PLANNING])
+
+    def test_material_delta_revises_full_artifact_then_requires_supervisor_authorization(self):
+        self._queue_common()
+        harness = EffectHarness(self.root, self.client)
+        for _ in range(4):
+            harness.run_one()
+        self.assertEqual(1, harness.state.blueprint_revision)
+        self.assertEqual(1, harness.state.authorized_blueprint_revision)
+
+        revised_plan = json.loads(json.dumps(_plan()))
+        anchor = revised_plan["requirements"][0]["source_ref"]
+        revised_plan["requirements"].append(
+            {
+                "requirement_id": "req-2",
+                "kind": "structure",
+                "description": "Add the new roof subsystem from user guidance",
+                "source_ref": anchor,
+                "user_fact_ids": ["fact-1"],
+            }
+        )
+        revised_plan["stages"][0]["requirement_ids"].append("req-2")
+        revised_plan["stages"][0]["ordered_steps"][0]["requirement_ids"].append("req-2")
+        for section in revised_plan["blueprint_sections"]:
+            section["requirement_ids"].append("req-2")
+
+        updated = publish_guidance(
+            harness.state,
+            "add a roof subsystem",
+            requirement_delta=RequirementDelta(
+                add=(Requirement("req-2", "structure", source_ref=anchor),)
+            ),
+        )
+        replanning, commands = reduce_project(
+            updated, LifecycleEvent(ProjectEvent.MATERIAL_REPLAN_REQUIRED)
+        )
+        effect = _pending_effect(replanning, 0, commands[0].kind.value, commands[0].data or {})
+        harness.state = replace(replanning, pending_effects=(effect,))
+        harness.registry.put(
+            ProjectRecord(harness.state, "build a Houdini asset"),
+            expected_revision=harness.registry.require("project-1").state.revision,
+        )
+        self.client.queue(Role.PLANNING, "create_plan_and_stage_cards", revised_plan)
+        self.client.queue(
+            Role.SUPERVISOR,
+            "authorize_plan",
+            {
+                "schema": "hia-project-authorization/1",
+                "authorized": True,
+                "stage_ids": ["stage-1"],
+            },
+        )
+
+        harness.run_one()
+        self.assertEqual(ProjectStatus.AUTHORIZATION, harness.state.status)
+        self.assertEqual(2, harness.state.blueprint_revision)
+        self.assertEqual(1, harness.state.authorized_blueprint_revision)
+        planning = [
+            json.loads(params["input"][0]["text"])
+            for method, params in self.client.calls
+            if method == "turn/start" and params["threadId"] == "thread-planning"
+        ][-1]
+        self.assertEqual(1, planning["current_blueprint"]["_blueprint_revision"])
+        self.assertEqual("req-2", planning["material_requirement_deltas"][0]["delta"]["add"][0]["requirement_id"])
+        self.assertEqual(2, planning["target_blueprint_revision"])
+        self.assertEqual(2, len(harness.artifacts.get_named("project-1", "plan_history")))
+
+        harness.run_one()
+        self.assertEqual(ProjectStatus.EXECUTING_STAGE, harness.state.status)
+        self.assertEqual(2, harness.state.authorized_blueprint_revision)
 
     def test_advance_stage_returns_exact_state_only_effect_result(self):
         harness = EffectHarness(self.root, self.client)

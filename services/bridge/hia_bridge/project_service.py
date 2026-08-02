@@ -232,6 +232,7 @@ class ProjectTeamService:
         thread_id: str | None = None,
         requirement_delta: RequirementDelta | None = None,
     ) -> dict[str, Any]:
+        material = requirement_delta is not None and requirement_delta.is_material
         with self._lock:
             record = self._registry.require(project_id)
             if (
@@ -261,6 +262,8 @@ class ProjectTeamService:
                 ),
                 expected_revision=record.state.revision,
             )
+        if material and self._workflow is not None:
+            self._workflow.start(project_id)
         return self.snapshot()
 
     def continue_project(self, *, project_id: str) -> dict[str, Any]:

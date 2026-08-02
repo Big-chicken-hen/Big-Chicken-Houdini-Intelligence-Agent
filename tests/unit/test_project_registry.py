@@ -8,10 +8,12 @@ import unittest
 from services.bridge.hia_bridge.project_contracts import (
     ProjectState,
     ProjectStatus,
+    Requirement,
     Role,
     RoleThread,
     authoritative_task_identity,
 )
+from services.bridge.hia_bridge.project_guidance import RequirementDelta, publish_guidance
 from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
 
 
@@ -56,6 +58,30 @@ class ProjectRegistryTests(unittest.TestCase):
         record = _record()
         with self.assertRaisesRegex(ValueError, "hash|ID"):
             ProjectRecord(record.state, "different task")
+
+    def test_material_blueprint_revision_and_delta_survive_restart(self) -> None:
+        record = _record()
+        planned = replace(
+            record.state,
+            blueprint_revision=2,
+            authorized_blueprint_revision=2,
+        )
+        revised = publish_guidance(
+            planned,
+            "add a roof",
+            requirement_delta=RequirementDelta(
+                add=(Requirement("REQ-roof", "structure", source_ref="task"),)
+            ),
+        )
+        self.registry.put(ProjectRecord(revised, record.authoritative_task_text))
+        loaded = ProjectRegistry(self.registry.path).require("project-1")
+        self.assertTrue(loaded.state.plan_stale)
+        self.assertEqual(2, loaded.state.blueprint_revision)
+        self.assertEqual(2, loaded.state.authorized_blueprint_revision)
+        self.assertEqual(
+            "REQ-roof",
+            loaded.state.guidance[-1].requirement_delta["add"][0]["requirement_id"],
+        )
 
     def test_optimistic_revision_prevents_lost_updates(self) -> None:
         record = _record()

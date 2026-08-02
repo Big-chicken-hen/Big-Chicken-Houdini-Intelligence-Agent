@@ -36,6 +36,15 @@ _WAITING_STATUSES = frozenset(
     }
 )
 _STOP_CONTROL_EFFECTS = frozenset({"pause_goal", "show_attention", "record_failure"})
+_REPLAN_STATUSES = frozenset(
+    {
+        ProjectStatus.PLANNING,
+        ProjectStatus.AUTHORIZATION,
+        ProjectStatus.EXECUTING_STAGE,
+        ProjectStatus.REVIEWING_STAGE,
+        ProjectStatus.REPAIRING_STAGE,
+    }
+)
 
 
 class ProjectWorkflowHost:
@@ -79,6 +88,18 @@ class ProjectWorkflowHost:
             if current is not None and not current.done():
                 return False
             record = self._registry.require(project_id)
+            if (
+                record.state.plan_stale
+                and record.state.status in _REPLAN_STATUSES
+                and (
+                    not record.state.pending_effects
+                    or record.state.pending_effects[0].kind != "request_plan"
+                )
+            ):
+                record = self._runner.cancel_pending_and_dispatch(
+                    project_id,
+                    LifecycleEvent(ProjectEvent.MATERIAL_REPLAN_REQUIRED),
+                )
             if record.state.status in _WAITING_STATUSES:
                 return False
             if not record.state.pending_effects:
@@ -121,7 +142,7 @@ class ProjectWorkflowHost:
         for record in self._registry.list():
             if (
                 record.state.status not in _WAITING_STATUSES
-                and record.state.pending_effects
+                and (record.state.pending_effects or record.state.plan_stale)
                 and self.start(record.state.project_id)
             ):
                 scheduled.append(record.state.project_id)

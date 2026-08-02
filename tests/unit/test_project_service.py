@@ -5,7 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from services.bridge.hia_bridge.project_contracts import ProjectStatus, Role
+from services.bridge.hia_bridge.project_contracts import ProjectStatus, Requirement, Role
+from services.bridge.hia_bridge.project_guidance import RequirementDelta
 from services.bridge.hia_bridge.project_registry import ProjectRegistry
 from services.bridge.hia_bridge.project_service import (
     ProjectGuidanceUnavailable,
@@ -280,6 +281,45 @@ class ProjectServiceTests(unittest.TestCase):
         )
         service.continue_project(project_id=project_id)
         self.assertEqual([project_id], workflow.resumed)
+
+    def test_material_guidance_wakes_workflow_but_plain_guidance_does_not(self) -> None:
+        root = Path(self.temp.name)
+        workflow = FakeWorkflow()
+        registry = ProjectRegistry(root / "material-guidance-projects.json")
+        service = ProjectTeamService(
+            client=self.client,
+            project_root=root,
+            registry=registry,
+            settings=self.settings,
+            thread_factory=_factory(self.client, root),
+            workflow=workflow,
+        )
+        result = service.start_team_project(task_text="build a scene")
+        project_id = result["project_id"]
+        record = registry.require(project_id)
+        active = replace(
+            record.state,
+            status=ProjectStatus.EXECUTING_STAGE,
+            pending_effects=(),
+            blueprint_revision=1,
+            authorized_blueprint_revision=1,
+            revision=record.state.revision + 1,
+        )
+        registry.put(
+            type(record)(active, record.authoritative_task_text, record.attachments),
+            expected_revision=record.state.revision,
+        )
+        service.append_guidance(project_id=project_id, text="explain the next step")
+        self.assertEqual([project_id], workflow.started)
+        service.append_guidance(
+            project_id=project_id,
+            text="add a roof requirement",
+            requirement_delta=RequirementDelta(
+                add=(Requirement("REQ-roof", "structure", source_ref="task"),)
+            ),
+        )
+        self.assertEqual([project_id, project_id], workflow.started)
+        self.assertTrue(registry.require(project_id).state.plan_stale)
 
     def test_stop_request_immediately_disables_and_rejects_guidance(self) -> None:
         root = Path(self.temp.name)

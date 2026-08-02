@@ -226,6 +226,31 @@ class ProjectWorkflowHostTests(unittest.TestCase):
         self._wait_until(lambda: not self.registry.require("active").state.pending_effects)
         self.assertEqual([("active", "active-effect-0")], executor.effects)
 
+    def test_recovery_replaces_persisted_old_plan_work_with_replanning(self) -> None:
+        record = _record("stale", 2)
+        record = ProjectRecord(
+            replace(
+                record.state,
+                plan_stale=True,
+                blueprint_revision=1,
+                authorized_blueprint_revision=1,
+            ),
+            record.authoritative_task_text,
+        )
+        self.registry.put(record)
+        executor = BlockingExecutor()
+        host = self._host(executor)
+
+        self.assertEqual(("stale",), host.recover())
+        self.assertTrue(executor.entered.wait(1))
+        current = self.registry.require("stale")
+        self.assertEqual(ProjectStatus.PLANNING, current.state.status)
+        self.assertNotEqual("stale-effect-0", executor.effects[0][1])
+        self.assertEqual("request_plan", current.state.pending_effects[0].kind)
+        executor.release.set()
+        self._wait_until(lambda: not host.is_inflight("stale"))
+        self.assertEqual(1, len(executor.effects))
+
     def test_resuming_project_becomes_active_only_after_resume_effect_ack(self) -> None:
         record = _record("p1")
         record = ProjectRecord(

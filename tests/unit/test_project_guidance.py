@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 from services.bridge.hia_bridge.project_contracts import (
@@ -56,7 +57,7 @@ class ProjectGuidanceTests(unittest.TestCase):
 
     def test_user_can_remove_stage_requirement_and_shorten_blueprint(self) -> None:
         state = publish_guidance(
-            _state(),
+            replace(_state(), blueprint_revision=1, authorized_blueprint_revision=1),
             "取消动画阶段",
             requirement_delta=RequirementDelta(remove=("REQ-animation",)),
         )
@@ -64,6 +65,8 @@ class ProjectGuidanceTests(unittest.TestCase):
             item for item in state.requirements if item.requirement_id == "REQ-animation"
         )
         self.assertEqual(RequirementStatus.REMOVED_BY_USER, animation.status)
+        self.assertTrue(state.plan_stale)
+        self.assertEqual(["REQ-animation"], state.guidance[-1].requirement_delta["remove"])
         validate_requirement_coverage(
             state.requirements, ("REQ-structure", "REQ-material")
         )
@@ -91,6 +94,14 @@ class ProjectGuidanceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "missing"):
             validate_requirement_coverage(_state().requirements, ("REQ-structure",))
+
+    def test_plain_guidance_never_invalidates_the_blueprint(self) -> None:
+        state = replace(
+            _state(), blueprint_revision=1, authorized_blueprint_revision=1
+        )
+        updated = publish_guidance(state, "make the next explanation shorter")
+        self.assertFalse(updated.plan_stale)
+        self.assertIsNone(updated.guidance[-1].requirement_delta)
 
 
 if __name__ == "__main__":
