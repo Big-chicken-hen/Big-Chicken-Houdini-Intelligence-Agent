@@ -101,7 +101,7 @@ class ProjectLifecycleTests(unittest.TestCase):
 
     def test_ineligible_and_unclear_do_not_provision_workers(self) -> None:
         for event, expected in (
-            (ProjectEvent.SCENE_INELIGIBLE, ProjectStatus.BLOCKED),
+            (ProjectEvent.SCENE_INELIGIBLE, ProjectStatus.NOT_APPLICABLE),
             (ProjectEvent.INTAKE_UNCLEAR, ProjectStatus.NEEDS_ATTENTION),
         ):
             with self.subTest(event=event):

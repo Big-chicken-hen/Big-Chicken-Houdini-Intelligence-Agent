@@ -23,6 +23,7 @@ from .project_contracts import (
 
 
 REGISTRY_SCHEMA = "hia-project-registry/2"
+REGISTRY_MAX_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,8 @@ class ProjectRegistry:
     def _read_all(self) -> dict[str, ProjectRecord]:
         if not self._path.exists():
             return {}
+        if self._path.stat().st_size > REGISTRY_MAX_BYTES:
+            raise ValueError("project registry exceeds its byte limit")
         raw = json.loads(self._path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict) or raw.get("schema") != REGISTRY_SCHEMA:
             raise ValueError("project registry schema is invalid")
@@ -96,6 +99,11 @@ class ProjectRegistry:
             if record.state.project_id in parsed:
                 raise ValueError("project registry contains a duplicate project_id")
             parsed[record.state.project_id] = record
+        all_threads: list[str] = []
+        for record in parsed.values():
+            all_threads.extend(binding.thread_id for binding in record.state.roles.values())
+        if len(all_threads) != len(set(all_threads)):
+            raise ValueError("project registry reuses a Thread across projects")
         return parsed
 
     def _write_all(self, records: dict[str, ProjectRecord]) -> None:
@@ -110,9 +118,11 @@ class ProjectRegistry:
                 for _, record in sorted(records.items())
             ],
         }
-        temporary = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
+            "utf-8"
         )
+        if len(encoded) > REGISTRY_MAX_BYTES:
+            raise ValueError("project registry exceeds its byte limit")
+        temporary = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(encoded)
         os.replace(temporary, self._path)

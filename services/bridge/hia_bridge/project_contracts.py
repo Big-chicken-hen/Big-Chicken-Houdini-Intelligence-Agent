@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 import hashlib
+from types import MappingProxyType
 from typing import Any, Mapping
 
 
@@ -28,6 +29,7 @@ class ProjectStatus(str, Enum):
     INTERRUPTED = "interrupted"
     FAILED = "failed"
     NEEDS_ATTENTION = "needs_attention"
+    NOT_APPLICABLE = "not_applicable"
 
 
 class Role(str, Enum):
@@ -113,6 +115,8 @@ class StageState:
     latest_evidence_ids: tuple[str, ...] = ()
     latest_defect_hash: str | None = None
     latest_repair_hash: str | None = None
+    latest_screenshot_hash: str | None = None
+    latest_coverage_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +168,20 @@ class ProjectState:
             raise ValueError("authoritative_task_sha256 must be a SHA-256 hex digest")
         if self.elapsed_seconds < 0 or self.total_evidence_bytes < 0:
             raise ValueError("project counters cannot be negative")
+        role_values = dict(self.roles)
+        thread_ids = [binding.thread_id for binding in role_values.values()]
+        if len(thread_ids) != len(set(thread_ids)):
+            raise ValueError("project role Thread IDs must be unique")
+        supervisor = role_values.get(Role.SUPERVISOR)
+        if supervisor is not None and supervisor.thread_id != self.goal_thread_id:
+            raise ValueError("Supervisor Thread must own the native Goal")
+        object.__setattr__(self, "roles", MappingProxyType(role_values))
+        object.__setattr__(self, "turns", MappingProxyType(dict(self.turns)))
+        object.__setattr__(
+            self,
+            "guidance_consumed",
+            MappingProxyType(dict(self.guidance_consumed)),
+        )
 
 
 def authoritative_task_identity(task_text: str) -> tuple[str, str]:
@@ -373,6 +391,12 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
             ),
             latest_repair_hash=_optional_text(
                 raw_stage.get("latest_repair_hash"), "latest_repair_hash"
+            ),
+            latest_screenshot_hash=_optional_text(
+                raw_stage.get("latest_screenshot_hash"), "latest_screenshot_hash"
+            ),
+            latest_coverage_hash=_optional_text(
+                raw_stage.get("latest_coverage_hash"), "latest_coverage_hash"
             ),
         ),
         turns=turns,

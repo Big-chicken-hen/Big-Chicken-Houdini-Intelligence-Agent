@@ -26,10 +26,14 @@ class RolePermissionProfile:
         return self.role is Role.EXECUTION
 
 
-def permission_profile(role: Role) -> RolePermissionProfile:
+def permission_profile(
+    role: Role, selected_backend: str = "hia_mcp_v2"
+) -> RolePermissionProfile:
+    if selected_backend not in {"hia_mcp_v2", "houdini_intelligence"}:
+        raise ValueError("selected_backend is invalid")
     read_only = role in READ_ONLY_ROLES
     config: dict[str, Any] = {
-        key: not read_only for key in HIA_SERVER_KEYS
+        key: (not read_only and selected_backend in key) for key in HIA_SERVER_KEYS
     }
     config["multi_agent_mode"] = (
         "explicitRequestOnly" if role is Role.EXECUTION else "proactive"
@@ -42,10 +46,14 @@ def permission_profile(role: Role) -> RolePermissionProfile:
     )
 
 
-def validate_role_permissions(role: Role, descriptor: Mapping[str, Any]) -> None:
+def validate_role_permissions(
+    role: Role,
+    descriptor: Mapping[str, Any],
+    selected_backend: str = "hia_mcp_v2",
+) -> None:
     """Reject permission drift after start, resume, fork, or restart."""
 
-    expected = permission_profile(role)
+    expected = permission_profile(role, selected_backend)
     if descriptor.get("sandbox") != expected.sandbox:
         raise ValueError(f"{role.value} sandbox permission drift")
     if descriptor.get("approvalPolicy") != expected.approval_policy:

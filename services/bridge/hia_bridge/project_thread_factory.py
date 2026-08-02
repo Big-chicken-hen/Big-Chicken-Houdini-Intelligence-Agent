@@ -33,9 +33,16 @@ ROLE_INSTRUCTIONS: Mapping[Role, str] = {
 
 
 class ProjectThreadFactory:
-    def __init__(self, client: AppServerClient, project_root: Path) -> None:
+    def __init__(
+        self,
+        client: AppServerClient,
+        project_root: Path,
+        selected_backend: str = "hia_mcp_v2",
+    ) -> None:
         self._client = client
         self._project_root = project_root.resolve()
+        self._selected_backend = selected_backend
+        permission_profile(Role.EXECUTION, selected_backend)
 
     def start_role(
         self,
@@ -50,7 +57,7 @@ class ProjectThreadFactory:
             raise ValueError(f"project already has a {role.value} Thread")
         if role is not Role.SUPERVISOR and state.status is not ProjectStatus.PROVISIONING_ROLES:
             raise ValueError("worker roles are provisioned only after eligible intake")
-        profile = permission_profile(role)
+        profile = permission_profile(role, self._selected_backend)
         params: dict[str, Any] = {
             "cwd": str(self._project_root),
             "approvalPolicy": profile.approval_policy,
@@ -89,7 +96,13 @@ class ProjectThreadFactory:
         )
         roles = dict(state.roles)
         roles[role] = binding
-        return replace(state, roles=roles, revision=state.revision + 1)
+        changes: dict[str, Any] = {
+            "roles": roles,
+            "revision": state.revision + 1,
+        }
+        if role is Role.SUPERVISOR:
+            changes["goal_thread_id"] = thread_id
+        return replace(state, **changes)
 
     def start_supervisor(
         self,
@@ -108,8 +121,7 @@ class ProjectThreadFactory:
             effort=effort,
             service_tier=service_tier,
         )
-        supervisor_id = started.roles[Role.SUPERVISOR].thread_id
-        return replace(started, goal_thread_id=supervisor_id)
+        return started
 
     def provision_workers(self, state: ProjectState) -> ProjectState:
         if set(state.roles) != {Role.SUPERVISOR}:

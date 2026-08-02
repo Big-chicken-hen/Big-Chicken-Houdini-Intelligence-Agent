@@ -139,7 +139,7 @@ def reduce_project(
         reason = str(data.get("reason") or "not_a_houdini_scene_task")
         return _next(
             state,
-            ProjectStatus.BLOCKED,
+            ProjectStatus.NOT_APPLICABLE,
             LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": reason}),
             attention_reason=reason,
         )

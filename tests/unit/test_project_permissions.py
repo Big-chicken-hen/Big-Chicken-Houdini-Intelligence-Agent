@@ -61,8 +61,13 @@ class ProjectPermissionTests(unittest.TestCase):
                 expected = role is Role.EXECUTION
                 self.assertEqual(expected, profile.scene_write)
                 self.assertEqual("workspace-write" if expected else "read-only", profile.sandbox)
-                for key in HIA_SERVER_KEYS:
-                    self.assertEqual(expected, profile.config[key])
+                self.assertEqual(expected, profile.config[HIA_SERVER_KEYS[0]])
+                self.assertFalse(profile.config[HIA_SERVER_KEYS[1]])
+
+    def test_execution_enables_only_selected_backend(self) -> None:
+        profile = permission_profile(Role.EXECUTION, "houdini_intelligence")
+        self.assertFalse(profile.config[HIA_SERVER_KEYS[0]])
+        self.assertTrue(profile.config[HIA_SERVER_KEYS[1]])
 
     def test_permission_validation_rejects_read_only_escalation(self) -> None:
         profile = permission_profile(Role.VISUAL_REVIEW)
