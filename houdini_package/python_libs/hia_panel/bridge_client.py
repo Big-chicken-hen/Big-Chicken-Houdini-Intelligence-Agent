@@ -220,6 +220,7 @@ class BridgeClient(QtCore.QObject):
         effort: str | None = None,
         service_tier: str | None = None,
         local_image_paths: list[str] | None = None,
+        attachment_draft_id: str | None = None,
         context: str = "project_team_start",
     ) -> str | None:
         payload: dict[str, Any] = {"text": text, "service_tier": service_tier}
@@ -229,6 +230,8 @@ class BridgeClient(QtCore.QObject):
             payload["effort"] = effort
         if local_image_paths is not None:
             payload["local_image_paths"] = list(local_image_paths)
+        if attachment_draft_id is not None:
+            payload["attachment_draft_id"] = attachment_draft_id
         return self._request(
             "POST",
             "/v1/project-team/start",

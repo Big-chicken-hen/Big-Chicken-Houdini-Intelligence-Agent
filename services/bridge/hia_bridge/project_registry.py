@@ -1,11 +1,11 @@
 """Single durable registry for project identity and restart boundaries.
 
-Only the authoritative task, current coarse state, current stage identity, five
-native role Thread identities, requirements, and guidance revision cross a
-Bridge restart.  Role transcripts remain authoritative in native Codex Thread
-history; execution receipts, plans, reviews, evidence bodies, pending actions,
-restart replay, model settings, attachments, and host errors are deliberately not
-mirrored here.
+Only the authoritative task (user text plus content-addressed attachment
+references), current coarse state, current stage identity, five native role
+Thread identities, requirements, and guidance revision cross a Bridge restart.
+Role transcripts remain authoritative in native Codex Thread history;
+execution receipts, plans, reviews, evidence bodies, pending actions, restart
+replay, model settings, and host errors are deliberately not mirrored here.
 """
 
 from __future__ import annotations
@@ -27,9 +27,13 @@ from .project_contracts import (
     StageState,
     authoritative_task_identity,
 )
+from .project_attachments import (
+    ProjectAttachmentRef,
+    resolve_project_attachment_paths,
+)
 
 
-REGISTRY_SCHEMA = "hia-project-registry/3"
+REGISTRY_SCHEMA = "hia-project-registry/4"
 REGISTRY_MAX_BYTES = 16 * 1024 * 1024
 _PERSISTED_KEYS = frozenset(
     {
@@ -51,13 +55,21 @@ _RESTART_TERMINAL = frozenset(
 class ProjectRecord:
     state: ProjectState
     authoritative_task_text: str
+    attachments: tuple[ProjectAttachmentRef, ...] = ()
 
     def __post_init__(self) -> None:
-        task_id, digest = authoritative_task_identity(self.authoritative_task_text)
+        attachments = tuple(self.attachments)
+        task_id, digest = authoritative_task_identity(
+            self.authoritative_task_text,
+            tuple(item.sha256 for item in attachments),
+        )
         if task_id != self.state.authoritative_task_id:
             raise ValueError("authoritative task ID does not match the stored text")
         if digest != self.state.authoritative_task_sha256:
             raise ValueError("authoritative task hash does not match the stored text")
+        if len({item.sha256 for item in attachments}) != len(attachments):
+            raise ValueError("authoritative task attachment hashes must be unique")
+        object.__setattr__(self, "attachments", attachments)
 
 
 class ProjectRegistry:
@@ -83,6 +95,16 @@ class ProjectRegistry:
         if record is None:
             raise KeyError(project_id)
         return record
+
+    def attachment_paths(self, record: ProjectRecord) -> tuple[str, ...]:
+        if self.get(record.state.project_id) != record:
+            raise ValueError("project attachment record is not current")
+        project_root = self._path.parent.parent.parent
+        return resolve_project_attachment_paths(
+            project_root,
+            record.state.project_id,
+            record.attachments,
+        )
 
     def put(self, record: ProjectRecord, *, expected_revision: int | None = None) -> None:
         with self._lock:
@@ -123,7 +145,31 @@ class ProjectRegistry:
         if not isinstance(item, Mapping) or set(item) != _PERSISTED_KEYS:
             raise ValueError("project registry entry has unsupported fields")
         project_id = _required_text(item, "project_id")
-        task_text = _required_text(item, "authoritative_task")
+        raw_task = item.get("authoritative_task")
+        if not isinstance(raw_task, Mapping) or set(raw_task) != {
+            "text",
+            "attachments",
+        }:
+            raise ValueError("authoritative_task must contain text and attachments")
+        task_text = raw_task.get("text")
+        if not isinstance(task_text, str):
+            raise ValueError("authoritative task text must be a string")
+        raw_attachments = raw_task.get("attachments")
+        if not isinstance(raw_attachments, list):
+            raise ValueError("authoritative task attachments must be a list")
+        attachments: list[ProjectAttachmentRef] = []
+        for raw_attachment in raw_attachments:
+            if not isinstance(raw_attachment, Mapping) or set(raw_attachment) != {
+                "sha256",
+                "file_name",
+            }:
+                raise ValueError("authoritative task attachment is malformed")
+            attachments.append(
+                ProjectAttachmentRef(
+                    sha256=_required_text(raw_attachment, "sha256"),
+                    file_name=_required_text(raw_attachment, "file_name"),
+                )
+            )
         persisted_status = ProjectStatus(_required_text(item, "current_status"))
         status = (
             persisted_status
@@ -172,7 +218,10 @@ class ProjectRegistry:
             or guidance_revision < 0
         ):
             raise ValueError("guidance_revision must be a non-negative integer")
-        task_id, digest = authoritative_task_identity(task_text)
+        task_id, digest = authoritative_task_identity(
+            task_text,
+            tuple(item.sha256 for item in attachments),
+        )
         state = ProjectState(
             project_id=project_id,
             authoritative_task_id=task_id,
@@ -184,7 +233,7 @@ class ProjectRegistry:
             guidance_revision=guidance_revision,
             revision=0,
         )
-        return ProjectRecord(state, task_text)
+        return ProjectRecord(state, task_text, tuple(attachments))
 
     @staticmethod
     def _validate_thread_uniqueness(records: Mapping[str, ProjectRecord]) -> None:
@@ -220,7 +269,16 @@ def _record_to_entry(record: ProjectRecord) -> dict[str, Any]:
         raise ValueError("a persisted project must contain exactly five role Threads")
     return {
         "project_id": state.project_id,
-        "authoritative_task": record.authoritative_task_text,
+        "authoritative_task": {
+            "text": record.authoritative_task_text,
+            "attachments": [
+                {
+                    "sha256": item.sha256,
+                    "file_name": item.file_name,
+                }
+                for item in record.attachments
+            ],
+        },
         "current_status": state.status.value,
         "current_stage_id": state.stage.stage_id,
         "role_thread_ids": {

@@ -16,6 +16,7 @@ import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .project_budget import ProgressObservation, record_progress
+from .errors import CodexRPCError
 from .project_contracts import (
     ProjectState,
     Requirement,
@@ -818,9 +819,14 @@ class ProjectRoleExecutor:
                 )
                 if reservation is not None:
                     scene_owner = self._scene_writer.bind(reservation, call.turn_id)
-            except Exception:
+            except CodexRPCError:
                 if reservation is not None:
                     self._scene_writer.abandon_uncreated(reservation)
+                raise
+            except Exception:
+                # A transport or protocol failure does not prove that Codex did
+                # not create the Execution Turn.  Retain the reservation so a
+                # second scene writer cannot start against an unknown writer.
                 raise
             try:
                 completed = self._client.wait_for_turn(
@@ -828,6 +834,13 @@ class ProjectRoleExecutor:
                 )
             except TimeoutError as exc:
                 raise _Interrupted(state, "project_role_turn_timeout") from exc
+            except Exception as exc:
+                if (
+                    scene_owner is not None
+                    and getattr(exc, "turn_terminal_no_hia", False) is True
+                ):
+                    self._scene_writer.turn_terminal(scene_owner)
+                raise
             if scene_owner is not None:
                 if not self._scene_writer.turn_terminal(scene_owner):
                     raise ProjectRoleError(
@@ -1101,14 +1114,26 @@ class ProjectRoleExecutor:
                 "AUTHORITATIVE_TASK_MISMATCH",
                 "persisted authoritative task identity changed",
             )
+        attachment_paths = self._registry.attachment_paths(record)
         return {
             "schema": "hia-authoritative-task/1",
             "task_id": state.authoritative_task_id,
             "sha256": state.authoritative_task_sha256,
             "task_anchor": f"task:{state.authoritative_task_id}",
             "task_text": record.authoritative_task_text,
-            "attachments": [],
+            "attachments": [
+                {
+                    "sha256": reference.sha256,
+                    "attachment_anchor": f"attachment:{reference.sha256}",
+                    "path": path,
+                }
+                for reference, path in zip(record.attachments, attachment_paths)
+            ],
         }
+
+    def _authoritative_image_paths(self, state: ProjectState) -> tuple[str, ...]:
+        record = self._registry.require(state.project_id)
+        return self._registry.attachment_paths(record)
 
     def _action_plan(
         self, state: ProjectState, action: ProjectAction

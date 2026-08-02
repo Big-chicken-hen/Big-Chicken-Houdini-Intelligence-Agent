@@ -56,7 +56,11 @@ class ProjectRunner:
                 raise ValueError("project already has a role action in progress")
             record = self._registry.require(project_id)
             next_state, commands = reduce_project(record.state, event)
-            updated = ProjectRecord(next_state, record.authoritative_task_text)
+            updated = ProjectRecord(
+                next_state,
+                record.authoritative_task_text,
+                record.attachments,
+            )
             self._registry.put(updated, expected_revision=record.state.revision)
             self._enqueue(project_id, commands)
             return updated
@@ -81,7 +85,11 @@ class ProjectRunner:
                 commands: tuple[LifecycleCommand, ...] = ()
             else:
                 next_state, commands = reduce_project(base, outcome.event)
-            updated = ProjectRecord(next_state, current.authoritative_task_text)
+            updated = ProjectRecord(
+                next_state,
+                current.authoritative_task_text,
+                current.attachments,
+            )
             self._registry.put(updated, expected_revision=current.state.revision)
             self._enqueue(project_id, commands)
             if not queue:
@@ -106,7 +114,11 @@ class ProjectRunner:
                 target_role=target_role,
                 requirement_delta=requirement_delta,
             )
-            updated = ProjectRecord(state, current.authoritative_task_text)
+            updated = ProjectRecord(
+                state,
+                current.authoritative_task_text,
+                current.attachments,
+            )
             self._registry.put(updated, expected_revision=current.state.revision)
             return updated
 

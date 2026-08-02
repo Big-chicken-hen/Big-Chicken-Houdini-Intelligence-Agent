@@ -13,6 +13,10 @@ from typing import Protocol
 import uuid
 
 from .errors import BridgeError
+from .project_attachments import (
+    finalize_project_attachments,
+    inspect_project_draft,
+)
 from .project_contracts import (
     ProjectState,
     ProjectStatus,
@@ -241,10 +245,18 @@ class ProjectTeamService:
         effort: str | None = None,
         service_tier: str | None = None,
         local_image_paths: list[str] | None = None,
+        attachment_draft_id: str | None = None,
     ) -> dict[str, Any]:
-        task_id, digest = authoritative_task_identity(task_text)
+        if not isinstance(task_text, str):
+            raise ValueError("project task text must be a string")
         project_id = f"project-{uuid.uuid4()}"
-        image_paths = self._validated_image_paths(local_image_paths or [])
+        candidates = inspect_project_draft(
+            self._project_root,
+            attachment_draft_id,
+            tuple(local_image_paths or ()),
+        )
+        attachment_hashes = tuple(item.sha256 for item in candidates)
+        task_id, digest = authoritative_task_identity(task_text, attachment_hashes)
         state = ProjectState(
             project_id=project_id,
             authoritative_task_id=task_id,
@@ -264,8 +276,32 @@ class ProjectTeamService:
                 500,
                 {"orphan_thread_ids": list(exc.orphan_thread_ids)},
             ) from exc
+        try:
+            attachments = finalize_project_attachments(
+                self._project_root,
+                project_id,
+                candidates,
+            )
+        except Exception as exc:
+            orphan_thread_ids = self._factory.cleanup_roles(state)
+            raise BridgeError(
+                "PROJECT_ATTACHMENT_FINALIZE_FAILED",
+                str(exc),
+                500,
+                {"orphan_thread_ids": list(orphan_thread_ids)},
+            ) from exc
+        image_paths = tuple(
+            str(
+                self._project_root
+                / ".runtime"
+                / "project-attachments"
+                / project_id
+                / item.file_name
+            )
+            for item in attachments
+        )
         supervisor_id = state.supervisor_thread_id
-        record = ProjectRecord(state, task_text)
+        record = ProjectRecord(state, task_text, attachments)
         self._registry.put(record)
         record = self._runner.dispatch(
             project_id,
@@ -492,7 +528,9 @@ class ProjectTeamService:
             state = replace(record.state, roles=roles, revision=record.state.revision + 1)
             self._registry.put(
                 ProjectRecord(
-                    state, record.authoritative_task_text
+                    state,
+                    record.authoritative_task_text,
+                    record.attachments,
                 ),
                 expected_revision=record.state.revision,
             )
@@ -630,7 +668,11 @@ class ProjectTeamService:
             )
         return {
             "project_id": state.project_id,
-            "title": record.authoritative_task_text.strip().splitlines()[0][:160],
+            "title": (
+                record.authoritative_task_text.strip().splitlines()[0][:160]
+                if record.authoritative_task_text.strip()
+                else f"图片项目 {state.project_id[-8:]}"
+            ),
             "status": state.status.value,
             "stage": state.stage.stage_id,
             "root_thread_id": state.supervisor_thread_id,
@@ -638,7 +680,7 @@ class ProjectTeamService:
             "consumed_turns": sum(item.consumed_turns for item in state.turns.values()),
             "last_error": state.last_error,
             "latest_evidence_ids": list(state.stage.latest_evidence_ids),
-            "attachment_count": 0,
+            "attachment_count": len(record.attachments),
             "requirements": [
                 {
                     "requirement_id": item.requirement_id,
@@ -657,27 +699,6 @@ class ProjectTeamService:
             },
             "threads": threads,
         }
-
-    def _validated_image_paths(self, values: list[str]) -> tuple[str, ...]:
-        if len(values) > 16:
-            raise ValueError("a project task accepts at most 16 images")
-        paths: list[str] = []
-        total = 0
-        for value in values:
-            if not isinstance(value, str) or not value:
-                raise ValueError("image path must be a non-empty string")
-            path = Path(value).resolve(strict=True)
-            try:
-                path.relative_to(self._project_root)
-            except ValueError as exc:
-                raise ValueError("project image must stay inside the project") from exc
-            if not path.is_file():
-                raise ValueError("project image path must reference a file")
-            total += path.stat().st_size
-            if total > 128 * 1024 * 1024:
-                raise ValueError("project images exceed 128 MiB")
-            paths.append(str(path))
-        return tuple(paths)
 
     def _resolve_continuation(self, record: ProjectRecord) -> dict[str, object]:
         """Choose one new role Turn from native history; ambiguity stays user-visible."""

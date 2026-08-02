@@ -191,6 +191,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._thread_history: list[dict[str, Any]] = []
         self._project_team_controller: Any | None = None
         self._project_draft_active = False
+        self._project_draft_id: str | None = None
+        self._ordinary_composer_draft: dict[str, Any] | None = None
         self._project_start_pending = False
         self._pending_team_drafts: dict[str, dict[str, Any]] = {}
         self._thread_delete_confirm_id: str | None = None
@@ -252,6 +254,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._selected_node_paths: tuple[str, ...] = ()
         self._attachment_store = AttachmentStore()
         self._attachment_dialog: Any | None = None
+        self._attachment_dialog_owner: tuple[str, str] | None = None
         self._diagnostic_turn_key: str | None = None
         self._diagnostic_draft_key: str | None = None
         self._diagnostic_snapshot: dict[str, Any] = {}
@@ -3462,6 +3465,48 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return ()
         return tuple(path for path in values if isinstance(path, str) and path)
 
+    def _attachment_owner(self) -> tuple[str, str] | None:
+        if self._project_draft_active:
+            draft_id = self._project_draft_id
+            if isinstance(draft_id, str) and draft_id:
+                return "project", draft_id
+            return None
+        thread_id = self._selected_thread_id
+        if isinstance(thread_id, str) and thread_id:
+            return "ordinary", thread_id
+        return None
+
+    def _begin_project_draft(self) -> None:
+        if self._project_draft_active:
+            return
+        self._ordinary_composer_draft = {
+            "text": self.input_edit.toPlainText(),
+            "attachment_paths": self._attachment_paths(),
+        }
+        self.input_edit.clear()
+        self.attachment_strip.clear()
+        self._project_draft_id = self._attachment_store.new_project_draft_id()
+        self._project_draft_active = True
+
+    def _leave_project_draft(self, *, restore_ordinary: bool) -> None:
+        self._project_draft_active = False
+        self._project_draft_id = None
+        if not restore_ordinary:
+            self._ordinary_composer_draft = None
+            return
+        draft = self._ordinary_composer_draft
+        self._ordinary_composer_draft = None
+        self.input_edit.clear()
+        self.attachment_strip.clear()
+        if not isinstance(draft, dict):
+            return
+        text = draft.get("text")
+        if isinstance(text, str):
+            self.input_edit.setPlainText(text)
+        for path in tuple(draft.get("attachment_paths") or ()):
+            if isinstance(path, str) and path:
+                self.attachment_strip.add_path(path)
+
     def _add_attachment_path(self, path: str) -> None:
         if len(self._attachment_paths()) >= _MAX_TURN_IMAGES:
             self._append_system(
@@ -3473,8 +3518,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             strip.add_path(path)
 
     def _choose_images(self) -> None:
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
+        owner = self._attachment_owner()
+        if owner is None:
             self._append_system("请先新建或恢复 Thread，再添加图片。")
             return
         if not self._selected_model_supports_images():
@@ -3499,12 +3544,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         dialog.finished.connect(self._attachment_dialog_finished)
         dialog.destroyed.connect(self._attachment_dialog_destroyed)
         self._attachment_dialog = dialog
+        self._attachment_dialog_owner = owner
         dialog.show()
 
     @QtCore.Slot(list)
     def _accept_chosen_images(self, paths: list[str]) -> None:
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
+        owner = self._attachment_dialog_owner
+        if owner is None:
             return
         remaining = max(0, _MAX_TURN_IMAGES - len(self._attachment_paths()))
         if len(paths) > remaining:
@@ -3513,7 +3559,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
         for source in paths[:remaining]:
             try:
-                stored = self._attachment_store.copy_file(thread_id, source)
+                if owner[0] == "project":
+                    stored = self._attachment_store.copy_project_file(owner[1], source)
+                else:
+                    stored = self._attachment_store.copy_file(owner[1], source)
             except (OSError, TypeError, ValueError) as exc:
                 self._append_system(f"图片添加失败：{exc}")
                 self._record_pre_turn_issue(
@@ -3529,6 +3578,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _attachment_dialog_finished(self, _result: int) -> None:
         dialog = self._attachment_dialog
         self._attachment_dialog = None
+        self._attachment_dialog_owner = None
         if dialog is not None:
             dialog.deleteLater()
 
@@ -3536,11 +3586,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _attachment_dialog_destroyed(self, dialog: Any = None) -> None:
         if self._attachment_dialog is dialog:
             self._attachment_dialog = None
+            self._attachment_dialog_owner = None
 
     @QtCore.Slot(object)
     def _add_clipboard_image(self, image: Any) -> None:
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
+        owner = self._attachment_owner()
+        if owner is None:
             self._append_system("请先新建或恢复 Thread，再粘贴图片。")
             return
         if not self._selected_model_supports_images():
@@ -3550,7 +3601,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._append_system(f"每轮最多添加 {_MAX_TURN_IMAGES} 张图片。")
             return
         try:
-            path = self._attachment_store.clipboard_path(thread_id)
+            path = (
+                self._attachment_store.project_clipboard_path(owner[1])
+                if owner[0] == "project"
+                else self._attachment_store.clipboard_path(owner[1])
+            )
             if hasattr(image, "toImage"):
                 image = image.toImage()
             if not hasattr(image, "save") or image.save(path, "PNG") is not True:
@@ -6435,6 +6490,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         hidden_user_prefix: str | None = None,
         expected_thread_id: str | None = None,
         explicit_project_role: tuple[str, str] | None = None,
+        explicit_project_status: str | None = None,
         preserve_ordinary_state: bool = False,
     ) -> bool:
         if self._turn_state.busy and not allow_active:
@@ -6506,6 +6562,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         agent_text = self._project_role_agent_text(
                             agent_text,
                             project_role[1],
+                            project_status=explicit_project_status or "unknown",
                         )
                     restored.append(("agent", agent_text))
         if hasattr(self.conversation, "clear_messages"):
@@ -6622,7 +6679,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         return f"{role_title}：{label}{suffix}"
 
     @classmethod
-    def _project_role_agent_text(cls, text: str, role_title: str) -> str:
+    def _project_role_agent_text(
+        cls,
+        text: str,
+        role_title: str,
+        *,
+        project_status: str = "unknown",
+    ) -> str:
         """Keep project protocol JSON out of the visible chat transcript."""
 
         normalized = text.strip()
@@ -6634,16 +6697,28 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         candidate = fenced.group(1).strip() if fenced is not None else normalized
         try:
             payload = json.loads(candidate)
-        except (TypeError, ValueError):
-            if "hia-project-" in normalized or normalized.startswith(("{", "[")):
-                return (
-                    f"**{role_title}**\n\n"
-                    "本轮结构化响应无效，项目工作流将重新处理。"
-                )
-            return normalized
+        except json.JSONDecodeError as exc:
+            safe_excerpt = cls._safe_project_role_excerpt(normalized)
+            return (
+                f"**{role_title}：结构化响应无效**\n\n"
+                f"项目状态：{project_status}\n\n"
+                f"Schema 错误：JSONDecodeError: {exc}\n\n"
+                f"原始响应摘要：\n\n```text\n{safe_excerpt}\n```"
+            )
         schema = payload.get("schema") if isinstance(payload, dict) else None
         if not isinstance(schema, str) or not schema.startswith("hia-project-"):
-            return normalized
+            safe_excerpt = cls._safe_project_role_excerpt(normalized)
+            error = (
+                "expected one JSON object"
+                if not isinstance(payload, dict)
+                else "schema must be a string starting with hia-project-"
+            )
+            return (
+                f"**{role_title}：结构化响应无效**\n\n"
+                f"项目状态：{project_status}\n\n"
+                f"Schema 错误：{error}\n\n"
+                f"原始响应摘要：\n\n```text\n{safe_excerpt}\n```"
+            )
 
         if schema == "hia-project-start/1":
             reply = payload.get("reply")
@@ -6654,6 +6729,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         lines = [f"**{role_title}已完成本轮工作。**"]
         lines.extend(cls._project_role_value_lines(payload))
         return "\n\n".join(lines)
+
+    @staticmethod
+    def _safe_project_role_excerpt(text: str, limit: int = 2000) -> str:
+        value = "".join(
+            character
+            if character in "\n\t" or ord(character) >= 32
+            else " "
+            for character in text
+        ).strip()
+        if len(value) > limit:
+            return value[:limit] + "…"
+        return value or "（空响应）"
 
     @staticmethod
     def _project_role_value_lines(value: Any, *, depth: int = 0) -> list[str]:
@@ -6724,7 +6811,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         return [scalar_text(value)]
 
     def _new_thread(self) -> None:
-        self._project_draft_active = False
+        if self._project_draft_active:
+            self._leave_project_draft(restore_ordinary=True)
         if (
             self._client is not None
             and not self._turn_state.busy
@@ -6760,7 +6848,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         ):
             self._append_system("当前操作结束后才能新建项目。")
             return
-        self._project_draft_active = True
+        self._begin_project_draft()
         self._append_system(
             "已选择新建项目。请在下方输入完整初始任务并发送；"
             "无需先新建普通任务。"
@@ -6811,7 +6899,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return
         role_context = self._project_role_context_for_thread(thread_id)
         if role_context is None:
-            self._project_draft_active = False
+            if self._project_draft_active:
+                self._leave_project_draft(restore_ordinary=True)
             self._request_thread_resume(thread_id, context="session_resume")
             return
         if self._client is not None:
@@ -6911,6 +7000,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._pending_team_drafts[context] = {
             "text": text,
             "attachment_paths": attachment_paths,
+            "attachment_draft_id": self._project_draft_id,
         }
         self._project_start_pending = True
         self._refresh_controls()
@@ -6920,6 +7010,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             effort=runtime_settings["effort"],
             service_tier=runtime_settings["service_tier"],
             local_image_paths=list(attachment_paths),
+            attachment_draft_id=self._project_draft_id,
             context=context,
         )
         if request_id is None:
@@ -7255,6 +7346,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 allow_active=True,
                 expected_thread_id=thread_id,
                 explicit_project_role=(project.title, role.title),
+                explicit_project_status=project.status,
                 preserve_ordinary_state=True,
             )
             if rendered:
@@ -7275,7 +7367,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self.input_edit.clear()
                 if paths and paths == self._attachment_paths():
                     self.attachment_strip.clear()
-            self._project_draft_active = False
+            self._leave_project_draft(restore_ordinary=True)
             project_id = payload.get("project_id")
             self._append_system(
                 "项目已创建，监督 AI 正在接收初始任务。"

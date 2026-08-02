@@ -2050,12 +2050,6 @@ class BridgeSession:
                 "role": identity.role.value,
             },
         )
-        if isinstance(source, str) and source.startswith(PROJECT_THREAD_SOURCE_PREFIX):
-            raise BridgeError(
-                "INVALID_CODEX_RESPONSE",
-                "Project Thread source is malformed",
-                502,
-            )
 
     @staticmethod
     def _project_thread_messages(

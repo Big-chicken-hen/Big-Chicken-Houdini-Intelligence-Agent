@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol
 
 from .project_contracts import ProjectState, ProjectStatus, Role, RoleThread
 from .project_permissions import (
@@ -44,9 +44,8 @@ _PROJECT_PROTOCOL_INSTRUCTION = (
     "it is the only current project action. Follow its response_contract "
     "exactly, return one JSON object "
     "only, and do not call update_goal. Do not start independent work outside "
-    "the envelope. Read-only roles may use native subagents only for genuinely "
-    "parallel, non-overlapping read-only research or review; Execution must never "
-    "delegate because it owns the live scene writer. On the first "
+    "the envelope. Do not create, fork, or delegate to internal subagents; the "
+    "five native project role Threads are the complete project team. On the first "
     "project Turn, respond naturally to the user's task. If fulfilling it "
     "requires the live Houdini scene, hand it to Planning; otherwise answer it "
     "yourself and complete the project. Never expose an eligibility classifier "
@@ -230,15 +229,28 @@ class ProjectThreadFactory:
             candidates = list(created)
             if isinstance(exc, ProjectRoleCreationError):
                 candidates.extend(exc.orphan_thread_ids)
-            orphans: list[str] = []
-            for thread_id in dict.fromkeys(candidates):
-                try:
-                    self._client.request("thread/delete", {"threadId": thread_id})
-                except Exception:
-                    orphans.append(thread_id)
+            orphans = self.cleanup_thread_ids(candidates)
             raise ProjectRoleCreationError(
                 "project role creation failed; all known role Threads were cleaned"
                 if not orphans
                 else "project role creation failed and cleanup was incomplete",
                 tuple(orphans),
             ) from exc
+
+    def cleanup_roles(self, state: ProjectState) -> tuple[str, ...]:
+        """Delete only role Threads created for a not-yet-persisted project."""
+
+        return self.cleanup_thread_ids(
+            binding.thread_id for binding in state.roles.values()
+        )
+
+    def cleanup_thread_ids(self, thread_ids: Iterable[str]) -> tuple[str, ...]:
+        orphans: list[str] = []
+        for thread_id in dict.fromkeys(thread_ids):
+            if not isinstance(thread_id, str) or not thread_id:
+                continue
+            try:
+                self._client.request("thread/delete", {"threadId": thread_id})
+            except Exception:
+                orphans.append(thread_id)
+        return tuple(orphans)

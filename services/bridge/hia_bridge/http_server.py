@@ -925,6 +925,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 "effort",
                 "service_tier",
                 "local_image_paths",
+                "attachment_draft_id",
             }
             if set(body) - allowed:
                 raise BridgeError(
@@ -938,6 +939,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 effort=body.get("effort"),
                 service_tier=body.get("service_tier"),
                 local_image_paths=body.get("local_image_paths"),
+                attachment_draft_id=body.get("attachment_draft_id"),
             )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/project-team":

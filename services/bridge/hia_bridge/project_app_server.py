@@ -24,8 +24,15 @@ if TYPE_CHECKING:
 class ProjectAppServerError(RuntimeError):
     """A deterministic failure while correlating a native project Turn."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        turn_terminal_no_hia: bool = False,
+    ) -> None:
         self.code = code
+        self.turn_terminal_no_hia = bool(turn_terminal_no_hia)
         super().__init__(message)
 
 
@@ -344,6 +351,7 @@ class ProjectRoleClient:
                         raise ProjectAppServerError(
                             "PROJECT_TURN_NOT_COMPLETED",
                             f"project Turn ended with status {terminal_status!r}",
+                            turn_terminal_no_hia=True,
                         )
                     payload, terminal_payload_error = self._parse_payload(
                         deltas,

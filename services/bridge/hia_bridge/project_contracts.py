@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 import hashlib
+import json
+import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -149,10 +151,29 @@ class ProjectState:
         return supervisor.thread_id
 
 
-def authoritative_task_identity(task_text: str) -> tuple[str, str]:
-    """Return stable references without asking a model to restate the task."""
+def authoritative_task_identity(
+    task_text: str,
+    attachment_sha256s: tuple[str, ...] = (),
+) -> tuple[str, str]:
+    """Hash normalized user text and the ordered project attachment hashes."""
 
-    if not isinstance(task_text, str) or not task_text.strip():
-        raise ValueError("task_text must be non-empty")
-    digest = hashlib.sha256(task_text.encode("utf-8")).hexdigest()
+    if not isinstance(task_text, str):
+        raise ValueError("task_text must be a string")
+    normalized_text = task_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    hashes = tuple(attachment_sha256s)
+    if any(
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for value in hashes
+    ):
+        raise ValueError("attachment_sha256s must contain SHA-256 hex digests")
+    if not normalized_text and not hashes:
+        raise ValueError("task text or at least one attachment is required")
+    encoded = json.dumps(
+        {"text": normalized_text, "attachment_sha256s": list(hashes)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
     return f"task-{digest[:24]}", digest
