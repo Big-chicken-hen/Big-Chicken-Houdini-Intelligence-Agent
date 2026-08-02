@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 import hmac
 import json
 import os
@@ -22,18 +22,13 @@ from .codex_stdio import CodexStdioClient
 from .errors import BridgeError
 from .events import EventBuffer
 from .http_server import BridgeApplication, LoopbackHTTPServer
-from .ordinary_transfer import OrdinaryThreadTransfer
 from .protocol import ProtocolPolicy
-from .project_contracts import ProjectState, ProjectStatus, Role
-from .project_lifecycle import LifecycleEvent, ProjectEvent
-from .project_registry import ProjectRecord, ProjectRegistry
-from .project_app_server import ProjectEffectClient
-from .project_artifacts import ProjectArtifactStore
-from .project_effects import ProjectEffectExecutor
+from .project_registry import ProjectRegistry
+from .project_app_server import ProjectRoleClient
+from .project_effects import ProjectRoleExecutor
 from .project_runner import ProjectRunner
 from .project_service import ProjectTeamService, ProjectTeamSettings
 from .project_thread_factory import ProjectThreadFactory
-from .project_transfer import ProjectThreadTransfer
 from .project_workflow import ProjectWorkflowHost
 from .scene_queue import B2_READ_ONLY_PROFILE, SceneQueue
 from .session import BridgeSession
@@ -48,17 +43,8 @@ FOCUS_STATE_RELATIVE_PATH = Path(".runtime/bridge/focus-mode.json")
 PROJECT_REGISTRY_RELATIVE_PATH = Path(
     ".runtime/bridge/project-team-registry.json"
 )
-LEGACY_PROJECT_REGISTRY_RELATIVE_PATH = Path(
-    ".runtime/bridge/project-threads.json"
-)
 PROJECT_SETTINGS_RELATIVE_PATH = Path(
     ".runtime/bridge/project-team-settings.json"
-)
-PROJECT_ARTIFACTS_RELATIVE_PATH = Path(
-    ".runtime/bridge/project-team-artifacts.json"
-)
-ORDINARY_TRANSFER_RELATIVE_PATH = Path(
-    ".runtime/bridge/ordinary-thread-transfers.json"
 )
 HIA_MCP_V2_SERVICE_RELATIVE_PATH = Path("services/hia_mcp_v2")
 HIA_MCP_V2_RUNTIME_RELATIVE_PATH = Path(".runtime/hia-mcp-v2")
@@ -240,228 +226,9 @@ class ProjectRuntime:
     workflow: ProjectWorkflowHost
     registry: ProjectRegistry
     runner: ProjectRunner
-    effect_client: ProjectEffectClient
+    client: ProjectRoleClient
     thread_factory: ProjectThreadFactory
-    thread_transfer: ProjectThreadTransfer
-    artifacts: ProjectArtifactStore
     events: EventBuffer
-    _transfer_lock: threading.RLock = field(default_factory=threading.RLock)
-    _transfers_inflight: set[tuple[str, Role]] = field(default_factory=set)
-
-    def observe_state(self, state: ProjectState) -> None:
-        """Migrate a role only after its third persisted real compaction."""
-
-        for role, binding in state.roles.items():
-            turn = state.turns.get(role)
-            if binding.compaction_count < 3 or (turn is not None and turn.active):
-                continue
-            key = (state.project_id, role)
-            with self._transfer_lock:
-                if key in self._transfers_inflight:
-                    continue
-                self._transfers_inflight.add(key)
-            threading.Thread(
-                target=self._transfer_role,
-                args=(state.project_id, role),
-                name=f"hia-transfer-{role.value}",
-                daemon=True,
-            ).start()
-
-    def observe_codex_event(self, event: Mapping[str, object]) -> bool:
-        """Persist one deduplicated real automatic-compaction notification."""
-
-        if event.get("type") != "codex_notification":
-            return False
-        method = event.get("method")
-        params = event.get("params")
-        if not isinstance(params, Mapping):
-            return False
-        if method == "thread/compacted":
-            thread_id = params.get("threadId")
-            turn_id = params.get("turnId")
-        elif method == "item/completed":
-            item = params.get("item")
-            if not isinstance(item, Mapping) or item.get("type") != "contextCompaction":
-                return False
-            thread_id = params.get("threadId")
-            turn_id = params.get("turnId")
-        else:
-            return False
-        if not isinstance(thread_id, str) or not isinstance(turn_id, str):
-            return False
-        identity = self.service.role_identity_for_thread(thread_id)
-        if identity is None:
-            return False
-        project_id, role = identity
-        with self._transfer_lock:
-            for _ in range(3):
-                record = self.registry.require(project_id)
-                binding = record.state.roles.get(role)
-                if binding is None or binding.thread_id != thread_id:
-                    return True
-                item = params.get("item")
-                item_id = item.get("id") if isinstance(item, Mapping) else None
-                event_id = (
-                    f"item:{turn_id}:{item_id}"
-                    if isinstance(item_id, str) and item_id
-                    else f"legacy:{turn_id}"
-                )
-                if event_id in binding.compaction_event_ids:
-                    return True
-                compaction_ids = list(binding.compaction_event_ids)
-                legacy_id = f"legacy:{turn_id}"
-                item_prefix = f"item:{turn_id}:"
-                if event_id == legacy_id and any(
-                    value.startswith(item_prefix) for value in compaction_ids
-                ):
-                    return True
-                if event_id.startswith(item_prefix) and legacy_id in compaction_ids:
-                    compaction_ids[compaction_ids.index(legacy_id)] = event_id
-                else:
-                    compaction_ids.append(event_id)
-                roles = dict(record.state.roles)
-                roles[role] = replace(
-                    binding,
-                    compaction_count=len(compaction_ids),
-                    compaction_event_ids=tuple(compaction_ids),
-                )
-                updated = replace(
-                    record.state,
-                    roles=roles,
-                    revision=record.state.revision + 1,
-                )
-                try:
-                    self.registry.put(
-                        ProjectRecord(
-                            updated,
-                            record.authoritative_task_text,
-                            record.attachments,
-                        ),
-                        expected_revision=record.state.revision,
-                    )
-                except ValueError as exc:
-                    if "revision mismatch" not in str(exc):
-                        raise
-                    continue
-                self.events.publish(
-                    "project_thread_compaction_recorded",
-                    project_id=project_id,
-                    role=role.value,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
-                    compaction_count=roles[role].compaction_count,
-                )
-                return True
-        raise ValueError("project compaction could not be persisted after concurrent updates")
-
-    def _transfer_role(self, project_id: str, role: Role) -> None:
-        key = (project_id, role)
-        old_thread_id: str | None = None
-        try:
-            record = self.registry.require(project_id)
-            binding = record.state.roles.get(role)
-            if binding is None or binding.compaction_count < 3:
-                return
-            turn = record.state.turns.get(role)
-            if turn is not None and turn.active:
-                return
-            old_thread_id = binding.thread_id
-            prepared = self.thread_transfer.prepare(record.state, role)
-
-            def persist(updated: ProjectState) -> None:
-                self.registry.put(
-                    ProjectRecord(
-                        updated,
-                        record.authoritative_task_text,
-                        record.attachments,
-                    ),
-                    expected_revision=record.state.revision,
-                )
-
-            result = self.thread_transfer.commit(record.state, prepared, persist)
-            if result.old_thread_deleted:
-                self.events.publish(
-                    "thread_transferred",
-                    old_thread_id=prepared.old_thread_id,
-                    new_thread_id=prepared.new_thread_id,
-                    project_id=project_id,
-                    role=role.value,
-                )
-            else:
-                self.events.publish(
-                    "thread_transfer_cleanup_failed",
-                    old_thread_id=prepared.old_thread_id,
-                    new_thread_id=prepared.new_thread_id,
-                    project_id=project_id,
-                    role=role.value,
-                    error=result.cleanup_error,
-                )
-        except Exception as exc:
-            self.events.publish(
-                "thread_transferred",
-                old_thread_id=old_thread_id,
-                new_thread_id=None,
-                project_id=project_id,
-                role=role.value,
-                error=str(exc),
-            )
-        finally:
-            with self._transfer_lock:
-                self._transfers_inflight.discard(key)
-            self.events.publish(
-                "project_team_updated",
-                project_team=self.service.snapshot(),
-            )
-
-    def recover(self) -> tuple[str, ...]:
-        recoverable: list[str] = []
-        failures: list[dict[str, str]] = []
-        for record in self.registry.list():
-            if record.state.status is ProjectStatus.INTERRUPTED:
-                if not record.state.pending_effects:
-                    record = self.runner.dispatch(
-                        record.state.project_id,
-                        LifecycleEvent(ProjectEvent.RESTART_REQUESTED),
-                    )
-                if (
-                    record.state.pending_effects
-                    and record.state.pending_effects[0].kind == "verify_recovery"
-                ):
-                    recoverable.append(record.state.project_id)
-                else:
-                    failures.append(
-                        {
-                            "project_id": record.state.project_id,
-                            "error": "interrupted project has unresolved non-recovery work",
-                        }
-                    )
-                continue
-            if not record.state.pending_effects and not record.state.plan_stale:
-                continue
-            try:
-                self.thread_factory.validate_recovery_identity(record.state)
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                record = self.runner.persist_recovery_failure(
-                    record.state.project_id,
-                    error,
-                )
-                failures.append(
-                    {
-                        "project_id": record.state.project_id,
-                        "error": error,
-                    }
-                )
-                continue
-            recoverable.append(record.state.project_id)
-        scheduled = self.workflow.recover(recoverable)
-        self.events.publish(
-            "project_team_updated",
-            project_team=self.service.snapshot(),
-            recovered_project_ids=list(scheduled),
-            recovery_failures=failures,
-        )
-        return scheduled
 
     def close(self, timeout_seconds: float = 5.0) -> bool:
         completed = self.workflow.close(timeout_seconds)
@@ -480,31 +247,21 @@ def _build_project_runtime(
     selected_backend: str,
     server_transports: Mapping[str, Mapping[str, object]],
     allowed_evidence_roots: Sequence[Path],
-    model_catalog: Callable[[], Mapping[str, object]] | None = None,
-    thread_deleter: Callable[[str], object] | None = None,
+    model_catalog: Callable[[], Mapping[str, object]],
 ) -> ProjectRuntime:
     """Compose the project runtime once around the owned app-server client."""
 
     registry = ProjectRegistry(project_root / PROJECT_REGISTRY_RELATIVE_PATH)
     runner = ProjectRunner(registry)
-    effect_client = ProjectEffectClient(client, events)
+    scene_write_lock = threading.Lock()
+    role_client = ProjectRoleClient(client, events)
     thread_factory = ProjectThreadFactory(
-        effect_client,
+        role_client,
         project_root,
         selected_backend,
         server_transports,
     )
-    thread_transfer = ProjectThreadTransfer(
-        effect_client,
-        enabled=True,
-        selected_backend=selected_backend,
-        server_transports=server_transports,
-    )
-    artifacts = ProjectArtifactStore(
-        project_root / PROJECT_ARTIFACTS_RELATIVE_PATH
-    )
     service_holder: list[ProjectTeamService] = []
-    runtime_holder: list[ProjectRuntime] = []
 
     def publish_snapshot(record: object) -> None:
         if service_holder:
@@ -512,12 +269,10 @@ def _build_project_runtime(
                 "project_team_updated",
                 project_team=service_holder[0].snapshot(),
             )
-        if runtime_holder and isinstance(record, ProjectRecord):
-            runtime_holder[0].observe_state(record.state)
 
     def interrupt_project(project_id: str) -> None:
         record = registry.require(project_id)
-        interrupted = effect_client.interrupt_threads(
+        interrupted = role_client.interrupt_threads(
             binding.thread_id for binding in record.state.roles.values()
         )
         events.publish(
@@ -529,12 +284,11 @@ def _build_project_runtime(
             ],
         )
 
-    def executor_factory(_: str) -> ProjectEffectExecutor:
-        return ProjectEffectExecutor(
-            client=effect_client,
+    def executor_factory(_: str) -> ProjectRoleExecutor:
+        return ProjectRoleExecutor(
+            client=role_client,
             registry=registry,
-            thread_factory=thread_factory,
-            artifacts=artifacts,
+            scene_write_lock=scene_write_lock,
             allowed_evidence_roots=allowed_evidence_roots,
         )
 
@@ -546,18 +300,16 @@ def _build_project_runtime(
         on_snapshot=publish_snapshot,
     )
     service = ProjectTeamService(
-        client=effect_client,
+        client=role_client,
         project_root=project_root,
         registry=registry,
-        legacy_registry_path=project_root / LEGACY_PROJECT_REGISTRY_RELATIVE_PATH,
         settings=ProjectTeamSettings(
             project_root / PROJECT_SETTINGS_RELATIVE_PATH
         ),
         thread_factory=thread_factory,
+        runner=runner,
         model_catalog=model_catalog,
         workflow=workflow,
-        thread_deleter=thread_deleter,
-        artifacts=artifacts,
     )
     service_holder.append(service)
     runtime = ProjectRuntime(
@@ -565,13 +317,10 @@ def _build_project_runtime(
         workflow=workflow,
         registry=registry,
         runner=runner,
-        effect_client=effect_client,
+        client=role_client,
         thread_factory=thread_factory,
-        thread_transfer=thread_transfer,
-        artifacts=artifacts,
         events=events,
     )
-    runtime_holder.append(runtime)
     return runtime
 
 
@@ -897,7 +646,6 @@ def run(argv: Sequence[str] | None = None) -> int:
     server: LoopbackHTTPServer | None = None
     scene_queue: SceneQueue | None = None
     project_runtime: ProjectRuntime | None = None
-    ordinary_transfer: OrdinaryThreadTransfer | None = None
     sensitive_values: list[str] = []
     try:
         project_root, codex_exe, codex_home, temp_directory = _validated_paths(args)
@@ -1073,34 +821,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             allowed_evidence_roots=_project_evidence_roots(
                 project_root, render_output_directory
             ),
-            thread_deleter=(
-                session.delete_thread
-                if callable(getattr(session, "delete_thread", None))
-                else None
-            ),
         )
         session_model_catalog = getattr(session, "list_models", None)
         if callable(session_model_catalog):
             project_runtime_arguments["model_catalog"] = session_model_catalog
         project_runtime = _build_project_runtime(**project_runtime_arguments)
-        observer_setter = getattr(session, "set_project_event_observer", None)
-        if callable(observer_setter):
-            observer_setter(project_runtime.observe_codex_event)
-        rebind_transferred = getattr(session, "rebind_transferred_thread", None)
-        ordinary_transfer = OrdinaryThreadTransfer(
-            client,
-            project_root=project_root,
-            ledger_path=project_root / ORDINARY_TRANSFER_RELATIVE_PATH,
-            publish=events.publish,
-            rebind=(
-                rebind_transferred
-                if callable(rebind_transferred)
-                else lambda _old, _new: False
-            ),
-        )
-        transfer_setter = getattr(session, "set_ordinary_thread_transfer", None)
-        if callable(transfer_setter):
-            transfer_setter(ordinary_transfer)
         project_team = project_runtime.service
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
@@ -1149,9 +874,10 @@ def run(argv: Sequence[str] | None = None) -> int:
             }
         )
         session.start()
-        project_runtime.recover()
-        if ordinary_transfer is not None:
-            ordinary_transfer.recover()
+        events.publish(
+            "project_team_updated",
+            project_team=project_runtime.service.snapshot(),
+        )
 
         def request_shutdown(*_: object) -> None:
             threading.Thread(
@@ -1228,15 +954,11 @@ def run(argv: Sequence[str] | None = None) -> int:
                     project_runtime.close()
             finally:
                 try:
-                    if ordinary_transfer is not None:
-                        ordinary_transfer.close()
+                    if scene_queue is not None:
+                        scene_queue.shutdown()
                 finally:
-                    try:
-                        if scene_queue is not None:
-                            scene_queue.shutdown()
-                    finally:
-                        if session is not None:
-                            session.close()
+                    if session is not None:
+                        session.close()
 
 
 def main() -> None:

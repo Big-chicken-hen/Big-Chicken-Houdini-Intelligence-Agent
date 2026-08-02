@@ -1,10 +1,8 @@
-"""Bounded executor for project-team lifecycle effects.
+"""Bounded executor for explicit project-role actions.
 
-The executor performs RPC work and returns a complete replacement state plus an
-optional lifecycle event.  It does not persist lifecycle state itself.  This is
-an intentional narrow contract for the runner: an ``event=None`` result means
-only that the external effect was acknowledged and its deterministic state
-change is already present; it never means that a stage or project passed.
+The executor performs one native role Turn and returns the resulting lifecycle
+event. It does not persist plans, reviews, repairs, or execution bodies; those
+remain authoritative in the five native Codex Thread histories.
 """
 
 from __future__ import annotations
@@ -17,23 +15,16 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from .project_artifacts import ProjectArtifactStore
 from .project_budget import ProgressObservation, record_progress
 from .project_contracts import (
-    PendingEffect,
     ProjectState,
     Requirement,
     RequirementStatus,
     Role,
     StageState,
-    native_goal_objective,
 )
-from .project_evidence import EvidenceValidationResult, validate_evidence
-from .project_guidance import (
-    mark_guidance_consumed,
-    pending_guidance,
-    validate_requirement_coverage,
-)
+from .project_evidence import validate_evidence
+from .project_guidance import validate_requirement_coverage
 from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_payloads import (
     parse_review_claim,
@@ -42,16 +33,24 @@ from .project_payloads import (
     validate_plan_structure,
 )
 from .project_registry import ProjectRegistry
-from .project_thread_factory import ProjectThreadFactory
+from .project_runner import ProjectAction, ProjectActionResult
 from .project_turns import TurnOwnershipLedger
 
 
-class ProjectEffectClient(Protocol):
+class ProjectRoleClient(Protocol):
     def request(self, method: str, params: Mapping[str, Any]) -> Any: ...
 
     def wait_for_turn(
         self, thread_id: str, turn_id: str, timeout_seconds: float
     ) -> "CompletedTurn": ...
+
+    def wait_until_thread_idle(
+        self, thread_id: str, timeout_seconds: float
+    ) -> bool: ...
+
+    def start_turn_when_idle(
+        self, params: Mapping[str, Any], timeout_seconds: float
+    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -62,15 +61,8 @@ class CompletedTurn:
     payload: Mapping[str, Any]
     events: tuple[Mapping[str, Any], ...] = ()
     elapsed_seconds: int = 0
-    native_subagents: int = 0
     payload_error_code: str | None = None
     payload_error_message: str | None = None
-
-
-@dataclass(frozen=True)
-class EffectResult:
-    state: ProjectState
-    event: LifecycleEvent | None
 
 
 @dataclass(frozen=True)
@@ -83,7 +75,7 @@ class _TurnCall:
     guidance_ids: tuple[str, ...]
 
 
-class ProjectEffectError(RuntimeError):
+class ProjectRoleError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
@@ -101,228 +93,102 @@ class _Interrupted(Exception):
         self.reason = reason
 
 
-class _MaterialReplan(Exception):
-    def __init__(self, state: ProjectState) -> None:
-        self.state = state
-
-
-class ProjectEffectExecutor:
-    """Execute one persisted effect with exact ownership and finite waiting."""
+class ProjectRoleExecutor:
+    """Execute one explicit role action with finite waiting."""
 
     def __init__(
         self,
         *,
-        client: ProjectEffectClient,
+        client: ProjectRoleClient,
         registry: ProjectRegistry,
-        thread_factory: ProjectThreadFactory,
-        artifacts: ProjectArtifactStore,
+        scene_write_lock: Any,
         allowed_evidence_roots: Sequence[str | Path],
         total_timeout_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if total_timeout_seconds <= 0:
             raise ValueError("total_timeout_seconds must be positive")
+        if scene_write_lock is None:
+            raise ValueError("scene_write_lock is required")
         self._client = client
         self._registry = registry
-        self._factory = thread_factory
-        self._artifacts = artifacts
+        self._scene_write_lock = scene_write_lock
         self._allowed_roots = tuple(allowed_evidence_roots)
         self._timeout = float(total_timeout_seconds)
         self._clock = clock
         self._ledger = TurnOwnershipLedger()
 
-    def execute(self, state: ProjectState, effect: PendingEffect) -> EffectResult:
-        if not state.pending_effects or state.pending_effects[0].effect_id != effect.effect_id:
-            raise ProjectEffectError(
-                "EFFECT_OWNERSHIP_MISMATCH",
-                "executor may run only the oldest persisted project effect",
-            )
+    def execute(self, state: ProjectState, action: ProjectAction) -> ProjectActionResult:
         deadline = min(
             self._clock() + self._timeout,
             self._clock() + max(0, state.budget.max_elapsed_seconds - state.elapsed_seconds),
         )
         try:
-            if effect.kind not in {
-                "verify_recovery",
-                "pause_goal",
-                "resume_goal",
-                "complete_goal",
-            }:
-                self._hold_native_goal(state)
-            return self._execute(state, effect, deadline)
+            return self._execute(state, action, deadline)
         except _BudgetStop as stop:
-            return EffectResult(
+            return ProjectActionResult(
                 stop.state,
                 LifecycleEvent(ProjectEvent.BUDGET_EXHAUSTED, {"reason": stop.reason}),
             )
         except _Interrupted as stop:
-            return EffectResult(
+            return ProjectActionResult(
                 stop.state,
                 LifecycleEvent(ProjectEvent.PROJECT_INTERRUPTED, {"reason": stop.reason}),
             )
-        except _MaterialReplan as stop:
-            return EffectResult(
-                stop.state,
-                LifecycleEvent(ProjectEvent.MATERIAL_REPLAN_REQUIRED),
-            )
         except TimeoutError:
-            return EffectResult(
+            return ProjectActionResult(
                 state,
                 LifecycleEvent(
                     ProjectEvent.PROJECT_INTERRUPTED,
-                    {"reason": "project_effect_timeout"},
+                    {"reason": "project_role_timeout"},
                 ),
-            )
-
-    def _hold_native_goal(self, state: ProjectState) -> None:
-        """Keep project Turns under the persisted workflow, including recovery.
-
-        Older projects may have an active native Goal from before project-held
-        Goals were introduced.  Reasserting paused is idempotent and prevents
-        native auto-continuation from racing the oldest persisted effect.
-        """
-
-        record = self._registry.require(state.project_id)
-        result = self._client.request(
-            "thread/goal/set",
-            {
-                "threadId": state.goal_thread_id,
-                "objective": native_goal_objective(
-                    record.authoritative_task_text,
-                    state.authoritative_task_id,
-                ),
-                "status": "paused",
-                "tokenBudget": None,
-            },
-        )
-        goal = result.get("goal") if isinstance(result, Mapping) else None
-        if (
-            not isinstance(goal, Mapping)
-            or goal.get("threadId") != state.goal_thread_id
-            or goal.get("status") != "paused"
-        ):
-            raise ProjectEffectError(
-                "PROJECT_GOAL_HOLD_FAILED",
-                "project workflow could not hold the native Goal",
             )
 
     def _execute(
-        self, state: ProjectState, effect: PendingEffect, deadline: float
-    ) -> EffectResult:
-        kind = effect.kind
-        if kind == "start_intake":
-            return self._intake(state, effect, deadline)
-        if kind == "provision_workers":
-            provisioned = self._factory.provision_workers(state)
-            self._artifacts.put_effect(
-                state.project_id,
-                effect.effect_id,
-                kind,
-                {"role_threads": {r.value: b.thread_id for r, b in provisioned.roles.items()}},
-            )
-            return EffectResult(provisioned, LifecycleEvent(ProjectEvent.ROLES_PROVISIONED))
+        self, state: ProjectState, action: ProjectAction, deadline: float
+    ) -> ProjectActionResult:
+        kind = action.kind
+        if kind == "start_supervisor":
+            return self._supervisor_start(state, action, deadline)
         if kind == "request_plan":
-            return self._plan(state, effect, deadline)
+            return self._plan(state, action, deadline)
         if kind == "request_authorization":
-            return self._authorize(state, effect, deadline)
+            return self._authorize(state, action, deadline)
         if kind == "start_execution":
-            return self._execute_stage(state, effect, deadline)
+            return self._execute_stage(state, action, deadline)
         if kind == "start_reviews":
-            return self._review_stage(state, effect, deadline)
-        if kind == "request_repair":
-            return self._authorize_repair(state, effect, deadline)
-        if kind == "verify_recovery":
-            return self._verify_recovery(state, effect)
-        if kind == "complete_goal":
-            return self._set_goal(state, effect, "completed", ProjectEvent.GOAL_COMPLETED)
-        if kind == "pause_goal":
-            return self._set_goal(state, effect, "paused", ProjectEvent.GOAL_PAUSED)
-        if kind == "resume_goal":
-            return self._set_goal(state, effect, "active", ProjectEvent.GOAL_RESUMED)
-        if kind in {"show_attention", "record_failure"}:
-            self._artifacts.put_effect(state.project_id, effect.effect_id, kind, dict(effect.data))
-            return EffectResult(state, None)
-        if kind == "advance_stage":
-            return self._advance_stage(state, effect)
-        raise ProjectEffectError("UNKNOWN_PROJECT_EFFECT", f"unsupported effect kind: {kind}")
+            return self._review_stage(state, action, deadline)
+        raise ProjectRoleError("UNKNOWN_PROJECT_ACTION", f"unsupported action kind: {kind}")
 
-    def _verify_recovery(
-        self, state: ProjectState, effect: PendingEffect
-    ) -> EffectResult:
-        """Validate persisted native identities without consulting Turn history."""
-
-        try:
-            self._factory.validate_recovery_identity(state)
-        except Exception as exc:
-            return EffectResult(
-                state,
-                LifecycleEvent(
-                    ProjectEvent.RECOVERY_FAILED,
-                    {"error": f"{type(exc).__name__}: {exc}"},
-                ),
-            )
-        state = replace(
-            state,
-            turns={
-                role: (
-                    replace(turn, active=False, turn_id=None)
-                    if turn.active
-                    else turn
-                )
-                for role, turn in state.turns.items()
-            },
-        )
-        self._artifacts.put_effect(
-            state.project_id,
-            effect.effect_id,
-            effect.kind,
-            {
-                "task_id": state.authoritative_task_id,
-                "task_sha256": state.authoritative_task_sha256,
-                "role_threads": {
-                    role.value: binding.thread_id
-                    for role, binding in state.roles.items()
-                },
-                "goal_thread_id": state.goal_thread_id,
-            },
-        )
-        return EffectResult(
-            state,
-            LifecycleEvent(ProjectEvent.RECOVERY_VALIDATED),
-        )
-
-    def _intake(
-        self, state: ProjectState, effect: PendingEffect, deadline: float
-    ) -> EffectResult:
-        request = self._base_request(state, Role.SUPERVISOR, "scene_task_eligibility")
+    def _supervisor_start(
+        self, state: ProjectState, action: ProjectAction, deadline: float
+    ) -> ProjectActionResult:
+        request = self._base_request(state, Role.SUPERVISOR, "start_project")
         request["authoritative_task"] = self._authoritative_task_capsule(state)
         state, completed = self._run_structured(
             state,
             Role.SUPERVISOR,
             request,
-            "hia-project-eligibility/1",
+            "hia-project-start/1",
             deadline,
-            local_image_paths=self._authoritative_image_paths(state),
+            local_image_paths=tuple(action.data.get("local_image_paths", ())),
         )
         payload = completed.payload
-        if set(payload) != {"schema", "disposition", "reason"}:
-            raise ProjectEffectError("INVALID_ELIGIBILITY_SCHEMA", "eligibility fields are invalid")
-        disposition = payload.get("disposition")
-        _text(payload.get("reason"), "eligibility reason")
-        self._artifacts.put_effect(state.project_id, effect.effect_id, effect.kind, payload)
-        if disposition == "eligible":
-            event = LifecycleEvent(ProjectEvent.SCENE_ELIGIBLE)
-        elif disposition == "ineligible":
-            event = LifecycleEvent(ProjectEvent.SCENE_INELIGIBLE, {"reason": payload["reason"]})
-        elif disposition == "unclear":
-            event = LifecycleEvent(ProjectEvent.INTAKE_UNCLEAR, {"reason": payload["reason"]})
+        if set(payload) != {"schema", "route", "reply"}:
+            raise ProjectRoleError("INVALID_PROJECT_START", "project start fields are invalid")
+        route = payload.get("route")
+        _text(payload.get("reply"), "Supervisor reply")
+        if route == "planning":
+            event = LifecycleEvent(ProjectEvent.PROJECT_ACCEPTED)
+        elif route == "answered":
+            event = LifecycleEvent(ProjectEvent.PROJECT_ANSWERED)
         else:
-            raise ProjectEffectError("INVALID_ELIGIBILITY_SCHEMA", "eligibility disposition is invalid")
-        return EffectResult(state, event)
+            raise ProjectRoleError("INVALID_PROJECT_START", "route must be planning or answered")
+        return ProjectActionResult(state, event)
 
     def _plan(
-        self, state: ProjectState, effect: PendingEffect, deadline: float
-    ) -> EffectResult:
+        self, state: ProjectState, action: ProjectAction, deadline: float
+    ) -> ProjectActionResult:
         request = self._base_request(state, Role.PLANNING, "create_plan_and_stage_cards")
         request["authoritative_task"] = self._authoritative_task_capsule(state)
         state, completed = self._run_structured(
@@ -331,7 +197,7 @@ class ProjectEffectExecutor:
             request,
             "hia-project-plan/1",
             deadline,
-            local_image_paths=self._authoritative_image_paths(state),
+            local_image_paths=self._read_latest_images(state, Role.SUPERVISOR),
         )
         payload = completed.payload
         capsule = self._authoritative_task_capsule(state)
@@ -341,17 +207,17 @@ class ProjectEffectExecutor:
                 allowed_source_anchors=(
                     capsule["task_anchor"],
                     *(item["attachment_anchor"] for item in capsule["attachments"]),
-                    *(f"guidance:{item.guidance_id}" for item in state.guidance),
+                    *(f"guidance:{revision}" for revision in range(1, state.guidance_revision + 1)),
                 ),
             )
         except ValueError as exc:
-            raise ProjectEffectError("INVALID_PLAN_SCHEMA", str(exc)) from exc
+            raise ProjectRoleError("INVALID_PLAN_SCHEMA", str(exc)) from exc
         raw_requirements = payload.get("requirements")
         raw_stages = payload.get("stages")
         if not isinstance(raw_requirements, list) or not raw_requirements:
-            raise ProjectEffectError("INVALID_PLAN_SCHEMA", "requirements must be non-empty")
+            raise ProjectRoleError("INVALID_PLAN_SCHEMA", "requirements must be non-empty")
         if not isinstance(raw_stages, list) or not raw_stages:
-            raise ProjectEffectError("INVALID_PLAN_SCHEMA", "stages must be non-empty")
+            raise ProjectRoleError("INVALID_PLAN_SCHEMA", "stages must be non-empty")
         requirements: list[Requirement] = []
         seen: set[str] = set()
         for raw in raw_requirements:
@@ -362,10 +228,10 @@ class ProjectEffectExecutor:
                 "source_ref",
                 "user_fact_ids",
             }:
-                raise ProjectEffectError("INVALID_PLAN_SCHEMA", "requirement fields are invalid")
+                raise ProjectRoleError("INVALID_PLAN_SCHEMA", "requirement fields are invalid")
             requirement_id = _text(raw.get("requirement_id"), "requirement_id")
             if requirement_id in seen:
-                raise ProjectEffectError("INVALID_PLAN_SCHEMA", "requirement IDs must be unique")
+                raise ProjectRoleError("INVALID_PLAN_SCHEMA", "requirement IDs must be unique")
             seen.add(requirement_id)
             requirements.append(
                 Requirement(
@@ -377,11 +243,11 @@ class ProjectEffectExecutor:
             )
         cards = [parse_stage_card(raw) for raw in raw_stages if isinstance(raw, Mapping)]
         if len(cards) != len(raw_stages) or len({card.stage_id for card in cards}) != len(cards):
-            raise ProjectEffectError("INVALID_PLAN_SCHEMA", "stage cards are malformed or duplicated")
+            raise ProjectRoleError("INVALID_PLAN_SCHEMA", "stage cards are malformed or duplicated")
         try:
             validate_blueprint_information(payload, tuple(cards))
         except ValueError as exc:
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "INVALID_PLAN_SCHEMA",
                 str(exc),
             ) from exc
@@ -389,18 +255,6 @@ class ProjectEffectExecutor:
         validate_requirement_coverage(requirements, covered)
         if state.requirements:
             validate_requirement_coverage(state.requirements, (item.requirement_id for item in requirements))
-        previous = self._artifacts.get_named(state.project_id, "plan")
-        blueprint_revision = state.blueprint_revision + 1
-        guidance_revision = max((item.revision for item in state.guidance), default=0)
-        stored_plan = json.loads(json.dumps(payload, ensure_ascii=False))
-        stored_plan["_blueprint_revision"] = blueprint_revision
-        stored_plan["_guidance_revision"] = guidance_revision
-        stored_plan["_previous_blueprint_sha256"] = (
-            previous.get("_blueprint_sha256") if isinstance(previous, Mapping) else None
-        )
-        stored_plan["_blueprint_sha256"] = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
         inactive_requirements = tuple(
             item
             for item in state.requirements
@@ -415,36 +269,14 @@ class ProjectEffectExecutor:
             state,
             requirements=tuple((*requirements, *inactive_requirements)),
             stage=StageState(stage_id=cards[0].stage_id, ordinal=1),
-            plan_stale=False,
-            blueprint_revision=blueprint_revision,
             revision=state.revision + 1,
         )
-        history = self._artifacts.get_named(state.project_id, "plan_history")
-        history = list(history) if isinstance(history, list) else []
-        history.append(
-            {
-                "blueprint_revision": blueprint_revision,
-                "blueprint_sha256": stored_plan["_blueprint_sha256"],
-                "previous_blueprint_sha256": stored_plan["_previous_blueprint_sha256"],
-                "guidance_revision": guidance_revision,
-            }
-        )
-        self._artifacts.put_named(state.project_id, "plan", stored_plan)
-        self._artifacts.put_named(state.project_id, "plan_history", history)
-        self._artifacts.put_effect(
-            state.project_id, effect.effect_id, effect.kind, {"stage_ids": [c.stage_id for c in cards]}
-        )
-        return EffectResult(state, LifecycleEvent(ProjectEvent.PLAN_READY))
+        return ProjectActionResult(state, LifecycleEvent(ProjectEvent.PLAN_READY))
 
     def _authorize(
-        self, state: ProjectState, effect: PendingEffect, deadline: float
-    ) -> EffectResult:
-        plan = self._require_plan(state)
-        if (
-            state.plan_stale
-            or plan.get("_blueprint_revision") != state.blueprint_revision
-        ):
-            raise ProjectEffectError("STALE_BLUEPRINT", "current blueprint must be replanned")
+        self, state: ProjectState, action: ProjectAction, deadline: float
+    ) -> ProjectActionResult:
+        plan = self._action_plan(state, action)
         request = self._base_request(state, Role.SUPERVISOR, "authorize_plan")
         request["authoritative_task"] = self._authoritative_task_capsule(state)
         request["plan"] = plan
@@ -460,17 +292,15 @@ class ProjectEffectExecutor:
         if set(payload) != {
             "schema",
             "authorized",
-            "blueprint_revision",
-            "blueprint_sha256",
             "stage_ids",
             "semantic_review",
         }:
-            raise ProjectEffectError("INVALID_AUTHORIZATION_SCHEMA", "authorization fields are invalid")
+            raise ProjectRoleError("INVALID_AUTHORIZATION_SCHEMA", "authorization fields are invalid")
         expected = [stage["stage_id"] for stage in plan["stages"]]
         try:
             _validate_semantic_authorization(payload["semantic_review"], plan)
         except ValueError as exc:
-            raise ProjectEffectError("INVALID_AUTHORIZATION_SCHEMA", str(exc)) from exc
+            raise ProjectRoleError("INVALID_AUTHORIZATION_SCHEMA", str(exc)) from exc
         all_pass = all(
             item["status"] == "pass"
             for item in payload["semantic_review"].values()
@@ -478,41 +308,53 @@ class ProjectEffectExecutor:
         if (
             payload.get("authorized") is not True
             or not all_pass
-            or payload.get("blueprint_revision") != state.blueprint_revision
-            or payload.get("blueprint_sha256") != plan.get("_blueprint_sha256")
             or payload.get("stage_ids") != expected
         ):
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "PLAN_NOT_AUTHORIZED",
                 "Supervisor did not pass every semantic item for the exact blueprint revision",
             )
-        self._artifacts.put_effect(state.project_id, effect.effect_id, effect.kind, payload)
-        return EffectResult(
-            replace(
-                state,
-                authorized_blueprint_revision=state.blueprint_revision,
-                revision=state.revision + 1,
-            ),
-            LifecycleEvent(ProjectEvent.PLAN_AUTHORIZED),
-        )
+        return ProjectActionResult(state, LifecycleEvent(ProjectEvent.PLAN_AUTHORIZED))
 
     def _execute_stage(
-        self, state: ProjectState, effect: PendingEffect, deadline: float
-    ) -> EffectResult:
+        self, state: ProjectState, action: ProjectAction, deadline: float
+    ) -> ProjectActionResult:
+        acquired = self._scene_write_lock.acquire(timeout=self._remaining(deadline))
+        if not acquired:
+            raise ProjectRoleError(
+                "SCENE_WRITE_BUSY",
+                "another project still owns the live Houdini scene write",
+            )
+        try:
+            return self._execute_stage_owned(state, action, deadline)
+        finally:
+            self._scene_write_lock.release()
+
+    def _execute_stage_owned(
+        self, state: ProjectState, action: ProjectAction, deadline: float
+    ) -> ProjectActionResult:
+        plan = self._action_plan(state, action)
         if (
-            state.plan_stale
-            or state.blueprint_revision == 0
-            or state.authorized_blueprint_revision != state.blueprint_revision
+            state.status.value != "executing"
         ):
-            raise ProjectEffectError("STALE_BLUEPRINT", "Execution requires the latest authorized blueprint")
-        stage = self._current_stage(state)
-        repair = bool(effect.data.get("repair", False))
+            raise ProjectRoleError("INVALID_EXECUTION_PHASE", "Execution requires the executing phase")
+        stage = self._current_stage(state, plan)
+        repair = bool(action.data.get("repair", False))
         request = self._base_request(
             state, Role.EXECUTION, "execute_repair" if repair else "execute_stage"
         )
         request["stage_card"] = stage
         if repair:
-            request["repair_card"] = self._require_named(state, "repair_card")
+            decision = self._read_latest_payload(
+                state, Role.SUPERVISOR, "hia-project-stage-decision/1"
+            )
+            repair_card = decision.get("repair_card")
+            if not isinstance(repair_card, Mapping):
+                raise ProjectRoleError(
+                    "MISSING_REPAIR_CARD",
+                    "Supervisor native Thread has no repair card for this stage",
+                )
+            request["repair_card"] = repair_card
         state, completed = self._run_structured(
             state,
             Role.EXECUTION,
@@ -521,22 +363,17 @@ class ProjectEffectExecutor:
             deadline,
             record_success=False,
         )
-        if completed.native_subagents != 0:
-            raise ProjectEffectError(
-                "EXECUTION_SUBAGENT_FORBIDDEN",
-                "Execution cannot delegate inherited scene-write capability",
-            )
         payload = completed.payload
         if set(payload) != {"schema", "stage_id", "evidence_refs", "claims_visual_change"}:
-            raise ProjectEffectError("INVALID_EXECUTION_SCHEMA", "execution fields are invalid")
+            raise ProjectRoleError("INVALID_EXECUTION_SCHEMA", "execution fields are invalid")
         if payload.get("stage_id") != stage["stage_id"]:
-            raise ProjectEffectError("STAGE_OWNERSHIP_MISMATCH", "Execution returned the wrong stage")
+            raise ProjectRoleError("STAGE_OWNERSHIP_MISMATCH", "Execution returned the wrong stage")
         references = payload.get("evidence_refs")
-        if not isinstance(references, list) or not references:
-            raise ProjectEffectError("MISSING_EXECUTION_EVIDENCE", "Execution evidence is required")
+        if not isinstance(references, list):
+            raise ProjectRoleError("INVALID_EXECUTION_SCHEMA", "evidence_refs must be a list")
         current = state.turns.get(Role.EXECUTION)
         if current is None or current.turn_id != completed.turn_id:
-            raise ProjectEffectError("TURN_OWNERSHIP_MISMATCH", "Execution Turn identity was lost")
+            raise ProjectRoleError("TURN_OWNERSHIP_MISMATCH", "Execution Turn identity was lost")
         evidence = validate_evidence(
             references=references,
             tool_events=completed.events,
@@ -547,107 +384,36 @@ class ProjectEffectExecutor:
             max_total_evidence_bytes=state.budget.max_total_evidence_bytes,
         )
         tools = {item.tool for item in evidence.evidence}
-        if "hia_capture_viewport" not in tools or len(tools - {"hia_capture_viewport"}) < 1:
-            raise ProjectEffectError(
-                "INCOMPLETE_EXECUTION_EVIDENCE",
-                "stage evidence requires a real viewport capture and technical HIA evidence",
+        capture_required, technical_required = _stage_evidence_needs(stage)
+        if capture_required and "hia_capture_viewport" not in tools:
+            raise ProjectRoleError(
+                "MISSING_VISUAL_EVIDENCE",
+                "the Full stage contract requires a current viewport capture",
             )
-        screenshot_hash = _capture_hash(evidence)
-        repair_card = self._artifacts.get_named(state.project_id, "repair_card") if repair else None
-        previous_execution = (
-            self._artifacts.get_named(state.project_id, "current_execution") if repair else None
-        )
+        if technical_required and not (tools - {"hia_capture_viewport"}):
+            raise ProjectRoleError(
+                "MISSING_TECHNICAL_EVIDENCE",
+                "the Full stage contract requires current technical evidence",
+            )
         observation = ProgressObservation(
             role=Role.EXECUTION,
             kind="repair" if repair else "execution",
             elapsed_seconds=0,
             evidence_bytes=evidence.added_evidence_bytes,
             evidence_ids=tuple(item.item_id for item in evidence.evidence),
-            repair_hash=(repair_card or {}).get("repair_hash") if isinstance(repair_card, Mapping) else None,
-            screenshot_hash=screenshot_hash,
-            claims_visual_change=payload.get("claims_visual_change") is True,
         )
         state = self._record(state, observation)
-        stored = {
-            "stage_id": stage["stage_id"],
-            "turn_id": completed.turn_id,
-            "thread_id": completed.thread_id,
-            "evidence": [
-                {
-                    "item_id": item.item_id,
-                    "tool": item.tool,
-                    "artifact_paths": list(item.artifact_paths),
-                    "frame": item.capture_frame,
-                    "view": item.capture_view,
-                    "evidence_bytes": item.evidence_bytes,
-                }
-                for item in evidence.evidence
-            ],
-        }
-        if repair:
-            previous_ids = {
-                item.get("item_id")
-                for item in (previous_execution or {}).get("evidence", [])
-                if isinstance(item, Mapping)
-            }
-            current_ids = {item["item_id"] for item in stored["evidence"]}
-            progress = self._artifacts.get_named(state.project_id, "repair_progress")
-            prior_rounds = (
-                progress.get("no_progress_rounds", 0) if isinstance(progress, Mapping) else 0
-            )
-            no_progress_rounds = prior_rounds + 1 if current_ids <= previous_ids else 0
-            progress = {
-                "no_progress_rounds": no_progress_rounds,
-                "latest_evidence_ids": sorted(current_ids),
-                "repair_hash": (repair_card or {}).get("repair_hash"),
-            }
-            self._artifacts.put_named(state.project_id, "repair_progress", progress)
-            state = replace(
-                state,
-                stage=replace(state.stage, no_progress_rounds=no_progress_rounds),
-                revision=state.revision + 1,
-            )
-            if no_progress_rounds >= state.budget.max_no_progress_rounds:
-                raise _BudgetStop(state, "repair_added_no_new_evidence")
-        self._artifacts.put_named(state.project_id, "current_execution", stored)
-        self._artifacts.put_effect(state.project_id, effect.effect_id, effect.kind, stored)
-        return EffectResult(state, LifecycleEvent(ProjectEvent.STAGE_EXECUTED))
-
-    def _advance_stage(
-        self, state: ProjectState, effect: PendingEffect
-    ) -> EffectResult:
-        plan = self._require_plan(state)
-        stages = plan.get("stages")
-        if not isinstance(stages, list):
-            raise ProjectEffectError("MISSING_PLAN_ARTIFACT", "plan stages are unavailable")
-        current = next(
-            (index for index, item in enumerate(stages) if item.get("stage_id") == state.stage.stage_id),
-            None,
-        )
-        if current is None or current + 1 >= len(stages):
-            raise ProjectEffectError("NO_NEXT_STAGE", "advance_stage has no exact next stage")
-        next_stage = stages[current + 1]
-        stage_id = next_stage.get("stage_id")
-        if not isinstance(stage_id, str) or not stage_id:
-            raise ProjectEffectError("MISSING_STAGE_ARTIFACT", "next stage identity is invalid")
-        advanced = replace(
+        return ProjectActionResult(
             state,
-            stage=StageState(stage_id=stage_id, ordinal=state.stage.ordinal + 1),
-            revision=state.revision + 1,
+            LifecycleEvent(ProjectEvent.STAGE_EXECUTED),
         )
-        self._artifacts.put_effect(
-            state.project_id,
-            effect.effect_id,
-            effect.kind,
-            {"from_stage_id": state.stage.stage_id, "to_stage_id": stage_id},
-        )
-        return EffectResult(advanced, None)
 
     def _review_stage(
-        self, state: ProjectState, effect: PendingEffect, deadline: float
-    ) -> EffectResult:
-        stage = self._current_stage(state)
-        execution = self._require_named(state, "current_execution")
+        self, state: ProjectState, action: ProjectAction, deadline: float
+    ) -> ProjectActionResult:
+        plan = self._action_plan(state, action)
+        stage = self._current_stage(state, plan)
+        execution = self._read_execution_history(state, stage)
         state, reviews = self._parallel_reviews(state, stage, execution, deadline)
         coverage_proof = _review_coverage_proof(stage, reviews)
         decision_request = self._base_request(state, Role.SUPERVISOR, "decide_stage_review")
@@ -675,9 +441,9 @@ class ProjectEffectExecutor:
             "repair_card",
             "approved_exemptions",
         }:
-            raise ProjectEffectError("INVALID_STAGE_DECISION", "stage decision fields are invalid")
+            raise ProjectRoleError("INVALID_STAGE_DECISION", "stage decision fields are invalid")
         if payload.get("stage_id") != stage["stage_id"]:
-            raise ProjectEffectError("STAGE_OWNERSHIP_MISMATCH", "Supervisor decided the wrong stage")
+            raise ProjectRoleError("STAGE_OWNERSHIP_MISMATCH", "Supervisor decided the wrong stage")
         failed = any(
             claim["disposition"] in {"failed", "unverified"}
             for review in reviews
@@ -688,62 +454,61 @@ class ProjectEffectExecutor:
             payload.get("approved_exemptions")
         )
         if not set(approved_exemptions).issubset(required_exemptions):
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "INVALID_STAGE_DECISION",
                 "approved exemptions must exactly match evidence-bound review exemptions",
             )
         exemptions_match = approved_exemptions == required_exemptions
-        final_expected = self._is_final_stage(state)
+        final_expected = self._is_final_stage(state, plan)
         if payload.get("final_stage") is not final_expected:
-            raise ProjectEffectError("INVALID_STAGE_DECISION", "final_stage does not match the plan")
+            raise ProjectRoleError("INVALID_STAGE_DECISION", "final_stage does not match the plan")
         decision = payload.get("decision")
         if decision == "pass":
             if failed or not exemptions_match or payload.get("repair_card") is not None:
-                raise ProjectEffectError(
+                raise ProjectRoleError(
                     "INVALID_STAGE_DECISION",
                     "failed, unverified, or unapproved exemption claims cannot be passed",
                 )
-            event = LifecycleEvent(ProjectEvent.REVIEWS_PASSED, {"final_stage": final_expected})
+            stages = plan.get("stages")
+            next_stage_id = None
+            if not final_expected and isinstance(stages, list):
+                index = next(
+                    (
+                        offset
+                        for offset, item in enumerate(stages)
+                        if isinstance(item, Mapping)
+                        and item.get("stage_id") == state.stage.stage_id
+                    ),
+                    None,
+                )
+                if index is not None and index + 1 < len(stages):
+                    candidate = stages[index + 1]
+                    next_stage_id = (
+                        candidate.get("stage_id")
+                        if isinstance(candidate, Mapping)
+                        else None
+                    )
+            event = LifecycleEvent(
+                ProjectEvent.REVIEWS_PASSED,
+                {
+                    "final_stage": final_expected,
+                    "next_stage_id": next_stage_id,
+                },
+            )
         elif decision == "repair":
             card = _parse_repair_card(payload.get("repair_card"), stage["stage_id"], execution)
             if not failed and exemptions_match:
-                raise ProjectEffectError(
+                raise ProjectRoleError(
                     "INVALID_STAGE_DECISION",
                     "repair requires a failed, unverified, or unapproved exemption claim",
                 )
-            self._artifacts.put_named(state.project_id, "repair_card", card)
-            event = LifecycleEvent(ProjectEvent.REVIEWS_FAILED)
+            event = LifecycleEvent(
+                ProjectEvent.REVIEWS_FAILED,
+                {},
+            )
         else:
-            raise ProjectEffectError("INVALID_STAGE_DECISION", "decision must be pass or repair")
-        self._artifacts.put_named(state.project_id, "current_reviews", reviews)
-        self._artifacts.put_effect(state.project_id, effect.effect_id, effect.kind, payload)
-        return EffectResult(state, event)
-
-    def _authorize_repair(
-        self, state: ProjectState, effect: PendingEffect, deadline: float
-    ) -> EffectResult:
-        stage = self._current_stage(state)
-        card = self._require_named(state, "repair_card")
-        request = self._base_request(state, Role.SUPERVISOR, "authorize_minimum_repair")
-        request.update({"stage_card": stage, "repair_card": card})
-        state, completed = self._run_structured(
-            state,
-            Role.SUPERVISOR,
-            request,
-            "hia-project-repair-authorization/1",
-            deadline,
-        )
-        payload = completed.payload
-        if set(payload) != {"schema", "stage_id", "authorized", "repair_hash"}:
-            raise ProjectEffectError("INVALID_REPAIR_AUTHORIZATION", "repair authorization fields are invalid")
-        if (
-            payload.get("stage_id") != stage["stage_id"]
-            or payload.get("authorized") is not True
-            or payload.get("repair_hash") != card["repair_hash"]
-        ):
-            raise ProjectEffectError("INVALID_REPAIR_AUTHORIZATION", "repair authorization mismatch")
-        self._artifacts.put_effect(state.project_id, effect.effect_id, effect.kind, payload)
-        return EffectResult(state, LifecycleEvent(ProjectEvent.REPAIR_READY))
+            raise ProjectRoleError("INVALID_STAGE_DECISION", "decision must be pass or repair")
+        return ProjectActionResult(state, event)
 
     def _parallel_reviews(
         self,
@@ -753,7 +518,10 @@ class ProjectEffectExecutor:
         deadline: float,
     ) -> tuple[ProjectState, list[dict[str, Any]]]:
         calls: list[_TurnCall] = []
-        visual_images = _capture_image_paths(execution)
+        capture_required, _ = _stage_evidence_needs(stage)
+        visual_images = (
+            _capture_image_paths(execution) if capture_required else ()
+        )
         for role in (Role.VISUAL_REVIEW, Role.TECHNICAL_REVIEW):
             request = self._base_request(state, role, "review_stage")
             request.update({"stage_card": stage, "execution": execution})
@@ -787,14 +555,13 @@ class ProjectEffectExecutor:
                     role=call.role,
                     kind="turn",
                     elapsed_seconds=completed.elapsed_seconds,
-                    native_subagents=completed.native_subagents,
                 ),
             )
             try:
                 payload = self._parse_review_payload(
                     completed.payload, call.role, stage, execution
                 )
-            except ProjectEffectError as exc:
+            except ProjectRoleError as exc:
                 state = self._record(
                     state,
                     ProgressObservation(role=call.role, kind="schema_correction"),
@@ -824,34 +591,13 @@ class ProjectEffectExecutor:
                             candidate, review_role, stage, execution
                         )
                     ),
+                    allow_correction=False,
                 )
                 payload = self._parse_review_payload(
                     completed.payload, call.role, stage, execution
                 )
             reviews.append(payload)
         state = self._refresh_guidance(state)
-        for role in (Role.VISUAL_REVIEW, Role.TECHNICAL_REVIEW):
-            if pending_guidance(state, role):
-                request = self._base_request(state, role, "revise_stage_review")
-                request.update({"stage_card": stage, "execution": execution, "prior_reviews": reviews})
-                state, completed = self._run_structured(
-                    state,
-                    role,
-                    request,
-                    "hia-project-review/1",
-                    deadline,
-                    local_image_paths=(
-                        visual_images if role is Role.VISUAL_REVIEW else ()
-                    ),
-                    payload_validator=lambda candidate, review_role=role: (
-                        self._validate_review_correction(
-                            candidate, review_role, stage, execution
-                        )
-                    ),
-                )
-                revised = self._parse_review_payload(completed.payload, role, stage, execution)
-                reviews = [item for item in reviews if item["reviewer"] != role.value]
-                reviews.append(revised)
         reviews.sort(key=lambda item: item["reviewer"])
         return state, reviews
 
@@ -863,14 +609,14 @@ class ProjectEffectExecutor:
         execution: Mapping[str, Any],
     ) -> dict[str, Any]:
         if set(payload) != {"schema", "stage_id", "reviewer", "claims"}:
-            raise ProjectEffectError("INVALID_REVIEW_SCHEMA", "review fields are invalid")
+            raise ProjectRoleError("INVALID_REVIEW_SCHEMA", "review fields are invalid")
         if payload.get("schema") != "hia-project-review/1":
-            raise ProjectEffectError("INVALID_REVIEW_SCHEMA", "review schema is invalid")
+            raise ProjectRoleError("INVALID_REVIEW_SCHEMA", "review schema is invalid")
         if payload.get("reviewer") != role.value or payload.get("stage_id") != stage["stage_id"]:
-            raise ProjectEffectError("REVIEW_OWNERSHIP_MISMATCH", "review role or stage mismatch")
+            raise ProjectRoleError("REVIEW_OWNERSHIP_MISMATCH", "review role or stage mismatch")
         raw_claims = payload.get("claims")
         if not isinstance(raw_claims, list) or not raw_claims:
-            raise ProjectEffectError("INVALID_REVIEW_SCHEMA", "review claims must be non-empty")
+            raise ProjectRoleError("INVALID_REVIEW_SCHEMA", "review claims must be non-empty")
         try:
             claims = [
                 parse_review_claim(item)
@@ -878,29 +624,29 @@ class ProjectEffectExecutor:
                 if isinstance(item, Mapping)
             ]
         except (TypeError, ValueError) as exc:
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "INVALID_REVIEW_SCHEMA", "review claim is malformed"
             ) from exc
         if len(claims) != len(raw_claims):
-            raise ProjectEffectError("INVALID_REVIEW_SCHEMA", "review claim is malformed")
+            raise ProjectRoleError("INVALID_REVIEW_SCHEMA", "review claim is malformed")
         expected_ids = tuple(stage.get("requirement_ids") or ())
         if not expected_ids or any(not isinstance(item, str) or not item for item in expected_ids):
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "INVALID_REVIEW_REQUIREMENTS", "stage requirement IDs are malformed"
             )
         claim_ids = tuple(claim.claim_id for claim in claims)
         if len(set(claim_ids)) != len(claim_ids):
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "DUPLICATE_REVIEW_CLAIM", "each stage requirement must be claimed exactly once"
             )
         unknown = sorted(set(claim_ids) - set(expected_ids))
         missing = sorted(set(expected_ids) - set(claim_ids))
         if unknown:
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "UNKNOWN_REVIEW_CLAIM", f"unknown stage requirement claims: {unknown}"
             )
         if missing:
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "MISSING_REVIEW_CLAIM", f"missing stage requirement claims: {missing}"
             )
         available = {item["item_id"] for item in execution["evidence"]}
@@ -911,15 +657,21 @@ class ProjectEffectExecutor:
             and item.get("artifact_paths")
         }
         technical_ids = available - capture_ids
+        capture_required, technical_required = _stage_evidence_needs(stage)
         for claim in claims:
             refs = getattr(claim, "evidence_refs", ())
             if not set(refs).issubset(available):
-                raise ProjectEffectError("UNKNOWN_REVIEW_EVIDENCE", "review cites unavailable evidence")
+                raise ProjectRoleError("UNKNOWN_REVIEW_EVIDENCE", "review cites unavailable evidence")
             if claim.disposition in {"verified", "failed", "not_applicable"}:
                 required = capture_ids if role is Role.VISUAL_REVIEW else technical_ids
-                if not set(refs).intersection(required):
+                kind_required = (
+                    capture_required
+                    if role is Role.VISUAL_REVIEW
+                    else technical_required
+                )
+                if kind_required and not set(refs).intersection(required):
                     kind = "capture" if role is Role.VISUAL_REVIEW else "technical"
-                    raise ProjectEffectError(
+                    raise ProjectRoleError(
                         "REVIEW_EVIDENCE_KIND_MISMATCH",
                         f"{role.value} {claim.disposition} claim requires current {kind} evidence",
                     )
@@ -934,7 +686,7 @@ class ProjectEffectExecutor:
     ) -> None:
         try:
             self._parse_review_payload(payload, role, stage, execution)
-        except ProjectEffectError as exc:
+        except ProjectRoleError as exc:
             raise ValueError(f"{exc.code}: {exc}") from exc
 
     def _run_structured(
@@ -948,6 +700,7 @@ class ProjectEffectExecutor:
         record_success: bool = True,
         local_image_paths: Sequence[str] = (),
         payload_validator: Callable[[Mapping[str, Any]], None] | None = None,
+        allow_correction: bool = True,
     ) -> tuple[ProjectState, CompletedTurn]:
         correction = 0
         current_request = dict(request)
@@ -960,7 +713,7 @@ class ProjectEffectExecutor:
         }
         if schema == "hia-project-plan/1":
             current_request["response_rules"]["depth_policy"] = _plan_depth_policy()
-        while correction <= state.budget.max_schema_corrections:
+        while True:
             state, call = self._start_turn(
                 state,
                 role,
@@ -976,28 +729,6 @@ class ProjectEffectExecutor:
                 raise _Interrupted(state, "project_role_turn_timeout") from exc
             state = self._finish_turn(state, call, completed)
             state = self._refresh_guidance(state)
-            if pending_guidance(state, role):
-                state = self._record(
-                    state,
-                    ProgressObservation(
-                        role=role,
-                        kind="turn",
-                        elapsed_seconds=completed.elapsed_seconds,
-                        native_subagents=completed.native_subagents,
-                    ),
-                )
-                current_request = dict(request)
-                current_request["response_contract"] = _response_contract(schema)
-                current_request["response_rules"] = {
-                    "format": "one JSON object only",
-                    "no_markdown_fence": True,
-                    "task_specific": True,
-                    "no_placeholder_or_filler": True,
-                }
-                if schema == "hia-project-plan/1":
-                    current_request["response_rules"]["depth_policy"] = _plan_depth_policy()
-                current_request["revision_of_turn_id"] = completed.turn_id
-                continue
             try:
                 if completed.payload_error_code is not None:
                     raise ValueError(completed.payload_error_code)
@@ -1013,11 +744,15 @@ class ProjectEffectExecutor:
                             role=role,
                             kind="turn",
                             elapsed_seconds=completed.elapsed_seconds,
-                            native_subagents=completed.native_subagents,
                         ),
                     )
                 return state, completed
             except (TypeError, ValueError) as exc:
+                if correction >= (1 if allow_correction else 0):
+                    raise ProjectRoleError(
+                        "INVALID_STRUCTURED_OUTPUT",
+                        f"{role.value} returned invalid {schema} twice",
+                    ) from exc
                 correction += 1
                 state = self._record(
                     state,
@@ -1038,8 +773,6 @@ class ProjectEffectExecutor:
                     "required_schema": schema,
                     "error": completed.payload_error_code or type(exc).__name__,
                 }
-        raise _BudgetStop(state, "max_schema_corrections")
-
     def _start_turn(
         self,
         state: ProjectState,
@@ -1049,65 +782,10 @@ class ProjectEffectExecutor:
         *,
         local_image_paths: Sequence[str] = (),
     ) -> tuple[ProjectState, _TurnCall]:
-        state = self._refresh_guidance(state)
-        guidance = pending_guidance(state, role)
         envelope = dict(request)
         action = str(envelope.get("action") or "")
-        if state.plan_stale and action != "create_plan_and_stage_cards":
-            raise _MaterialReplan(state)
-        if action == "create_plan_and_stage_cards":
-            current_plan = self._artifacts.get_named(state.project_id, "plan")
-            previous_guidance_revision = (
-                int(current_plan.get("_guidance_revision", 0))
-                if isinstance(current_plan, Mapping)
-                else 0
-            )
-            envelope["current_blueprint"] = current_plan
-            envelope["target_blueprint_revision"] = state.blueprint_revision + 1
-            envelope["material_requirement_deltas"] = [
-                {
-                    "guidance_id": item.guidance_id,
-                    "revision": item.revision,
-                    "delta": dict(item.requirement_delta),
-                }
-                for item in state.guidance
-                if item.revision > previous_guidance_revision
-                and item.requirement_delta is not None
-            ]
-            envelope["material_revision_requests"] = [
-                {
-                    "guidance_id": item.guidance_id,
-                    "revision": item.revision,
-                    "text": item.text,
-                    "force_replan": True,
-                }
-                for item in state.guidance
-                if item.revision > previous_guidance_revision and item.force_replan
-            ]
-        envelope["guidance"] = [
-            {
-                "guidance_id": item.guidance_id,
-                "revision": item.revision,
-                "text": item.text,
-                "force_replan": item.force_replan,
-                "source_anchor": f"guidance:{item.guidance_id}",
-            }
-            for item in guidance
-        ]
-        if action == "scene_task_eligibility":
-            if guidance:
-                latest = guidance[-1]
-                envelope["current_submission"] = {
-                    "text": latest.text,
-                    "source_anchor": f"guidance:{latest.guidance_id}",
-                }
-            else:
-                task = envelope.get("authoritative_task")
-                if isinstance(task, Mapping):
-                    envelope["current_submission"] = {
-                        "text": task.get("task_text"),
-                        "source_anchor": task.get("task_anchor"),
-                    }
+        envelope["guidance_revision"] = state.guidance_revision
+        envelope["guidance_source"] = "native Thread history"
         request_id = hashlib.sha256(
             f"{state.project_id}\0{role.value}\0{state.revision}\0{self._clock()}".encode("utf-8")
         ).hexdigest()[:24]
@@ -1133,11 +811,11 @@ class ProjectEffectExecutor:
                 ),
             }
         )
-        if action == "scene_task_eligibility":
-            params["effort"] = "low"
         self._remaining(deadline)
         try:
-            result = self._client.request("turn/start", params)
+            result = self._client.start_turn_when_idle(
+                params, self._remaining(deadline)
+            )
             if not isinstance(result, Mapping):
                 raise ValueError("turn/start ACK must be an object")
             state, _ = self._ledger.acknowledge(state, role, request_id, result)
@@ -1151,7 +829,7 @@ class ProjectEffectExecutor:
             request_id,
             turn.thread_id or "",
             turn.turn_id or "",
-            tuple(item.guidance_id for item in guidance),
+            (),
         )
 
     def _finish_turn(
@@ -1163,13 +841,8 @@ class ProjectEffectExecutor:
             or completed.status != "completed"
             or not isinstance(completed.payload, Mapping)
         ):
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "TURN_OWNERSHIP_MISMATCH", "completed Turn does not match its acknowledged request"
-            )
-        if call.action == "scene_task_eligibility" and completed.native_subagents != 0:
-            raise ProjectEffectError(
-                "ELIGIBILITY_SUBAGENT_FORBIDDEN",
-                "scene eligibility is a low-cost Supervisor-only Turn",
             )
         event = {
             "params": {
@@ -1178,7 +851,6 @@ class ProjectEffectExecutor:
             }
         }
         state = self._ledger.complete(state, call.role, event)
-        state = mark_guidance_consumed(state, call.role, call.guidance_ids)
         return state
 
     def _record(self, state: ProjectState, observation: ProgressObservation) -> ProjectState:
@@ -1192,19 +864,16 @@ class ProjectEffectExecutor:
         if latest is None:
             return state
         external = latest.state
-        known = {item.guidance_id for item in state.guidance}
-        additions = tuple(item for item in external.guidance if item.guidance_id not in known)
-        if not additions:
+        if external.guidance_revision <= state.guidance_revision:
             return state
-        if external.roles != state.roles or external.goal_thread_id != state.goal_thread_id:
-            raise ProjectEffectError(
-                "PROJECT_IDENTITY_CHANGED", "project identity changed while an effect was running"
+        if external.roles != state.roles:
+            raise ProjectRoleError(
+                "PROJECT_IDENTITY_CHANGED", "project identity changed while a role action was running"
             )
         return replace(
             state,
-            guidance=(*state.guidance, *additions),
+            guidance_revision=external.guidance_revision,
             requirements=external.requirements,
-            plan_stale=external.plan_stale,
             revision=max(state.revision, external.revision) + 1,
         )
 
@@ -1227,12 +896,82 @@ class ProjectEffectExecutor:
                 }
                 for item in state.requirements
             ],
-            "native_subagent_budget": (
-                0
-                if role is Role.EXECUTION or action == "scene_task_eligibility"
-                else state.budget.max_native_subagents_per_turn
-            ),
+            "guidance": self._native_guidance(state, role),
         }
+
+    def _native_guidance(
+        self, state: ProjectState, role: Role
+    ) -> list[dict[str, Any]]:
+        if state.guidance_revision == 0:
+            return []
+        by_revision: dict[int, dict[str, Any]] = {}
+        for turn in self._read_thread_turns(state, Role.SUPERVISOR):
+            items = turn.get("items")
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, Mapping) or item.get("type") != "userMessage":
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for entry in content:
+                    if not isinstance(entry, Mapping) or entry.get("type") != "text":
+                        continue
+                    raw_text = entry.get("text")
+                    if not isinstance(raw_text, str):
+                        continue
+                    try:
+                        payload = json.loads(raw_text)
+                    except ValueError:
+                        continue
+                    if not isinstance(payload, Mapping) or payload.get("schema") != "hia-project-guidance/1":
+                        continue
+                    if payload.get("project_id") != state.project_id:
+                        raise ProjectRoleError(
+                            "INVALID_GUIDANCE_HISTORY",
+                            "native Supervisor guidance references another project",
+                        )
+                    revision = payload.get("revision")
+                    target = payload.get("target_role")
+                    text = payload.get("text")
+                    if (
+                        not isinstance(revision, int)
+                        or isinstance(revision, bool)
+                        or revision < 1
+                        or target not in {None, *(role.value for role in Role)}
+                        or not isinstance(text, str)
+                        or not text.strip()
+                    ):
+                        raise ProjectRoleError(
+                            "INVALID_GUIDANCE_HISTORY",
+                            "native Supervisor guidance is malformed",
+                        )
+                    normalized = {
+                        "revision": revision,
+                        "target_role": target,
+                        "text": text,
+                    }
+                    existing = by_revision.get(revision)
+                    if existing is not None and existing != normalized:
+                        raise ProjectRoleError(
+                            "INVALID_GUIDANCE_HISTORY",
+                            "native Supervisor guidance revisions conflict",
+                        )
+                    by_revision[revision] = normalized
+        expected = set(range(1, state.guidance_revision + 1))
+        observed = set(by_revision).intersection(expected)
+        if observed != expected:
+            raise ProjectRoleError(
+                "MISSING_GUIDANCE_HISTORY",
+                "registry guidance revision has no complete native Supervisor history",
+            )
+        return [
+            by_revision[revision]
+            for revision in sorted(expected)
+            if role is Role.SUPERVISOR
+            or by_revision[revision]["target_role"] in {None, role.value}
+        ]
 
     def _authoritative_task_capsule(self, state: ProjectState) -> dict[str, Any]:
         """Return the sole persisted task record as a read-only Turn capsule."""
@@ -1243,7 +982,7 @@ class ProjectEffectExecutor:
             or record.state.authoritative_task_sha256
             != state.authoritative_task_sha256
         ):
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "AUTHORITATIVE_TASK_MISMATCH",
                 "persisted authoritative task identity changed",
             )
@@ -1253,132 +992,182 @@ class ProjectEffectExecutor:
             "sha256": state.authoritative_task_sha256,
             "task_anchor": f"task:{state.authoritative_task_id}",
             "task_text": record.authoritative_task_text,
-            "attachments": [
-                {
-                    "attachment_anchor": f"attachment:{item.sha256}",
-                    "path": item.path,
-                    "sha256": item.sha256,
-                    "size_bytes": item.size_bytes,
-                }
-                for item in record.attachments
-            ],
+            "attachments": [],
         }
 
-    def _authoritative_image_paths(self, state: ProjectState) -> tuple[str, ...]:
-        """Return only supported image attachments from the authoritative task."""
+    def _action_plan(
+        self, state: ProjectState, action: ProjectAction
+    ) -> Mapping[str, Any]:
+        return self._read_latest_payload(state, Role.PLANNING, "hia-project-plan/1")
 
-        record = self._registry.require(state.project_id)
-        return tuple(
-            item.path
-            for item in record.attachments
-            if Path(item.path).suffix.casefold() in {".png", ".jpg", ".jpeg", ".webp"}
+    def _read_latest_payload(
+        self, state: ProjectState, role: Role, schema: str
+    ) -> Mapping[str, Any]:
+        turns = self._read_thread_turns(state, role)
+        for turn in reversed(turns):
+            items = turn.get("items") if isinstance(turn, Mapping) else None
+            if not isinstance(items, list):
+                continue
+            for item in reversed(items):
+                if not isinstance(item, Mapping) or item.get("type") != "agentMessage":
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str):
+                    continue
+                try:
+                    payload = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(payload, Mapping) and payload.get("schema") == schema:
+                    return payload
+        raise ProjectRoleError(
+            "MISSING_NATIVE_ROLE_OUTPUT",
+            f"{role.value} native Thread has no {schema} output",
         )
 
-    def _set_goal(
-        self,
-        state: ProjectState,
-        effect: PendingEffect,
-        status: str,
-        event: ProjectEvent | None,
-    ) -> EffectResult:
-        record = self._registry.require(state.project_id)
-        requested_status = "paused" if effect.kind == "resume_goal" else status
-        try:
-            result = self._client.request(
-                "thread/goal/set",
-                {
-                    "threadId": state.goal_thread_id,
-                    "objective": native_goal_objective(
-                        record.authoritative_task_text,
-                        state.authoritative_task_id,
-                    ),
-                    "status": requested_status,
-                    "tokenBudget": None,
-                },
-            )
-        except TimeoutError:
-            # A timeout does not prove whether the native Goal changed.  The
-            # outer executor maps it to PROJECT_INTERRUPTED so the reducer first
-            # obtains a confirmed pause before another recovery attempt.
-            raise
-        except Exception:
-            return EffectResult(state, _goal_failure_event(status, "goal_rpc_failed"))
-        goal = result.get("goal") if isinstance(result, Mapping) else None
+    def _read_thread_turns(
+        self, state: ProjectState, role: Role
+    ) -> list[Mapping[str, Any]]:
+        thread_id = state.roles[role].thread_id
+        result = self._client.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": True},
+        )
+        thread = result.get("thread") if isinstance(result, Mapping) else None
+        turns = thread.get("turns") if isinstance(thread, Mapping) else None
         if (
-            not isinstance(goal, Mapping)
-            or goal.get("threadId") != state.goal_thread_id
-            or goal.get("status") != requested_status
+            not isinstance(thread, Mapping)
+            or thread.get("id") != thread_id
+            or not isinstance(turns, list)
         ):
-            return EffectResult(
-                state,
-                _goal_failure_event(status, "goal_ack_mismatch"),
+            raise ProjectRoleError("INVALID_THREAD_HISTORY", "native Thread history is unavailable")
+        return [turn for turn in turns if isinstance(turn, Mapping)]
+
+    def _read_latest_images(
+        self, state: ProjectState, role: Role
+    ) -> tuple[str, ...]:
+        paths: list[str] = []
+        for turn in self._read_thread_turns(state, role):
+            items = turn.get("items")
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                content = item.get("content")
+                if item.get("type") != "userMessage" or not isinstance(content, list):
+                    continue
+                for entry in content:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    path = entry.get("path")
+                    if entry.get("type") == "localImage" and isinstance(path, str):
+                        paths.append(path)
+        return tuple(dict.fromkeys(paths))
+
+    def _read_execution_history(
+        self, state: ProjectState, stage: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        thread_id = state.roles[Role.EXECUTION].thread_id
+        for turn in reversed(self._read_thread_turns(state, Role.EXECUTION)):
+            turn_id = turn.get("id")
+            items = turn.get("items")
+            if not isinstance(turn_id, str) or not isinstance(items, list):
+                continue
+            payload: Mapping[str, Any] | None = None
+            events: list[Mapping[str, Any]] = []
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
+                    try:
+                        candidate = json.loads(item["text"])
+                    except ValueError:
+                        candidate = None
+                    if (
+                        isinstance(candidate, Mapping)
+                        and candidate.get("schema") == "hia-project-execution/1"
+                        and candidate.get("stage_id") == stage.get("stage_id")
+                    ):
+                        payload = candidate
+                elif item.get("type") == "mcpToolCall":
+                    events.append(
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": thread_id,
+                                "turnId": turn_id,
+                                "item": item,
+                            },
+                        }
+                    )
+            if payload is None:
+                continue
+            references = payload.get("evidence_refs")
+            if not isinstance(references, list):
+                raise ProjectRoleError("INVALID_EXECUTION_SCHEMA", "evidence_refs must be a list")
+            evidence = validate_evidence(
+                references=references,
+                tool_events=events,
+                execution_thread_id=thread_id,
+                execution_turn_id=turn_id,
+                allowed_roots=self._allowed_roots,
+                existing_total_evidence_bytes=0,
+                max_total_evidence_bytes=state.budget.max_total_evidence_bytes,
             )
-        self._artifacts.put_effect(
-            state.project_id,
-            effect.effect_id,
-            effect.kind,
-            {"thread_id": state.goal_thread_id, "status": requested_status},
+            return {
+                "stage_id": stage["stage_id"],
+                "turn_id": turn_id,
+                "thread_id": thread_id,
+                "evidence": [
+                    {
+                        "item_id": item.item_id,
+                        "tool": item.tool,
+                        "artifact_paths": list(item.artifact_paths),
+                        "frame": item.capture_frame,
+                        "view": item.capture_view,
+                        "evidence_bytes": item.evidence_bytes,
+                    }
+                    for item in evidence.evidence
+                ],
+            }
+        raise ProjectRoleError(
+            "MISSING_NATIVE_ROLE_OUTPUT",
+            "Execution native Thread has no output for the current stage",
         )
-        return EffectResult(state, LifecycleEvent(event) if event is not None else None)
 
-    def _require_plan(self, state: ProjectState) -> Mapping[str, Any]:
-        value = self._artifacts.get_named(state.project_id, "plan")
-        if not isinstance(value, Mapping):
-            raise ProjectEffectError("MISSING_PLAN_ARTIFACT", "persisted plan is unavailable")
-        return value
-
-    def _current_stage(self, state: ProjectState) -> Mapping[str, Any]:
-        plan = self._require_plan(state)
+    def _current_stage(
+        self, state: ProjectState, plan: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
         for stage in plan.get("stages", []):
             if isinstance(stage, Mapping) and stage.get("stage_id") == state.stage.stage_id:
                 return stage
-        raise ProjectEffectError("MISSING_STAGE_ARTIFACT", "current stage card is unavailable")
+        raise ProjectRoleError("MISSING_STAGE_ARTIFACT", "current stage card is unavailable")
 
-    def _is_final_stage(self, state: ProjectState) -> bool:
-        plan = self._require_plan(state)
+    def _is_final_stage(
+        self, state: ProjectState, plan: Mapping[str, Any]
+    ) -> bool:
         stages = plan.get("stages", [])
         return bool(stages) and stages[-1].get("stage_id") == state.stage.stage_id
-
-    def _require_named(self, state: ProjectState, name: str) -> Mapping[str, Any]:
-        value = self._artifacts.get_named(state.project_id, name)
-        if not isinstance(value, Mapping):
-            raise ProjectEffectError("MISSING_PROJECT_ARTIFACT", f"{name} is unavailable")
-        return value
 
     def _remaining(self, deadline: float) -> float:
         value = deadline - self._clock()
         if value <= 0:
-            raise TimeoutError("project effect deadline exceeded")
+            raise TimeoutError("project role deadline exceeded")
         return value
 
 
 def _text(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ProjectEffectError("INVALID_STRUCTURED_PAYLOAD", f"{name} must be non-empty")
+        raise ProjectRoleError("INVALID_STRUCTURED_PAYLOAD", f"{name} must be non-empty")
     return value
-
-
-def _goal_failure_event(status: str, error: str) -> LifecycleEvent:
-    events = {
-        "completed": ProjectEvent.GOAL_COMPLETION_FAILED,
-        "paused": ProjectEvent.GOAL_PAUSE_FAILED,
-        "active": ProjectEvent.GOAL_RESUME_FAILED,
-    }
-    try:
-        event = events[status]
-    except KeyError as exc:
-        raise ProjectEffectError(
-            "INVALID_GOAL_STATUS",
-            f"unsupported native Goal status: {status}",
-        ) from exc
-    return LifecycleEvent(event, {"error": error})
 
 
 def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
     """Validate structural response shape without judging natural-language quality."""
 
     fields = {
-        "hia-project-eligibility/1": {"schema", "disposition", "reason"},
+        "hia-project-start/1": {"schema", "route", "reply"},
         "hia-project-plan/1": {
             "schema",
             "task_description",
@@ -1390,8 +1179,6 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
         "hia-project-authorization/1": {
             "schema",
             "authorized",
-            "blueprint_revision",
-            "blueprint_sha256",
             "stage_ids",
             "semantic_review",
         },
@@ -1410,20 +1197,14 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             "repair_card",
             "approved_exemptions",
         },
-        "hia-project-repair-authorization/1": {
-            "schema",
-            "stage_id",
-            "authorized",
-            "repair_hash",
-        },
     }
     expected = fields.get(schema)
     if expected is None or set(payload) != expected:
         raise ValueError("structured response fields do not match its schema")
-    if schema == "hia-project-eligibility/1":
-        if payload.get("disposition") not in {"eligible", "ineligible", "unclear"}:
-            raise ValueError("eligibility disposition is invalid")
-        _plain_text(payload.get("reason"))
+    if schema == "hia-project-start/1":
+        if payload.get("route") not in {"planning", "answered"}:
+            raise ValueError("project route is invalid")
+        _plain_text(payload.get("reply"))
     elif schema == "hia-project-plan/1":
         description = payload.get("task_description")
         facts = payload.get("user_facts")
@@ -1459,11 +1240,6 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
     elif schema == "hia-project-authorization/1":
         if not isinstance(payload.get("authorized"), bool):
             raise ValueError("authorized must be boolean")
-        if not isinstance(payload.get("blueprint_revision"), int) or isinstance(
-            payload.get("blueprint_revision"), bool
-        ):
-            raise ValueError("blueprint_revision must be an integer")
-        _plain_text(payload.get("blueprint_sha256"))
         _text_list(payload.get("stage_ids"))
         _validate_semantic_review_shape(payload.get("semantic_review"))
     elif schema == "hia-project-execution/1":
@@ -1490,11 +1266,6 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
         if not isinstance(payload.get("final_stage"), bool):
             raise ValueError("final_stage must be boolean")
         _approved_review_exemptions(payload.get("approved_exemptions"))
-    elif schema == "hia-project-repair-authorization/1":
-        _plain_text(payload.get("stage_id"))
-        if not isinstance(payload.get("authorized"), bool):
-            raise ValueError("authorized must be boolean")
-        _plain_text(payload.get("repair_hash"))
 
 
 def _plain_text(value: Any) -> None:
@@ -1563,10 +1334,7 @@ def _validate_semantic_authorization(value: Any, plan: Mapping[str, Any]) -> Non
             str(item["requirement_id"]) for item in plan["requirements"]
         },
         "stages_and_steps": set((*stage_ids, *step_ids)),
-        "anti_filler": {
-            f"blueprint:{plan['_blueprint_revision']}",
-            str(plan["_blueprint_sha256"]),
-        },
+        "anti_filler": set((*stage_ids, *step_ids)),
         "native_strategy_and_dependencies": set(step_ids),
         "evidence_contracts": set((*stage_ids, *step_ids)),
         "minimum_repairs": set((*stage_ids, *step_ids)),
@@ -1584,46 +1352,24 @@ def _parse_repair_card(
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {
         "stage_id",
-        "defect_hash",
         "instructions",
         "evidence_refs",
     }:
-        raise ProjectEffectError("INVALID_REPAIR_CARD", "repair card fields are invalid")
+        raise ProjectRoleError("INVALID_REPAIR_CARD", "repair card fields are invalid")
     if value.get("stage_id") != stage_id:
-        raise ProjectEffectError("INVALID_REPAIR_CARD", "repair card stage mismatch")
-    defect_hash = _text(value.get("defect_hash"), "defect_hash")
+        raise ProjectRoleError("INVALID_REPAIR_CARD", "repair card stage mismatch")
     instructions = value.get("instructions")
     refs = value.get("evidence_refs")
     if not isinstance(instructions, list) or not instructions or not all(
         isinstance(item, Mapping) and item for item in instructions
     ):
-        raise ProjectEffectError("INVALID_REPAIR_CARD", "repair instructions must be structured")
+        raise ProjectRoleError("INVALID_REPAIR_CARD", "repair instructions must be structured")
     if not isinstance(refs, list) or not refs or not all(isinstance(item, str) and item for item in refs):
-        raise ProjectEffectError("INVALID_REPAIR_CARD", "repair evidence refs are invalid")
+        raise ProjectRoleError("INVALID_REPAIR_CARD", "repair evidence refs are invalid")
     available = {item["item_id"] for item in execution["evidence"]}
     if not set(refs).issubset(available):
-        raise ProjectEffectError("INVALID_REPAIR_CARD", "repair cites unavailable evidence")
-    result = json.loads(json.dumps(value, ensure_ascii=False))
-    result["repair_hash"] = hashlib.sha256(
-        json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    result["defect_hash"] = defect_hash
-    return result
-
-
-def _capture_hash(evidence: EvidenceValidationResult) -> str | None:
-    paths = [
-        path
-        for item in evidence.evidence
-        if item.tool == "hia_capture_viewport"
-        for path in item.artifact_paths
-    ]
-    if not paths:
-        return None
-    digest = hashlib.sha256()
-    for path in sorted(paths):
-        digest.update(Path(path).read_bytes())
-    return digest.hexdigest()
+        raise ProjectRoleError("INVALID_REPAIR_CARD", "repair cites unavailable evidence")
+    return json.loads(json.dumps(value, ensure_ascii=False))
 
 
 def _capture_image_paths(execution: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1633,7 +1379,7 @@ def _capture_image_paths(execution: Mapping[str, Any]) -> tuple[str, ...]:
     seen: set[str] = set()
     evidence = execution.get("evidence")
     if not isinstance(evidence, list):
-        raise ProjectEffectError(
+        raise ProjectRoleError(
             "MISSING_EXECUTION_EVIDENCE", "validated execution evidence is unavailable"
         )
     for item in evidence:
@@ -1647,11 +1393,22 @@ def _capture_image_paths(execution: Mapping[str, Any]) -> tuple[str, ...]:
                 seen.add(path)
                 paths.append(path)
     if not paths:
-        raise ProjectEffectError(
+        raise ProjectRoleError(
             "MISSING_VISUAL_REVIEW_IMAGE",
             "Visual Review requires current validated viewport image content",
         )
     return tuple(paths)
+
+
+def _stage_evidence_needs(stage: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Return only evidence kinds explicitly requested by a Full stage card."""
+
+    if stage.get("depth") != "full":
+        return False, False
+    contract = stage.get("evidence_contract")
+    if not isinstance(contract, Mapping):
+        return False, False
+    return bool(contract.get("capture")), bool(contract.get("technical"))
 
 
 def _review_exemptions(
@@ -1665,7 +1422,7 @@ def _review_exemptions(
                 continue
             exemption = claim.get("exemption")
             if not isinstance(exemption, Mapping):
-                raise ProjectEffectError(
+                raise ProjectRoleError(
                     "INVALID_REVIEW_EXEMPTION", "review exemption is malformed"
                 )
             exemptions.append(
@@ -1726,7 +1483,7 @@ def _review_coverage_proof(
     for review in reviews:
         reviewer = str(review.get("reviewer") or "")
         if reviewer in by_reviewer:
-            raise ProjectEffectError(
+            raise ProjectRoleError(
                 "DUPLICATE_STAGE_REVIEW", "each required reviewer may report only once"
             )
         by_reviewer[reviewer] = [
@@ -1735,11 +1492,11 @@ def _review_coverage_proof(
             if isinstance(claim, Mapping)
         ]
     if set(by_reviewer) != expected_reviewers:
-        raise ProjectEffectError(
+        raise ProjectRoleError(
             "MISSING_STAGE_REVIEW", "both independent stage reviews are required"
         )
     if any(set(claim_ids) != set(requirement_ids) for claim_ids in by_reviewer.values()):
-        raise ProjectEffectError(
+        raise ProjectRoleError(
             "INCOMPLETE_REVIEW_COVERAGE",
             "both reviewers must cover every stage requirement",
         )
@@ -1774,10 +1531,10 @@ def _plan_depth_policy() -> Mapping[str, Any]:
 
 def _response_contract(schema: str) -> Mapping[str, Any]:
     contracts: dict[str, Mapping[str, Any]] = {
-        "hia-project-eligibility/1": {
+        "hia-project-start/1": {
             "schema": schema,
-            "disposition": "eligible|ineligible|unclear",
-            "reason": "specific reason",
+            "route": "planning|answered",
+            "reply": "natural answer or concise handoff acknowledgement",
         },
         "hia-project-plan/1": {
             "schema": schema,
@@ -1857,9 +1614,7 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
         "hia-project-authorization/1": {
             "schema": schema,
             "authorized": True,
-            "blueprint_revision": "exact plan._blueprint_revision integer",
-            "blueprint_sha256": "exact plan._blueprint_sha256",
-            "stage_ids": ["exact persisted stage IDs in order"],
+            "stage_ids": ["exact plan stage IDs in order"],
             "semantic_review": {
                 name: {
                     "status": "pass|fail",
@@ -1873,12 +1628,11 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
             "schema": schema,
             "stage_id": "exact current stage ID",
             "evidence_refs": [
-                {"item_id": "completed current-Turn HIA item ID"},
                 {
-                    "item_id": "current-Turn hia_capture_viewport item ID",
-                    "frame": "exact numeric frame",
-                    "path": "optional exact returned path",
-                },
+                    "item_id": "completed current-Turn HIA item required by the stage evidence contract",
+                    "frame": "include only for a requested capture",
+                    "path": "include only when returned by that item",
+                }
             ],
             "claims_visual_change": "boolean",
         },
@@ -1931,16 +1685,10 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                 }
             ],
         },
-        "hia-project-repair-authorization/1": {
-            "schema": schema,
-            "stage_id": "exact current stage ID",
-            "authorized": True,
-            "repair_hash": "exact persisted repair hash",
-        },
     }
     contract = contracts.get(schema)
     if contract is None:
-        raise ProjectEffectError(
+        raise ProjectRoleError(
             "UNKNOWN_RESPONSE_SCHEMA", f"no response contract for {schema}"
         )
     return contract

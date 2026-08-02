@@ -287,14 +287,14 @@ def _select_capture_path(
             "INVALID_CAPTURE_EVIDENCE", "Viewport capture has no structured result"
         )
     candidates: list[tuple[float, str]] = []
-    _append_capture_candidate(candidates, payload, fallback_path=None)
+    _append_capture_candidate(candidates, payload)
     sequence = payload.get("sequence")
     if isinstance(sequence, Mapping):
         records = sequence.get("frames")
         if isinstance(records, Sequence) and not isinstance(records, (str, bytes)):
             for record in records:
                 if isinstance(record, Mapping):
-                    _append_capture_candidate(candidates, record, fallback_path=None)
+                    _append_capture_candidate(candidates, record)
     matches = [
         path
         for actual_frame, path in candidates
@@ -313,8 +313,6 @@ def _select_capture_path(
 def _append_capture_candidate(
     candidates: list[tuple[float, str]],
     value: Mapping[str, Any],
-    *,
-    fallback_path: str | None,
 ) -> None:
     frames = [
         value.get("requested_frame"),
@@ -327,7 +325,7 @@ def _append_capture_candidate(
         for item in numeric[1:]
     ):
         return
-    path = value.get("absolute_path") or value.get("evidence_path") or fallback_path
+    path = value.get("absolute_path") or value.get("evidence_path")
     if isinstance(path, str) and path:
         candidates.append((numeric[0], path))
 

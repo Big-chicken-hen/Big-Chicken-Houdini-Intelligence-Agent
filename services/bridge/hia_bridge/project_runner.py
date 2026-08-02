@@ -1,264 +1,169 @@
-"""Thin command runner for the pure project lifecycle reducer.
+"""Process-local role action queue for the explicit project lifecycle.
 
-Each call persists a deterministic pending effect before external RPC work.  An
-effect ACK is applied explicitly; this module contains no autonomous while-loop.
+Actions are intentionally not persisted.  If Bridge exits, the registry loads
+the project as ``stopped`` and the user explicitly continues from the current
+stage. There are no action receipts, replay transactions, or host-error shadow
+records.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
-import hashlib
-import json
+from collections import deque
+from dataclasses import dataclass, replace
+import threading
 from typing import Any, Mapping, Protocol
 
-from .project_contracts import PendingEffect, ProjectState
-from .project_effects import EffectResult
-from .project_lifecycle import LifecycleEvent, ProjectEvent, reduce_project
+from .project_contracts import ProjectState, Role
+from .project_guidance import RequirementDelta, publish_guidance
+from .project_lifecycle import LifecycleCommand, LifecycleEvent, ProjectEvent, reduce_project
 from .project_registry import ProjectRecord, ProjectRegistry
 
 
-class EffectExecutor(Protocol):
-    def execute(self, state: ProjectState, effect: PendingEffect) -> EffectResult: ...
+@dataclass(frozen=True)
+class ProjectAction:
+    kind: str
+    data: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class ProjectActionResult:
+    state: ProjectState
+    event: LifecycleEvent | None
+
+
+class ActionExecutor(Protocol):
+    def execute(self, state: ProjectState, action: ProjectAction) -> ProjectActionResult: ...
 
 
 class ProjectRunner:
     def __init__(self, registry: ProjectRegistry) -> None:
         self._registry = registry
+        self._queues: dict[str, deque[ProjectAction]] = {}
+        self._lock = threading.RLock()
+
+    def has_pending(self, project_id: str) -> bool:
+        with self._lock:
+            return bool(self._queues.get(project_id))
+
+    def next_action(self, project_id: str) -> ProjectAction | None:
+        with self._lock:
+            queue = self._queues.get(project_id)
+            return queue[0] if queue else None
 
     def dispatch(self, project_id: str, event: LifecycleEvent) -> ProjectRecord:
-        record = self._registry.require(project_id)
-        if record.state.pending_effects:
-            raise ValueError("project has an unacknowledged pending effect")
-        next_state, commands = reduce_project(record.state, event)
-        effects = tuple(
-            _pending_effect(next_state, index, command.kind.value, command.data or {})
-            for index, command in enumerate(commands)
-        )
-        next_state = replace(next_state, pending_effects=effects)
-        updated = ProjectRecord(
-            next_state, record.authoritative_task_text, record.attachments
-        )
-        self._registry.put(updated, expected_revision=record.state.revision)
-        return updated
+        with self._lock:
+            if self._queues.get(project_id):
+                raise ValueError("project already has a role action in progress")
+            record = self._registry.require(project_id)
+            next_state, commands = reduce_project(record.state, event)
+            updated = ProjectRecord(next_state, record.authoritative_task_text)
+            self._registry.put(updated, expected_revision=record.state.revision)
+            self._enqueue(project_id, commands)
+            return updated
 
-    def execute_next(self, project_id: str, executor: EffectExecutor) -> ProjectRecord:
-        record = self._registry.require(project_id)
-        if not record.state.pending_effects:
-            raise ValueError("project has no pending effect")
-        effect = record.state.pending_effects[0]
-        outcome = executor.execute(record.state, effect)
-        return self.acknowledge_effect(project_id, effect.effect_id, outcome)
+    def execute_next(self, project_id: str, executor: ActionExecutor) -> ProjectRecord:
+        with self._lock:
+            record = self._registry.require(project_id)
+            queue = self._queues.get(project_id)
+            if not queue:
+                raise ValueError("project has no pending role action")
+            action = queue[0]
+        outcome = executor.execute(record.state, action)
+        with self._lock:
+            current = self._registry.require(project_id)
+            queue = self._queues.get(project_id)
+            if not queue or queue[0] != action:
+                raise ValueError("project action ownership changed while running")
+            base = _merge_concurrent_user_state(current.state, outcome.state)
+            queue.popleft()
+            if outcome.event is None:
+                next_state = replace(base, revision=current.state.revision + 1)
+                commands: tuple[LifecycleCommand, ...] = ()
+            else:
+                next_state, commands = reduce_project(base, outcome.event)
+            updated = ProjectRecord(next_state, current.authoritative_task_text)
+            self._registry.put(updated, expected_revision=current.state.revision)
+            self._enqueue(project_id, commands)
+            if not queue:
+                self._queues.pop(project_id, None)
+            return updated
 
-    def cancel_pending_and_dispatch(
+    def merge_guidance(
         self,
         project_id: str,
-        event: LifecycleEvent,
+        text: str,
+        *,
+        target_role: Role | None = None,
+        requirement_delta: RequirementDelta | None = None,
     ) -> ProjectRecord:
-        """Cancel not-in-flight effects before an explicit control transition.
+        """Apply confirmed native guidance to the latest lifecycle state."""
 
-        The workflow host calls this only after proving that no effect for the
-        project is in flight.  It is intentionally separate from ``dispatch``
-        so ordinary events can never bypass persisted external work.
-        """
-
-        record = self._registry.require(project_id)
-        base = replace(record.state, pending_effects=())
-        next_state, commands = reduce_project(base, event)
-        effects = tuple(
-            _pending_effect(next_state, index, command.kind.value, command.data or {})
-            for index, command in enumerate(commands)
-        )
-        next_state = replace(next_state, pending_effects=effects)
-        updated = ProjectRecord(
-            next_state, record.authoritative_task_text, record.attachments
-        )
-        self._registry.put(updated, expected_revision=record.state.revision)
-        return updated
-
-    def persist_recovery_failure(
-        self,
-        project_id: str,
-        error: str,
-    ) -> ProjectRecord:
-        """Persist startup identity rejection without losing queued work.
-
-        This is deliberately narrower than ``dispatch``: the recovery reducer
-        transition owns moving existing effects into its durable recovery
-        holding area before the project becomes user-actionable attention.
-        """
-
-        record = self._registry.require(project_id)
-        next_state, commands = reduce_project(
-            record.state,
-            LifecycleEvent(ProjectEvent.RECOVERY_FAILED, {"error": error}),
-        )
-        if commands:
-            raise ValueError("recovery failure must not emit an external command")
-        updated = ProjectRecord(
-            next_state, record.authoritative_task_text, record.attachments
-        )
-        self._registry.put(updated, expected_revision=record.state.revision)
-        return updated
-
-    def acknowledge(
-        self,
-        project_id: str,
-        effect_id: str,
-        outcome: LifecycleEvent,
-    ) -> ProjectRecord:
-        record = self._registry.require(project_id)
-        return self.acknowledge_effect(
-            project_id,
-            effect_id,
-            EffectResult(record.state, outcome),
-        )
-
-    def acknowledge_effect(
-        self,
-        project_id: str,
-        effect_id: str,
-        outcome: EffectResult,
-    ) -> ProjectRecord:
-        record = self._registry.require(project_id)
-        effects = record.state.pending_effects
-        if not effects or effects[0].effect_id != effect_id:
-            raise ValueError("effect ACK does not match the oldest pending effect")
-        base = _reconcile_effect_state(record.state, outcome.state, effect_id)
-        base = replace(
-            base,
-            pending_effects=effects[1:],
-            revision=record.state.revision,
-        )
-        safe_replan = outcome.event is None or outcome.event.kind in {
-            ProjectEvent.PLAN_READY,
-            ProjectEvent.PLAN_AUTHORIZED,
-            ProjectEvent.STAGE_EXECUTED,
-            ProjectEvent.REVIEWS_PASSED,
-            ProjectEvent.REVIEWS_FAILED,
-            ProjectEvent.REPAIR_READY,
-        }
-        if (
-            base.plan_stale
-            and safe_replan
-            and not (effects[0].kind == "request_plan" and outcome.event is None)
-        ):
-            base = replace(base, pending_effects=())
-            next_state, commands = reduce_project(
-                base, LifecycleEvent(ProjectEvent.MATERIAL_REPLAN_REQUIRED)
+        with self._lock:
+            current = self._registry.require(project_id)
+            state = publish_guidance(
+                current.state,
+                text,
+                target_role=target_role,
+                requirement_delta=requirement_delta,
             )
-        elif outcome.event is None:
-            next_state = replace(base, revision=record.state.revision + 1)
-            commands = ()
-        else:
-            next_state, commands = reduce_project(base, outcome.event)
-        appended = tuple(
-            _pending_effect(next_state, index, command.kind.value, command.data or {})
-            for index, command in enumerate(commands, start=len(base.pending_effects))
+            updated = ProjectRecord(state, current.authoritative_task_text)
+            self._registry.put(updated, expected_revision=current.state.revision)
+            return updated
+
+    def cancel_and_dispatch(
+        self, project_id: str, event: LifecycleEvent
+    ) -> ProjectRecord:
+        with self._lock:
+            self._queues.pop(project_id, None)
+        return self.dispatch(project_id, event)
+
+    def fail(self, project_id: str, error: BaseException) -> ProjectRecord:
+        with self._lock:
+            self._queues.pop(project_id, None)
+        return self.dispatch(
+            project_id,
+            LifecycleEvent(
+                ProjectEvent.PROJECT_FAILED,
+                {"error": f"{type(error).__name__}: {error}"},
+            ),
         )
-        next_state = replace(
-            next_state,
-            pending_effects=(*base.pending_effects, *appended),
+
+    def _enqueue(
+        self, project_id: str, commands: tuple[LifecycleCommand, ...]
+    ) -> None:
+        if not commands:
+            return
+        queue = self._queues.setdefault(project_id, deque())
+        queue.extend(
+            ProjectAction(command.kind.value, dict(command.data or {}))
+            for command in commands
         )
-        updated = ProjectRecord(
-            next_state, record.authoritative_task_text, record.attachments
-        )
-        self._registry.put(updated, expected_revision=record.state.revision)
-        return updated
 
 
-def _reconcile_effect_state(
-    current: ProjectState,
-    outcome: ProjectState,
-    effect_id: str,
+def _merge_concurrent_user_state(
+    current: ProjectState, outcome: ProjectState
 ) -> ProjectState:
-    """Merge only concurrent guidance/runtime edits into an effect receipt."""
-
-    stable_current = (
-        current.project_id,
-        current.goal_thread_id,
-        current.authoritative_task_id,
-        current.authoritative_task_sha256,
-        current.status,
-    )
-    stable_outcome = (
-        outcome.project_id,
-        outcome.goal_thread_id,
-        outcome.authoritative_task_id,
-        outcome.authoritative_task_sha256,
-        outcome.status,
-    )
-    if stable_outcome != stable_current:
-        raise ValueError("effect outcome changed authoritative project identity or status")
     if (
-        not outcome.pending_effects
-        or outcome.pending_effects[0].effect_id != effect_id
+        outcome.project_id != current.project_id
+        or outcome.authoritative_task_id != current.authoritative_task_id
+        or outcome.authoritative_task_sha256 != current.authoritative_task_sha256
+        or outcome.status is not current.status
     ):
-        raise ValueError("effect outcome lost the oldest pending effect")
-
-    roles = dict(outcome.roles)
-    for role, latest in current.roles.items():
-        produced = roles.get(role)
-        if produced is None:
-            roles[role] = latest
-        elif produced.thread_id != latest.thread_id:
-            raise ValueError("effect outcome changed an existing role Thread identity")
-        else:
-            # A user runtime edit applies to the role's next Turn.  Preserve the
-            # latest explicit settings without changing the active Turn receipt.
-            roles[role] = latest
-
-    guidance = {item.guidance_id: item for item in outcome.guidance}
-    for item in current.guidance:
-        existing = guidance.get(item.guidance_id)
-        if existing is not None and existing != item:
-            raise ValueError("effect outcome conflicts with persisted guidance")
-        guidance[item.guidance_id] = item
-    ordered_guidance = tuple(sorted(guidance.values(), key=lambda item: item.revision))
-    if len({item.revision for item in ordered_guidance}) != len(ordered_guidance):
-        raise ValueError("effect outcome has duplicate guidance revisions")
-    latest_current_revision = max(
-        (item.revision for item in current.guidance), default=0
-    )
-    latest_outcome_revision = max(
-        (item.revision for item in outcome.guidance), default=0
-    )
-    requirements = (
-        current.requirements
-        if latest_current_revision > latest_outcome_revision
-        else outcome.requirements
-    )
-    plan_stale = (
-        current.plan_stale
-        if latest_current_revision > latest_outcome_revision
-        else outcome.plan_stale
-    )
-    consumed = dict(outcome.guidance_consumed)
-    for role, revision in current.guidance_consumed.items():
-        consumed[role] = max(consumed.get(role, 0), revision)
+        raise ValueError("role action changed authoritative project identity or phase")
+    for role, binding in current.roles.items():
+        produced = outcome.roles.get(role)
+        if produced is None or produced.thread_id != binding.thread_id:
+            raise ValueError("role action changed a project Thread identity")
     return replace(
         outcome,
-        roles=roles,
-        guidance=ordered_guidance,
-        guidance_consumed=consumed,
-        requirements=requirements,
-        plan_stale=plan_stale,
+        roles=current.roles,
+        requirements=(
+            current.requirements
+            if current.guidance_revision > outcome.guidance_revision
+            else outcome.requirements
+        ),
+        guidance_revision=max(
+            current.guidance_revision, outcome.guidance_revision
+        ),
+        revision=current.revision,
     )
-
-
-def _pending_effect(
-    state: ProjectState, index: int, kind: str, data: Mapping[str, Any]
-) -> PendingEffect:
-    encoded = json.dumps(
-        {
-            "project_id": state.project_id,
-            "revision": state.revision,
-            "index": index,
-            "kind": kind,
-            "data": dict(data),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    return PendingEffect(f"effect-{digest[:24]}", kind, data)

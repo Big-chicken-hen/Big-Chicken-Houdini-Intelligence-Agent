@@ -41,17 +41,19 @@ ROLE_INSTRUCTIONS: Mapping[Role, str] = {
 
 _PROJECT_PROTOCOL_INSTRUCTION = (
     " When the newest user message is a hia-project-role-request/1 envelope, "
-    "it is the only current project action. Native Goal continuation context "
-    "preserves the overall objective but never replaces or broadens that "
-    "envelope. Follow its response_contract exactly, return one JSON object "
+    "it is the only current project action. Follow its response_contract "
+    "exactly, return one JSON object "
     "only, and do not call update_goal. Do not start independent work outside "
-    "the envelope. For scene_task_eligibility, decide semantically whether the "
-    "user request requires reading or changing the live Houdini scene; do not "
-    "use task-example keywords or inspect project files. When it is ineligible, "
-    "write reason as a concise, natural reply to the user's actual request, not "
-    "as an internal classification report. On repeated intake, classify the "
-    "explicit current_submission; the original task is context, not a reason to "
-    "ignore the newest user message."
+    "the envelope. Do not create, fork, or delegate to internal subagents; the "
+    "five native project-role Threads are the complete team. On the first "
+    "project Turn, respond naturally to the user's task. If fulfilling it "
+    "requires the live Houdini scene, hand it to Planning; otherwise answer it "
+    "yourself and complete the project. Never expose an eligibility classifier "
+    "or inspect repository files merely to choose that route."
+    " When the newest user message is a hia-project-guidance/1 envelope, record "
+    "it as user guidance and return exactly one JSON object with schema "
+    "hia-project-guidance-recorded/1 and the same revision; do not start project "
+    "work or call tools from that guidance-record Turn."
 )
 
 ROLE_INSTRUCTIONS = {
@@ -89,8 +91,6 @@ class ProjectThreadFactory:
     ) -> ProjectState:
         if role in state.roles:
             raise ValueError(f"project already has a {role.value} Thread")
-        if role is not Role.SUPERVISOR and state.status is not ProjectStatus.PROVISIONING_ROLES:
-            raise ValueError("worker roles are provisioned only after eligible intake")
         profile = permission_profile(
             role,
             self._selected_backend,
@@ -124,10 +124,9 @@ class ProjectThreadFactory:
                 expected_model=model,
             )
         except Exception as exc:
-            cleanup_error = self._delete_thread(thread_id)
-            suffix = f"; cleanup failed: {cleanup_error}" if cleanup_error else ""
             raise ValueError(
-                f"thread/start observable profile mismatch: {exc}{suffix}"
+                "thread/start observable profile mismatch; the returned Thread "
+                f"may remain visible and must not be deleted automatically: {exc}"
             ) from exc
         actual_model = result.get("model", model) if isinstance(result, Mapping) else model
         actual_tier = (
@@ -152,16 +151,7 @@ class ProjectThreadFactory:
             "roles": roles,
             "revision": state.revision + 1,
         }
-        if role is Role.SUPERVISOR:
-            changes["goal_thread_id"] = thread_id
         return replace(state, **changes)
-
-    def _delete_thread(self, thread_id: str) -> str | None:
-        try:
-            self._client.request("thread/delete", {"threadId": thread_id})
-        except Exception as exc:
-            return str(exc)
-        return None
 
     def start_supervisor(
         self,
@@ -171,8 +161,8 @@ class ProjectThreadFactory:
         effort: str | None = None,
         service_tier: str | None = None,
     ) -> ProjectState:
-        if state.status is not ProjectStatus.PROVISIONING:
-            raise ValueError("Supervisor must be created during provisioning")
+        if state.status is not ProjectStatus.PLANNING:
+            raise ValueError("Supervisor must be created while project planning starts")
         started = self.start_role(
             state,
             Role.SUPERVISOR,
@@ -183,90 +173,23 @@ class ProjectThreadFactory:
         return started
 
     def provision_workers(self, state: ProjectState) -> ProjectState:
+        """Create the remaining four native roles immediately after Supervisor."""
+
         if set(state.roles) != {Role.SUPERVISOR}:
-            raise ValueError("eligible provisioning requires exactly one Supervisor")
+            raise ValueError("project role creation requires exactly one Supervisor")
         supervisor = state.roles[Role.SUPERVISOR]
-        created: list[str] = []
-        try:
-            for role in (
-                Role.PLANNING,
-                Role.EXECUTION,
-                Role.VISUAL_REVIEW,
-                Role.TECHNICAL_REVIEW,
-            ):
-                state = self.start_role(
-                    state,
-                    role,
-                    model=supervisor.model,
-                    effort=supervisor.effort,
-                    service_tier=supervisor.service_tier,
-                )
-                created.append(state.roles[role].thread_id)
-        except Exception:
-            cleanup_errors: list[str] = []
-            for thread_id in reversed(created):
-                try:
-                    self._client.request("thread/delete", {"threadId": thread_id})
-                except Exception as cleanup_error:
-                    cleanup_errors.append(f"{thread_id}: {cleanup_error}")
-            if cleanup_errors:
-                raise RuntimeError(
-                    "role provisioning failed and precise cleanup was incomplete: "
-                    + "; ".join(cleanup_errors)
-                )
-            raise
+        for role in (
+            Role.PLANNING,
+            Role.EXECUTION,
+            Role.VISUAL_REVIEW,
+            Role.TECHNICAL_REVIEW,
+        ):
+            state = self.start_role(
+                state,
+                role,
+                model=supervisor.model,
+                effort=supervisor.effort,
+                service_tier=supervisor.service_tier,
+            )
         require_complete_project_roles(state.roles)
         return state
-
-    def validate_recovery_identity(self, state: ProjectState) -> None:
-        """Verify persisted native identities without depending on chat history.
-
-        The project registry is the authority for the original task text and
-        its digest.  Native history can be paged, compacted, or replaced by a
-        verified Thread migration, so recovery deliberately requests no Turns
-        and never searches user messages for another copy of the task.
-        """
-
-        supervisor = state.roles.get(Role.SUPERVISOR)
-        if supervisor is None or supervisor.thread_id != state.goal_thread_id:
-            raise ValueError("persisted Supervisor/Goal owner identity is invalid")
-
-        for role, binding in state.roles.items():
-            expected_source = f"hia-project/{state.project_id}/{role.value}"
-            result = self._client.request(
-                "thread/read",
-                {"threadId": binding.thread_id, "includeTurns": False},
-            )
-            thread = result.get("thread") if isinstance(result, Mapping) else None
-            if not isinstance(thread, Mapping) or thread.get("id") != binding.thread_id:
-                raise ValueError(f"persisted {role.value} Thread identity is missing")
-            source = thread.get("threadSource", thread.get("source"))
-            if source != expected_source:
-                raise ValueError(f"persisted {role.value} Thread source is invalid")
-            status = thread.get("status")
-            status_type = status.get("type") if isinstance(status, Mapping) else None
-            if status_type == "active":
-                raise ValueError(f"persisted {role.value} Thread still has an active Turn")
-            session_source = thread.get("source")
-            if (
-                thread.get("nativeSubagent") is True
-                or thread.get("parentThreadId")
-                or (
-                    isinstance(session_source, Mapping)
-                    and "subAgent" in session_source
-                )
-            ):
-                raise ValueError(f"persisted {role.value} identity is a native subagent")
-
-            goal_result = self._client.request(
-                "thread/goal/get", {"threadId": binding.thread_id}
-            )
-            goal = goal_result.get("goal") if isinstance(goal_result, Mapping) else None
-            if role is Role.SUPERVISOR:
-                if (
-                    not isinstance(goal, Mapping)
-                    or goal.get("threadId") != state.goal_thread_id
-                ):
-                    raise ValueError("persisted Supervisor no longer owns the native Goal")
-            elif goal is not None:
-                raise ValueError(f"persisted {role.value} unexpectedly owns a native Goal")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,18 +11,17 @@ from typing import Any, Callable, Mapping
 from typing import Protocol
 import uuid
 
+from .errors import BridgeError
 from .project_contracts import (
     ProjectState,
     ProjectStatus,
     Role,
     RoleThread,
     authoritative_task_identity,
-    native_goal_objective,
 )
 from .project_guidance import RequirementDelta, publish_guidance
 from .project_lifecycle import LifecycleEvent, ProjectEvent
-from .project_registry import ProjectAttachment, ProjectRecord, ProjectRegistry
-from .project_artifacts import ProjectArtifactStore
+from .project_registry import ProjectRecord, ProjectRegistry
 from .project_runner import ProjectRunner
 from .project_thread_factory import AppServerClient, ProjectThreadFactory, ROLE_TITLES
 
@@ -32,24 +30,10 @@ PROJECT_TEAM_SCHEMA = "hia-project-team/2"
 SETTINGS_SCHEMA = "hia-project-team-settings/3"
 PROJECT_MODES = frozenset({"single", "team"})
 _TERMINAL = frozenset(
-    {ProjectStatus.COMPLETED, ProjectStatus.FAILED, ProjectStatus.NOT_APPLICABLE}
+    {ProjectStatus.COMPLETED, ProjectStatus.FAILED}
 )
 _GUIDANCE_INACTIVE = frozenset(
-    {
-        *(_TERMINAL - {ProjectStatus.NOT_APPLICABLE}),
-        ProjectStatus.BLOCKED,
-        ProjectStatus.INTERRUPTED,
-        ProjectStatus.PAUSING,
-        ProjectStatus.COMPLETING,
-    }
-)
-_DELETABLE = frozenset(
-    {
-        *_TERMINAL,
-        ProjectStatus.BLOCKED,
-        ProjectStatus.INTERRUPTED,
-        ProjectStatus.NEEDS_ATTENTION,
-    }
+    {*_TERMINAL, ProjectStatus.STOPPED}
 )
 
 
@@ -92,6 +76,20 @@ class ProjectWorkflowControl(Protocol):
     def resume(self, project_id: str) -> bool: ...
 
 
+class ProjectServiceClient(AppServerClient, Protocol):
+    def wait_for_turn(
+        self, thread_id: str, turn_id: str, timeout_seconds: float
+    ) -> Any: ...
+
+    def has_active_thread(self, thread_id: str) -> bool: ...
+
+
+class ProjectGuidanceRecordError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 class ProjectTeamSettings:
     def __init__(self, path: Path) -> None:
         self._path = path.resolve()
@@ -103,10 +101,26 @@ class ProjectTeamSettings:
                 return "single"
             try:
                 raw = json.loads(self._path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, ValueError):
-                return "single"
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise BridgeError(
+                    "SETTINGS_CORRUPTED",
+                    "Project team settings exist but cannot be read",
+                    http_status=500,
+                ) from exc
             mode = raw.get("mode") if isinstance(raw, Mapping) else None
-            return mode if raw.get("schema") == SETTINGS_SCHEMA and mode in PROJECT_MODES else "single"
+            if not isinstance(raw, Mapping) or raw.get("schema") != SETTINGS_SCHEMA:
+                raise BridgeError(
+                    "SETTINGS_CORRUPTED",
+                    "Project team settings use an unsupported schema",
+                    http_status=500,
+                )
+            if mode not in PROJECT_MODES:
+                raise BridgeError(
+                    "SETTINGS_CORRUPTED",
+                    "Project team settings contain an invalid mode",
+                    http_status=500,
+                )
+            return mode
 
     def set(self, mode: str) -> None:
         if mode not in PROJECT_MODES:
@@ -125,30 +139,41 @@ class ProjectTeamService:
     def __init__(
         self,
         *,
-        client: AppServerClient,
+        client: ProjectServiceClient,
         project_root: Path,
         registry: ProjectRegistry,
-        legacy_registry_path: Path | None = None,
         settings: ProjectTeamSettings,
         thread_factory: ProjectThreadFactory,
-        model_catalog: Callable[[], Mapping[str, Any]] | None = None,
-        workflow: ProjectWorkflowControl | None = None,
-        thread_deleter: Callable[[str], Any] | None = None,
-        artifacts: ProjectArtifactStore | None = None,
+        runner: ProjectRunner,
+        workflow: ProjectWorkflowControl,
+        model_catalog: Callable[[], Mapping[str, Any]],
     ) -> None:
+        if any(
+            dependency is None
+            for dependency in (
+                client,
+                registry,
+                settings,
+                thread_factory,
+                runner,
+                workflow,
+                model_catalog,
+            )
+        ):
+            raise ValueError("project service dependencies must be configured")
+        for method_name in ("request", "wait_for_turn", "has_active_thread"):
+            if not callable(getattr(client, method_name, None)):
+                raise ValueError(
+                    f"project service client must implement {method_name}"
+                )
         self._client = client
         self._project_root = project_root.resolve()
         self._registry = registry
-        self._legacy_registry_path = (
-            legacy_registry_path.resolve() if legacy_registry_path is not None else None
-        )
         self._settings = settings
         self._factory = thread_factory
         self._model_catalog = model_catalog
-        self._runner = ProjectRunner(registry)
+        self._runner = runner
         self._workflow = workflow
-        self._thread_deleter = thread_deleter
-        self._artifacts = artifacts
         self._stop_requested: set[str] = set()
         self._lock = threading.RLock()
 
@@ -190,10 +215,9 @@ class ProjectTeamService:
     ) -> dict[str, Any]:
         task_id, digest = authoritative_task_identity(task_text)
         project_id = f"project-{uuid.uuid4()}"
-        provisional = f"pending-{project_id}"
+        image_paths = self._validated_image_paths(local_image_paths or [])
         state = ProjectState(
             project_id=project_id,
-            goal_thread_id=provisional,
             authoritative_task_id=task_id,
             authoritative_task_sha256=digest,
         )
@@ -203,47 +227,36 @@ class ProjectTeamService:
             effort=effort,
             service_tier=service_tier,
         )
-        supervisor_id = state.roles[Role.SUPERVISOR].thread_id
-        try:
-            goal_result = self._client.request(
-                "thread/goal/set",
-                {
-                    "threadId": supervisor_id,
-                    "objective": native_goal_objective(task_text, task_id),
-                    # ProjectWorkflowHost owns role Turns.  Keeping the native
-                    # Goal paused prevents its independent auto-continuation
-                    # from racing the persisted project effect queue.
-                    "status": "paused",
-                    "tokenBudget": None,
-                },
-            )
-            _validate_goal_result(goal_result, supervisor_id, "paused")
-        except Exception as original_error:
-            try:
-                self._client.request("thread/delete", {"threadId": supervisor_id})
-            except Exception as cleanup_error:
-                raise RuntimeError(
-                    "native Goal creation failed and precise Supervisor cleanup "
-                    f"also failed: goal={original_error}; cleanup={cleanup_error}"
-                ) from original_error
-            raise
-        record = ProjectRecord(
-            state,
-            task_text,
-            self._attachment_refs(local_image_paths or []),
-        )
+        state = self._factory.provision_workers(state)
+        supervisor_id = state.supervisor_thread_id
+        record = ProjectRecord(state, task_text)
         self._registry.put(record)
         record = self._runner.dispatch(
-            project_id, LifecycleEvent(ProjectEvent.INTAKE_STARTED)
+            project_id,
+            LifecycleEvent(
+                ProjectEvent.PROJECT_STARTED,
+                {"local_image_paths": list(image_paths)},
+            ),
         )
-        if self._workflow is not None:
-            self._workflow.start(project_id)
+        if not self._workflow.start(project_id):
+            self._runner.cancel_and_dispatch(
+                project_id,
+                LifecycleEvent(
+                    ProjectEvent.PROJECT_FAILED,
+                    {"error": "project workflow did not start"},
+                ),
+            )
+            raise RuntimeError("project workflow did not start")
         return {
             "project_id": project_id,
             "root_thread_id": supervisor_id,
             "routing": "team",
             "project_team": self.snapshot(),
-            "pending_effect": record.state.pending_effects[0].kind,
+            "next_action": (
+                self._runner.next_action(project_id).kind
+                if self._runner.next_action(project_id) is not None
+                else None
+            ),
         }
 
     def append_guidance(
@@ -253,13 +266,9 @@ class ProjectTeamService:
         text: str,
         thread_id: str | None = None,
         requirement_delta: RequirementDelta | None = None,
-        force_replan: bool = False,
     ) -> dict[str, Any]:
-        if not isinstance(force_replan, bool):
-            raise ValueError("force_replan must be boolean")
-        material = force_replan or (
-            requirement_delta is not None and requirement_delta.is_material
-        )
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("guidance text must be non-empty")
         with self._lock:
             record = self._registry.require(project_id)
             if (
@@ -267,11 +276,6 @@ class ProjectTeamService:
                 or record.state.status in _GUIDANCE_INACTIVE
             ):
                 raise ProjectGuidanceUnavailable(project_id, record.state.status)
-            restart_intake = (
-                record.state.status
-                in {ProjectStatus.INTAKE, ProjectStatus.NOT_APPLICABLE}
-                and not record.state.pending_effects
-            )
             target_role = None
             if thread_id is not None:
                 matches = [
@@ -281,42 +285,115 @@ class ProjectTeamService:
                 ]
                 if len(matches) != 1:
                     raise ValueError("thread_id is not an explicit member of this project")
-                target_role = None if force_replan else matches[0]
-            state = publish_guidance(
+                target_role = matches[0]
+            # Validate the requirement delta before writing the sole guidance body
+            # to native Thread history.
+            publish_guidance(
                 record.state,
                 text,
                 target_role=target_role,
                 requirement_delta=requirement_delta,
-                force_replan=force_replan,
             )
-            self._registry.put(
-                ProjectRecord(
-                    state, record.authoritative_task_text, record.attachments
-                ),
-                expected_revision=record.state.revision,
+            self._record_native_guidance(
+                record,
+                text=text,
+                target_role=target_role,
             )
-            if restart_intake:
-                self._runner.dispatch(
-                    project_id,
-                    LifecycleEvent(ProjectEvent.INTAKE_MESSAGE_RECEIVED),
-                )
-        if (material or restart_intake) and self._workflow is not None:
-            self._workflow.start(project_id)
+            self._runner.merge_guidance(
+                project_id,
+                text,
+                target_role=target_role,
+                requirement_delta=requirement_delta,
+            )
+        # Guidance is consumed by the next explicit role stage.  Never restart
+        # a completed role Turn in the background.
         return self.snapshot()
+
+    def _record_native_guidance(
+        self,
+        record: ProjectRecord,
+        *,
+        text: str,
+        target_role: Role | None,
+    ) -> None:
+        supervisor = record.state.roles.get(Role.SUPERVISOR)
+        if supervisor is None:
+            raise ProjectGuidanceRecordError(
+                "PROJECT_GUIDANCE_HISTORY_UNAVAILABLE",
+                "project has no native Supervisor Thread for guidance history",
+            )
+        if self._client.has_active_thread(supervisor.thread_id):
+            raise ProjectGuidanceRecordError(
+                "PROJECT_GUIDANCE_BUSY",
+                "Supervisor is running a project Turn; retry guidance after it finishes",
+            )
+        revision = record.state.guidance_revision + 1
+        envelope = {
+            "schema": "hia-project-guidance/1",
+            "project_id": record.state.project_id,
+            "revision": revision,
+            "target_role": target_role.value if target_role is not None else None,
+            "text": text,
+        }
+        params: dict[str, Any] = {
+            "threadId": supervisor.thread_id,
+            "input": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        envelope, ensure_ascii=False, separators=(",", ":")
+                    ),
+                    "text_elements": [],
+                }
+            ],
+            "approvalPolicy": "never",
+            "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+        }
+        if supervisor.model is not None:
+            params["model"] = supervisor.model
+        if supervisor.effort is not None:
+            params["effort"] = supervisor.effort
+        if supervisor.service_tier is not None:
+            params["serviceTier"] = supervisor.service_tier
+        try:
+            result = self._client.request("turn/start", params)
+            turn = result.get("turn") if isinstance(result, Mapping) else None
+            turn_id = turn.get("id") if isinstance(turn, Mapping) else None
+            if not isinstance(turn_id, str) or not turn_id:
+                raise ValueError("turn/start did not acknowledge a guidance Turn")
+            completed = self._client.wait_for_turn(
+                supervisor.thread_id,
+                turn_id,
+                120.0,
+            )
+            payload = getattr(completed, "payload", None)
+            if (
+                getattr(completed, "status", None) != "completed"
+                or not isinstance(payload, Mapping)
+                or set(payload) != {"schema", "revision"}
+                or payload.get("schema") != "hia-project-guidance-recorded/1"
+                or payload.get("revision") != revision
+            ):
+                raise ValueError("Supervisor did not confirm the exact guidance revision")
+        except ProjectGuidanceRecordError:
+            raise
+        except Exception as exc:
+            raise ProjectGuidanceRecordError(
+                "PROJECT_GUIDANCE_RECORD_FAILED",
+                "guidance was not confirmed in native Supervisor Thread history",
+            ) from exc
 
     def continue_project(self, *, project_id: str) -> dict[str, Any]:
         with self._lock:
             record = self._registry.require(project_id)
-            if record.state.status is not ProjectStatus.NEEDS_ATTENTION:
-                raise ValueError("only a needs_attention project can continue")
-            if record.state.pending_effects:
-                raise ValueError("project attention transition is not fully acknowledged")
-            self._runner.dispatch(
-                project_id,
-                LifecycleEvent(ProjectEvent.USER_CONTINUE),
-            )
-        if self._workflow is not None:
-            self._workflow.resume(project_id)
+            if record.state.status not in {
+                ProjectStatus.WAITING_USER,
+                ProjectStatus.STOPPED,
+            }:
+                raise ValueError("only a waiting or stopped project can continue")
+            self._stop_requested.discard(project_id)
+            if not self._workflow.resume(project_id):
+                raise RuntimeError("project workflow did not resume")
         return self.snapshot()
 
     def stop_project(self, *, project_id: str) -> dict[str, Any]:
@@ -324,64 +401,9 @@ class ProjectTeamService:
             record = self._registry.require(project_id)
             if record.state.status in _TERMINAL:
                 raise ValueError("terminal project cannot be stopped")
-            if self._workflow is None:
-                raise ValueError("project workflow is unavailable")
             self._stop_requested.add(project_id)
             self._workflow.stop(project_id)
         return self.snapshot()
-
-    def delete_project(self, *, project_id: str) -> dict[str, Any]:
-        """Permanently delete one explicitly selected inactive project.
-
-        The five exact role identities are deleted before their container is
-        forgotten, so a failed native deletion cannot spill role Threads into
-        the ordinary-task list.
-        """
-
-        with self._lock:
-            record = self._registry.get(project_id)
-            if record is not None:
-                if record.state.status not in _DELETABLE:
-                    raise ValueError("running project cannot be deleted")
-                thread_ids = tuple(
-                    record.state.roles[role].thread_id for role in Role
-                    if role in record.state.roles
-                )
-                revision = record.state.revision
-                legacy = False
-            else:
-                legacy_item = self._legacy_project(project_id)
-                if legacy_item is None:
-                    raise KeyError(project_id)
-                thread_ids = tuple(
-                    item["thread_id"] for item in legacy_item["threads"]
-                )
-                revision = None
-                legacy = True
-
-        deleted_threads: list[str] = []
-        for thread_id in thread_ids:
-            if self._thread_deleter is not None:
-                self._thread_deleter(thread_id)
-            else:
-                self._client.request("thread/delete", {"threadId": thread_id})
-            deleted_threads.append(thread_id)
-
-        with self._lock:
-            if legacy:
-                self._remove_legacy_project(project_id)
-            else:
-                assert revision is not None
-                self._registry.remove(project_id, expected_revision=revision)
-                if self._artifacts is not None:
-                    self._artifacts.remove_project(project_id)
-            self._stop_requested.discard(project_id)
-        return {
-            "project_id": project_id,
-            "deleted": True,
-            "deleted_thread_ids": deleted_threads,
-            "project_team": self.snapshot(),
-        }
 
     def set_role_runtime(
         self,
@@ -432,7 +454,7 @@ class ProjectTeamService:
             state = replace(record.state, roles=roles, revision=record.state.revision + 1)
             self._registry.put(
                 ProjectRecord(
-                    state, record.authoritative_task_text, record.attachments
+                    state, record.authoritative_task_text
                 ),
                 expected_revision=record.state.revision,
             )
@@ -460,13 +482,6 @@ class ProjectTeamService:
                     model=model if isinstance(model, str) else None,
                     allowed=[],
                 )
-        if self._model_catalog is None:
-            raise ProjectRuntimeSelectionError(
-                "The live Codex model catalog is unavailable; refresh models and retry",
-                field="model",
-                model=model,
-                allowed=[],
-            )
         payload = self._model_catalog()
         raw_models = payload.get("models") if isinstance(payload, Mapping) else None
         if not isinstance(raw_models, list):
@@ -538,16 +553,6 @@ class ProjectTeamService:
     def snapshot(self) -> dict[str, Any]:
         records = self._registry.list()
         projects = [self._public_project(record) for record in records]
-        projects.extend(
-            self._legacy_public_projects(
-                {record.state.project_id for record in records},
-                {
-                    binding.thread_id
-                    for record in records
-                    for binding in record.state.roles.values()
-                },
-            )
-        )
         return {
             "schema": PROJECT_TEAM_SCHEMA,
             "revision": max((record.state.revision for record in records), default=0),
@@ -555,169 +560,6 @@ class ProjectTeamService:
             "settings": {"mode": self._settings.get(), "writable": True},
             "projects": projects,
         }
-
-    def _legacy_public_projects(
-        self,
-        registered_project_ids: set[str],
-        registered_thread_ids: set[str],
-    ) -> list[dict[str, Any]]:
-        """Expose exact legacy Project/Role IDs without reviving its old workflow.
-
-        The v1 registry is durable identity evidence.  It is used only as a
-        read-only compatibility view so old role Threads stay grouped and
-        openable after the v2 runtime upgrade.
-        """
-
-        path = self._legacy_registry_path
-        if path is None or not path.is_file():
-            return []
-        try:
-            if path.stat().st_size > 16 * 1024 * 1024:
-                return []
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            return []
-        if (
-            not isinstance(raw, Mapping)
-            or raw.get("schema") != "hia-project-thread-registry/1"
-            or not isinstance(raw.get("projects"), list)
-        ):
-            return []
-
-        projects: list[dict[str, Any]] = []
-        seen_threads = set(registered_thread_ids)
-        for item in raw["projects"]:
-            if not isinstance(item, Mapping):
-                continue
-            project_id = item.get("project_id")
-            title = item.get("title")
-            raw_threads = item.get("threads")
-            if (
-                not isinstance(project_id, str)
-                or not project_id
-                or project_id in registered_project_ids
-                or not isinstance(title, str)
-                or not title.strip()
-                or not isinstance(raw_threads, list)
-            ):
-                continue
-            by_role: dict[Role, Mapping[str, Any]] = {}
-            local_threads: set[str] = set()
-            valid = True
-            for raw_thread in raw_threads:
-                if not isinstance(raw_thread, Mapping):
-                    valid = False
-                    break
-                try:
-                    role = Role(raw_thread.get("role"))
-                except (TypeError, ValueError):
-                    valid = False
-                    break
-                thread_id = raw_thread.get("thread_id")
-                if (
-                    not isinstance(thread_id, str)
-                    or not thread_id
-                    or role in by_role
-                    or thread_id in local_threads
-                    or thread_id in seen_threads
-                ):
-                    valid = False
-                    break
-                by_role[role] = raw_thread
-                local_threads.add(thread_id)
-            if not valid or set(by_role) != set(Role):
-                continue
-            root_thread_id = item.get("root_thread_id")
-            if root_thread_id != by_role[Role.SUPERVISOR].get("thread_id"):
-                continue
-            seen_threads.update(local_threads)
-            threads = []
-            for role in Role:
-                raw_thread = by_role[role]
-                threads.append(
-                    {
-                        "role": role.value,
-                        "role_title": ROLE_TITLES[role],
-                        "thread_id": raw_thread["thread_id"],
-                        "model": (
-                            raw_thread.get("model")
-                            if isinstance(raw_thread.get("model"), str)
-                            else None
-                        ),
-                        "effort": None,
-                        "service_tier": None,
-                        "status": (
-                            raw_thread.get("status")
-                            if isinstance(raw_thread.get("status"), str)
-                            else "interrupted"
-                        ),
-                        "actions": {
-                            "open_thread": True,
-                            "append_guidance": False,
-                            "set_role_runtime": False,
-                        },
-                    }
-                )
-            projects.append(
-                {
-                    "project_id": project_id,
-                    "title": title.strip()[:160],
-                    "status": "interrupted",
-                    "stage": "旧项目记录（可打开角色任务）",
-                    "root_thread_id": root_thread_id,
-                    "attention_reason": "旧版项目已保留；不会自动恢复旧工作流。",
-                    "consumed_turns": 0,
-                    "last_error": item.get("error") if isinstance(item.get("error"), str) else None,
-                    "latest_evidence_ids": [],
-                    "attachment_count": 0,
-                    "requirements": [],
-                    "actions": {
-                        "append_guidance": False,
-                        "continue": False,
-                        "stop": False,
-                        "delete": True,
-                    },
-                    "threads": threads,
-                }
-            )
-        return projects
-
-    def _legacy_project(self, project_id: str) -> dict[str, Any] | None:
-        path = self._legacy_registry_path
-        if path is None or not path.is_file():
-            return None
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if (
-            not isinstance(raw, dict)
-            or raw.get("schema") != "hia-project-thread-registry/1"
-            or not isinstance(raw.get("projects"), list)
-        ):
-            raise ValueError("legacy project registry is invalid")
-        matches = [
-            item for item in raw["projects"]
-            if isinstance(item, dict) and item.get("project_id") == project_id
-        ]
-        if len(matches) > 1:
-            raise ValueError("legacy project registry contains duplicate project_id")
-        return matches[0] if matches else None
-
-    def _remove_legacy_project(self, project_id: str) -> None:
-        path = self._legacy_registry_path
-        item = self._legacy_project(project_id)
-        if path is None or item is None:
-            raise KeyError(project_id)
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        raw["projects"] = [
-            value for value in raw["projects"]
-            if not (isinstance(value, dict) and value.get("project_id") == project_id)
-        ]
-        raw["revision"] = int(raw.get("revision", 0)) + 1
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        temporary.write_text(
-            json.dumps(raw, ensure_ascii=False, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, path)
 
     def _public_project(self, record: ProjectRecord) -> dict[str, Any]:
         state = record.state
@@ -756,12 +598,12 @@ class ProjectTeamService:
             "title": record.authoritative_task_text.strip().splitlines()[0][:160],
             "status": state.status.value,
             "stage": state.stage.stage_id,
-            "root_thread_id": state.goal_thread_id,
+            "root_thread_id": state.supervisor_thread_id,
             "attention_reason": state.attention_reason,
             "consumed_turns": sum(item.consumed_turns for item in state.turns.values()),
             "last_error": state.last_error,
             "latest_evidence_ids": list(state.stage.latest_evidence_ids),
-            "attachment_count": len(record.attachments),
+            "attachment_count": 0,
             "requirements": [
                 {
                     "requirement_id": item.requirement_id,
@@ -772,43 +614,32 @@ class ProjectTeamService:
             ],
             "actions": {
                 "append_guidance": guidance_allowed,
-                "continue": state.status is ProjectStatus.NEEDS_ATTENTION,
+                "continue": state.status in {
+                    ProjectStatus.WAITING_USER,
+                    ProjectStatus.STOPPED,
+                },
                 "stop": state.status not in _TERMINAL,
-                "delete": state.status in _DELETABLE,
             },
             "threads": threads,
         }
 
-    def _attachment_refs(self, values: list[str]) -> tuple[ProjectAttachment, ...]:
+    def _validated_image_paths(self, values: list[str]) -> tuple[str, ...]:
         if len(values) > 16:
-            raise ValueError("a project task accepts at most 16 attachments")
-        attachments: list[ProjectAttachment] = []
+            raise ValueError("a project task accepts at most 16 images")
+        paths: list[str] = []
         total = 0
         for value in values:
             if not isinstance(value, str) or not value:
-                raise ValueError("attachment path must be a non-empty string")
+                raise ValueError("image path must be a non-empty string")
             path = Path(value).resolve(strict=True)
             try:
                 path.relative_to(self._project_root)
             except ValueError as exc:
-                raise ValueError("attachment path must stay inside the project") from exc
+                raise ValueError("project image must stay inside the project") from exc
             if not path.is_file():
-                raise ValueError("attachment path must reference a file")
-            size = path.stat().st_size
-            total += size
+                raise ValueError("project image path must reference a file")
+            total += path.stat().st_size
             if total > 128 * 1024 * 1024:
-                raise ValueError("project task attachments exceed 128 MiB")
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            attachments.append(ProjectAttachment(str(path), digest, size))
-        return tuple(attachments)
-
-
-def _validate_goal_result(
-    value: Any, expected_thread_id: str, expected_status: str
-) -> None:
-    goal = value.get("goal") if isinstance(value, Mapping) else None
-    if not isinstance(goal, Mapping):
-        raise ValueError("thread/goal/set did not return a Goal")
-    thread_id = goal.get("threadId", expected_thread_id)
-    if thread_id != expected_thread_id or goal.get("status") != expected_status:
-        raise ValueError("native Goal identity or status is invalid")
+                raise ValueError("project images exceed 128 MiB")
+            paths.append(str(path))
+        return tuple(paths)

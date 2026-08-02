@@ -33,6 +33,7 @@ from .scene_queue import (
 from .session import BridgeSession
 from .project_service import (
     ProjectGuidanceUnavailable,
+    ProjectGuidanceRecordError,
     ProjectRuntimeSelectionError,
     ProjectTeamService,
 )
@@ -941,14 +942,10 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     "thread_id",
                     "text",
                     "requirement_delta",
-                    "force_replan",
                 }
                 if set(body) - allowed:
                     raise BridgeError("INVALID_REQUEST", "Unexpected guidance fields")
                 try:
-                    force_replan = body.get("force_replan", False)
-                    if not isinstance(force_replan, bool):
-                        raise ValueError("force_replan must be boolean")
                     snapshot = application.project_team.append_guidance(
                         project_id=body.get("project_id"),
                         thread_id=body.get("thread_id"),
@@ -956,7 +953,6 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                         requirement_delta=_parse_requirement_delta(
                             body.get("requirement_delta")
                         ),
-                        force_replan=force_replan,
                     )
                 except ProjectGuidanceUnavailable as exc:
                     raise BridgeError(
@@ -971,6 +967,13 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                                 "continue" if exc.recoverable else "new_project"
                             ),
                         },
+                    ) from exc
+                except ProjectGuidanceRecordError as exc:
+                    raise BridgeError(
+                        exc.code,
+                        str(exc),
+                        HTTPStatus.CONFLICT,
+                        {"recoverable": True, "next_action": "retry_guidance"},
                     ) from exc
             elif action == "set_role_runtime":
                 expected = {
@@ -1002,7 +1005,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                             "next_action": "refresh_models",
                         },
                     ) from exc
-            elif action in {"continue", "stop", "delete"}:
+            elif action in {"continue", "stop"}:
                 self._require_exact_fields(body, {"action", "project_id"})
                 if action == "continue":
                     snapshot = application.project_team.continue_project(
@@ -1012,15 +1015,10 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     snapshot = application.project_team.stop_project(
                         project_id=body.get("project_id")
                     )
-                else:
-                    deleted = application.project_team.delete_project(
-                        project_id=body.get("project_id")
-                    )
-                    return {"ok": True, **deleted}, HTTPStatus.OK
             else:
                 raise BridgeError(
                     "INVALID_PROJECT_ACTION",
-                    "Project action must be append_guidance, set_role_runtime, continue, stop, or delete",
+                    "Project action must be append_guidance, set_role_runtime, continue, or stop",
                 )
             return {"ok": True, "project_team": snapshot}, HTTPStatus.OK
         if path == "/v1/project-memory":

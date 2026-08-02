@@ -1,23 +1,16 @@
-"""Versioned guidance routing and requirement supersession.
+"""Requirement deltas and monotonic guidance revision.
 
-The Bridge records explicit deltas.  It never tries to infer whether user prose
-is a better plan, similar claim, or sufficiently detailed blueprint.
+Guidance prose belongs to native Codex Thread history.  The registry records
+only the revision number needed to show that newer guidance exists; it never
+copies message bodies into a second local transcript.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import hashlib
-from typing import Iterable, Mapping
+from typing import Mapping
 
-from .project_contracts import (
-    GuidanceRecord,
-    GuidanceScope,
-    ProjectState,
-    Requirement,
-    RequirementStatus,
-    Role,
-)
+from .project_contracts import ProjectState, Requirement, RequirementStatus, Role
 
 
 @dataclass(frozen=True)
@@ -37,73 +30,24 @@ def publish_guidance(
     *,
     target_role: Role | None = None,
     requirement_delta: RequirementDelta | None = None,
-    force_replan: bool = False,
 ) -> ProjectState:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("guidance text must be non-empty")
-    if not isinstance(force_replan, bool):
-        raise ValueError("force_replan must be boolean")
-    revision = max((item.revision for item in state.guidance), default=0) + 1
-    digest = hashlib.sha256(
-        f"{state.project_id}\0{revision}\0{text}".encode("utf-8")
-    ).hexdigest()
+    if target_role is not None and not isinstance(target_role, Role):
+        raise ValueError("target_role must be a project role")
     delta = requirement_delta or RequirementDelta()
-    record = GuidanceRecord(
-        guidance_id=f"guidance-{digest[:24]}",
-        revision=revision,
-        text=text,
-        scope=GuidanceScope.ROLE if target_role is not None else GuidanceScope.PROJECT,
-        target_role=target_role,
-        requirement_delta=_delta_payload(delta) if delta.is_material else None,
-        force_replan=force_replan,
-    )
-    requirements = _apply_requirement_delta(
-        state.requirements, delta
-    )
     return replace(
         state,
-        guidance=(*state.guidance, record),
-        requirements=requirements,
-        plan_stale=state.plan_stale
-        or ((delta.is_material or force_replan) and state.blueprint_revision > 0),
+        guidance_revision=state.guidance_revision + 1,
+        requirements=_apply_requirement_delta(state.requirements, delta),
         revision=state.revision + 1,
     )
 
 
-def pending_guidance(state: ProjectState, role: Role) -> tuple[GuidanceRecord, ...]:
-    consumed = state.guidance_consumed.get(role, 0)
-    return tuple(
-        item
-        for item in state.guidance
-        if item.revision > consumed
-        and (item.scope is GuidanceScope.PROJECT or item.target_role is role)
-    )
-
-
-def mark_guidance_consumed(
-    state: ProjectState, role: Role, guidance_ids: Iterable[str]
-) -> ProjectState:
-    requested = set(guidance_ids)
-    applicable = pending_guidance(state, role)
-    expected = {item.guidance_id for item in applicable}
-    if requested != expected:
-        missing = sorted(expected - requested)
-        unknown = sorted(requested - expected)
-        raise ValueError(
-            f"role must consume every applicable guidance revision; "
-            f"missing={missing}, unknown={unknown}"
-        )
-    consumed = dict(state.guidance_consumed)
-    if applicable:
-        consumed[role] = max(item.revision for item in applicable)
-    return replace(state, guidance_consumed=consumed, revision=state.revision + 1)
-
-
 def validate_requirement_coverage(
-    requirements: Iterable[Requirement], covered_requirement_ids: Iterable[str]
+    requirements: tuple[Requirement, ...] | list[Requirement],
+    covered_requirement_ids: tuple[str, ...] | list[str],
 ) -> None:
-    """Check stable IDs only; blueprint length and prose style are irrelevant."""
-
     active = {
         item.requirement_id
         for item in requirements
@@ -145,20 +89,3 @@ def _apply_requirement_delta(
             superseded_by=None,
         )
     return tuple(records[key] for key in sorted(records))
-
-
-def _delta_payload(delta: RequirementDelta) -> dict[str, object]:
-    return {
-        "add": [
-            {
-                "requirement_id": item.requirement_id,
-                "kind": item.kind,
-                "status": item.status.value,
-                "source_ref": item.source_ref,
-                "superseded_by": item.superseded_by,
-            }
-            for item in delta.add
-        ],
-        "supersede": dict(delta.supersede or {}),
-        "remove": list(delta.remove),
-    }

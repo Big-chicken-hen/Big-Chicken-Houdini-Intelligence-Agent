@@ -27,7 +27,7 @@ contents. Each record must contain:
 - exact `hou.applicationVersionString()` and `sys.version`;
 - launcher session ID only if redacted to its last eight characters;
 - Bridge and HIA health result, without tokens;
-- Project ID, Goal ID, and all five role Thread IDs;
+- Project ID and all five role Thread IDs;
 - every tested Turn ID and role;
 - Execution HIA tool-item IDs used as technical evidence;
 - `hia_capture_viewport` item IDs, requested frames, returned media type, file
@@ -85,17 +85,17 @@ case with “expected to pass.”
    and an editable native node network.
 2. Verify the initial native acknowledgement returns without waiting for the
    entire project to finish.
-3. Verify the project receives one persisted Project ID and one native Goal ID.
-4. After scene eligibility is accepted, verify exactly five persisted native
-   role Threads exist: Supervisor, Planning, Execution, Visual Review, and
-   Technical Review. Confirm the four non-Execution roles were created lazily,
-   not before eligibility.
+3. Verify the project receives one persisted Project ID and no separate Goal is
+   created as a side effect.
+4. Verify exactly five native role Threads are created immediately: Supervisor,
+   Planning, Execution, Visual Review, and Technical Review. There is no
+   eligibility or lazy-provisioning phase.
 5. Inspect the actual app-server tool inventories. Execution alone may contain
    `hia_mcp_v2`/HOM/HIP-write capabilities. Supervisor, Planning, Visual Review,
    and Technical Review must expose neither `hia_mcp_v2` nor
    `houdini_intelligence`. A prompt saying “read only” is insufficient.
-6. Resume each role Thread once and verify Project/Role/Thread/Goal association
-   comes from persisted Bridge identity, not title, cwd, or model name.
+6. Resume each role Thread once and verify Project/Role/Thread association comes
+   from persisted Bridge identity, not title, cwd, or model name.
 7. Change the next-Turn model/settings for one reviewer only. Verify the change
    applies to that role's next Turn, leaves the current Turn untouched, and does
    not change the ordinary-task/new-project defaults.
@@ -154,50 +154,51 @@ case with “expected to pass.”
    (for example, remove an animation or simplify a secondary detail). Verify the
    old requirement becomes `removed_by_user` or `superseded_by_user`, a shorter
    valid stage card is accepted, and the removed work no longer blocks finish.
-4. Append guidance while a role Turn is active. Verify it is preserved and
-   consumed by the next applicable role Turn rather than falling through to an
-   ordinary unrelated conversation.
+4. Append guidance while Supervisor is busy. Verify the request fails explicitly,
+   the registry revision does not change, and nothing is silently queued. Retry
+   after Supervisor becomes idle; verify the guidance is recorded once in its
+   native Thread history and consumed by the next applicable role Turn.
 
 ## F. Stop and bounded-attention behavior
 
 1. Start a stage, press Stop, and verify no new Execution write Turn starts.
    Already-entered UI-thread HOM may finish; record that distinction.
-2. Verify the project/Goal becomes paused or otherwise explicitly stoppable and
-   the Panel does not claim completion.
-3. Resume only through the supported user action and verify permissions and role
+2. Verify the project becomes `stopped` and the Panel does not claim completion.
+3. Continue only through the supported user action and verify permissions and role
    identities have not drifted.
-4. In a separate disposable run, trigger one configured no-progress or budget
-   limit. Verify the lifecycle enters `needs_attention`, exposes the reason,
-   consumed turns, recent error/evidence/repair, and offers continue, revised
-   guidance, or stop. It must not auto-pass.
+4. In a separate disposable run, trigger one configured runtime budget. Verify
+   the lifecycle enters `waiting_user`, exposes the reason, and offers explicit
+   Continue or Stop. It must not auto-pass.
 
-## G. Bridge restart recovery
+## G. Bridge restart and explicit Continue
 
 1. With a project active but no HIA/HOM call in flight, stop only the Bridge by
    the supported lifecycle control and start it again. Do not kill Houdini.
-2. Reopen/refresh the Panel. Verify persisted Project/Goal/role identities,
-   current stage, guidance versions, budgets, and Execution ownership recover.
-3. Resume each role and confirm its original permission profile. In particular,
+2. Reopen/refresh the Panel. Verify the project is `stopped`; no Turn is started,
+   replayed, or resumed automatically. Verify only the registry contract remains:
+   project ID, authoritative task, stopped status, current stage ID, five role
+   Thread IDs, requirements, and guidance revision.
+3. Press Continue once and confirm the current stage starts again from native role
+   Thread history. In particular,
    no read-only role may gain HIA inventories after restart.
-4. Append guidance after recovery and verify it is recorded once without an HTTP
+4. Append guidance after Continue and verify it is recorded once without an HTTP
    timeout or duplicate ordinary Turn.
-5. Complete one further real Execution/review transition to prove recovery is
-   operational rather than a read-only snapshot.
+5. Complete one further real Execution/review transition to prove explicit Continue
+   is operational; do not describe it as automatic recovery, replay, or restoration.
 
 ## H. Saved and unsaved HIP capture paths
 
 Run both subcases and record the exact resolved capture path:
 
-1. **Saved HIP:** save the disposable HIP in a normal writable directory. A
-   current-scene viewport capture may use `<hip-parent>/.hia/screenshots` after
-   path safety checks. Verify the path, file header, and evidence binding.
+1. **Saved HIP:** save the disposable HIP in a normal writable directory. Capture
+   the current viewport and verify the result remains below
+   `<project-root>/.runtime/cache/screenshots`, with a valid file header and
+   evidence binding.
 2. **Unsaved HIP:** create a new untitled scene and do not save. Capture the
-   viewport and verify it falls back below
-   `<project-root>/.runtime/cache/screenshots` (or the current documented
-   project-runtime capture root), never a guessed HIP-relative path.
+   viewport and verify the same project-local path rule.
 3. Also test a deliberately unsafe/unwritable saved location if a safe disposable
-   fixture is available. It must use the project-runtime fallback or return a
-   clear failure; it must not write outside the allowed roots.
+   fixture is available. The HIP location must not alter the project-local capture
+   root or permit writes outside the project.
 
 ## I. HIA disconnect
 
@@ -212,20 +213,15 @@ Run both subcases and record the exact resolved capture path:
 5. Perform one fresh read-only call and one fresh capture. Do not reuse evidence
    from before the disconnect as proof of the restored state.
 
-## J. Thread transfer
+## J. Compaction stability
 
-1. Enable transfer for a disposable project and trigger the configured native
-   migration threshold for one idle role Thread. Do not migrate an internal
-   native subagent.
-2. Verify forked Thread context, role, model/settings, read/write inventory,
-   Project ID, and Goal ID before commit.
-3. Confirm the Panel selection changes to the replacement identity only after a
-   successful commit. Then verify only the superseded native Thread is deleted.
-4. Inject a fork/verification failure in a separate run. Confirm rollback keeps
-   the old Thread and project usable; normal project completion must not depend
-   on migration success.
-5. Restart Bridge after a prepared-but-uncommitted transfer and verify recovery
-   chooses a deterministic safe state without duplicating role membership.
+1. Trigger or observe an automatic context compaction for one ordinary Thread and
+   one disposable project-role Thread.
+2. Verify compaction is informational only: no replacement Thread, project, local
+   summary, or persisted chat-body artifact is created.
+3. Verify the original Thread IDs, role permissions, model settings, project
+   membership, and Panel selection remain unchanged.
+4. Verify no Thread or project is deleted in response to compaction.
 
 ## Completion rule
 

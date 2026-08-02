@@ -36,15 +36,16 @@ def permission_profile(
         raise ValueError("selected_backend is invalid")
     read_only = role in READ_ONLY_ROLES
     config: dict[str, Any] = {}
-    _validate_server_transports(server_transports)
+    _validate_selected_server_transport(selected_backend, server_transports)
     for server_id in HIA_SERVER_IDS:
-        descriptor = server_transports[server_id]
         prefix = f"mcp_servers.{server_id}"
-        for name, value in descriptor.items():
-            if name in {"enabled", "required"}:
-                continue
-            config[f"{prefix}.{name}"] = value
         selected = not read_only and server_id == selected_backend
+        if selected:
+            descriptor = server_transports[selected_backend]
+            for name, value in descriptor.items():
+                if name in {"enabled", "required"}:
+                    continue
+                config[f"{prefix}.{name}"] = value
         config[f"{prefix}.enabled"] = selected
         config[f"{prefix}.required"] = selected
     return RolePermissionProfile(
@@ -93,7 +94,7 @@ def validate_observable_role_response(
     """
 
     read_only = role in READ_ONLY_ROLES
-    allowed_sandboxes = {"readOnly"} if read_only else {"readOnly", "workspaceWrite"}
+    allowed_sandboxes = {"readOnly"} if read_only else {"workspaceWrite"}
     expected_approval = "never" if read_only else "on-request"
     sandbox = descriptor.get("sandbox")
     sandbox_type = sandbox.get("type") if isinstance(sandbox, Mapping) else None
@@ -111,24 +112,22 @@ def validate_observable_role_response(
         raise ValueError(f"{role.value} response model is missing")
     if expected_model is not None and actual_model != expected_model:
         raise ValueError(f"{role.value} response model drift")
-def _validate_server_transports(
+def _validate_selected_server_transport(
+    selected_backend: str,
     value: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    if set(value) != set(HIA_SERVER_IDS):
-        raise ValueError("both exact HIA MCP server transports are required")
-    for server_id in HIA_SERVER_IDS:
-        descriptor = value.get(server_id)
-        if not isinstance(descriptor, Mapping):
-            raise ValueError(f"{server_id} transport is missing")
-        command = descriptor.get("command")
-        args = descriptor.get("args")
-        if not isinstance(command, str) or not command.strip():
-            raise ValueError(f"{server_id} transport command is invalid")
-        if args is not None and (
-            not isinstance(args, (list, tuple))
-            or any(not isinstance(item, str) for item in args)
-        ):
-            raise ValueError(f"{server_id} transport args are invalid")
+    descriptor = value.get(selected_backend)
+    if not isinstance(descriptor, Mapping):
+        raise ValueError(f"{selected_backend} transport is missing")
+    command = descriptor.get("command")
+    args = descriptor.get("args")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError(f"{selected_backend} transport command is invalid")
+    if args is not None and (
+        not isinstance(args, (list, tuple))
+        or any(not isinstance(item, str) for item in args)
+    ):
+        raise ValueError(f"{selected_backend} transport args are invalid")
 
 
 def require_complete_project_roles(roles: Mapping[Role, Any]) -> None:

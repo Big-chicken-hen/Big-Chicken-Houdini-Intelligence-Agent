@@ -1,6 +1,6 @@
-# Full Goal Blueprint and Panel Project
+# Full Project Blueprint and Panel Project
 
-Use this contract for every Full Houdini Goal and for project allocation whenever a
+Use this contract for every Full Houdini task and for project allocation whenever a
 new submission explicitly chooses **项目团队**. It defines the user-visible construction
 specification, complete current-stage acceptance card, real-evidence repair loop, and
 Panel-owned Codex project. It does not define a backend Agent, a second planner, a
@@ -10,8 +10,8 @@ Resolve the user's **单个 AI / 项目团队** choice before applying the Direc
 Full depth from `build-brief-and-review.md`. The choice controls the collaboration
 container; complexity controls only the actual blueprint, research, execution, and
 review depth inside that choice. A hidden risk classification must never reverse the
-user's result. A bounded correction that continues an active Goal remains inside that
-Goal's current stage card and project.
+user's result. A bounded correction that continues an active project remains inside
+that project's current stage card.
 
 ## Contents
 
@@ -27,8 +27,6 @@ Goal's current stage card and project.
 - [Authorize the full blueprint, then use bounded loop payloads](#authorize-the-full-blueprint-then-use-bounded-loop-payloads)
 - [Complete current stage card contract](#complete-current-stage-card-contract)
 - [Run the stage build and acceptance loop](#run-the-stage-build-and-acceptance-loop)
-- [Use available native subagents only inside read-only roles](#use-available-native-subagents-only-inside-read-only-roles)
-- [Migrate a Thread only after its third real automatic compaction](#migrate-a-thread-only-after-its-third-real-automatic-compaction)
 - [Keep the project visible and steerable in Panel](#keep-the-project-visible-and-steerable-in-panel)
 - [Reject false complexity](#reject-false-complexity)
 
@@ -43,14 +41,14 @@ it does not replace or expand their authority.
 - `knowledge-and-memory.md` owns uncertainty-triggered retrieval, the optional Context
   Pack, and explicit durable project-memory actions. Coordination reuses supplied
   evidence; it never forces a Context Pack or lookup and never writes project memory.
-- The existing native Goal and Focus surfaces remain authoritative. A team-selected new
-  task creates or binds one native Goal through that existing surface. Project
-  membership, titles, stage cards, review evidence, and Panel labels neither copy the
-  Goal or Focus schema nor invent fields or transitions. Terms such as `incomplete`
-  describe a handoff or evidence outcome, never a new Goal or Focus state.
-- `visual-validation.md` owns the temporary bounded EffectSpec experiment. Project
+- The existing Focus surface remains independent and authoritative. A team-selected
+  task creates one Panel project and does not create or bind a separate Goal. Project
+  membership, titles, stage cards, review evidence, and Panel labels do not copy the
+  Focus schema or invent unrelated transitions. Terms such as `incomplete` describe a
+  handoff or evidence outcome, never a new Focus state.
+- `visual-validation.md` owns the temporary bounded EffectSpec comparison. Project
   Threads may route its resulting evidence but never create, persist, enlarge, or turn
-  the EffectSpec into Goal state.
+  the EffectSpec into project lifecycle state.
 - Each professional Skill retains its domain methods and trigger boundary. Planning
   coordinates modeling, material, lighting, FX, animation, simulation,
   render, research, and review handoffs; it does not absorb those Skill contracts.
@@ -60,47 +58,47 @@ it does not replace or expand their authority.
 - Keep Codex as the only reasoning and planning system.
 - Treat the user's latest explicit requirements as the highest-authority task facts.
 - Resolve **单个 AI / 项目团队** before complexity depth. Single creates no team;
-  project team creates the native Goal, Panel project, and all five real Threads for
-  that newly submitted task.
+  project team creates the Panel project and all five real Threads for that newly
+  submitted task.
 - Keep the complete blueprint and its revisions visible through the Planning Thread
   and the established Panel blueprint surface.
 - Keep Execution as the only role allowed to call mutating HIA/HOM capabilities or save
   the current HIP. Bridge enforces this at Thread creation: Supervisor, Planning, and
   both review Threads receive empty `hia_mcp_v2` and `houdini_intelligence` inventories.
   Prompt instructions are an additional semantic boundary, not the enforcement layer.
-- For every team-selected task, keep one Panel project for the native Goal and reuse
+- For every team-selected task, keep one Panel project for that task and reuse
   exactly five real project Threads for every stage and correction: Supervisor,
   Planning, Execution, Visual Review, and Technical Review. This is the baseline for
   every model.
 - Never create a Thread per stage, subsystem, reviewer, retry, or source.
-- At initial authorization and after every material blueprint revision, give Supervisor
-  the complete Planning blueprint for strict review. After authorization, keep each
+- At initial authorization, give Supervisor the complete Planning blueprint for strict
+  review. After authorization, keep each
   repeated execution and review loop bounded to the hard-constraint capsule, complete
   current stage card, and latest evidence delta.
 - Plan the whole semantic stage before authoring it, then use bounded scene writes for
   one coherent change at a time.
 - Require both applicable technical evidence and applicable visual evidence before a
   stage passes.
-- Keep the native Goal active throughout planning, Execution, both review returns, and
-  every repair cycle. Complete it only after every applicable stage has passed with
-  fresh actual image content and claim-specific technical evidence.
+- Keep the project active throughout planning, Execution, both review returns, and every
+  repair cycle. Complete it only after every applicable stage has passed with the
+  current stage contract's relevant visual and technical evidence.
 - Keep all project workers inside the Panel project container so they do not clutter
   the user's top-level task list.
 - Let the user change any project Thread to any model supported by Panel and append
   guidance without changing project membership or creating a new top-level task.
 - Run Visual Review and Technical Review independently and read-only after every stage;
   missing either required Thread is an activation failure, not a reason to merge roles.
-- Keep Goal state, stage cards, and both review results on their existing surfaces; do
-  not copy their schema into this project contract, project memory, or a new ledger.
+- Keep project state, stage cards, and both review results on their existing surfaces;
+  do not copy their schema into project memory or a new ledger.
 
 ## Resolve the user choice before complexity depth
 
 Resolve the per-submission selector first. Choosing **单个 AI** keeps that newly
 submitted task in the original Panel Thread and creates no team project or five-role
-roster. Choosing **项目团队** automatically creates one Panel project, one native Goal,
-and all five real project Threads for that newly submitted task. Resume an existing
-project only when the submission explicitly continues that same native Goal; never
-create another project for a later stage or correction of it.
+roster. Choosing **项目团队** automatically creates one Panel project and all five real
+project Threads for that newly submitted task. Resume an existing project only when
+the submission explicitly continues that same task; never create another project for
+a later stage or correction of it.
 
 Direct, Focused, and Full are depth descriptions, not hidden routing decisions. They
 may shorten or expand the blueprint, evidence, and review work that the chosen route
@@ -108,9 +106,9 @@ actually needs, but they must not override, downgrade, or upgrade the user's exp
 single/team choice. Do not claim that a request stayed single because it was Direct or
 Focused, and do not create a team after the user selected single.
 
-Associate a team project with the existing native Goal identity and keep all role
-Threads inside that container. Do not derive membership from a title, current working
-directory, model, service tier, or risk label.
+Associate a team project with the exact submitted task and stable project ID, and keep
+all role Threads inside that container. Do not derive membership from a title, current
+working directory, model, service tier, or risk label.
 
 Panel is the user's control surface for the project. It displays the five roles,
 current Thread state, model, blueprint/stage guidance, and review evidence that the
@@ -127,24 +125,23 @@ the first write, while its blueprint and review detail still scale to the actual
 User-facing team settings must name these results in ordinary language. Machine
 storage values are implementation details and must not be the primary labels. A
 setting changes project launch behavior only; it never changes the complexity depth,
-evidence bar, single-writer boundary, or any Goal, Focus, Context Pack, EffectSpec, or
-project memory contract.
+evidence bar, single-writer boundary, or any Focus, Context Pack, EffectSpec, or project
+memory contract.
 
 If the Bridge cannot create or resume the required app-server Threads, surface the
-specific project activation failure in Panel and keep the native Goal active and
-incomplete. Do not
+specific project activation failure in Panel and keep the project incomplete. Do not
 claim that Panel work is inherently single-Thread, silently substitute a lower-quality
 route, or compensate with one giant HOM script.
 
 ## Reuse the five project Threads
 
-Every project-team Full Goal project has exactly these five stable, user-visible roles. Use
+Every project-team Full task has exactly these five stable, user-visible roles. Use
 the Chinese role name as the primary Panel label and the English name as a secondary
 aid.
 
 | Project role | Authority and durable responsibility |
 | --- | --- |
-| **监督（Supervisor）** | Owns Goal-level decisions, keeps the native Goal active through planning, both reviews, and every repair, receives and strictly reviews the complete blueprint at initial authorization and after material revisions, then receives bounded current-stage loop payloads, rejects or returns generic and under-specified plans, accepts or rejects real technical and visual evidence, selects the minimum repair, and completes the Goal only after every stage really passes. It never mutates or saves the HIP. |
+| **监督（Supervisor）** | Owns project-level decisions, keeps the project active through planning, both reviews, and every repair, strictly reviews the complete blueprint once before execution, then receives bounded current-stage loop payloads, rejects generic and under-specified plans, accepts or rejects stage-relevant evidence, sends the minimum repair directly to Execution, and completes the project only after every stage really passes. It never mutates or saves the HIP. |
 | **方案（Planning）** | Owns the complete user-visible, task-specific advanced construction blueprint, research and source findings, reference observations, architecture, provenance ledgers, fully expanded stage cards, native-node proposals, dependency plans, bounded HOM drafts, revision history, and downstream contracts. It never mutates or saves the HIP. |
 | **执行（Execution）** | Is the only role allowed to call mutating HIA/HOM capabilities or save the current HIP. Each turn receives only the approved current stage card plus its hard constraints and latest evidence delta, executes bounded changes for that stage, and returns real scene evidence, diffs, errors, and limitations to Supervisor. It must never receive or execute the whole asset plan as one batch. |
 | **视觉审查（Visual Review）** | Independently and read-only reviews the stage's usable actual image content, visible acceptance claims, reference match, composition, temporal appearance, material/light response, largest visual deviation, and minimum visual repair. |
@@ -152,20 +149,18 @@ aid.
 
 Use stable role keys `supervisor`, `planning`, `execution`, `visual_review`, and
 `technical_review` only as transport identifiers; never use them as substitute primary
-labels. Resume these same five Threads for every stage and correction of the Goal.
+labels. Resume these same five Threads for every stage and correction of the task.
 Never replace Execution with Supervisor, Planning, a reviewer, or an internal subagent,
 and never allow a second writer. Review Threads never mutate the HIP, never start their
 own repair loop, and never replace a core responsibility.
 
-Keep all five Threads associated with the same Panel project and Goal.
-Do not reuse a worker for a different Goal merely because the asset or technique looks
+Keep all five Threads associated with the same Panel project.
+Do not reuse a worker for a different task merely because the asset or technique looks
 similar. Thread history is the collaboration record; do not add a second roster
 database, watcher, scheduler, or reasoning service. Project lifecycle follows the
 existing Panel project controls: preserve role histories and keep the user's main
-project visible after final handoff. Never delete a project or role Thread as cleanup.
-The only automatic deletion exception is the verified third-compaction migration
-defined below, which deletes exactly one superseded Thread after its replacement has
-passed every check.
+project visible after final handoff. Never delete a project or role Thread as cleanup,
+and never migrate or replace a Thread automatically in response to compaction.
 
 ## Coordinate through the Codex app-server
 
@@ -176,7 +171,7 @@ and responses; this reference intentionally freezes only those method families, 
 payload schema. Resume the existing project member when possible instead of starting a
 duplicate Thread.
 
-The Bridge associates each app-server Thread with the Panel project, Goal, role key,
+The Bridge associates each app-server Thread with the Panel project, role key,
 and user-visible role title, then forwards state and output to Panel. It does not
 reason about the blueprint, choose repairs, rank evidence, or authorize a HIP write.
 Those remain Codex role responsibilities. Project membership is explicit Bridge state;
@@ -184,9 +179,8 @@ do not infer it from a common directory, matching title, or model name.
 
 At project activation, ensure all five members exist before the first scene write.
 Send exact user facts and project-wide guidance to Supervisor and Planning. After
-Planning publishes the complete blueprint, route that entire artifact to Supervisor
-for initial authorization; repeat this full-artifact review after every material
-revision. Only after authorization: Send Execution only the approved hard-constraint
+Planning publishes the complete blueprint, route the complete native Planning output to
+Supervisor for one initial authorization. Only after authorization: Send Execution only the approved hard-constraint
 capsule, one complete current stage card, and latest evidence delta; never send all
 future stage cards or ask it to execute the whole asset in one turn. Route later user
 guidance from Panel to the relevant existing member with `turn/start`. A user-selected
@@ -205,7 +199,8 @@ collaboration database, or separate autonomous orchestration service.
 
 If project activation or a required role turn fails, preserve the current HIP, expose
 the exact Bridge/app-server failure and affected role in Panel, and keep the relevant
-claim incomplete. Retry only through the existing bounded Bridge recovery contract.
+claim incomplete. Bridge restart marks active projects `stopped`; only an explicit user
+Continue starts the current stage again, with no automatic replay or restoration.
 Do not invent successful worker output, shift write authority to another role, or
 silently degrade the project into a different coordination model.
 
@@ -231,13 +226,14 @@ Panel project Threads:
 - Give Execution only the approved hard-constraint capsule, first complete stage card,
   and current evidence delta after those artifacts are available.
 - After every stage, send unchanged technical claims and routed live evidence to
-  Technical Review and unchanged visual claims plus usable actual image content to
-  Visual Review. Start both read-only review turns in parallel and wait for both before
-  Supervisor accepts the stage or selects a repair.
+  Technical Review. Send Visual Review the image content required by the stage
+  contract, if any. Start both read-only review turns in parallel and wait for both
+  before Supervisor accepts the stage or sends a repair directly to Execution.
 
-Supervisor resolves tradeoffs, accepts evidence, and authorizes each bounded stage
-instruction. Planning maintains the authoritative plan. Execution alone performs the
-scene write. Reviewers provide evidence only and cannot receive HIA/HOM tools.
+Supervisor authorizes the complete plan once, then resolves stage acceptance and repair
+decisions from review evidence. Planning maintains the authoritative plan in its native
+Thread history. Execution alone performs the scene write. Reviewers provide evidence
+only and cannot receive HIA/HOM tools.
 
 ## Keep authority and provenance explicit
 
@@ -258,7 +254,7 @@ instruction to approximate or not approximate.
 
 Apply this authority order:
 
-- the user's latest explicit instruction for this Goal;
+- the user's latest explicit instruction for this task;
 - earlier explicit user instructions that the latest instruction did not supersede;
 - verified current-scene facts;
 - reference observations supported by cited evidence;
@@ -313,7 +309,7 @@ a Full blueprint, require all of these minimum information floors:
 These information floors are necessary but never sufficient. The same authorization
 must pass the production semantic checks for:
 
-- **task anchors:** the Goal, User facts, target identity, relevant references or scene
+- **task anchors:** the task objective, User facts, target identity, relevant references or scene
   facts, subsystem responsibility, construction decision, expected result, evidence,
   and minimum repair remain traceable to the actual task;
 - **required structure:** every applicable user-visible section, complete stage card,
@@ -341,13 +337,13 @@ decisions.
 
 Do not pad the blueprint with repeated prose, generic checklists, or a canned recipe.
 Every line must change construction, review, evidence, risk, or downstream use. Derive
-the actual subsystems, stages, node strategy, and parameters from the current Goal,
+the actual subsystems, stages, node strategy, and parameters from the current task,
 references, scene, and Houdini evidence. Never hard-code a domain or asset-family
 recipe into this Skill.
 
 Detail means resolving the requested deliverable at professional construction depth;
 it does not authorize speculative features, unnecessary subsystems, decorative node
-counts, or complexity the Goal does not need. Prefer explicit reversible assumptions
+counts, or complexity the task does not need. Prefer explicit reversible assumptions
 over silent invention, and keep each assumption visibly separate from User facts.
 
 Do not use node quantity, Box quantity, network-box quantity, script length, stage
@@ -357,11 +353,11 @@ stage may be correct; a long network may still be wrong.
 ## Use these stable user-visible blueprint sections
 
 Planning publishes the following natural-language sections in this order through its
-project Thread and the established Panel blueprint surface. In a single-AI Full Goal,
+project Thread and the established Panel blueprint surface. In a single-AI Full task,
 the original Panel Thread publishes the same sections. A section may say `Not
-applicable` with a reason; do not silently omit a section that affects the Goal.
+applicable` with a reason; do not silently omit a section that affects the task.
 
-### Goal and observable completion
+### Task objective and observable completion
 
 State the intended result, audience or use, completeness promise, observable quality
 bar, and what would make the result recognizably correct.
@@ -429,7 +425,7 @@ Include one complete card for every stage. Keep future cards in the Planning Thr
 and revise them when evidence or user instructions change. Each card must contain at
 least 2,500 production-measured task-specific information units after repeated or
 filler content is excluded. Supervisor receives all cards inside the complete blueprint
-for initial and material-revision authorization; after authorization, give Supervisor,
+for one initial authorization; after authorization, give Supervisor,
 Execution, and reviewers only the complete current card needed for the active loop.
 
 ### Evidence and review ledger
@@ -446,7 +442,7 @@ copy routine transcript chatter.
 
 ## Authorize the full blueprint, then use bounded loop payloads
 
-In a project-team Full Goal, Planning must send Supervisor the complete synthesized
+In a project-team Full task, Planning must send Supervisor the complete synthesized
 blueprint for initial authorization. That authorization payload includes every stable
 user-visible section, all complete stage cards, provenance and assumption ledgers,
 outputs and downstream contracts, the evidence/review plan, revision history, and the
@@ -468,7 +464,7 @@ current card reaches Execution.
 After Supervisor authorizes that full version, each repeated execution and review loop
 uses exactly these bounded semantic parts:
 
-- **Global hard-constraint capsule:** the current Goal, all applicable User facts and
+- **Global hard-constraint capsule:** the current task objective, all applicable User facts and
   explicit prohibitions, output and safety boundaries, sole-writer rule, source or
   licensing constraints that affect execution, and unresolved blockers.
 - **Complete current stage card:** every field in the card contract below, in full.
@@ -482,15 +478,14 @@ brief. The card must remain self-contained enough to build and review the curren
 stage without reopening the whole blueprint. Execution and both review Threads never
 need the whole blueprint merely because Supervisor received it for authorization.
 
-When a user correction, evidence result, or global constraint materially changes the
-blueprint, update the authoritative Planning artifact first, identify every affected
-stage and downstream contract, and send the complete revised blueprint back to
-Supervisor for renewed strict authorization. Only after that approval resume bounded
-loop payloads. A local evidence delta that does not revise the blueprint stays in the
-current loop package. Never rely on an old summary after a user correction.
+New user guidance is recorded in native Supervisor Thread history and enters the next
+explicit stage Turn. It must not silently restart a completed role Turn in the
+background. If guidance invalidates the already authorized stage map, stop with an
+explicit user-facing error instead of inventing a hidden replan or renewed authorization
+path.
 
-In a single-AI Full Goal, the original Thread must perform the same complete-blueprint
-review at initial authorization and after material revisions, then keep its authoring
+In a single-AI Full task, the original Thread must perform the same complete-blueprint
+review once before execution, then keep its authoring
 and separated review passes bounded to the same capsule, complete current card, and
 latest evidence delta without inventing project roles.
 
@@ -590,7 +585,7 @@ claim matters.
 Repeat every global or local negative constraint that the stage could violate. Include
 forbidden equivalent geometry or behavior, placeholder substitutions, destructive
 scope expansion, parallel live-scene writes, hidden dependencies, and any disallowed
-legacy or renderer route relevant to the Goal.
+legacy or renderer route relevant to the task.
 
 ### Technical evidence
 
@@ -601,13 +596,12 @@ node existence alone is insufficient when the claim is relational or semantic.
 
 ### Visual evidence
 
-List the required actual image content, intended view/camera/aspect, representative
-frame or bounded sequence, visible features to compare, capture/display limitations,
-and exact pass conditions. In a project-team Goal, usable actual image content is
-required for every stage review and every repair review. Even a technically oriented
-stage must provide a representative image that can expose visual regression; missing
-or unusable image content keeps the stage unverified. Do not replace image evidence
-with a node list, successful cook, or prose description.
+When the stage makes a visual claim, list the required actual image content, intended
+view/camera/aspect, representative frame or bounded sequence, visible features to
+compare, capture/display limitations, and exact pass conditions. Missing or unusable
+image content keeps that visual claim unverified. A purely technical stage must not
+manufacture a screenshot merely to satisfy the workflow. Do not replace required image
+evidence with a node list, successful cook, or prose description.
 
 ### Reviewer
 
@@ -622,7 +616,7 @@ settles the bounded task.
 
 Define how to select the largest consequential deviation, the smallest coherent region
 or control set allowed to change, evidence that must be reacquired, and passed regions
-that must remain untouched. Do not pre-author a generic fallback that weakens the Goal.
+that must remain untouched. Do not pre-author a generic fallback that weakens the task.
 
 ### Downstream contract
 
@@ -640,28 +634,26 @@ evidence labels, not mandatory transitions and not a state machine.
 
 ## Run the stage build and acceptance loop
 
-Keep the existing native Goal `active` throughout this entire loop. A Planning return,
-an Execution success, one reviewer pass, or one stage pass never completes the Goal.
+Keep the project active throughout this entire loop. A Planning return, an Execution
+success, one reviewer pass, or one stage pass never completes the project.
 
-For each applicable stage in a project-team Full Goal:
+For each applicable stage in a project-team Full task:
 
 - Enter the loop only after Supervisor has received and authorized the complete
   Planning blueprint and production validation result.
-- Have Planning issue the complete current stage card and any changed hard
-  constraints through its project Thread and Panel surface.
-- Have Supervisor check the card against the current Goal, user guidance, and existing
-  evidence. Expand the authorization request with established missing detail or return
-  a generic or under-specified card to Planning; authorize only a task-specific,
-  fully expanded card.
+- Select the already authorized complete current stage card from Planning's native
+  Thread history. Do not start another Planning or authorization Turn merely because
+  the project advanced to the next stage.
 - Send Execution only that fully expanded current stage card, its hard constraints,
   and latest evidence delta. A returned generic card never reaches Execution. Never
   send future cards or ask it to author the whole asset in one turn.
 - Have Execution inspect only the live context required by the card, plan the affected
   graph region, and execute bounded authoring batches. Only Execution may use mutating
   HIA/HOM capabilities on the current HIP.
-- Have Execution return the card's claim-specific technical evidence from the real
-  scene plus usable actual image content for every stage and every repair. If either is
-  unavailable, the stage remains unverified and cannot advance.
+- Have Execution return exactly the card's claim-specific evidence from the real scene.
+  Full visual stages may require both actual image content and technical evidence;
+  Direct, Focused, purely technical, and purely visual stages must not manufacture an
+  irrelevant evidence type.
 - Start Technical Review and Visual Review in parallel after the stage. Give unchanged
   technical claims and routed live evidence to Technical Review; give unchanged visual
   claims and usable actual image content to Visual Review. Both remain independent and
@@ -676,107 +668,51 @@ For each applicable stage in a project-team Full Goal:
   clearance, and a Box-heavy stand-in for requested finished construction as concrete
   failures when applicable. Supervisor issues the smallest directed repair that fixes
   the evidenced defect without reopening passed regions.
-- Have Supervisor approve the bounded repair, Planning revise the card only when its
-  contract changed, and Execution repair only that region. Reacquire both usable actual
-  image content and claim-specific technical evidence, then return the same claims to
-  both reviews. If that repair materially revises the full blueprint or any downstream
-  contract, pause the bounded loop and send the complete revised artifact to Supervisor
-  for renewed authorization before Execution continues.
+- Have Supervisor send the bounded repair card directly to Execution. Execution repairs
+  only that region and reacquires exactly the evidence required by the current stage
+  contract, then returns the same claims to both reviews. There is no separate repair
+  authorization Turn.
 - Continue the Supervisor-driven repair and parallel review loop without a fixed
   iteration count until both applicable evidence sets are verified. Stop earlier only
-  when the user stops the Goal or a genuine blocker is evidenced; then mark the affected
+  when the user stops the task or a genuine blocker is evidenced; then mark the affected
   claim and downstream contract incomplete or blocked rather than manufacturing a pass.
 - After a pass, have Planning record the evidence delta, freeze the downstream
   contract, and issue the next complete stage card.
 - Only after every applicable stage has passed both review lanes with real evidence may
-  Supervisor mark the existing native Goal complete through its established Goal
-  surface. A pause, tool failure, or genuine blocker does not manufacture completion;
-  retain the active Goal and expose the limitation through the existing surface unless
-  the user explicitly ends it there.
+  Supervisor mark the project complete through its established project surface. A
+  pause, tool failure, or genuine blocker does not manufacture completion; retain the
+  active project and expose the limitation unless the user explicitly ends it there.
 
 Do not turn review into a numeric score, fixed iteration ritual, or automatic approval.
 Do not advance because a call succeeded, a Box exists, a chosen node count was reached,
 or a reviewer is unavailable.
 
-Keep Goal state, stage cards, Technical Review evidence, and Visual Review evidence on
-their established surfaces. This loop consumes those values but never copies their
-schema into a second Goal record, phase system, review database, or project memory.
+Keep project state, stage cards, Technical Review evidence, and Visual Review evidence
+on their established surfaces. This loop consumes those values but never copies their
+schema into a second project record, phase system, review database, or project memory.
 
-For a single-AI Full Goal, perform the same stage-card and evidence loop in the original
+For a single-AI Full task, perform the same stage-card and evidence loop in the original
 Panel Thread. Keep scene writes bounded to the current card, then perform visual and
 technical review as separated read-only passes before the next write. Do not create
 project roles or pretend that independent reviewer Threads ran.
 
-## Use available native subagents only inside read-only roles
+## Keep collaboration to the five project Threads
 
-The five real project Threads are the baseline for every model. Any model supported by
-HIA Panel may serve any project role; do not hard-code a model family, model ID,
-service tier, or reasoning level into role identity. A user model change keeps the
-same project membership and role history.
+The five real project Threads are the complete collaboration baseline for every model.
+Any model supported by HIA Panel may serve any project role; do not hard-code a model
+family, model ID, service tier, or reasoning level into role identity. A user model
+change keeps the same project membership and role history. Do not create another
+subagent layer behind these roles or pretend that such work occurred.
 
-At each Supervisor, Planning, Visual Review, or Technical Review turn, use only
-capabilities that the current model and runtime actually expose. When a native
-subagent tool is available and that read-only role has genuinely parallel,
-non-overlapping work, it must dispatch bounded internal subagents for appropriate
-research, structural analysis, visual review, or technical review, then synthesize
-their returns into the owning project Thread. Sol Ultra is an important
-capability-bearing case, not a version or model-ID dependency.
-
-Every internal subagent assignment is read-only. Execution deliberately does not
-proactively spawn or delegate to native subagents: they inherit its HIA scene-write
-capability, so prompt-only restraint would not prove the sole-writer boundary.
-Execution instead remains a serialized mainline writer while the other four project
-Threads provide the parallel research and review lanes. Do not dispatch overlapping
-subagents to repeat the same claim or parallelize work whose dependency order is
-inherently sequential.
-
-Native subagents are an extra internal layer: they do not become project roles,
-app-server project Threads, top-level tasks, or replacements for the five real
-Threads, full blueprint, current stage card, Execution authority, or dual acceptance.
-When the native tool is unavailable or no suitable parallel read-only work exists, do
-not claim or invent subagent activity. The five project Threads still perform the same
-work without lowering blueprint detail, evidence, review separation, or repair quality.
-
-## Migrate a Thread only after its third real automatic compaction
-
-This is the user's sole standing authorization for automatic Thread replacement. It
-applies independently to an ordinary Panel task Thread and to each of the five real
-project-role Threads. Count only real automatic context-compaction events reported by
-the Codex app-server for that exact Thread. Do not infer events from token estimates,
-create a local counter as a second authority, or trigger migration for an internal
-native subagent.
-
-Immediately after that Thread's third reported automatic compaction, use the native
-`thread/fork` method to create one replacement. Do not create a local summary, invoke a
-manual compact operation, persist chat bodies, replay a copied transcript, or invent a
-replacement context. The native fork is the context-transfer mechanism.
-
-Before changing ownership or deleting anything, validate the replacement against the
-live app-server result:
-
-- required conversation and task context is present and usable;
-- the ordinary-task identity or exact project role is unchanged;
-- the selected model is unchanged unless the user already requested a change;
-- the capability boundary is unchanged, including sole-writer HIA/HOM/HIP access for
-  Execution and empty scene-tool inventories for non-Execution roles;
-- the native Goal identity and, when applicable, Panel project membership are exact.
-
-Only after every check succeeds may the lifecycle owner switch Panel/project ownership
-to the replacement and precisely delete the one superseded old Thread through the live
-native contract. Never delete the Goal, project container, another role, multiple
-Threads, or chat history in bulk. If fork, validation, reassociation, or deletion
-preconditions fail, retain the old Thread unchanged, expose the exact failure, and do
-not claim migration success.
-
-This verified third-compaction migration is the only automatic deletion exception.
-Outside it, never automatically delete a Goal project or its Threads. Do not migrate
-Ultra or other internal subagents, create a local summarizer, manually compact, persist
-chat bodies, or treat ordinary project cleanup as migration.
+Automatic context compaction is informational only. It does not authorize a local
+summary, persisted chat bodies, automatic Thread replacement, migration, or deletion.
+Project and Thread lifecycle changes require an explicit user action through the
+existing Panel controls.
 
 ## Keep the project visible and steerable in Panel
 
 HIA Panel is the user-facing owner of project presentation and guidance. Show one
-project container for the Goal, its five project Threads, each role's current supported
+project container for the task, its five project Threads, each role's current supported
 model and state, Planning content, active stage card, and returned review evidence when
 those values are supplied by the Bridge/app-server. Keep worker
 Threads inside the project container rather than adding them to the top-level task
@@ -793,18 +729,18 @@ outcome only for the newly submitted task, then return the Panel selector to the
 default immediately after send. The one-shot choice never writes back to that default.
 
 Resolve the per-submission choice before complexity. **单个 AI** creates no team for
-that new task; **项目团队** creates its native Goal, Panel project, and five real
-Threads. Direct, Focused, and Full scale the actual work depth inside the chosen route
+that new task; **项目团队** creates its Panel project and five real Threads. Direct,
+Focused, and Full scale the actual work depth inside the chosen route
 and never override it. Never split, merge, or rebuild an already running project
 because the persistent default later changes. These settings route a new task; they
-are not a Planner, Gate, Goal transition, or quality level. Primary labels must not
+are not a Planner, Gate, or quality level. Primary labels must not
 expose internal persistence values.
 
-Keep existing ownership boundaries intact: Goal and Focus remain on their established
-surfaces; Context Pack remains optional evidence; EffectSpec remains transient; and
-project memory changes remain explicit. The project view may link to or display their
-public outputs, but must not create duplicate Goal, Focus, Context Pack, EffectSpec, or
-memory state machines.
+Keep existing ownership boundaries intact: Focus remains on its established surface;
+Context Pack remains optional evidence; EffectSpec remains transient; and project
+memory changes remain explicit. The project view may link to or display their public
+outputs, but must not create duplicate Focus, Context Pack, EffectSpec, or memory state
+machines.
 
 Bridge owns app-server transport, Thread/project association, and reported lifecycle
 state. Codex roles own reasoning, blueprint content, execution decisions, and evidence
@@ -823,18 +759,17 @@ planner, status machine, or hidden evidence ledger outside those established own
   insufficient without task-anchor, structure, anti-repetition/filler, and semantic
   completeness checks.
 - Do not confuse completeness with padding, repeated prose, speculative overdesign, or
-  features outside the Goal.
+  features outside the task.
 - Do not add a second Planner to repair weak plans; return them to the same Planning
   Thread, and do not turn revision into a workflow state machine.
 - Do not hide a sparse request behind a generic blockout when a complete asset was
   requested.
-- Do send Supervisor the complete blueprint for initial and material-revision
-  authorization; do not repeatedly re-paste that authorized artifact into every
+- Do send Supervisor the complete blueprint for one initial authorization; do not
+  repeatedly re-paste that authorized output into every
   execution or review loop.
 - Do not compress the complete current stage card into a short summary.
-- Do not let Supervisor, Planning, review, or Ultra internal subagents write the live
-  HIP; Execution is the only writer.
+- Do not let Supervisor, Planning, either review role, or any extra worker write the
+  live HIP; Execution is the only writer.
 - Do not fan out project Threads or live-scene calls.
 - Do not discard role history before final evidence and limitations are published.
-  Never delete a Goal project or role Thread as cleanup; only the verified
-  third-compaction `thread/fork` migration may precisely delete its superseded Thread.
+  Never delete a project or role Thread as background cleanup.

@@ -1,4 +1,9 @@
-"""Pure lifecycle reducer for project-team orchestration."""
+"""Small deterministic lifecycle for the five native project Threads.
+
+The reducer describes only the visible project phase. It does not model role
+provisioning, a second goal authority, persisted actions, restart replay, or a
+separate repair authorization phase.
+"""
 
 from __future__ import annotations
 
@@ -6,56 +11,31 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Mapping
 
-from .project_contracts import ProjectState, ProjectStatus, Role
+from .project_contracts import ProjectState, ProjectStatus
 
 
 class ProjectEvent(str, Enum):
-    INTAKE_STARTED = "intake_started"
-    INTAKE_MESSAGE_RECEIVED = "intake_message_received"
-    SCENE_ELIGIBLE = "scene_eligible"
-    ROLES_PROVISIONED = "roles_provisioned"
-    ROLE_PROVISIONING_FAILED = "role_provisioning_failed"
-    SCENE_INELIGIBLE = "scene_ineligible"
-    INTAKE_UNCLEAR = "intake_unclear"
+    PROJECT_STARTED = "project_started"
+    PROJECT_ACCEPTED = "project_accepted"
+    PROJECT_ANSWERED = "project_answered"
     PLAN_READY = "plan_ready"
     PLAN_AUTHORIZED = "plan_authorized"
-    MATERIAL_REPLAN_REQUIRED = "material_replan_required"
     STAGE_EXECUTED = "stage_executed"
     REVIEWS_PASSED = "reviews_passed"
     REVIEWS_FAILED = "reviews_failed"
-    GOAL_COMPLETED = "goal_completed"
-    GOAL_COMPLETION_FAILED = "goal_completion_failed"
-    GOAL_PAUSED = "goal_paused"
-    GOAL_PAUSE_FAILED = "goal_pause_failed"
-    GOAL_RESUMED = "goal_resumed"
-    GOAL_RESUME_FAILED = "goal_resume_failed"
-    REPAIR_READY = "repair_ready"
     PROJECT_INTERRUPTED = "project_interrupted"
-    RESTART_REQUESTED = "restart_requested"
-    RECOVERY_VALIDATED = "recovery_validated"
-    RECOVERY_FAILED = "recovery_failed"
     PROJECT_BLOCKED = "project_blocked"
     PROJECT_FAILED = "project_failed"
     BUDGET_EXHAUSTED = "budget_exhausted"
-    NO_PROGRESS = "no_progress"
     USER_CONTINUE = "user_continue"
 
 
 class ProjectCommand(str, Enum):
-    START_INTAKE = "start_intake"
-    PROVISION_WORKERS = "provision_workers"
+    START_SUPERVISOR = "start_supervisor"
     REQUEST_PLAN = "request_plan"
     REQUEST_AUTHORIZATION = "request_authorization"
     START_EXECUTION = "start_execution"
     START_REVIEWS = "start_reviews"
-    REQUEST_REPAIR = "request_repair"
-    ADVANCE_STAGE = "advance_stage"
-    COMPLETE_GOAL = "complete_goal"
-    VERIFY_RECOVERY = "verify_recovery"
-    PAUSE_GOAL = "pause_goal"
-    RESUME_GOAL = "resume_goal"
-    SHOW_ATTENTION = "show_attention"
-    RECORD_FAILURE = "record_failure"
 
 
 @dataclass(frozen=True)
@@ -78,31 +58,7 @@ class InvalidTransition(ValueError):
 
 
 _ACTIVE = frozenset(
-    {
-        ProjectStatus.PROVISIONING,
-        ProjectStatus.INTAKE,
-        ProjectStatus.PROVISIONING_ROLES,
-        ProjectStatus.PLANNING,
-        ProjectStatus.AUTHORIZATION,
-        ProjectStatus.EXECUTING_STAGE,
-        ProjectStatus.REVIEWING_STAGE,
-        ProjectStatus.REPAIRING_STAGE,
-        ProjectStatus.COMPLETING,
-    }
-)
-
-_RECOVERY_RESTORABLE = frozenset(
-    {*_ACTIVE, ProjectStatus.PAUSING, ProjectStatus.RESUMING}
-)
-
-_REPLAN_RECOVERY_TARGETS = frozenset(
-    {
-        ProjectStatus.PLANNING,
-        ProjectStatus.AUTHORIZATION,
-        ProjectStatus.EXECUTING_STAGE,
-        ProjectStatus.REVIEWING_STAGE,
-        ProjectStatus.REPAIRING_STAGE,
-    }
+    {ProjectStatus.PLANNING, ProjectStatus.EXECUTING, ProjectStatus.REVIEWING}
 )
 
 
@@ -118,320 +74,137 @@ def _next(
     )
 
 
-def _pause(
-    state: ProjectState,
-    target: ProjectStatus,
-    reason: str,
-    *,
-    resume_status: ProjectStatus | None = None,
-) -> tuple[ProjectState, tuple[LifecycleCommand, ...]]:
-    return _next(
-        state,
-        ProjectStatus.PAUSING,
-        LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": reason}),
-        pause_target=target,
-        resume_status=resume_status,
-        attention_reason=reason,
-    )
-
-
 def reduce_project(
     state: ProjectState, event: LifecycleEvent
 ) -> tuple[ProjectState, tuple[LifecycleCommand, ...]]:
-    """Apply one legal event and emit deterministic side-effect commands."""
+    """Apply one explicit phase event and return the next role action."""
 
     kind = event.kind
     data = dict(event.data or {})
     status = state.status
 
-    if kind is ProjectEvent.MATERIAL_REPLAN_REQUIRED and status in _ACTIVE:
+    if kind is ProjectEvent.PROJECT_STARTED and status is ProjectStatus.PLANNING:
         return _next(
             state,
             ProjectStatus.PLANNING,
-            LifecycleCommand(ProjectCommand.REQUEST_PLAN, {"revision": True}),
+            LifecycleCommand(ProjectCommand.START_SUPERVISOR, data),
         )
-
-    if kind is ProjectEvent.INTAKE_STARTED and status is ProjectStatus.PROVISIONING:
-        return _next(state, ProjectStatus.INTAKE, LifecycleCommand(ProjectCommand.START_INTAKE))
-    if kind is ProjectEvent.INTAKE_MESSAGE_RECEIVED and status in {
-        ProjectStatus.INTAKE,
-        ProjectStatus.NOT_APPLICABLE,
-    }:
-        return _next(
-            state,
-            ProjectStatus.INTAKE,
-            LifecycleCommand(ProjectCommand.START_INTAKE),
-            pause_target=None,
-            resume_status=None,
-            attention_reason=None,
-            last_error=None,
-        )
-    if kind is ProjectEvent.SCENE_ELIGIBLE and status is ProjectStatus.INTAKE:
-        return _next(
-            state,
-            ProjectStatus.PROVISIONING_ROLES,
-            LifecycleCommand(ProjectCommand.PROVISION_WORKERS),
-        )
-    if kind is ProjectEvent.ROLES_PROVISIONED and status is ProjectStatus.PROVISIONING_ROLES:
+    if kind is ProjectEvent.PROJECT_ACCEPTED and status is ProjectStatus.PLANNING:
         return _next(
             state,
             ProjectStatus.PLANNING,
             LifecycleCommand(ProjectCommand.REQUEST_PLAN),
         )
-    if (
-        kind is ProjectEvent.ROLE_PROVISIONING_FAILED
-        and status is ProjectStatus.PROVISIONING_ROLES
-    ):
-        error = str(data.get("error") or "role_provisioning_failed")
-        paused, commands = _pause(
-            state,
-            ProjectStatus.NEEDS_ATTENTION,
-            error,
-            resume_status=ProjectStatus.PROVISIONING_ROLES,
-        )
-        return replace(paused, last_error=error), commands
-    if kind is ProjectEvent.SCENE_INELIGIBLE and status is ProjectStatus.INTAKE:
+    if kind is ProjectEvent.PROJECT_ANSWERED and status is ProjectStatus.PLANNING:
         return _next(
             state,
-            ProjectStatus.INTAKE,
+            ProjectStatus.COMPLETED,
             attention_reason=None,
             last_error=None,
-        )
-    if kind is ProjectEvent.INTAKE_UNCLEAR and status is ProjectStatus.INTAKE:
-        reason = str(data.get("reason") or "scene_task_eligibility_unclear")
-        return _pause(
-            state,
-            ProjectStatus.NEEDS_ATTENTION,
-            reason,
-            resume_status=ProjectStatus.INTAKE,
         )
     if kind is ProjectEvent.PLAN_READY and status is ProjectStatus.PLANNING:
         return _next(
             state,
-            ProjectStatus.AUTHORIZATION,
+            ProjectStatus.PLANNING,
             LifecycleCommand(ProjectCommand.REQUEST_AUTHORIZATION),
         )
-    if kind is ProjectEvent.PLAN_AUTHORIZED and status is ProjectStatus.AUTHORIZATION:
+    if kind is ProjectEvent.PLAN_AUTHORIZED and status is ProjectStatus.PLANNING:
         return _next(
             state,
-            ProjectStatus.EXECUTING_STAGE,
+            ProjectStatus.EXECUTING,
             LifecycleCommand(ProjectCommand.START_EXECUTION),
         )
-    if kind is ProjectEvent.STAGE_EXECUTED and status is ProjectStatus.EXECUTING_STAGE:
+    if kind is ProjectEvent.STAGE_EXECUTED and status is ProjectStatus.EXECUTING:
         return _next(
             state,
-            ProjectStatus.REVIEWING_STAGE,
+            ProjectStatus.REVIEWING,
             LifecycleCommand(ProjectCommand.START_REVIEWS),
         )
-    if kind is ProjectEvent.REVIEWS_FAILED and status is ProjectStatus.REVIEWING_STAGE:
+    if kind is ProjectEvent.REVIEWS_FAILED and status is ProjectStatus.REVIEWING:
         return _next(
             state,
-            ProjectStatus.REPAIRING_STAGE,
-            LifecycleCommand(ProjectCommand.REQUEST_REPAIR),
+            ProjectStatus.EXECUTING,
+            LifecycleCommand(
+                ProjectCommand.START_EXECUTION,
+                {"repair": True},
+            ),
         )
-    if kind is ProjectEvent.REPAIR_READY and status is ProjectStatus.REPAIRING_STAGE:
-        return _next(
-            state,
-            ProjectStatus.EXECUTING_STAGE,
-            LifecycleCommand(ProjectCommand.START_EXECUTION, {"repair": True}),
-        )
-    if kind is ProjectEvent.REVIEWS_PASSED and status is ProjectStatus.REVIEWING_STAGE:
+    if kind is ProjectEvent.REVIEWS_PASSED and status is ProjectStatus.REVIEWING:
         if bool(data.get("final_stage")):
             return _next(
                 state,
-                ProjectStatus.COMPLETING,
-                LifecycleCommand(ProjectCommand.COMPLETE_GOAL),
+                ProjectStatus.COMPLETED,
+                attention_reason=None,
+                last_error=None,
             )
+        next_stage_id = data.get("next_stage_id")
+        if not isinstance(next_stage_id, str) or not next_stage_id:
+            raise InvalidTransition(status, kind)
         return _next(
             state,
-            ProjectStatus.EXECUTING_STAGE,
-            LifecycleCommand(ProjectCommand.ADVANCE_STAGE),
+            ProjectStatus.EXECUTING,
             LifecycleCommand(ProjectCommand.START_EXECUTION),
+            stage=replace(
+                state.stage,
+                stage_id=next_stage_id,
+                ordinal=state.stage.ordinal + 1,
+                repair_count=0,
+                schema_correction_count=0,
+                latest_evidence_ids=(),
+            ),
         )
     if kind is ProjectEvent.PROJECT_INTERRUPTED and status in _ACTIVE:
-        reason = str(data.get("reason") or "interrupted")
-        return _pause(
-            state,
-            ProjectStatus.INTERRUPTED,
-            reason,
-            resume_status=status,
+        return _next(state, ProjectStatus.STOPPED)
+    if kind is ProjectEvent.USER_CONTINUE and status is ProjectStatus.STOPPED:
+        target = (
+            ProjectStatus.EXECUTING
+            if state.stage.stage_id is not None
+            else ProjectStatus.PLANNING
         )
-    if kind is ProjectEvent.PROJECT_INTERRUPTED and status is ProjectStatus.RESUMING:
-        reason = str(data.get("reason") or "goal_resume_interrupted")
-        return _pause(
-            state,
-            ProjectStatus.INTERRUPTED,
-            reason,
-            resume_status=state.resume_status,
+        command = (
+            ProjectCommand.START_EXECUTION
+            if target is ProjectStatus.EXECUTING
+            else ProjectCommand.REQUEST_PLAN
         )
-    if kind is ProjectEvent.GOAL_PAUSED and status is ProjectStatus.PAUSING:
-        target = state.pause_target
-        if target not in {
-            ProjectStatus.INTERRUPTED,
-            ProjectStatus.NEEDS_ATTENTION,
-            ProjectStatus.NOT_APPLICABLE,
-            ProjectStatus.BLOCKED,
-        }:
-            raise InvalidTransition(status, kind)
-        return _next(state, target, pause_target=None)
-    if kind is ProjectEvent.GOAL_PAUSE_FAILED and status is ProjectStatus.PAUSING:
-        error = str(data.get("error") or "goal_pause_failed")
-        return _next(
-            state,
-            ProjectStatus.NEEDS_ATTENTION,
-            pause_target=None,
-            attention_reason=error,
-            last_error=error,
-        )
-    if kind is ProjectEvent.GOAL_COMPLETED and status is ProjectStatus.COMPLETING:
-        return _next(
-            state,
-            ProjectStatus.COMPLETED,
-            resume_status=None,
-            attention_reason=None,
-        )
-    if kind is ProjectEvent.GOAL_COMPLETION_FAILED and status is ProjectStatus.COMPLETING:
-        error = str(data.get("error") or "goal_completion_failed")
-        return _next(
-            state,
-            ProjectStatus.NEEDS_ATTENTION,
-            resume_status=ProjectStatus.COMPLETING,
-            attention_reason=error,
-            last_error=error,
-        )
-    if kind is ProjectEvent.RESTART_REQUESTED and status is ProjectStatus.INTERRUPTED:
-        return _next(
-            state,
-            ProjectStatus.INTERRUPTED,
-            LifecycleCommand(ProjectCommand.VERIFY_RECOVERY),
-            attention_reason="recovery_validation_pending",
-        )
-    if kind is ProjectEvent.RECOVERY_VALIDATED and status is ProjectStatus.INTERRUPTED:
-        target = state.recovery_return_status or state.resume_status
-        if target not in _RECOVERY_RESTORABLE:
-            raise InvalidTransition(status, kind)
-        return _next(
-            state,
-            ProjectStatus.RESUMING,
-            LifecycleCommand(ProjectCommand.RESUME_GOAL),
-            attention_reason="goal_resume_pending",
-        )
-    if kind is ProjectEvent.RECOVERY_FAILED and status is ProjectStatus.INTERRUPTED:
-        error = str(data.get("error") or "recovery_validation_failed")
-        target = state.recovery_return_status or state.resume_status
-        if target not in _RECOVERY_RESTORABLE:
-            raise InvalidTransition(status, kind)
-        return _next(
-            state,
-            ProjectStatus.NEEDS_ATTENTION,
-            recovery_required=True,
-            attention_reason=error,
-            last_error=error,
-        )
-    if kind is ProjectEvent.RECOVERY_FAILED and status in _RECOVERY_RESTORABLE:
-        error = str(data.get("error") or "recovery_validation_failed")
-        return _next(
-            state,
-            ProjectStatus.NEEDS_ATTENTION,
-            pending_effects=(),
-            recovery_required=True,
-            recovery_return_status=status,
-            recovery_pending_effects=state.pending_effects,
-            attention_reason=error,
-            last_error=error,
-        )
-    if kind is ProjectEvent.USER_CONTINUE and status is ProjectStatus.NEEDS_ATTENTION:
-        target = state.recovery_return_status or state.resume_status
-        if target not in _RECOVERY_RESTORABLE:
-            raise InvalidTransition(status, kind)
-        if state.recovery_required:
-            return _next(
-                state,
-                ProjectStatus.INTERRUPTED,
-                LifecycleCommand(ProjectCommand.VERIFY_RECOVERY),
-                attention_reason="recovery_validation_pending",
-            )
-        return _next(
-            state,
-            ProjectStatus.RESUMING,
-            LifecycleCommand(ProjectCommand.RESUME_GOAL),
-            attention_reason="goal_resume_pending",
-        )
-    if kind is ProjectEvent.GOAL_RESUMED and status is ProjectStatus.RESUMING:
-        target = state.recovery_return_status or state.resume_status
-        if target not in _RECOVERY_RESTORABLE:
-            raise InvalidTransition(status, kind)
-        if state.recovery_required:
-            if (
-                state.plan_stale
-                and not state.recovery_pending_effects
-                and target in _REPLAN_RECOVERY_TARGETS
-            ):
-                return _next(
-                    state,
-                    ProjectStatus.PLANNING,
-                    LifecycleCommand(ProjectCommand.REQUEST_PLAN, {"revision": True}),
-                    pending_effects=(),
-                    recovery_required=False,
-                    recovery_return_status=None,
-                    recovery_pending_effects=(),
-                    attention_reason=None,
-                    last_error=None,
-                )
-            return _next(
-                state,
-                target,
-                pending_effects=state.recovery_pending_effects,
-                recovery_required=False,
-                recovery_return_status=None,
-                recovery_pending_effects=(),
-                attention_reason=None,
-                last_error=None,
-            )
-        if target is ProjectStatus.PLANNING and not state.pending_effects:
-            return _next(
-                state,
-                ProjectStatus.PLANNING,
-                LifecycleCommand(ProjectCommand.REQUEST_PLAN, {"recovery": True}),
-                resume_status=None,
-                attention_reason=None,
-                last_error=None,
-            )
         return _next(
             state,
             target,
-            resume_status=None,
+            LifecycleCommand(command, {"restart_stage": True}),
             attention_reason=None,
             last_error=None,
         )
-    if kind is ProjectEvent.GOAL_RESUME_FAILED and status is ProjectStatus.RESUMING:
-        error = str(data.get("error") or "goal_resume_failed")
+    if kind in {
+        ProjectEvent.PROJECT_BLOCKED,
+        ProjectEvent.BUDGET_EXHAUSTED,
+    } and status in _ACTIVE:
+        reason = str(data.get("reason") or kind.value)
         return _next(
             state,
-            ProjectStatus.NEEDS_ATTENTION,
-            attention_reason=error,
-            last_error=error,
+            ProjectStatus.WAITING_USER,
+            attention_reason=reason,
         )
-    if kind in {ProjectEvent.BUDGET_EXHAUSTED, ProjectEvent.NO_PROGRESS} and status in _ACTIVE:
-        reason = str(data.get("reason") or kind.value)
-        return _pause(
+    if kind is ProjectEvent.USER_CONTINUE and status is ProjectStatus.WAITING_USER:
+        target = (
+            ProjectStatus.EXECUTING
+            if state.stage.stage_id is not None
+            else ProjectStatus.PLANNING
+        )
+        command = (
+            ProjectCommand.START_EXECUTION
+            if target is ProjectStatus.EXECUTING
+            else ProjectCommand.REQUEST_PLAN
+        )
+        return _next(
             state,
-            ProjectStatus.NEEDS_ATTENTION,
-            reason,
-            resume_status=status,
+            target,
+            LifecycleCommand(command, {"continue": True}),
+            attention_reason=None,
+            last_error=None,
         )
-    if kind is ProjectEvent.PROJECT_BLOCKED and status in _ACTIVE:
-        reason = str(data.get("reason") or "blocked")
-        return _pause(state, ProjectStatus.BLOCKED, reason)
     if kind is ProjectEvent.PROJECT_FAILED and status not in {
         ProjectStatus.COMPLETED,
         ProjectStatus.FAILED,
     }:
         error = str(data.get("error") or "project_failed")
-        return _next(
-            state,
-            ProjectStatus.FAILED,
-            LifecycleCommand(ProjectCommand.RECORD_FAILURE, {"error": error}),
-            last_error=error,
-        )
+        return _next(state, ProjectStatus.FAILED, last_error=error)
     raise InvalidTransition(status, kind)
