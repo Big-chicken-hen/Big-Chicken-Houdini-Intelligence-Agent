@@ -106,12 +106,19 @@ class ProjectTeamQtTests(unittest.TestCase):
         self.assertEqual(["thread-supervisor"], opened)
 
     def test_collapse_and_expand_restore_navigation(self) -> None:
+        changes = []
+        self.view.collapsedChanged.connect(changes.append)
         self.view.collapse_button.setChecked(True)
         self.app.processEvents()
         self.assertFalse(self.view.navigation_body.isVisible())
+        self.assertFalse(self.view.title_label.isVisible())
+        self.assertEqual(42, self.view.minimumWidth())
         self.view.collapse_button.setChecked(False)
         self.app.processEvents()
         self.assertTrue(self.view.navigation_body.isVisible())
+        self.assertTrue(self.view.title_label.isVisible())
+        self.assertEqual(300, self.view.minimumWidth())
+        self.assertEqual([True, False], changes)
 
 
 if __name__ == "__main__":

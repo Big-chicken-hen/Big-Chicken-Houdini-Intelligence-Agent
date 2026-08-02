@@ -517,6 +517,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         left_layout = QtWidgets.QVBoxLayout(self.left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
         self.project_team_view = ProjectTeamView(parent=self.left_column)
+        self.project_team_view.collapsedChanged.connect(
+            self._set_project_navigation_collapsed
+        )
         left_layout.addWidget(self.project_team_view, 1)
 
         # These objects remain alive because the existing session, rename and
@@ -628,6 +631,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         center_layout.addWidget(self.welcome_group)
 
         self.goal_stage_summary_group = QtWidgets.QGroupBox("当前任务")
+        self.goal_stage_summary_group.setObjectName("goalStageSummary")
+        self.goal_stage_summary_group.setStyleSheet(
+            "QGroupBox#goalStageSummary { background-color: #171a22; "
+            "color: #e5e9f0; border: 1px solid #3a414d; "
+            "border-radius: 4px; margin-top: 7px; } "
+            "QGroupBox#goalStageSummary::title { subcontrol-origin: margin; "
+            "left: 8px; padding: 0 3px; background-color: #171a22; } "
+            "QGroupBox#goalStageSummary QLabel { background-color: transparent; "
+            "color: #e5e9f0; }"
+        )
         self.goal_stage_summary_group.setMinimumWidth(0)
         self.goal_stage_summary_group.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
@@ -1360,6 +1373,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.main_splitter.setStretchFactor(1, 4)
         self.main_splitter.setStretchFactor(2, 2)
         self.main_splitter.setSizes([210, 720, 300])
+        self._project_navigation_expanded_width = 300
         root.addWidget(self.main_splitter, 1)
 
         self.new_thread_button.clicked.connect(self._new_thread)
@@ -6895,6 +6909,31 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         self.input_edit.setFocus()
         self._refresh_controls()
+
+    def _set_project_navigation_collapsed(self, collapsed: bool) -> None:
+        """Resize the actual splitter pane while preserving an expand handle."""
+
+        sizes = self.main_splitter.sizes()
+        if len(sizes) != 3:
+            return
+        if collapsed:
+            if sizes[0] > 64:
+                self._project_navigation_expanded_width = sizes[0]
+            released = max(0, sizes[0] - 48)
+            self.left_column.setMinimumWidth(42)
+            self.main_splitter.setSizes(
+                [48, sizes[1] + released, sizes[2]]
+            )
+            return
+        restored = max(
+            160,
+            int(getattr(self, "_project_navigation_expanded_width", 300)),
+        )
+        gained = max(0, restored - sizes[0])
+        self.left_column.setMinimumWidth(160)
+        self.main_splitter.setSizes(
+            [restored, max(360, sizes[1] - gained), sizes[2]]
+        )
 
     def _open_project_role_thread(self, thread_id: str) -> None:
         """Open only an explicit ordinary or project-role Thread."""

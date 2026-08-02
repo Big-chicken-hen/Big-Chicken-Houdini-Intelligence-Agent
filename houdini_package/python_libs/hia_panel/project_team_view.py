@@ -38,6 +38,7 @@ if PYSIDE_AVAILABLE:
         appendGuidanceRequested = QtCore.Signal(str, object, str)
         continueProjectRequested = QtCore.Signal(str)
         stopProjectRequested = QtCore.Signal(str)
+        collapsedChanged = QtCore.Signal(bool)
         roleRuntimeRequested = QtCore.Signal(
             str, str, object, object, object
         )
@@ -293,11 +294,14 @@ if PYSIDE_AVAILABLE:
             self.state.collapsed = bool(collapsed)
             self.navigation_body.setVisible(not collapsed)
             self.detail_surface.setVisible(not collapsed)
+            self.title_label.setVisible(not collapsed)
+            self.setMinimumWidth(42 if collapsed else 300)
             self.collapse_button.setText("展开" if collapsed else "收起")
             if collapsed:
                 self.attention_surface.hide()
             else:
                 self._render_selection()
+            self.collapsedChanged.emit(bool(collapsed))
 
         def _selected_key(self) -> str | None:
             item = self.tree.currentItem()
