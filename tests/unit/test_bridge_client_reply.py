@@ -300,7 +300,11 @@ class BridgeClientQueueTests(unittest.TestCase):
 
         client.get_project_team()
         client.set_project_mode("team")
-        client.append_project_guidance("project-a", "keep the roof low")
+        client.append_project_guidance(
+            "project-a",
+            "keep the roof low",
+            requirement_delta={"remove": ["REQ-chimney"]},
+        )
         client.append_project_guidance(
             "project-a",
             "check the clearance",
@@ -332,6 +336,7 @@ class BridgeClientQueueTests(unittest.TestCase):
                         "action": "append_guidance",
                         "project_id": "project-a",
                         "text": "keep the roof low",
+                        "requirement_delta": {"remove": ["REQ-chimney"]},
                     },
                 ),
                 (

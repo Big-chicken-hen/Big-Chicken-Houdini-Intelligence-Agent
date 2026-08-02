@@ -22,6 +22,8 @@ from hia_core.houdini_contract import ContractError, SchemaRegistry, strict_json
 from .errors import BridgeError
 from .events import EventBuffer
 from .knowledge_cli import KnowledgeCliError, KnowledgeCliRunner
+from .project_contracts import Requirement
+from .project_guidance import RequirementDelta
 from .scene_queue import (
     B2_READ_ONLY_PROFILE,
     RequestSnapshot,
@@ -30,6 +32,53 @@ from .scene_queue import (
 )
 from .session import BridgeSession
 from .project_service import ProjectTeamService
+
+
+def _parse_requirement_delta(value: Any) -> RequirementDelta | None:
+    """Parse explicit user scope edits without interpreting guidance prose."""
+
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"add", "supersede", "remove"}:
+        raise BridgeError("INVALID_REQUEST", "Invalid requirement_delta fields")
+    raw_add = value.get("add", [])
+    raw_supersede = value.get("supersede", {})
+    raw_remove = value.get("remove", [])
+    if not isinstance(raw_add, list) or not isinstance(raw_supersede, dict):
+        raise BridgeError("INVALID_REQUEST", "Invalid requirement_delta collection")
+    if not isinstance(raw_remove, list) or not all(
+        isinstance(item, str) and item for item in raw_remove
+    ):
+        raise BridgeError("INVALID_REQUEST", "Invalid removed requirement IDs")
+    additions = []
+    for item in raw_add:
+        if not isinstance(item, dict) or set(item) - {
+            "requirement_id",
+            "kind",
+            "source_ref",
+        }:
+            raise BridgeError("INVALID_REQUEST", "Invalid added requirement")
+        requirement_id = item.get("requirement_id")
+        kind = item.get("kind")
+        source_ref = item.get("source_ref", "")
+        if not all(isinstance(field, str) for field in (requirement_id, kind, source_ref)):
+            raise BridgeError("INVALID_REQUEST", "Invalid added requirement values")
+        if not requirement_id or not kind:
+            raise BridgeError("INVALID_REQUEST", "Added requirement needs ID and kind")
+        additions.append(Requirement(requirement_id, kind, source_ref=source_ref))
+    if not all(
+        isinstance(old_id, str)
+        and old_id
+        and isinstance(new_id, str)
+        and new_id
+        for old_id, new_id in raw_supersede.items()
+    ):
+        raise BridgeError("INVALID_REQUEST", "Invalid supersession IDs")
+    return RequirementDelta(
+        add=tuple(additions),
+        supersede=dict(raw_supersede),
+        remove=tuple(raw_remove),
+    )
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -861,13 +910,22 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 )
             action = body.get("action")
             if action == "append_guidance":
-                allowed = {"action", "project_id", "thread_id", "text"}
+                allowed = {
+                    "action",
+                    "project_id",
+                    "thread_id",
+                    "text",
+                    "requirement_delta",
+                }
                 if set(body) - allowed:
                     raise BridgeError("INVALID_REQUEST", "Unexpected guidance fields")
                 snapshot = application.project_team.append_guidance(
                     project_id=body.get("project_id"),
                     thread_id=body.get("thread_id"),
                     text=body.get("text"),
+                    requirement_delta=_parse_requirement_delta(
+                        body.get("requirement_delta")
+                    ),
                 )
             elif action == "set_role_runtime":
                 expected = {

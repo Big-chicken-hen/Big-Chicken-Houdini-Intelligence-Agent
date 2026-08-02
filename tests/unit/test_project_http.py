@@ -119,9 +119,23 @@ class ProjectHTTPTests(unittest.TestCase):
         guided = self.request(
             "POST",
             "/v1/project-team/actions",
-            {"action": "append_guidance", "text": "keep scale", **common},
+            {
+                "action": "append_guidance",
+                "text": "replace the broad material scope",
+                "requirement_delta": {
+                    "add": [
+                        {
+                            "requirement_id": "REQ-simple-material",
+                            "kind": "material",
+                        }
+                    ]
+                },
+                **common,
+            },
         )
         self.assertIn("project_team", guided)
+        record = self.project_team._registry.require(started["project_id"])
+        self.assertEqual("REQ-simple-material", record.state.requirements[0].requirement_id)
         runtime = self.request(
             "POST",
             "/v1/project-team/actions",
