@@ -880,12 +880,33 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     local_image_paths=body.get("local_image_paths"),
                 )
             else:
+                def require_ordinary_thread(thread_id: str) -> None:
+                    if application.project_team is None:
+                        return
+                    identity = application.project_team.role_identity_for_thread(
+                        thread_id
+                    )
+                    if identity is None:
+                        return
+                    project_id, role = identity
+                    raise BridgeError(
+                        "PROJECT_ROLE_TURN_REQUIRES_WORKFLOW",
+                        "Project role Threads can only advance through the project workflow",
+                        HTTPStatus.CONFLICT,
+                        {
+                            "project_id": project_id,
+                            "thread_id": thread_id,
+                            "role": role.value,
+                        },
+                    )
+
                 result = application.session.start_turn(
                     text=body.get("text"),
                     model=body.get("model"),
                     effort=body.get("effort"),
                     local_image_paths=body.get("local_image_paths"),
                     service_tier=body.get("service_tier"),
+                    thread_guard=require_ordinary_thread,
                 )
                 result["routing"] = "single"
             return {"ok": True, **result}, HTTPStatus.OK

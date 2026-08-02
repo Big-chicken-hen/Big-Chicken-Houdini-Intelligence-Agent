@@ -96,6 +96,28 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual("thread/start", self.client.calls[0][0])
         self.assertEqual("thread/goal/set", self.client.calls[1][0])
 
+    def test_role_identity_is_resolved_only_from_persisted_registry_membership(self) -> None:
+        result = self.service.start_team_project(task_text="建造木屋")
+        expected = (result["project_id"], Role.SUPERVISOR)
+        self.assertEqual(
+            expected,
+            self.service.role_identity_for_thread(result["root_thread_id"]),
+        )
+        self.assertIsNone(self.service.role_identity_for_thread("thread-unrelated"))
+
+        # Reconstructing the service proves that the decision is not based on
+        # an in-memory title, cwd, model, or previously observed request.
+        reconstructed = ProjectTeamService(
+            client=self.client,
+            project_root=Path(self.temp.name),
+            registry=self.registry,
+            settings=self.settings,
+        )
+        self.assertEqual(
+            expected,
+            reconstructed.role_identity_for_thread(result["root_thread_id"]),
+        )
+
     def test_role_guidance_and_runtime_use_explicit_membership(self) -> None:
         result = self.service.start_team_project(task_text="建造木屋")
         project_id = result["project_id"]

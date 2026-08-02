@@ -100,6 +100,24 @@ class ProjectTeamService:
             raise ValueError("team_override must be single or team")
         return override or self._settings.get()
 
+    def role_identity_for_thread(self, thread_id: str) -> tuple[str, Role] | None:
+        """Return only an exact persisted Project/Role identity for a Thread."""
+
+        if not isinstance(thread_id, str) or not thread_id:
+            return None
+        with self._lock:
+            for record in self._registry.list():
+                matches = [
+                    role
+                    for role, binding in record.state.roles.items()
+                    if binding.thread_id == thread_id
+                ]
+                if len(matches) > 1:
+                    raise ValueError("project registry reuses a Thread within a project")
+                if matches:
+                    return record.state.project_id, matches[0]
+        return None
+
     def start_team_project(
         self,
         *,

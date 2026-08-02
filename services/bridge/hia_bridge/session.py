@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .codex_stdio import CodexStdioClient, RequestId
 from .errors import BridgeError, CodexRPCError
@@ -1190,6 +1190,7 @@ class BridgeSession:
         effort: str | None = None,
         local_image_paths: list[str] | None = None,
         service_tier: str | None = None,
+        thread_guard: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(text, str):
             raise BridgeError("EMPTY_INPUT", "Natural-language input must not be empty")
@@ -1212,6 +1213,12 @@ class BridgeSession:
         )
         with self._lock:
             thread_id = self._validated_identifier(self._thread_id, "thread_id")
+            if thread_guard is not None:
+                # Resolve and authorize the exact selected Thread while the
+                # same lock that reserves turn/start still owns its identity.
+                # This prevents a concurrent resume from changing the Thread
+                # between a preflight check and the native request.
+                thread_guard(thread_id)
             image_paths = self._validated_local_image_paths(
                 local_image_paths,
                 thread_id,

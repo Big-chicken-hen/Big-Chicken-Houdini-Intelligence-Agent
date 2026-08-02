@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -124,6 +125,47 @@ class ProjectHTTPTests(unittest.TestCase):
         self.assertEqual("start_intake", result["pending_effect"])
         self.assertTrue(result["project_id"].startswith("project-"))
         self.assertEqual(1, len(result["project_team"]["projects"]))
+
+    def test_project_role_cannot_bypass_workflow_through_ordinary_turn_route(self) -> None:
+        started = self.request(
+            "POST",
+            "/v1/turn",
+            {"text": "build scene", "team_override": "team"},
+        )
+        self.request(
+            "POST",
+            "/v1/session",
+            {"action": "resume", "thread_id": started["root_thread_id"]},
+        )
+
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/turn",
+                {"text": "bypass supervisor", "team_override": "single"},
+            )
+        self.assertEqual(409, raised.exception.code)
+        blocked = json.loads(raised.exception.read().decode("utf-8"))
+        error = blocked["structured_error"]
+        self.assertEqual("PROJECT_ROLE_TURN_REQUIRES_WORKFLOW", error["code"])
+        self.assertEqual(started["project_id"], error["details"]["project_id"])
+        self.assertEqual("supervisor", error["details"]["role"])
+        self.assertEqual(started["root_thread_id"], error["details"]["thread_id"])
+
+        # The rejected ordinary Turn does not block the sanctioned guidance
+        # route or leave a fake active Turn behind.
+        guided = self.request(
+            "POST",
+            "/v1/project-team/actions",
+            {
+                "action": "append_guidance",
+                "project_id": started["project_id"],
+                "thread_id": started["root_thread_id"],
+                "text": "preserve the roof silhouette",
+            },
+        )
+        self.assertIn("project_team", guided)
+        self.assertFalse(self.session.snapshot()["turn_active"])
 
     def test_role_actions_return_one_authoritative_snapshot(self) -> None:
         started = self.request(
