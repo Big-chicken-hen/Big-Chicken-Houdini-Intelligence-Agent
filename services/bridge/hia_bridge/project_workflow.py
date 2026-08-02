@@ -34,6 +34,7 @@ _WAITING_STATUSES = frozenset(
         ProjectStatus.NOT_APPLICABLE,
     }
 )
+_STOP_CONTROL_EFFECTS = frozenset({"pause_goal", "show_attention", "record_failure"})
 
 
 class ProjectWorkflowHost:
@@ -87,6 +88,26 @@ class ProjectWorkflowHost:
             )
             return True
 
+    def _start_stop_control(self, project_id: str) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            current = self._inflight.get(project_id)
+            if current is not None and not current.done():
+                return False
+            record = self._registry.require(project_id)
+            if (
+                not record.state.pending_effects
+                or record.state.pending_effects[0].kind not in _STOP_CONTROL_EFFECTS
+            ):
+                return False
+            future = self._pool.submit(self._execute_one, project_id)
+            self._inflight[project_id] = future
+            future.add_done_callback(
+                lambda completed, pid=project_id: self._effect_done(pid, completed)
+            )
+            return True
+
     def recover(self) -> tuple[str, ...]:
         """Reschedule persisted work after Bridge startup.
 
@@ -117,6 +138,8 @@ class ProjectWorkflowHost:
             active = future is not None and not future.done()
         if active and self._interrupt_hook is not None:
             self._interrupt_hook(project_id)
+        if not active:
+            self._transition_to_stopped(project_id)
         return active
 
     def resume(self, project_id: str) -> bool:
@@ -175,14 +198,38 @@ class ProjectWorkflowHost:
         with self._lock:
             if self._inflight.get(project_id) is future:
                 self._inflight.pop(project_id, None)
+            stopped = project_id in self._stopped
             should_continue = (
                 not self._closed
-                and project_id not in self._stopped
+                and not stopped
                 and record.state.status not in _WAITING_STATUSES
                 and bool(record.state.pending_effects)
             )
+        if stopped and record.state.status not in _WAITING_STATUSES:
+            record = self._transition_to_stopped(project_id)
+            if record is not None:
+                self._emit_snapshot(record)
+        if stopped:
+            self._start_stop_control(project_id)
         if should_continue:
             self.start(project_id)
+
+    def _transition_to_stopped(self, project_id: str) -> ProjectRecord | None:
+        try:
+            record = self._registry.require(project_id)
+            if record.state.status in _WAITING_STATUSES:
+                return record
+            return self._runner.cancel_pending_and_dispatch(
+                project_id,
+                LifecycleEvent(
+                    ProjectEvent.PROJECT_INTERRUPTED,
+                    {"reason": "user_stop"},
+                ),
+            )
+        except BaseException as error:
+            with self._lock:
+                self._host_errors[project_id] = error
+            return None
 
     def _persist_failure(
         self, project_id: str, error: BaseException

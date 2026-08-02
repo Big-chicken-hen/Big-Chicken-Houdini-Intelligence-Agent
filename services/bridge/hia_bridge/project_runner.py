@@ -49,6 +49,32 @@ class ProjectRunner:
         outcome = executor.execute(record.state, effect)
         return self.acknowledge_effect(project_id, effect.effect_id, outcome)
 
+    def cancel_pending_and_dispatch(
+        self,
+        project_id: str,
+        event: LifecycleEvent,
+    ) -> ProjectRecord:
+        """Cancel not-in-flight effects before an explicit control transition.
+
+        The workflow host calls this only after proving that no effect for the
+        project is in flight.  It is intentionally separate from ``dispatch``
+        so ordinary events can never bypass persisted external work.
+        """
+
+        record = self._registry.require(project_id)
+        base = replace(record.state, pending_effects=())
+        next_state, commands = reduce_project(base, event)
+        effects = tuple(
+            _pending_effect(next_state, index, command.kind.value, command.data or {})
+            for index, command in enumerate(commands)
+        )
+        next_state = replace(next_state, pending_effects=effects)
+        updated = ProjectRecord(
+            next_state, record.authoritative_task_text, record.attachments
+        )
+        self._registry.put(updated, expected_revision=record.state.revision)
+        return updated
+
     def acknowledge(
         self,
         project_id: str,

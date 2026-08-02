@@ -109,6 +109,23 @@ class ProjectRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pending"):
             self.runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_FAILED))
 
+    def test_explicit_idle_stop_cancels_pending_work_and_requires_pause_ack(self) -> None:
+        record = _record(ProjectStatus.EXECUTING_STAGE)
+        record = ProjectRecord(
+            replace(
+                record.state,
+                pending_effects=(PendingEffect("write-next", "start_execution"),),
+            ),
+            record.authoritative_task_text,
+        )
+        self.registry.put(record)
+        stopped = self.runner.cancel_pending_and_dispatch(
+            "p1",
+            LifecycleEvent(ProjectEvent.PROJECT_INTERRUPTED, {"reason": "user_stop"}),
+        )
+        self.assertEqual(ProjectStatus.PAUSING, stopped.state.status)
+        self.assertEqual("pause_goal", stopped.state.pending_effects[0].kind)
+
     def test_state_only_effect_ack_persists_stage_advance_without_auto_pass(self) -> None:
         record = _record(ProjectStatus.EXECUTING_STAGE)
         effect = PendingEffect("effect-advance", "advance_stage", {})

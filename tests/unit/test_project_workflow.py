@@ -14,6 +14,7 @@ from services.bridge.hia_bridge.project_contracts import (
     authoritative_task_identity,
 )
 from services.bridge.hia_bridge.project_effects import EffectResult
+from services.bridge.hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent
 from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
 from services.bridge.hia_bridge.project_runner import ProjectRunner
 from services.bridge.hia_bridge.project_workflow import ProjectWorkflowHost
@@ -47,6 +48,8 @@ class RecordingExecutor:
     def execute(self, state, effect):
         with self.lock:
             self.effects.append((state.project_id, effect.effect_id))
+        if effect.kind == "pause_goal":
+            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_PAUSED))
         return EffectResult(state, None)
 
 
@@ -66,6 +69,8 @@ class BlockingExecutor(RecordingExecutor):
         self.entered.set()
         if not self.release.wait(5):
             raise TimeoutError("test release was not signalled")
+        if effect.kind == "pause_goal":
+            return EffectResult(state, LifecycleEvent(ProjectEvent.GOAL_PAUSED))
         return EffectResult(state, None)
 
 
@@ -142,6 +147,9 @@ class ProjectWorkflowHostTests(unittest.TestCase):
         self.assertTrue(executor.all_entered.wait(1))
         self.assertEqual({"p1", "p2"}, {project for project, _ in executor.effects})
         executor.release.set()
+        self._wait_until(
+            lambda: not host.is_inflight("p1") and not host.is_inflight("p2")
+        )
 
     def test_stop_interrupts_current_rpc_and_does_not_start_next_effect(self) -> None:
         self.registry.put(_record("p1", 2))
@@ -156,8 +164,28 @@ class ProjectWorkflowHostTests(unittest.TestCase):
         executor.release.set()
         self._wait_until(lambda: not host.is_inflight("p1"))
 
+        self._wait_until(
+            lambda: self.registry.require("p1").state.status
+            is ProjectStatus.INTERRUPTED
+        )
         record = self.registry.require("p1")
-        self.assertEqual(["p1-effect-1"], [e.effect_id for e in record.state.pending_effects])
+        self.assertEqual((), record.state.pending_effects)
+        self.assertEqual(2, len(executor.effects))
+        self.assertNotIn(("p1", "p1-effect-1"), executor.effects)
+
+    def test_idle_stop_replaces_unstarted_work_with_confirmed_goal_pause(self) -> None:
+        self.registry.put(_record("p1", 2))
+        executor = RecordingExecutor()
+        host = self._host(executor)
+
+        self.assertFalse(host.stop("p1"))
+        self._wait_until(
+            lambda: self.registry.require("p1").state.status
+            is ProjectStatus.INTERRUPTED
+        )
+
+        self.assertNotIn(("p1", "p1-effect-0"), executor.effects)
+        self.assertNotIn(("p1", "p1-effect-1"), executor.effects)
         self.assertEqual(1, len(executor.effects))
 
     def test_executor_exception_is_persisted_as_project_failure(self) -> None:
