@@ -90,6 +90,10 @@ _ACTIVE = frozenset(
     }
 )
 
+_RECOVERY_RESTORABLE = frozenset(
+    {*_ACTIVE, ProjectStatus.PAUSING, ProjectStatus.RESUMING}
+)
+
 
 def _next(
     state: ProjectState,
@@ -275,8 +279,8 @@ def reduce_project(
             attention_reason="recovery_validation_pending",
         )
     if kind is ProjectEvent.RECOVERY_VALIDATED and status is ProjectStatus.INTERRUPTED:
-        target = state.resume_status
-        if target not in _ACTIVE:
+        target = state.recovery_return_status or state.resume_status
+        if target not in _RECOVERY_RESTORABLE:
             raise InvalidTransition(status, kind)
         return _next(
             state,
@@ -286,16 +290,39 @@ def reduce_project(
         )
     if kind is ProjectEvent.RECOVERY_FAILED and status is ProjectStatus.INTERRUPTED:
         error = str(data.get("error") or "recovery_validation_failed")
+        target = state.recovery_return_status or state.resume_status
+        if target not in _RECOVERY_RESTORABLE:
+            raise InvalidTransition(status, kind)
         return _next(
             state,
             ProjectStatus.NEEDS_ATTENTION,
+            recovery_required=True,
+            attention_reason=error,
+            last_error=error,
+        )
+    if kind is ProjectEvent.RECOVERY_FAILED and status in _RECOVERY_RESTORABLE:
+        error = str(data.get("error") or "recovery_validation_failed")
+        return _next(
+            state,
+            ProjectStatus.NEEDS_ATTENTION,
+            pending_effects=(),
+            recovery_required=True,
+            recovery_return_status=status,
+            recovery_pending_effects=state.pending_effects,
             attention_reason=error,
             last_error=error,
         )
     if kind is ProjectEvent.USER_CONTINUE and status is ProjectStatus.NEEDS_ATTENTION:
-        target = state.resume_status
-        if target not in _ACTIVE:
+        target = state.recovery_return_status or state.resume_status
+        if target not in _RECOVERY_RESTORABLE:
             raise InvalidTransition(status, kind)
+        if state.recovery_required:
+            return _next(
+                state,
+                ProjectStatus.INTERRUPTED,
+                LifecycleCommand(ProjectCommand.VERIFY_RECOVERY),
+                attention_reason="recovery_validation_pending",
+            )
         return _next(
             state,
             ProjectStatus.RESUMING,
@@ -303,9 +330,20 @@ def reduce_project(
             attention_reason="goal_resume_pending",
         )
     if kind is ProjectEvent.GOAL_RESUMED and status is ProjectStatus.RESUMING:
-        target = state.resume_status
-        if target not in _ACTIVE:
+        target = state.recovery_return_status or state.resume_status
+        if target not in _RECOVERY_RESTORABLE:
             raise InvalidTransition(status, kind)
+        if state.recovery_required:
+            return _next(
+                state,
+                target,
+                pending_effects=state.recovery_pending_effects,
+                recovery_required=False,
+                recovery_return_status=None,
+                recovery_pending_effects=(),
+                attention_reason=None,
+                last_error=None,
+            )
         return _next(
             state,
             target,

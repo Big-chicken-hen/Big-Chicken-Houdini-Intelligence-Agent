@@ -4,6 +4,7 @@ from dataclasses import replace
 import unittest
 
 from services.bridge.hia_bridge.project_contracts import (
+    PendingEffect,
     ProjectState,
     ProjectStatus,
     RuntimeBudget,
@@ -126,6 +127,98 @@ class ProjectLifecycleTests(unittest.TestCase):
                 self.assertEqual(ProjectCommand.RESUME_GOAL, commands[0].kind)
                 state, _ = self.apply(state, ProjectEvent.GOAL_RESUMED)
                 self.assertEqual(ProjectStatus.REPAIRING_STAGE, state.status)
+
+    def test_recovery_attention_revalidates_before_resuming_and_restores_work(self) -> None:
+        original = PendingEffect("original-effect", "start_execution")
+        state = replace(
+            _state(ProjectStatus.EXECUTING_STAGE),
+            resume_status=ProjectStatus.AUTHORIZATION,
+            pending_effects=(original,),
+        )
+        state, commands = self.apply(
+            state,
+            ProjectEvent.RECOVERY_FAILED,
+            error="native identity missing",
+        )
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
+        self.assertTrue(state.recovery_required)
+        self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.recovery_return_status)
+        self.assertEqual(ProjectStatus.AUTHORIZATION, state.resume_status)
+        self.assertEqual((original,), state.recovery_pending_effects)
+        self.assertEqual((), state.pending_effects)
+        self.assertEqual((), commands)
+
+        state, commands = self.apply(state, ProjectEvent.USER_CONTINUE)
+        self.assertEqual(ProjectStatus.INTERRUPTED, state.status)
+        self.assertEqual(ProjectCommand.VERIFY_RECOVERY, commands[0].kind)
+        state, commands = self.apply(state, ProjectEvent.RECOVERY_VALIDATED)
+        self.assertEqual(ProjectStatus.RESUMING, state.status)
+        self.assertEqual(ProjectCommand.RESUME_GOAL, commands[0].kind)
+        state, commands = self.apply(state, ProjectEvent.GOAL_RESUMED)
+        self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.status)
+        self.assertEqual(ProjectStatus.AUTHORIZATION, state.resume_status)
+        self.assertEqual((original,), state.pending_effects)
+        self.assertFalse(state.recovery_required)
+        self.assertEqual((), commands)
+
+    def test_recovery_attention_failed_retry_stays_attention_without_goal_resume(self) -> None:
+        original = PendingEffect("original-effect", "start_execution")
+        state = replace(
+            _state(ProjectStatus.PLANNING), pending_effects=(original,)
+        )
+        state, _ = self.apply(
+            state, ProjectEvent.RECOVERY_FAILED, error="identity missing"
+        )
+        state, commands = self.apply(state, ProjectEvent.USER_CONTINUE)
+        self.assertEqual(ProjectCommand.VERIFY_RECOVERY, commands[0].kind)
+        state, commands = self.apply(
+            state, ProjectEvent.RECOVERY_FAILED, error="identity still missing"
+        )
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
+        self.assertTrue(state.recovery_required)
+        self.assertEqual((original,), state.recovery_pending_effects)
+        self.assertEqual((), state.pending_effects)
+        self.assertEqual((), commands)
+
+    def test_recovery_restores_valid_pausing_and_resuming_control_effects(self) -> None:
+        cases = (
+            (
+                ProjectStatus.PAUSING,
+                PendingEffect("pause", "pause_goal"),
+                ProjectStatus.PLANNING,
+                ProjectEvent.GOAL_PAUSED,
+                ProjectStatus.INTERRUPTED,
+            ),
+            (
+                ProjectStatus.RESUMING,
+                PendingEffect("resume", "resume_goal"),
+                ProjectStatus.PLANNING,
+                ProjectEvent.GOAL_RESUMED,
+                ProjectStatus.PLANNING,
+            ),
+        )
+        for original_status, original_effect, resume_status, ack, expected in cases:
+            with self.subTest(status=original_status):
+                state = replace(
+                    _state(original_status),
+                    resume_status=resume_status,
+                    pause_target=(
+                        ProjectStatus.INTERRUPTED
+                        if original_status is ProjectStatus.PAUSING
+                        else None
+                    ),
+                    pending_effects=(original_effect,),
+                )
+                state, _ = self.apply(
+                    state, ProjectEvent.RECOVERY_FAILED, error="identity missing"
+                )
+                state, _ = self.apply(state, ProjectEvent.USER_CONTINUE)
+                state, _ = self.apply(state, ProjectEvent.RECOVERY_VALIDATED)
+                state, _ = self.apply(state, ProjectEvent.GOAL_RESUMED)
+                self.assertEqual(original_status, state.status)
+                self.assertEqual((original_effect,), state.pending_effects)
+                state, _ = self.apply(state, ack)
+                self.assertEqual(expected, state.status)
 
     def test_ineligible_and_unclear_do_not_provision_workers(self) -> None:
         for event, expected in (

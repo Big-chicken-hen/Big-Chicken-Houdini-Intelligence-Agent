@@ -192,6 +192,9 @@ class ProjectState:
     attention_reason: str | None = None
     last_error: str | None = None
     pending_effects: tuple[PendingEffect, ...] = ()
+    recovery_required: bool = False
+    recovery_return_status: ProjectStatus | None = None
+    recovery_pending_effects: tuple[PendingEffect, ...] = ()
     plan_stale: bool = False
     blueprint_revision: int = 0
     authorized_blueprint_revision: int = 0
@@ -220,6 +223,14 @@ class ProjectState:
             raise ValueError("authorized blueprint revision cannot exceed current revision")
         if not isinstance(self.plan_stale, bool):
             raise ValueError("plan_stale must be boolean")
+        if not isinstance(self.recovery_required, bool):
+            raise ValueError("recovery_required must be boolean")
+        if self.recovery_required:
+            recovery_target = self.recovery_return_status or self.resume_status
+            if recovery_target is None:
+                raise ValueError("recovery_required needs an exact return status")
+        elif self.recovery_return_status is not None or self.recovery_pending_effects:
+            raise ValueError("recovery fields require recovery_required")
         role_values = dict(self.roles)
         thread_ids = [binding.thread_id for binding in role_values.values()]
         if len(thread_ids) != len(set(thread_ids)):
@@ -335,6 +346,20 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
                 "data": dict(effect.data),
             }
             for effect in state.pending_effects
+        ],
+        "recovery_required": state.recovery_required,
+        "recovery_return_status": (
+            state.recovery_return_status.value
+            if state.recovery_return_status
+            else None
+        ),
+        "recovery_pending_effects": [
+            {
+                "effect_id": effect.effect_id,
+                "kind": effect.kind,
+                "data": dict(effect.data),
+            }
+            for effect in state.recovery_pending_effects
         ],
         "plan_stale": state.plan_stale,
         "blueprint_revision": state.blueprint_revision,
@@ -469,22 +494,30 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
     resume = value.get("resume_status")
     pause_target = value.get("pause_target")
     raw_effects = value.get("pending_effects", [])
-    if not isinstance(raw_effects, list):
-        raise ValueError("pending_effects must be a list")
-    effects: list[PendingEffect] = []
-    for raw_effect in raw_effects:
-        if not isinstance(raw_effect, Mapping):
-            raise ValueError("pending effect is malformed")
-        raw_data = raw_effect.get("data", {})
-        if not isinstance(raw_data, Mapping):
-            raise ValueError("pending effect data must be an object")
-        effects.append(
-            PendingEffect(
-                effect_id=str(raw_effect.get("effect_id") or ""),
-                kind=str(raw_effect.get("kind") or ""),
-                data=raw_data,
+    raw_recovery_effects = value.get("recovery_pending_effects", [])
+    if not isinstance(raw_effects, list) or not isinstance(raw_recovery_effects, list):
+        raise ValueError("pending effect collections must be lists")
+
+    def parse_effects(raw_values: list[Any]) -> tuple[PendingEffect, ...]:
+        effects: list[PendingEffect] = []
+        for raw_effect in raw_values:
+            if not isinstance(raw_effect, Mapping):
+                raise ValueError("pending effect is malformed")
+            raw_data = raw_effect.get("data", {})
+            if not isinstance(raw_data, Mapping):
+                raise ValueError("pending effect data must be an object")
+            effects.append(
+                PendingEffect(
+                    effect_id=str(raw_effect.get("effect_id") or ""),
+                    kind=str(raw_effect.get("kind") or ""),
+                    data=raw_data,
+                )
             )
-        )
+        return tuple(effects)
+
+    effects = parse_effects(raw_effects)
+    recovery_effects = parse_effects(raw_recovery_effects)
+    recovery_return = value.get("recovery_return_status")
     return ProjectState(
         project_id=required_text("project_id"),
         goal_thread_id=required_text("goal_thread_id"),
@@ -538,7 +571,14 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
             value.get("attention_reason"), "attention_reason"
         ),
         last_error=_optional_text(value.get("last_error"), "last_error"),
-        pending_effects=tuple(effects),
+        pending_effects=effects,
+        recovery_required=_boolean(
+            value.get("recovery_required", False), "recovery_required"
+        ),
+        recovery_return_status=(
+            ProjectStatus(recovery_return) if recovery_return is not None else None
+        ),
+        recovery_pending_effects=recovery_effects,
         plan_stale=_boolean(value.get("plan_stale", False), "plan_stale"),
         blueprint_revision=_non_negative_int(
             value.get("blueprint_revision", 0), "blueprint revision"

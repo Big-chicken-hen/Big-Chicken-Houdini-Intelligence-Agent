@@ -104,6 +104,30 @@ class ProjectRunnerTests(unittest.TestCase):
         self.assertIsNone(updated.state.resume_status)
         self.assertEqual((), updated.state.pending_effects)
 
+    def test_persist_recovery_failure_holds_original_effect_for_revalidation(self) -> None:
+        original = PendingEffect("original", "start_execution", {"repair": True})
+        record = _record(ProjectStatus.EXECUTING_STAGE)
+        record = ProjectRecord(
+            replace(
+                record.state,
+                resume_status=ProjectStatus.AUTHORIZATION,
+                pending_effects=(original,),
+            ),
+            record.authoritative_task_text,
+        )
+        self.registry.put(record)
+
+        updated = self.runner.persist_recovery_failure("p1", "identity missing")
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, updated.state.status)
+        self.assertEqual("identity missing", updated.state.attention_reason)
+        self.assertEqual(ProjectStatus.AUTHORIZATION, updated.state.resume_status)
+        self.assertEqual((original,), updated.state.recovery_pending_effects)
+        self.assertEqual((), updated.state.pending_effects)
+
+        reloaded = self.registry.require("p1")
+        self.assertTrue(reloaded.state.recovery_required)
+        self.assertEqual((original,), reloaded.state.recovery_pending_effects)
+
     def test_resume_effect_failure_is_persisted_as_needs_attention(self) -> None:
         record = _record(ProjectStatus.NEEDS_ATTENTION)
         record = ProjectRecord(

@@ -75,6 +75,31 @@ class ProjectRunner:
         self._registry.put(updated, expected_revision=record.state.revision)
         return updated
 
+    def persist_recovery_failure(
+        self,
+        project_id: str,
+        error: str,
+    ) -> ProjectRecord:
+        """Persist startup identity rejection without losing queued work.
+
+        This is deliberately narrower than ``dispatch``: the recovery reducer
+        transition owns moving existing effects into its durable recovery
+        holding area before the project becomes user-actionable attention.
+        """
+
+        record = self._registry.require(project_id)
+        next_state, commands = reduce_project(
+            record.state,
+            LifecycleEvent(ProjectEvent.RECOVERY_FAILED, {"error": error}),
+        )
+        if commands:
+            raise ValueError("recovery failure must not emit an external command")
+        updated = ProjectRecord(
+            next_state, record.authoritative_task_text, record.attachments
+        )
+        self._registry.put(updated, expected_revision=record.state.revision)
+        return updated
+
     def acknowledge(
         self,
         project_id: str,

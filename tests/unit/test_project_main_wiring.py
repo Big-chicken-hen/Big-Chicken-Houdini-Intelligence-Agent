@@ -226,9 +226,16 @@ class ProjectMainWiringTests(unittest.TestCase):
         )
 
         self.assertEqual((), runtime.recover())
-        self.assertTrue(
-            runtime.registry.require("project-1").authoritative_task_text
+        failed = runtime.registry.require("project-1")
+        self.assertTrue(failed.authoritative_task_text)
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, failed.state.status)
+        self.assertTrue(failed.state.recovery_required)
+        self.assertEqual(
+            ProjectStatus.EXECUTING_STAGE, failed.state.recovery_return_status
         )
+        self.assertEqual("effect-1", failed.state.recovery_pending_effects[0].effect_id)
+        self.assertEqual((), failed.state.pending_effects)
+        self.assertIn("Thread identity is missing", failed.state.attention_reason)
         update = next(
             event
             for event in self.events.poll(0, timeout=0)["events"]
@@ -236,7 +243,81 @@ class ProjectMainWiringTests(unittest.TestCase):
         )
         self.assertEqual([], update["recovered_project_ids"])
         self.assertEqual("project-1", update["recovery_failures"][0]["project_id"])
+        project = update["project_team"]["projects"][0]
+        self.assertEqual("needs_attention", project["status"])
+        self.assertIn("Thread identity is missing", project["attention_reason"])
         runtime.close(1)
+
+    def test_active_recovery_attention_revalidates_before_goal_and_restores_work(self) -> None:
+        runtime = bridge_main._build_project_runtime(
+            client=self.client,
+            events=self.events,
+            project_root=self.root,
+            selected_backend="hia_mcp_v2",
+            server_transports=server_transports(),
+            allowed_evidence_roots=(self.root / ".runtime",),
+        )
+        supervisor_id = "recoverable-supervisor"
+        record = _record("project-retry", supervisor_thread_id=supervisor_id)
+        original = PendingEffect("original-attention", "show_attention", {"why": "queued"})
+        runtime.registry.put(
+            ProjectRecord(
+                replace(
+                    record.state,
+                    resume_status=ProjectStatus.AUTHORIZATION,
+                    pending_effects=(original,),
+                ),
+                record.authoritative_task_text,
+            )
+        )
+
+        self.assertEqual((), runtime.recover())
+        failed = runtime.registry.require("project-retry").state
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, failed.status)
+        self.assertEqual(ProjectStatus.AUTHORIZATION, failed.resume_status)
+        self.assertEqual((original,), failed.recovery_pending_effects)
+
+        runtime.service.continue_project(project_id="project-retry")
+        self._wait_until(
+            lambda: runtime.registry.require("project-retry").state.status
+            is ProjectStatus.NEEDS_ATTENTION
+            and "Thread identity is missing"
+            in (runtime.registry.require("project-retry").state.last_error or "")
+        )
+        still_failed = runtime.registry.require("project-retry").state
+        self.assertTrue(still_failed.recovery_required)
+        self.assertEqual((original,), still_failed.recovery_pending_effects)
+        self.assertFalse(
+            any(method == "thread/goal/set" for method, _ in self.client.requests)
+        )
+
+        self.client.native_threads[supervisor_id] = {
+            "id": supervisor_id,
+            "threadSource": "hia-project/project-retry/supervisor",
+            "status": {"type": "idle"},
+        }
+        self.client.native_goals[supervisor_id] = {
+            "threadId": supervisor_id,
+            "status": "paused",
+        }
+        runtime.service.continue_project(project_id="project-retry")
+        self._wait_until(
+            lambda: runtime.registry.require("project-retry").state.status
+            is ProjectStatus.EXECUTING_STAGE
+            and not runtime.registry.require("project-retry").state.pending_effects
+        )
+        restored = runtime.registry.require("project-retry").state
+        self.assertFalse(restored.recovery_required)
+        self.assertEqual(ProjectStatus.AUTHORIZATION, restored.resume_status)
+        self.assertEqual((), restored.recovery_pending_effects)
+        goal_sets = [
+            params
+            for method, params in self.client.requests
+            if method == "thread/goal/set"
+        ]
+        self.assertEqual(1, len(goal_sets))
+        self.assertEqual("active", goal_sets[0]["status"])
+        self.assertTrue(runtime.close(1))
 
     def test_runtime_recovery_rejects_registry_without_authoritative_task(self) -> None:
         runtime = bridge_main._build_project_runtime(

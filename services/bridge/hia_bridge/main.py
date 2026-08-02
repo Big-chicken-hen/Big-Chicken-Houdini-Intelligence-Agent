@@ -438,10 +438,15 @@ class ProjectRuntime:
             try:
                 self.thread_factory.validate_recovery_identity(record.state)
             except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                record = self.runner.persist_recovery_failure(
+                    record.state.project_id,
+                    error,
+                )
                 failures.append(
                     {
                         "project_id": record.state.project_id,
-                        "error": str(exc),
+                        "error": error,
                     }
                 )
                 continue
