@@ -31,7 +31,7 @@ from .scene_queue import (
     SceneQueueError,
 )
 from .session import BridgeSession
-from .project_service import ProjectTeamService
+from .project_service import ProjectGuidanceUnavailable, ProjectTeamService
 
 
 def _parse_requirement_delta(value: Any) -> RequirementDelta | None:
@@ -940,14 +940,29 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 }
                 if set(body) - allowed:
                     raise BridgeError("INVALID_REQUEST", "Unexpected guidance fields")
-                snapshot = application.project_team.append_guidance(
-                    project_id=body.get("project_id"),
-                    thread_id=body.get("thread_id"),
-                    text=body.get("text"),
-                    requirement_delta=_parse_requirement_delta(
-                        body.get("requirement_delta")
-                    ),
-                )
+                try:
+                    snapshot = application.project_team.append_guidance(
+                        project_id=body.get("project_id"),
+                        thread_id=body.get("thread_id"),
+                        text=body.get("text"),
+                        requirement_delta=_parse_requirement_delta(
+                            body.get("requirement_delta")
+                        ),
+                    )
+                except ProjectGuidanceUnavailable as exc:
+                    raise BridgeError(
+                        exc.code,
+                        str(exc),
+                        HTTPStatus.CONFLICT,
+                        {
+                            "project_id": exc.project_id,
+                            "status": exc.status,
+                            "recoverable": exc.recoverable,
+                            "next_action": (
+                                "continue" if exc.recoverable else "new_project"
+                            ),
+                        },
+                    ) from exc
             elif action == "set_role_runtime":
                 expected = {
                     "action",

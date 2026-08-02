@@ -243,12 +243,17 @@ class FakeView:
         self.state = ProjectPanelState()
         self.render_count = 0
         self.guidance_ack_count = 0
+        self.guidance_text = ""
 
     def refresh_view(self) -> None:
         self.render_count += 1
 
-    def acknowledge_guidance(self) -> None:
+    def acknowledge_guidance(self, submitted_text: str) -> bool:
+        if self.guidance_text != submitted_text:
+            return False
         self.guidance_ack_count += 1
+        self.guidance_text = ""
+        return True
 
 
 class FakeGateway:
@@ -333,6 +338,27 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.assertEqual(1, len(self.view.state.tree.projects))
         self.assertEqual(1, len(self.view.state.tree.ordinary_threads))
 
+    def test_live_project_event_updates_project_without_losing_ordinary_history(self) -> None:
+        self.controller.show()
+        self.gateway.actionCompleted.emit(
+            "project_team_refresh", {"project_team": project_snapshot()}
+        )
+        self.gateway.actionCompleted.emit(
+            "project_history_refresh",
+            {"threads": [{"thread_id": "ordinary", "name": "普通", "updated_at": 1}]},
+        )
+        updated = project_snapshot(status="completed")
+        self.assertTrue(
+            self.controller.consume_project_team_update(
+                {"type": "project_team_updated", "project_team": updated}
+            )
+        )
+        self.assertEqual("completed", self.view.state.tree.projects[0].status)
+        self.assertEqual(
+            ["ordinary"],
+            [item.thread_id for item in self.view.state.tree.ordinary_threads],
+        )
+
     def test_role_runtime_and_guidance_use_explicit_ids(self) -> None:
         self.controller.show()
         self.view.roleRuntimeRequested.emit(
@@ -350,25 +376,88 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.assertEqual("gpt-next", runtime[2]["model"])
         guidance = next(call for call in self.gateway.calls if call[0] == "append_project_guidance")
         self.assertEqual("减少屋顶装饰", guidance[2]["text"])
+        self.assertRegex(guidance[2]["context"], r"^project_guidance:[0-9a-f]{32}$")
 
     def test_guidance_text_is_acknowledged_only_after_success(self) -> None:
         self.controller.show()
+        self.view.guidance_text = "保留屋顶"
+        self.view.appendGuidanceRequested.emit(
+            "project-house", "thread-execution", self.view.guidance_text
+        )
+        context = next(
+            call[2]["context"]
+            for call in self.gateway.calls
+            if call[0] == "append_project_guidance"
+        )
         self.gateway.requestFailed.emit(
-            "project_guidance:project-house",
+            context,
             {"error": {"message": "project needs attention"}},
         )
         self.assertEqual(0, self.view.guidance_ack_count)
+        self.assertEqual("保留屋顶", self.view.guidance_text)
         self.assertTrue(self.errors)
+        self.view.appendGuidanceRequested.emit(
+            "project-house", "thread-execution", self.view.guidance_text
+        )
+        context = [
+            call[2]["context"]
+            for call in self.gateway.calls
+            if call[0] == "append_project_guidance"
+        ][-1]
         self.gateway.actionCompleted.emit(
-            "project_guidance:project-house",
+            context,
             {"ok": True},
         )
         self.assertEqual(0, self.view.guidance_ack_count)
         self.gateway.actionCompleted.emit(
-            "project_guidance:project-house",
+            context,
             {"project_team": project_snapshot()},
         )
         self.assertEqual(1, self.view.guidance_ack_count)
+
+    def test_old_guidance_ack_never_clears_new_draft(self) -> None:
+        self.controller.show()
+        self.view.guidance_text = "旧指导"
+        self.view.appendGuidanceRequested.emit(
+            "project-house", "thread-execution", self.view.guidance_text
+        )
+        context = next(
+            call[2]["context"]
+            for call in self.gateway.calls
+            if call[0] == "append_project_guidance"
+        )
+        self.view.guidance_text = "新的详细指导"
+        self.gateway.actionCompleted.emit(
+            context, {"project_team": project_snapshot()}
+        )
+        self.assertEqual("新的详细指导", self.view.guidance_text)
+        self.assertEqual(0, self.view.guidance_ack_count)
+        self.assertIn("当前正在编辑的内容已保留", self.errors[-1])
+
+    def test_inactive_guidance_failure_is_actionable_and_preserves_text(self) -> None:
+        self.controller.show()
+        self.view.guidance_text = "继续细化栏杆"
+        self.view.appendGuidanceRequested.emit(
+            "project-house", "thread-execution", self.view.guidance_text
+        )
+        context = next(
+            call[2]["context"]
+            for call in self.gateway.calls
+            if call[0] == "append_project_guidance"
+        )
+        self.gateway.requestFailed.emit(
+            context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_GUIDANCE_INACTIVE",
+                    "message": "project is not running",
+                    "details": {"recoverable": False},
+                }
+            },
+        )
+        self.assertEqual("继续细化栏杆", self.view.guidance_text)
+        self.assertIn("请新建项目继续", self.errors[-1])
+        self.assertEqual("get_project_team", self.gateway.calls[-1][0])
 
 
 if __name__ == "__main__":

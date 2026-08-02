@@ -225,6 +225,23 @@ class ProjectHTTPTests(unittest.TestCase):
         )
         self.assertIn("project_team", stopped)
         self.assertEqual([started["project_id"]], self.workflow.stopped)
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/project-team/actions",
+                {
+                    "action": "append_guidance",
+                    "project_id": started["project_id"],
+                    "thread_id": started["root_thread_id"],
+                    "text": "must not be falsely accepted",
+                },
+            )
+        self.assertEqual(409, raised.exception.code)
+        rejected = json.loads(raised.exception.read().decode("utf-8"))
+        error = rejected["structured_error"]
+        self.assertEqual("PROJECT_GUIDANCE_INACTIVE", error["code"])
+        self.assertFalse(error["details"]["recoverable"])
+        self.assertEqual("new_project", error["details"]["next_action"])
 
 
 if __name__ == "__main__":

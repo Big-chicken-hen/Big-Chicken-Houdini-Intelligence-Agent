@@ -19,12 +19,17 @@ class _Controller:
     def __init__(self) -> None:
         self.refresh_calls = 0
         self.close_calls = 0
+        self.events = []
 
     def refresh(self) -> None:
         self.refresh_calls += 1
 
     def close(self) -> None:
         self.close_calls += 1
+
+    def consume_project_team_update(self, event) -> bool:
+        self.events.append(event)
+        return True
 
 
 class PanelProjectTeamWiringTests(unittest.TestCase):
@@ -105,6 +110,19 @@ class PanelProjectTeamWiringTests(unittest.TestCase):
             panel._client.resume_requests,
         )
         self.assertIsNone(panel._new_task_route)
+
+    def test_live_project_update_is_forwarded_to_project_controller(self) -> None:
+        panel = _make_panel()
+        controller = _Controller()
+        panel._project_team_controller = controller
+        event = {
+            "type": "project_team_updated",
+            "project_team": {"schema": "hia-project-team/2", "projects": []},
+        }
+
+        panel._render_event(event)
+
+        self.assertEqual([event], controller.events)
 
     def test_close_event_closes_controller_before_client_disposal(self) -> None:
         panel = _make_panel()

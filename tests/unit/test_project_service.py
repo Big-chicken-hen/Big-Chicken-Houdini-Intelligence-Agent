@@ -7,9 +7,13 @@ import unittest
 
 from services.bridge.hia_bridge.project_contracts import ProjectStatus, Role
 from services.bridge.hia_bridge.project_registry import ProjectRegistry
-from services.bridge.hia_bridge.project_service import ProjectTeamService, ProjectTeamSettings
+from services.bridge.hia_bridge.project_service import (
+    ProjectGuidanceUnavailable,
+    ProjectTeamService,
+    ProjectTeamSettings,
+)
 from services.bridge.hia_bridge.project_thread_factory import ProjectThreadFactory
-from tests.unit.project_test_support import server_transports
+from tests.unit.project_test_support import observable_thread_response, server_transports
 
 
 def _factory(client, root: Path) -> ProjectThreadFactory:
@@ -29,7 +33,7 @@ class FakeClient:
         self.calls.append((method, dict(params)))
         if method == "thread/start":
             role = params["threadSource"].rsplit("/", 1)[-1]
-            return {"thread": {"id": f"thread-{role}"}, "model": params.get("model")}
+            return observable_thread_response(params, f"thread-{role}")
         if method == "thread/goal/set":
             return {
                 "goal": {
@@ -219,6 +223,34 @@ class ProjectServiceTests(unittest.TestCase):
         )
         service.continue_project(project_id=project_id)
         self.assertEqual([project_id], workflow.resumed)
+
+    def test_stop_request_immediately_disables_and_rejects_guidance(self) -> None:
+        root = Path(self.temp.name)
+        workflow = FakeWorkflow()
+        service = ProjectTeamService(
+            client=self.client,
+            project_root=root,
+            registry=ProjectRegistry(root / "stopped-guidance-projects.json"),
+            settings=self.settings,
+            thread_factory=_factory(self.client, root),
+            workflow=workflow,
+        )
+        result = service.start_team_project(task_text="build a scene")
+        project_id = result["project_id"]
+
+        stopped = service.stop_project(project_id=project_id)
+
+        project = stopped["projects"][0]
+        self.assertFalse(project["actions"]["append_guidance"])
+        self.assertTrue(
+            all(
+                not role["actions"]["append_guidance"]
+                for role in project["threads"]
+            )
+        )
+        with self.assertRaises(ProjectGuidanceUnavailable) as raised:
+            service.append_guidance(project_id=project_id, text="too late")
+        self.assertFalse(raised.exception.recoverable)
 
 
 if __name__ == "__main__":

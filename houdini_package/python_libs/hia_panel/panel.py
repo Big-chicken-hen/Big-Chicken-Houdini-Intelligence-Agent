@@ -8240,6 +8240,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _render_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+        if event_type == "project_team_updated":
+            controller = self._project_team_controller
+            if controller is not None:
+                controller.consume_project_team_update(event)
+            return
         if event_type == "session_state":
             session = event.get("session")
             if isinstance(session, dict):

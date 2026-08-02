@@ -440,8 +440,13 @@ if PYSIDE_AVAILABLE:
             thread_id = selected.thread_id if isinstance(selected, RoleViewModel) else None
             self.appendGuidanceRequested.emit(project.project_id, thread_id, text)
 
-        def acknowledge_guidance(self) -> None:
+        def acknowledge_guidance(self, submitted_text: str) -> bool:
+            """Clear only the exact draft acknowledged by this response."""
+
+            if self.guidance_edit.toPlainText().strip() != submitted_text:
+                return False
             self.guidance_edit.clear()
+            return True
 
         def _continue_project(self) -> None:
             selected = find_tree_item(self.state.tree, self.state.selected_key)

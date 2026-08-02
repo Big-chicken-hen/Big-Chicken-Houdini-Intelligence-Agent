@@ -32,6 +32,26 @@ PROJECT_MODES = frozenset({"single", "team"})
 _TERMINAL = frozenset(
     {ProjectStatus.COMPLETED, ProjectStatus.FAILED, ProjectStatus.NOT_APPLICABLE}
 )
+_GUIDANCE_INACTIVE = frozenset(
+    {
+        *_TERMINAL,
+        ProjectStatus.BLOCKED,
+        ProjectStatus.INTERRUPTED,
+        ProjectStatus.PAUSING,
+    }
+)
+
+
+class ProjectGuidanceUnavailable(ValueError):
+    """Structured rejection for guidance that no live workflow can consume."""
+
+    code = "PROJECT_GUIDANCE_INACTIVE"
+
+    def __init__(self, project_id: str, status: ProjectStatus) -> None:
+        self.project_id = project_id
+        self.status = status.value
+        self.recoverable = False
+        super().__init__("project is not running and cannot accept guidance")
 
 
 class ProjectWorkflowControl(Protocol):
@@ -89,6 +109,7 @@ class ProjectTeamService:
         self._factory = thread_factory
         self._runner = ProjectRunner(registry)
         self._workflow = workflow
+        self._stop_requested: set[str] = set()
         self._lock = threading.RLock()
 
     def set_mode(self, mode: str) -> dict[str, Any]:
@@ -192,8 +213,11 @@ class ProjectTeamService:
     ) -> dict[str, Any]:
         with self._lock:
             record = self._registry.require(project_id)
-            if record.state.status in _TERMINAL:
-                raise ValueError("project no longer accepts guidance")
+            if (
+                project_id in self._stop_requested
+                or record.state.status in _GUIDANCE_INACTIVE
+            ):
+                raise ProjectGuidanceUnavailable(project_id, record.state.status)
             target_role = None
             if thread_id is not None:
                 matches = [
@@ -234,12 +258,14 @@ class ProjectTeamService:
         return self.snapshot()
 
     def stop_project(self, *, project_id: str) -> dict[str, Any]:
-        record = self._registry.require(project_id)
-        if record.state.status in _TERMINAL:
-            raise ValueError("terminal project cannot be stopped")
-        if self._workflow is None:
-            raise ValueError("project workflow is unavailable")
-        self._workflow.stop(project_id)
+        with self._lock:
+            record = self._registry.require(project_id)
+            if record.state.status in _TERMINAL:
+                raise ValueError("terminal project cannot be stopped")
+            if self._workflow is None:
+                raise ValueError("project workflow is unavailable")
+            self._stop_requested.add(project_id)
+            self._workflow.stop(project_id)
         return self.snapshot()
 
     def set_role_runtime(
@@ -290,11 +316,13 @@ class ProjectTeamService:
             "projects": projects,
         }
 
-    @staticmethod
-    def _public_project(record: ProjectRecord) -> dict[str, Any]:
+    def _public_project(self, record: ProjectRecord) -> dict[str, Any]:
         state = record.state
         runtime_allowed = state.status not in _TERMINAL
-        guidance_allowed = state.status not in _TERMINAL
+        guidance_allowed = (
+            state.project_id not in self._stop_requested
+            and state.status not in _GUIDANCE_INACTIVE
+        )
         threads = []
         for role in Role:
             binding = state.roles.get(role)

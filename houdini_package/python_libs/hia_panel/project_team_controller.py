@@ -8,6 +8,7 @@ detached on close and reattached once on show.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
@@ -72,6 +73,7 @@ class ProjectTeamController:
         self._closed = True
         self._ordinary_threads: Any = None
         self._project_snapshot: Any = None
+        self._pending_guidance: dict[str, tuple[str, str | None, str]] = {}
         self._connect_view_once()
 
     @property
@@ -99,6 +101,20 @@ class ProjectTeamController:
             return
         self.gateway.get_project_team(context="project_team_refresh")
         self.gateway.get_threads(context="project_history_refresh")
+
+    def consume_project_team_update(self, event: Any) -> bool:
+        """Apply one trusted Bridge event without disturbing ordinary history."""
+
+        if not self.active or not isinstance(event, Mapping):
+            return False
+        if event.get("type") != "project_team_updated":
+            return False
+        snapshot = event.get("project_team")
+        if not isinstance(snapshot, Mapping):
+            return False
+        self._project_snapshot = snapshot
+        self._render_if_available()
+        return True
 
     def _connect_view_once(self) -> None:
         self.view.refreshRequested.connect(self.refresh)
@@ -139,11 +155,13 @@ class ProjectTeamController:
     ) -> None:
         if not self.active:
             return
+        context = f"project_guidance:{uuid.uuid4().hex}"
+        self._pending_guidance[context] = (project_id, thread_id, text)
         self.gateway.append_project_guidance(
             project_id=project_id,
             thread_id=thread_id,
             text=text,
-            context=f"project_guidance:{project_id}",
+            context=context,
         )
 
     def _set_role_runtime(
@@ -191,20 +209,45 @@ class ProjectTeamController:
         if context == "project_history_refresh":
             self._ordinary_threads = payload.get("threads")
         if context.startswith("project_guidance:") and project_snapshot_received:
-            self.view.acknowledge_guidance()
+            pending = self._pending_guidance.pop(context, None)
+            if pending is not None:
+                _project_id, _thread_id, submitted_text = pending
+                if not self.view.acknowledge_guidance(submitted_text):
+                    self._on_error(
+                        "先前版本的追加指导已发送；当前正在编辑的内容已保留。"
+                    )
         self._render_if_available()
 
     def _request_failed(self, context: str, payload: Any) -> None:
         if not self.active:
             return
+        is_guidance = context.startswith("project_guidance:")
+        pending = self._pending_guidance.pop(context, None) if is_guidance else None
         message = "项目请求失败"
         if isinstance(payload, Mapping):
-            error = payload.get("error")
+            error = payload.get("structured_error")
+            if not isinstance(error, Mapping):
+                error = payload.get("error")
             if isinstance(error, Mapping) and isinstance(error.get("message"), str):
                 message = error["message"]
+                details = error.get("details")
+                if is_guidance and error.get("code") == "PROJECT_GUIDANCE_INACTIVE":
+                    recoverable = (
+                        isinstance(details, Mapping)
+                        and details.get("recoverable") is True
+                    )
+                    message = (
+                        "项目当前暂停，追加指导没有发送。请先点击“继续项目”，"
+                        "恢复后重新发送；当前文字已保留。"
+                        if recoverable
+                        else "项目已经停止或结束，追加指导没有发送。请新建项目继续；"
+                        "当前文字已保留。"
+                    )
             elif isinstance(payload.get("message"), str):
                 message = payload["message"]
-        self._on_error(f"{context}: {message}")
+        if is_guidance and pending is not None:
+            self.gateway.get_project_team(context="project_team_refresh")
+        self._on_error(message if is_guidance else f"{context}: {message}")
 
     def _render_if_available(self) -> None:
         if self._project_snapshot is None:

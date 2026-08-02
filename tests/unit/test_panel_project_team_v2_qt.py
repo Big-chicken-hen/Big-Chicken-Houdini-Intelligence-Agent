@@ -4,6 +4,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -119,6 +120,35 @@ class ProjectTeamQtTests(unittest.TestCase):
         self.assertTrue(self.view.title_label.isVisible())
         self.assertEqual(300, self.view.minimumWidth())
         self.assertEqual([True, False], changes)
+
+    def test_complete_panel_goal_card_renders_dark_instead_of_white(self) -> None:
+        from hia_panel.panel import HoudiniIntelligencePanel
+
+        with mock.patch.dict(
+            os.environ,
+            {"HIA_BRIDGE_URL": "", "HIA_BRIDGE_TOKEN": ""},
+        ):
+            panel = HoudiniIntelligencePanel(hou_module=None)
+        try:
+            panel.resize(1280, 800)
+            panel.show()
+            self.app.processEvents()
+            image = panel.goal_stage_summary_group.grab().toImage()
+            self.assertFalse(image.isNull())
+            samples = [
+                image.pixelColor(x, y)
+                for y in range(2, image.height(), 8)
+                for x in range(2, image.width(), 8)
+            ]
+            near_white = sum(
+                color.red() > 240 and color.green() > 240 and color.blue() > 240
+                for color in samples
+            )
+            self.assertLess(near_white, max(1, len(samples) // 10))
+        finally:
+            panel.close()
+            panel.deleteLater()
+            self.app.processEvents()
 
 
 if __name__ == "__main__":
