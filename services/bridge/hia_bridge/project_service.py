@@ -125,8 +125,14 @@ class ProjectTeamService:
                 },
             )
             _validate_goal_result(goal_result, supervisor_id)
-        except Exception:
-            self._client.request("thread/delete", {"threadId": supervisor_id})
+        except Exception as original_error:
+            try:
+                self._client.request("thread/delete", {"threadId": supervisor_id})
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "native Goal creation failed and precise Supervisor cleanup "
+                    f"also failed: goal={original_error}; cleanup={cleanup_error}"
+                ) from original_error
             raise
         record = ProjectRecord(
             state,

@@ -32,6 +32,15 @@ class FakeClient:
         raise AssertionError(method)
 
 
+class GoalAndCleanupFailingClient(FakeClient):
+    def request(self, method, params):
+        if method == "thread/goal/set":
+            raise RuntimeError("goal rpc failed")
+        if method == "thread/delete":
+            raise RuntimeError("delete rpc failed")
+        return super().request(method, params)
+
+
 class ProjectServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -107,6 +116,20 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual(str(attachment.resolve()), record.attachments[0].path)
         self.assertEqual(len(b"reference-bytes"), record.attachments[0].size_bytes)
         self.assertEqual(64, len(record.attachments[0].sha256))
+
+    def test_goal_failure_reports_incomplete_precise_cleanup(self) -> None:
+        root = Path(self.temp.name)
+        service = ProjectTeamService(
+            client=GoalAndCleanupFailingClient(),
+            project_root=root,
+            registry=ProjectRegistry(root / "failed-projects.json"),
+            settings=self.settings,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "goal rpc failed.*delete rpc failed",
+        ):
+            service.start_team_project(task_text="build a scene")
 
 
 if __name__ == "__main__":
