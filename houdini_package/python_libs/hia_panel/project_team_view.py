@@ -57,6 +57,7 @@ if PYSIDE_AVAILABLE:
             super().__init__(parent)
             self.state = state or ProjectPanelState()
             self._items_by_key: dict[str, QtWidgets.QTreeWidgetItem] = {}
+            self._model_catalog: dict[str, dict[str, Any]] = {}
             self._build_ui()
             self._connect_signals_once()
             self.refresh_view()
@@ -174,14 +175,10 @@ if PYSIDE_AVAILABLE:
                 QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
             )
             self.model_combo = QtWidgets.QComboBox()
-            self.model_combo.setEditable(True)
+            self.model_combo.setEditable(False)
             self.model_combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
             self.effort_combo = QtWidgets.QComboBox()
-            self.effort_combo.addItems(
-                ["默认", "low", "medium", "high", "xhigh", "max", "ultra"]
-            )
             self.tier_combo = QtWidgets.QComboBox()
-            self.tier_combo.addItems(["默认", "standard", "priority", "flex"])
             self.save_runtime_button = QtWidgets.QPushButton("保存到该角色的下一 Turn")
             runtime_layout.addRow("模型", self.model_combo)
             runtime_layout.addRow("推理", self.effort_combo)
@@ -230,23 +227,124 @@ if PYSIDE_AVAILABLE:
             self.tree.itemDoubleClicked.connect(self._item_double_clicked)
             self.open_button.clicked.connect(self._open_selected)
             self.save_runtime_button.clicked.connect(self._save_runtime)
-            self.model_combo.currentTextChanged.connect(self._capture_runtime_draft)
+            self.model_combo.currentIndexChanged.connect(self._model_changed)
             self.effort_combo.currentTextChanged.connect(self._capture_runtime_draft)
             self.tier_combo.currentTextChanged.connect(self._capture_runtime_draft)
             self.guidance_button.clicked.connect(self._send_guidance)
             self.continue_button.clicked.connect(self._continue_project)
             self.stop_button.clicked.connect(self._stop_project)
 
-        def set_model_catalog(self, model_ids: list[str]) -> None:
-            current = self.model_combo.currentText()
+        def set_model_catalog(self, models: list[dict[str, Any]]) -> None:
+            current = self._selected_model_id()
+            self._model_catalog = {}
             self.model_combo.blockSignals(True)
             self.model_combo.clear()
-            self.model_combo.addItem("默认")
-            for model_id in model_ids:
-                if isinstance(model_id, str) and model_id and model_id != "默认":
-                    self.model_combo.addItem(model_id)
-            self.model_combo.setCurrentText(current or "默认")
+            default_index = -1
+            for raw_model in models:
+                if not isinstance(raw_model, dict):
+                    continue
+                model_id = raw_model.get("model")
+                if (
+                    not isinstance(model_id, str)
+                    or not model_id
+                    or model_id in self._model_catalog
+                ):
+                    continue
+                record = dict(raw_model)
+                self._model_catalog[model_id] = record
+                display_name = record.get("displayName")
+                label = (
+                    display_name
+                    if isinstance(display_name, str) and display_name
+                    else model_id
+                )
+                self.model_combo.addItem(label, record)
+                if record.get("isDefault") is True:
+                    default_index = self.model_combo.count() - 1
+            selected = self._model_index(current)
+            self.model_combo.setCurrentIndex(
+                selected if selected >= 0 else default_index
+            )
             self.model_combo.blockSignals(False)
+            self._update_runtime_capabilities(None, None)
+            self._render_selection()
+
+        def _model_changed(self, _index: int = -1) -> None:
+            previous_effort = self._combo_value(self.effort_combo)
+            previous_tier = self._combo_value(self.tier_combo)
+            self._update_runtime_capabilities(previous_effort, previous_tier)
+            self._capture_runtime_draft()
+
+        def _update_runtime_capabilities(
+            self,
+            preferred_effort: str | None,
+            preferred_tier: str | None,
+        ) -> None:
+            record = self._selected_model_record()
+            efforts = (
+                record.get("supportedReasoningEfforts", [])
+                if record is not None
+                else []
+            )
+            tiers = record.get("serviceTiers", []) if record is not None else []
+            default_effort = record.get("defaultReasoningEffort") if record else None
+            default_tier = record.get("defaultServiceTier") if record else None
+            self._replace_options(
+                self.effort_combo,
+                efforts,
+                id_key="reasoningEffort",
+                label_key="reasoningEffort",
+                preferred=preferred_effort,
+                default_value=default_effort,
+            )
+            self._replace_options(
+                self.tier_combo,
+                tiers,
+                id_key="id",
+                label_key="name",
+                preferred=preferred_tier,
+                default_value=default_tier,
+            )
+            modalities = record.get("inputModalities", []) if record else []
+            self.model_combo.setToolTip(
+                "输入能力：" + ", ".join(modalities)
+                if isinstance(modalities, list) and modalities
+                else "模型能力来自实时 model/list"
+            )
+
+        @staticmethod
+        def _replace_options(
+            combo: QtWidgets.QComboBox,
+            records: Any,
+            *,
+            id_key: str,
+            label_key: str,
+            preferred: str | None,
+            default_value: Any,
+        ) -> None:
+            blocked = combo.blockSignals(True)
+            combo.clear()
+            default_suffix = (
+                f"（{default_value}）"
+                if isinstance(default_value, str) and default_value
+                else ""
+            )
+            combo.addItem(f"默认{default_suffix}", None)
+            if isinstance(records, list):
+                for item in records:
+                    if not isinstance(item, dict):
+                        continue
+                    option_id = item.get(id_key)
+                    if not isinstance(option_id, str) or not option_id:
+                        continue
+                    label = item.get(label_key)
+                    combo.addItem(
+                        label if isinstance(label, str) and label else option_id,
+                        option_id,
+                    )
+            index = combo.findData(preferred) if preferred is not None else 0
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(blocked)
 
         def refresh_view(self) -> None:
             self._items_by_key.clear()
@@ -350,10 +448,19 @@ if PYSIDE_AVAILABLE:
                     f"项目角色 · {selected.status}\nThread：{selected.thread_id}"
                 )
                 draft = self.state.runtime_draft_for(selected)
-                self._set_combo_value(self.model_combo, draft.model)
-                self._set_combo_value(self.effort_combo, draft.effort)
-                self._set_combo_value(self.tier_combo, draft.service_tier)
-                self.save_runtime_button.setEnabled(selected.can_set_runtime)
+                self._set_model_value(draft.model)
+                self._update_runtime_capabilities(
+                    draft.effort,
+                    draft.service_tier,
+                )
+                record = self._selected_model_record()
+                modalities = record.get("inputModalities") if record else None
+                self.save_runtime_button.setEnabled(
+                    selected.can_set_runtime
+                    and record is not None
+                    and isinstance(modalities, list)
+                    and "text" in modalities
+                )
             elif isinstance(selected, OrdinaryThreadViewModel):
                 self.selection_title.setText(selected.title)
                 self.selection_meta.setText(selected.preview or f"Thread：{selected.thread_id}")
@@ -426,7 +533,7 @@ if PYSIDE_AVAILABLE:
 
         def _current_runtime_draft(self) -> RoleRuntimeDraft:
             return RoleRuntimeDraft(
-                self._combo_value(self.model_combo),
+                self._selected_model_id(),
                 self._combo_value(self.effort_combo),
                 self._combo_value(self.tier_combo),
             )
@@ -460,16 +567,44 @@ if PYSIDE_AVAILABLE:
             if project and project.can_stop:
                 self.stopProjectRequested.emit(project.project_id)
 
-        @staticmethod
-        def _set_combo_value(combo: QtWidgets.QComboBox, value: str | None) -> None:
-            blocked = combo.blockSignals(True)
-            combo.setCurrentText(value or "默认")
-            combo.blockSignals(blocked)
+        def _selected_model_record(self) -> dict[str, Any] | None:
+            value = self.model_combo.currentData()
+            return value if isinstance(value, dict) else None
+
+        def _selected_model_id(self) -> str | None:
+            record = self._selected_model_record()
+            model_id = record.get("model") if record is not None else None
+            return model_id if isinstance(model_id, str) and model_id else None
+
+        def _model_index(self, model_id: str | None) -> int:
+            if model_id is None:
+                return -1
+            for index in range(self.model_combo.count()):
+                record = self.model_combo.itemData(index)
+                if isinstance(record, dict) and record.get("model") == model_id:
+                    return index
+            return -1
+
+        def _set_model_value(self, model_id: str | None) -> None:
+            blocked = self.model_combo.blockSignals(True)
+            index = self._model_index(model_id)
+            if index < 0:
+                index = next(
+                    (
+                        candidate
+                        for candidate in range(self.model_combo.count())
+                        if isinstance(self.model_combo.itemData(candidate), dict)
+                        and self.model_combo.itemData(candidate).get("isDefault") is True
+                    ),
+                    -1,
+                )
+            self.model_combo.setCurrentIndex(index)
+            self.model_combo.blockSignals(blocked)
 
         @staticmethod
         def _combo_value(combo: QtWidgets.QComboBox) -> str | None:
-            value = combo.currentText().strip()
-            return None if not value or value == "默认" else value
+            value = combo.currentData()
+            return value if isinstance(value, str) and value else None
 
 
 else:

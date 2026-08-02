@@ -29,6 +29,8 @@ class ProjectTeamGateway(Protocol):
 
     def get_threads(self, *, context: str) -> str | None: ...
 
+    def get_models(self, *, context: str) -> str | None: ...
+
     def append_project_guidance(
         self,
         *,
@@ -101,6 +103,7 @@ class ProjectTeamController:
             return
         self.gateway.get_project_team(context="project_team_refresh")
         self.gateway.get_threads(context="project_history_refresh")
+        self.gateway.get_models(context="project_model_catalog")
 
     def consume_project_team_update(self, event: Any) -> bool:
         """Apply one trusted Bridge event without disturbing ordinary history."""
@@ -208,6 +211,8 @@ class ProjectTeamController:
                 project_snapshot_received = True
         if context == "project_history_refresh":
             self._ordinary_threads = payload.get("threads")
+        if context == "project_model_catalog":
+            self.view.set_model_catalog(payload.get("models", []))
         if context.startswith("project_guidance:") and project_snapshot_received:
             pending = self._pending_guidance.pop(context, None)
             if pending is not None:
@@ -222,6 +227,7 @@ class ProjectTeamController:
         if not self.active:
             return
         is_guidance = context.startswith("project_guidance:")
+        is_runtime = context.startswith("project_runtime:")
         pending = self._pending_guidance.pop(context, None) if is_guidance else None
         message = "项目请求失败"
         if isinstance(payload, Mapping):
@@ -231,6 +237,13 @@ class ProjectTeamController:
             if isinstance(error, Mapping) and isinstance(error.get("message"), str):
                 message = error["message"]
                 details = error.get("details")
+                if is_runtime and error.get("code") == "PROJECT_RUNTIME_SELECTION_INVALID":
+                    field = details.get("field") if isinstance(details, Mapping) else None
+                    message = (
+                        f"角色运行设置未保存：{field or '模型组合'}不受当前模型支持。"
+                        "已刷新实时模型目录，请重新选择后保存。"
+                    )
+                    self.gateway.get_models(context="project_model_catalog")
                 if is_guidance and error.get("code") == "PROJECT_GUIDANCE_INACTIVE":
                     recoverable = (
                         isinstance(details, Mapping)
@@ -247,7 +260,9 @@ class ProjectTeamController:
                 message = payload["message"]
         if is_guidance and pending is not None:
             self.gateway.get_project_team(context="project_team_refresh")
-        self._on_error(message if is_guidance else f"{context}: {message}")
+        self._on_error(
+            message if is_guidance or is_runtime else f"{context}: {message}"
+        )
 
     def _render_if_available(self) -> None:
         if self._project_snapshot is None:

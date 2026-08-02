@@ -9,6 +9,7 @@ from services.bridge.hia_bridge.project_contracts import ProjectStatus, Role
 from services.bridge.hia_bridge.project_registry import ProjectRegistry
 from services.bridge.hia_bridge.project_service import (
     ProjectGuidanceUnavailable,
+    ProjectRuntimeSelectionError,
     ProjectTeamService,
     ProjectTeamSettings,
 )
@@ -23,6 +24,34 @@ def _factory(client, root: Path) -> ProjectThreadFactory:
         "hia_mcp_v2",
         server_transports(),
     )
+
+
+def _model_catalog():
+    return {
+        "models": [
+            {
+                "model": "gpt-next",
+                "isDefault": True,
+                "inputModalities": ["text", "image"],
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "fast"},
+                    {"reasoningEffort": "high", "description": "deep"},
+                ],
+                "defaultReasoningEffort": "high",
+                "serviceTiers": [
+                    {"id": "priority", "name": "Priority", "description": "fast"}
+                ],
+                "defaultServiceTier": "priority",
+            },
+            {
+                "model": "audio-only",
+                "isDefault": False,
+                "inputModalities": ["audio"],
+                "supportedReasoningEfforts": [],
+                "serviceTiers": [],
+            },
+        ]
+    }
 
 
 class FakeClient:
@@ -89,6 +118,7 @@ class ProjectServiceTests(unittest.TestCase):
             registry=self.registry,
             settings=self.settings,
             thread_factory=_factory(self.client, root),
+            model_catalog=_model_catalog,
         )
 
     def tearDown(self) -> None:
@@ -156,6 +186,33 @@ class ProjectServiceTests(unittest.TestCase):
             self.service.append_guidance(
                 project_id=project_id, thread_id="guessed", text="x"
             )
+
+    def test_role_runtime_rejects_unknown_or_incompatible_catalog_combinations(self) -> None:
+        result = self.service.start_team_project(task_text="build")
+        arguments = {
+            "project_id": result["project_id"],
+            "thread_id": result["root_thread_id"],
+            "model": "missing",
+            "effort": "high",
+            "service_tier": "priority",
+        }
+        with self.assertRaises(ProjectRuntimeSelectionError) as unknown:
+            self.service.set_role_runtime(**arguments)
+        self.assertEqual("model", unknown.exception.field)
+        arguments["model"] = "gpt-next"
+        arguments["effort"] = "ultra"
+        with self.assertRaises(ProjectRuntimeSelectionError) as effort:
+            self.service.set_role_runtime(**arguments)
+        self.assertEqual(["low", "high"], effort.exception.allowed)
+        arguments["effort"] = "high"
+        arguments["service_tier"] = "flex"
+        with self.assertRaises(ProjectRuntimeSelectionError) as tier:
+            self.service.set_role_runtime(**arguments)
+        self.assertEqual("service_tier", tier.exception.field)
+        arguments.update(model="audio-only", effort=None, service_tier=None)
+        with self.assertRaises(ProjectRuntimeSelectionError) as modality:
+            self.service.set_role_runtime(**arguments)
+        self.assertEqual("model", modality.exception.field)
 
     def test_project_snapshot_does_not_duplicate_task_body_into_roles(self) -> None:
         result = self.service.start_team_project(task_text="line one\nlong private body")

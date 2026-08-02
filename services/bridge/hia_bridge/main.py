@@ -13,7 +13,7 @@ import signal
 import sys
 import threading
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from hia_core.houdini_contract import B2_SCHEMA_VERSION, SchemaRegistry
 from hia_core.path_policy import PROJECT_ROOT, PathPolicyError, validate_project_subpath
@@ -435,6 +435,7 @@ def _build_project_runtime(
     selected_backend: str,
     server_transports: Mapping[str, Mapping[str, object]],
     allowed_evidence_roots: Sequence[Path],
+    model_catalog: Callable[[], Mapping[str, object]] | None = None,
 ) -> ProjectRuntime:
     """Compose the project runtime once around the owned app-server client."""
 
@@ -506,6 +507,7 @@ def _build_project_runtime(
             project_root / PROJECT_SETTINGS_RELATIVE_PATH
         ),
         thread_factory=thread_factory,
+        model_catalog=model_catalog,
         workflow=workflow,
     )
     service_holder.append(service)
@@ -1005,7 +1007,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             mcp_backend=backend,
             focus_state_path=focus_state_path,
         )
-        project_runtime = _build_project_runtime(
+        project_runtime_arguments = dict(
             client=client,
             events=events,
             project_root=project_root,
@@ -1023,6 +1025,10 @@ def run(argv: Sequence[str] | None = None) -> int:
                 project_root, render_output_directory
             ),
         )
+        session_model_catalog = getattr(session, "list_models", None)
+        if callable(session_model_catalog):
+            project_runtime_arguments["model_catalog"] = session_model_catalog
+        project_runtime = _build_project_runtime(**project_runtime_arguments)
         observer_setter = getattr(session, "set_project_event_observer", None)
         if callable(observer_setter):
             observer_setter(project_runtime.observe_codex_event)

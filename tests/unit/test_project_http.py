@@ -73,6 +73,7 @@ class ProjectHTTPTests(unittest.TestCase):
                 "hia_mcp_v2",
                 server_transports(),
             ),
+            model_catalog=self.session.list_models,
             workflow=self.workflow,
         )
         application = BridgeApplication(
@@ -210,14 +211,31 @@ class ProjectHTTPTests(unittest.TestCase):
             "/v1/project-team/actions",
             {
                 "action": "set_role_runtime",
-                "model": "gpt-next",
+                "model": "fake-secondary-model",
                 "effort": "high",
-                "service_tier": "priority",
+                "service_tier": None,
                 **common,
             },
         )
         role = runtime["project_team"]["projects"][0]["threads"][0]
-        self.assertEqual("gpt-next", role["model"])
+        self.assertEqual("fake-secondary-model", role["model"])
+        with self.assertRaises(HTTPError) as invalid_runtime:
+            self.request(
+                "POST",
+                "/v1/project-team/actions",
+                {
+                    "action": "set_role_runtime",
+                    "model": "made-up-model",
+                    "effort": "high",
+                    "service_tier": None,
+                    **common,
+                },
+            )
+        self.assertEqual(400, invalid_runtime.exception.code)
+        invalid_payload = json.loads(invalid_runtime.exception.read().decode("utf-8"))
+        invalid_error = invalid_payload["structured_error"]
+        self.assertEqual("PROJECT_RUNTIME_SELECTION_INVALID", invalid_error["code"])
+        self.assertEqual("refresh_models", invalid_error["details"]["next_action"])
         stopped = self.request(
             "POST",
             "/v1/project-team/actions",

@@ -31,7 +31,11 @@ from .scene_queue import (
     SceneQueueError,
 )
 from .session import BridgeSession
-from .project_service import ProjectGuidanceUnavailable, ProjectTeamService
+from .project_service import (
+    ProjectGuidanceUnavailable,
+    ProjectRuntimeSelectionError,
+    ProjectTeamService,
+)
 
 
 def _parse_requirement_delta(value: Any) -> RequirementDelta | None:
@@ -973,13 +977,26 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     "service_tier",
                 }
                 self._require_exact_fields(body, expected)
-                snapshot = application.project_team.set_role_runtime(
-                    project_id=body.get("project_id"),
-                    thread_id=body.get("thread_id"),
-                    model=body.get("model"),
-                    effort=body.get("effort"),
-                    service_tier=body.get("service_tier"),
-                )
+                try:
+                    snapshot = application.project_team.set_role_runtime(
+                        project_id=body.get("project_id"),
+                        thread_id=body.get("thread_id"),
+                        model=body.get("model"),
+                        effort=body.get("effort"),
+                        service_tier=body.get("service_tier"),
+                    )
+                except ProjectRuntimeSelectionError as exc:
+                    raise BridgeError(
+                        exc.code,
+                        str(exc),
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "field": exc.field,
+                            "model": exc.model,
+                            "allowed": exc.allowed,
+                            "next_action": "refresh_models",
+                        },
+                    ) from exc
             elif action in {"continue", "stop"}:
                 self._require_exact_fields(body, {"action", "project_id"})
                 if action == "continue":

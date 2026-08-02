@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import threading
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from typing import Protocol
 import uuid
 
@@ -52,6 +52,25 @@ class ProjectGuidanceUnavailable(ValueError):
         self.status = status.value
         self.recoverable = False
         super().__init__("project is not running and cannot accept guidance")
+
+
+class ProjectRuntimeSelectionError(ValueError):
+    """A role runtime selection is absent from the live Codex catalog."""
+
+    code = "PROJECT_RUNTIME_SELECTION_INVALID"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        field: str,
+        model: str | None,
+        allowed: list[str],
+    ) -> None:
+        self.field = field
+        self.model = model
+        self.allowed = allowed
+        super().__init__(message)
 
 
 class ProjectWorkflowControl(Protocol):
@@ -100,6 +119,7 @@ class ProjectTeamService:
         registry: ProjectRegistry,
         settings: ProjectTeamSettings,
         thread_factory: ProjectThreadFactory,
+        model_catalog: Callable[[], Mapping[str, Any]] | None = None,
         workflow: ProjectWorkflowControl | None = None,
     ) -> None:
         self._client = client
@@ -107,6 +127,7 @@ class ProjectTeamService:
         self._registry = registry
         self._settings = settings
         self._factory = thread_factory
+        self._model_catalog = model_catalog
         self._runner = ProjectRunner(registry)
         self._workflow = workflow
         self._stop_requested: set[str] = set()
@@ -289,6 +310,24 @@ class ProjectTeamService:
             if len(matches) != 1:
                 raise ValueError("thread_id is not an explicit member of this project")
             role = matches[0]
+            expected_revision = record.state.revision
+        model, effort, service_tier = self._validated_runtime_selection(
+            model,
+            effort,
+            service_tier,
+        )
+        with self._lock:
+            record = self._registry.require(project_id)
+            binding = record.state.roles.get(role)
+            if (
+                record.state.revision != expected_revision
+                or binding is None
+                or binding.thread_id != thread_id
+                or record.state.status in _TERMINAL
+            ):
+                raise ValueError(
+                    "project role changed while its runtime catalog was validated; retry"
+                )
             roles = dict(record.state.roles)
             roles[role] = replace(
                 roles[role],
@@ -304,6 +343,103 @@ class ProjectTeamService:
                 expected_revision=record.state.revision,
             )
         return self.snapshot()
+
+    def _validated_runtime_selection(
+        self,
+        model: str | None,
+        effort: str | None,
+        service_tier: str | None,
+    ) -> tuple[str, str | None, str | None]:
+        for field, value in (
+            ("model", model),
+            ("effort", effort),
+            ("service_tier", service_tier),
+        ):
+            if value is not None and (
+                not isinstance(value, str)
+                or not value.strip()
+                or any(ord(character) < 32 for character in value)
+            ):
+                raise ProjectRuntimeSelectionError(
+                    f"{field} must be selected from the live Codex model catalog",
+                    field=field,
+                    model=model if isinstance(model, str) else None,
+                    allowed=[],
+                )
+        if self._model_catalog is None:
+            raise ProjectRuntimeSelectionError(
+                "The live Codex model catalog is unavailable; refresh models and retry",
+                field="model",
+                model=model,
+                allowed=[],
+            )
+        payload = self._model_catalog()
+        raw_models = payload.get("models") if isinstance(payload, Mapping) else None
+        if not isinstance(raw_models, list):
+            raise ProjectRuntimeSelectionError(
+                "The live Codex model catalog is invalid; refresh models and retry",
+                field="model",
+                model=model,
+                allowed=[],
+            )
+        models = {
+            item.get("model"): item
+            for item in raw_models
+            if isinstance(item, Mapping)
+            and isinstance(item.get("model"), str)
+            and item.get("model")
+        }
+        selected = models.get(model) if model is not None else next(
+            (item for item in models.values() if item.get("isDefault") is True),
+            None,
+        )
+        if selected is None:
+            raise ProjectRuntimeSelectionError(
+                "Choose a model from the refreshed Codex model catalog",
+                field="model",
+                model=model,
+                allowed=sorted(models),
+            )
+        selected_model = selected.get("model")
+        modalities = selected.get("inputModalities")
+        if not isinstance(modalities, list) or "text" not in modalities:
+            raise ProjectRuntimeSelectionError(
+                "The selected model cannot accept project role text instructions",
+                field="model",
+                model=str(selected_model),
+                allowed=sorted(
+                    key
+                    for key, item in models.items()
+                    if isinstance(item.get("inputModalities"), list)
+                    and "text" in item["inputModalities"]
+                ),
+            )
+        allowed_efforts = [
+            item.get("reasoningEffort")
+            for item in selected.get("supportedReasoningEfforts", [])
+            if isinstance(item, Mapping)
+            and isinstance(item.get("reasoningEffort"), str)
+        ]
+        if effort is not None and effort not in allowed_efforts:
+            raise ProjectRuntimeSelectionError(
+                "Choose a reasoning effort supported by the selected model",
+                field="effort",
+                model=str(selected_model),
+                allowed=allowed_efforts,
+            )
+        allowed_tiers = [
+            item.get("id")
+            for item in selected.get("serviceTiers", [])
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        ]
+        if service_tier is not None and service_tier not in allowed_tiers:
+            raise ProjectRuntimeSelectionError(
+                "Choose a service tier supported by the selected model",
+                field="service_tier",
+                model=str(selected_model),
+                allowed=allowed_tiers,
+            )
+        return str(selected_model), effort, service_tier
 
     def snapshot(self) -> dict[str, Any]:
         records = self._registry.list()

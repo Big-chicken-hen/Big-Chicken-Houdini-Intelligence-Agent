@@ -9251,7 +9251,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.model_combo.blockSignals(False)
         project_team_view = getattr(self, "project_team_view", None)
         if project_team_view is not None:
-            project_team_view.set_model_catalog(sorted(seen))
+            project_team_view.set_model_catalog(
+                [dict(model) for model in models if isinstance(model, dict)]
+            )
         self._update_reasoning_efforts()
         self._update_service_tiers()
 

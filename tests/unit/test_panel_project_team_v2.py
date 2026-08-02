@@ -244,6 +244,7 @@ class FakeView:
         self.render_count = 0
         self.guidance_ack_count = 0
         self.guidance_text = ""
+        self.model_catalogs = []
 
     def refresh_view(self) -> None:
         self.render_count += 1
@@ -254,6 +255,9 @@ class FakeView:
         self.guidance_ack_count += 1
         self.guidance_text = ""
         return True
+
+    def set_model_catalog(self, models) -> None:
+        self.model_catalogs.append(models)
 
 
 class FakeGateway:
@@ -300,7 +304,7 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.assertEqual(1, self.gateway.actionCompleted.connect_count)
         self.assertEqual(1, self.gateway.requestFailed.connect_count)
         self.assertEqual(
-            ["get_project_team", "get_threads"],
+            ["get_project_team", "get_threads", "get_models"],
             [call[0] for call in self.gateway.calls],
         )
 
@@ -377,6 +381,37 @@ class ProjectTeamControllerTests(unittest.TestCase):
         guidance = next(call for call in self.gateway.calls if call[0] == "append_project_guidance")
         self.assertEqual("减少屋顶装饰", guidance[2]["text"])
         self.assertRegex(guidance[2]["context"], r"^project_guidance:[0-9a-f]{32}$")
+
+    def test_project_model_catalog_is_live_and_runtime_error_refreshes_it(self) -> None:
+        self.controller.show()
+        models = [
+            {
+                "model": "gpt-live",
+                "inputModalities": ["text", "image"],
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "high", "description": "deep"}
+                ],
+                "serviceTiers": [
+                    {"id": "priority", "name": "Priority", "description": "fast"}
+                ],
+            }
+        ]
+        self.gateway.actionCompleted.emit(
+            "project_model_catalog", {"models": models}
+        )
+        self.assertEqual([models], self.view.model_catalogs)
+        self.gateway.requestFailed.emit(
+            "project_runtime:project-house:thread-execution",
+            {
+                "structured_error": {
+                    "code": "PROJECT_RUNTIME_SELECTION_INVALID",
+                    "message": "unsupported",
+                    "details": {"field": "effort", "next_action": "refresh_models"},
+                }
+            },
+        )
+        self.assertTrue(any(call[0] == "get_models" for call in self.gateway.calls))
+        self.assertIn("未保存", self.errors[-1])
 
     def test_guidance_text_is_acknowledged_only_after_success(self) -> None:
         self.controller.show()

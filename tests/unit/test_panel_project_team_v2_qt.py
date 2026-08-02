@@ -121,6 +121,62 @@ class ProjectTeamQtTests(unittest.TestCase):
         self.assertEqual(300, self.view.minimumWidth())
         self.assertEqual([True, False], changes)
 
+    def test_role_runtime_uses_live_model_capabilities_without_free_text(self) -> None:
+        models = [
+            {
+                "model": "model-a",
+                "displayName": "Model A",
+                "isDefault": True,
+                "inputModalities": ["text", "image"],
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "fast"},
+                    {"reasoningEffort": "high", "description": "deep"},
+                ],
+                "defaultReasoningEffort": "high",
+                "serviceTiers": [
+                    {"id": "priority", "name": "Priority", "description": "fast"}
+                ],
+                "defaultServiceTier": "priority",
+            },
+            {
+                "model": "model-b",
+                "displayName": "Model B",
+                "isDefault": False,
+                "inputModalities": ["text"],
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "ultra", "description": "deepest"}
+                ],
+                "defaultReasoningEffort": "ultra",
+                "serviceTiers": [],
+                "defaultServiceTier": None,
+            },
+        ]
+        self.view.set_model_catalog(models)
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.assertFalse(self.view.model_combo.isEditable())
+        self.assertEqual(2, self.view.model_combo.count())
+        self.assertEqual(
+            [None, "low", "high"],
+            [
+                self.view.effort_combo.itemData(index)
+                for index in range(self.view.effort_combo.count())
+            ],
+        )
+        self.view.model_combo.setCurrentIndex(1)
+        self.app.processEvents()
+        self.assertEqual(
+            [None, "ultra"],
+            [
+                self.view.effort_combo.itemData(index)
+                for index in range(self.view.effort_combo.count())
+            ],
+        )
+        self.assertEqual(
+            "model-b",
+            self.state.runtime_draft_for(self.state.tree.projects[0].roles[0]).model,
+        )
+
     def test_complete_panel_goal_card_renders_dark_instead_of_white(self) -> None:
         from hia_panel.panel import HoudiniIntelligencePanel
 

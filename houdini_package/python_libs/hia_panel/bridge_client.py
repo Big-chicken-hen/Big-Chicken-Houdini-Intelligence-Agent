@@ -96,10 +96,10 @@ class BridgeClient(QtCore.QObject):
 
         return self._request("GET", "/v1/session", context=context)
 
-    def get_models(self) -> str | None:
+    def get_models(self, *, context: str = "models") -> str | None:
         """Read the Bridge-sanitized stable Codex model catalog."""
 
-        return self._request("GET", "/v1/models", context="models")
+        return self._request("GET", "/v1/models", context=context)
 
     def get_threads(self, *, context: str = "threads") -> str | None:
         return self._request("GET", "/v1/threads", context=context)
