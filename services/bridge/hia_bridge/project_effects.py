@@ -315,9 +315,19 @@ class ProjectEffectExecutor:
         stored_plan["_blueprint_sha256"] = hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+        inactive_requirements = tuple(
+            item
+            for item in state.requirements
+            if item.status
+            in {
+                RequirementStatus.REMOVED_BY_USER,
+                RequirementStatus.SUPERSEDED_BY_USER,
+            }
+            and item.requirement_id not in {current.requirement_id for current in requirements}
+        )
         state = replace(
             state,
-            requirements=tuple(requirements),
+            requirements=tuple((*requirements, *inactive_requirements)),
             stage=StageState(stage_id=cards[0].stage_id, ordinal=1),
             plan_stale=False,
             blueprint_revision=blueprint_revision,
@@ -553,8 +563,16 @@ class ProjectEffectExecutor:
         stage = self._current_stage(state)
         execution = self._require_named(state, "current_execution")
         state, reviews = self._parallel_reviews(state, stage, execution, deadline)
+        coverage_proof = _review_coverage_proof(stage, reviews)
         decision_request = self._base_request(state, Role.SUPERVISOR, "decide_stage_review")
-        decision_request.update({"stage_card": stage, "execution": execution, "reviews": reviews})
+        decision_request.update(
+            {
+                "stage_card": stage,
+                "execution": execution,
+                "reviews": reviews,
+                "review_coverage": coverage_proof,
+            }
+        )
         state, completed = self._run_structured(
             state,
             Role.SUPERVISOR,
@@ -563,7 +581,14 @@ class ProjectEffectExecutor:
             deadline,
         )
         payload = completed.payload
-        if set(payload) != {"schema", "stage_id", "decision", "final_stage", "repair_card"}:
+        if set(payload) != {
+            "schema",
+            "stage_id",
+            "decision",
+            "final_stage",
+            "repair_card",
+            "approved_exemptions",
+        }:
             raise ProjectEffectError("INVALID_STAGE_DECISION", "stage decision fields are invalid")
         if payload.get("stage_id") != stage["stage_id"]:
             raise ProjectEffectError("STAGE_OWNERSHIP_MISMATCH", "Supervisor decided the wrong stage")
@@ -572,18 +597,34 @@ class ProjectEffectExecutor:
             for review in reviews
             for claim in review["claims"]
         )
+        required_exemptions = _review_exemptions(reviews)
+        approved_exemptions = _approved_review_exemptions(
+            payload.get("approved_exemptions")
+        )
+        if not set(approved_exemptions).issubset(required_exemptions):
+            raise ProjectEffectError(
+                "INVALID_STAGE_DECISION",
+                "approved exemptions must exactly match evidence-bound review exemptions",
+            )
+        exemptions_match = approved_exemptions == required_exemptions
         final_expected = self._is_final_stage(state)
         if payload.get("final_stage") is not final_expected:
             raise ProjectEffectError("INVALID_STAGE_DECISION", "final_stage does not match the plan")
         decision = payload.get("decision")
         if decision == "pass":
-            if failed or payload.get("repair_card") is not None:
-                raise ProjectEffectError("INVALID_STAGE_DECISION", "failed claims cannot be passed")
+            if failed or not exemptions_match or payload.get("repair_card") is not None:
+                raise ProjectEffectError(
+                    "INVALID_STAGE_DECISION",
+                    "failed, unverified, or unapproved exemption claims cannot be passed",
+                )
             event = LifecycleEvent(ProjectEvent.REVIEWS_PASSED, {"final_stage": final_expected})
         elif decision == "repair":
             card = _parse_repair_card(payload.get("repair_card"), stage["stage_id"], execution)
-            if not failed:
-                raise ProjectEffectError("INVALID_STAGE_DECISION", "repair requires a failed claim")
+            if not failed and exemptions_match:
+                raise ProjectEffectError(
+                    "INVALID_STAGE_DECISION",
+                    "repair requires a failed, unverified, or unapproved exemption claim",
+                )
             self._artifacts.put_named(state.project_id, "repair_card", card)
             event = LifecycleEvent(ProjectEvent.REVIEWS_FAILED)
         else:
@@ -663,7 +704,44 @@ class ProjectEffectExecutor:
                     native_subagents=completed.native_subagents,
                 ),
             )
-            payload = self._parse_review_payload(completed.payload, call.role, stage, execution)
+            try:
+                payload = self._parse_review_payload(
+                    completed.payload, call.role, stage, execution
+                )
+            except ProjectEffectError as exc:
+                state = self._record(
+                    state,
+                    ProgressObservation(role=call.role, kind="schema_correction"),
+                )
+                correction_request = self._base_request(
+                    state, call.role, "correct_stage_review"
+                )
+                correction_request.update(
+                    {
+                        "stage_card": stage,
+                        "execution": execution,
+                        "invalid_review": completed.payload,
+                        "review_error": {"code": exc.code, "message": str(exc)},
+                    }
+                )
+                state, completed = self._run_structured(
+                    state,
+                    call.role,
+                    correction_request,
+                    "hia-project-review/1",
+                    deadline,
+                    local_image_paths=(
+                        visual_images if call.role is Role.VISUAL_REVIEW else ()
+                    ),
+                    payload_validator=lambda candidate, review_role=call.role: (
+                        self._validate_review_correction(
+                            candidate, review_role, stage, execution
+                        )
+                    ),
+                )
+                payload = self._parse_review_payload(
+                    completed.payload, call.role, stage, execution
+                )
             reviews.append(payload)
         state = self._refresh_guidance(state)
         for role in (Role.VISUAL_REVIEW, Role.TECHNICAL_REVIEW):
@@ -678,6 +756,11 @@ class ProjectEffectExecutor:
                     deadline,
                     local_image_paths=(
                         visual_images if role is Role.VISUAL_REVIEW else ()
+                    ),
+                    payload_validator=lambda candidate, review_role=role: (
+                        self._validate_review_correction(
+                            candidate, review_role, stage, execution
+                        )
                     ),
                 )
                 revised = self._parse_review_payload(completed.payload, role, stage, execution)
@@ -702,9 +785,38 @@ class ProjectEffectExecutor:
         raw_claims = payload.get("claims")
         if not isinstance(raw_claims, list) or not raw_claims:
             raise ProjectEffectError("INVALID_REVIEW_SCHEMA", "review claims must be non-empty")
-        claims = [parse_review_claim(item) for item in raw_claims if isinstance(item, Mapping)]
+        try:
+            claims = [
+                parse_review_claim(item)
+                for item in raw_claims
+                if isinstance(item, Mapping)
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ProjectEffectError(
+                "INVALID_REVIEW_SCHEMA", "review claim is malformed"
+            ) from exc
         if len(claims) != len(raw_claims):
             raise ProjectEffectError("INVALID_REVIEW_SCHEMA", "review claim is malformed")
+        expected_ids = tuple(stage.get("requirement_ids") or ())
+        if not expected_ids or any(not isinstance(item, str) or not item for item in expected_ids):
+            raise ProjectEffectError(
+                "INVALID_REVIEW_REQUIREMENTS", "stage requirement IDs are malformed"
+            )
+        claim_ids = tuple(claim.claim_id for claim in claims)
+        if len(set(claim_ids)) != len(claim_ids):
+            raise ProjectEffectError(
+                "DUPLICATE_REVIEW_CLAIM", "each stage requirement must be claimed exactly once"
+            )
+        unknown = sorted(set(claim_ids) - set(expected_ids))
+        missing = sorted(set(expected_ids) - set(claim_ids))
+        if unknown:
+            raise ProjectEffectError(
+                "UNKNOWN_REVIEW_CLAIM", f"unknown stage requirement claims: {unknown}"
+            )
+        if missing:
+            raise ProjectEffectError(
+                "MISSING_REVIEW_CLAIM", f"missing stage requirement claims: {missing}"
+            )
         available = {item["item_id"] for item in execution["evidence"]}
         capture_ids = {
             item["item_id"]
@@ -717,7 +829,7 @@ class ProjectEffectExecutor:
             refs = getattr(claim, "evidence_refs", ())
             if not set(refs).issubset(available):
                 raise ProjectEffectError("UNKNOWN_REVIEW_EVIDENCE", "review cites unavailable evidence")
-            if claim.disposition in {"verified", "failed"}:
+            if claim.disposition in {"verified", "failed", "not_applicable"}:
                 required = capture_ids if role is Role.VISUAL_REVIEW else technical_ids
                 if not set(refs).intersection(required):
                     kind = "capture" if role is Role.VISUAL_REVIEW else "technical"
@@ -726,6 +838,18 @@ class ProjectEffectExecutor:
                         f"{role.value} {claim.disposition} claim requires current {kind} evidence",
                     )
         return json.loads(json.dumps(payload, ensure_ascii=False))
+
+    def _validate_review_correction(
+        self,
+        payload: Mapping[str, Any],
+        role: Role,
+        stage: Mapping[str, Any],
+        execution: Mapping[str, Any],
+    ) -> None:
+        try:
+            self._parse_review_payload(payload, role, stage, execution)
+        except ProjectEffectError as exc:
+            raise ValueError(f"{exc.code}: {exc}") from exc
 
     def _run_structured(
         self,
@@ -737,6 +861,7 @@ class ProjectEffectExecutor:
         *,
         record_success: bool = True,
         local_image_paths: Sequence[str] = (),
+        payload_validator: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> tuple[ProjectState, CompletedTurn]:
         correction = 0
         current_request = dict(request)
@@ -789,6 +914,8 @@ class ProjectEffectExecutor:
                 if completed.payload.get("schema") != schema:
                     raise ValueError(f"expected schema {schema}")
                 _validate_payload_shape(schema, completed.payload)
+                if payload_validator is not None:
+                    payload_validator(completed.payload)
                 if record_success:
                     state = self._record(
                         state,
@@ -1170,6 +1297,7 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             "decision",
             "final_stage",
             "repair_card",
+            "approved_exemptions",
         },
         "hia-project-repair-authorization/1": {
             "schema",
@@ -1250,6 +1378,7 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             raise ValueError("stage decision is invalid")
         if not isinstance(payload.get("final_stage"), bool):
             raise ValueError("final_stage must be boolean")
+        _approved_review_exemptions(payload.get("approved_exemptions"))
     elif schema == "hia-project-repair-authorization/1":
         _plain_text(payload.get("stage_id"))
         if not isinstance(payload.get("authorized"), bool):
@@ -1414,6 +1543,105 @@ def _capture_image_paths(execution: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(paths)
 
 
+def _review_exemptions(
+    reviews: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[str, str, str, tuple[str, ...]], ...]:
+    exemptions: list[tuple[str, str, str, tuple[str, ...]]] = []
+    for review in reviews:
+        reviewer = str(review.get("reviewer") or "")
+        for claim in review.get("claims", ()):
+            if not isinstance(claim, Mapping) or claim.get("disposition") != "not_applicable":
+                continue
+            exemption = claim.get("exemption")
+            if not isinstance(exemption, Mapping):
+                raise ProjectEffectError(
+                    "INVALID_REVIEW_EXEMPTION", "review exemption is malformed"
+                )
+            exemptions.append(
+                (
+                    reviewer,
+                    str(claim.get("claim_id") or ""),
+                    str(exemption.get("reason") or ""),
+                    tuple(str(item) for item in exemption.get("evidence_refs", ())),
+                )
+            )
+    return tuple(sorted(exemptions))
+
+
+def _approved_review_exemptions(
+    value: Any,
+) -> tuple[tuple[str, str, str, tuple[str, ...]], ...]:
+    if not isinstance(value, list):
+        raise ValueError("approved_exemptions must be a list")
+    approvals: list[tuple[str, str, str, tuple[str, ...]]] = []
+    expected = {"reviewer", "requirement_id", "reason", "evidence_refs"}
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != expected:
+            raise ValueError("approved exemption shape is invalid")
+        reviewer = item.get("reviewer")
+        if reviewer not in {
+            Role.VISUAL_REVIEW.value,
+            Role.TECHNICAL_REVIEW.value,
+        }:
+            raise ValueError("approved exemption reviewer is invalid")
+        requirement_id = item.get("requirement_id")
+        reason = item.get("reason")
+        evidence_refs = item.get("evidence_refs")
+        if not isinstance(requirement_id, str) or not requirement_id.strip():
+            raise ValueError("approved exemption requirement_id is invalid")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("approved exemption reason is invalid")
+        if (
+            not isinstance(evidence_refs, list)
+            or not evidence_refs
+            or any(not isinstance(ref, str) or not ref for ref in evidence_refs)
+        ):
+            raise ValueError("approved exemption evidence_refs are invalid")
+        approvals.append((reviewer, requirement_id, reason, tuple(evidence_refs)))
+    if len(set(approvals)) != len(approvals):
+        raise ValueError("approved exemptions must be unique")
+    return tuple(sorted(approvals))
+
+
+def _review_coverage_proof(
+    stage: Mapping[str, Any], reviews: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    requirement_ids = tuple(stage.get("requirement_ids") or ())
+    expected_reviewers = {
+        Role.VISUAL_REVIEW.value,
+        Role.TECHNICAL_REVIEW.value,
+    }
+    by_reviewer: dict[str, list[str]] = {}
+    for review in reviews:
+        reviewer = str(review.get("reviewer") or "")
+        if reviewer in by_reviewer:
+            raise ProjectEffectError(
+                "DUPLICATE_STAGE_REVIEW", "each required reviewer may report only once"
+            )
+        by_reviewer[reviewer] = [
+            str(claim.get("claim_id") or "")
+            for claim in review.get("claims", ())
+            if isinstance(claim, Mapping)
+        ]
+    if set(by_reviewer) != expected_reviewers:
+        raise ProjectEffectError(
+            "MISSING_STAGE_REVIEW", "both independent stage reviews are required"
+        )
+    if any(set(claim_ids) != set(requirement_ids) for claim_ids in by_reviewer.values()):
+        raise ProjectEffectError(
+            "INCOMPLETE_REVIEW_COVERAGE",
+            "both reviewers must cover every stage requirement",
+        )
+    return {
+        "stage_id": stage.get("stage_id"),
+        "requirement_ids": list(requirement_ids),
+        "reviewers": {
+            reviewer: {"claim_ids": list(requirement_ids), "complete": True}
+            for reviewer in sorted(by_reviewer)
+        },
+    }
+
+
 def _response_contract(schema: str) -> Mapping[str, Any]:
     contracts: dict[str, Mapping[str, Any]] = {
         "hia-project-eligibility/1": {
@@ -1538,22 +1766,30 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
             "claims": [
                 {
                     "disposition": "verified",
-                    "claim_id": "stable requirement claim ID",
+                    "claim_id": "exact current stage requirement_id",
                     "evidence_refs": ["available evidence item IDs"],
                     "actual_evidence": "specific observed evidence",
                 },
                 {
                     "disposition": "failed",
-                    "claim_id": "stable requirement claim ID",
+                    "claim_id": "exact current stage requirement_id",
                     "evidence_refs": ["available evidence item IDs"],
                     "deviation": "specific observed deviation",
                     "minimum_repair": "minimum evidence-backed repair",
                 },
                 {
                     "disposition": "unverified",
-                    "claim_id": "stable requirement claim ID",
+                    "claim_id": "exact current stage requirement_id",
                     "missing_evidence": ["missing observation"],
                     "minimum_next_observation": "smallest next observation",
+                },
+                {
+                    "disposition": "not_applicable",
+                    "claim_id": "exact current stage requirement_id",
+                    "exemption": {
+                        "reason": "specific reason the requirement cannot apply",
+                        "evidence_refs": ["available evidence item IDs proving the reason"],
+                    },
                 },
             ],
         },
@@ -1563,6 +1799,14 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
             "decision": "pass|repair",
             "final_stage": "boolean derived from persisted plan",
             "repair_card": "null for pass; structured repair card for repair",
+            "approved_exemptions": [
+                {
+                    "reviewer": "exact reviewer owning the not_applicable claim",
+                    "requirement_id": "exact current stage requirement_id",
+                    "reason": "exact structured exemption reason from the claim",
+                    "evidence_refs": ["exact available evidence IDs from the claim"],
+                }
+            ],
         },
         "hia-project-repair-authorization/1": {
             "schema": schema,

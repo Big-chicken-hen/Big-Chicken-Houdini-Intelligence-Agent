@@ -66,6 +66,7 @@ class UnverifiedClaim:
 class NotApplicableClaim:
     claim_id: str
     reason: str
+    evidence_refs: tuple[str, ...]
     disposition: str = "not_applicable"
 
 
@@ -87,7 +88,7 @@ _CLAIM_FIELDS = {
         "missing_evidence",
         "minimum_next_observation",
     },
-    "not_applicable": {"disposition", "claim_id", "reason"},
+    "not_applicable": {"disposition", "claim_id", "exemption"},
 }
 
 
@@ -120,7 +121,19 @@ def parse_review_claim(value: Mapping[str, Any]) -> ReviewClaim:
             _text_tuple(value, "missing_evidence"),
             _required_text(value, "minimum_next_observation"),
         )
-    return NotApplicableClaim(claim_id, _required_text(value, "reason"))
+    exemption = value.get("exemption")
+    if not isinstance(exemption, Mapping) or set(exemption) != {
+        "reason",
+        "evidence_refs",
+    }:
+        raise ValueError(
+            "not_applicable exemption fields must be exactly reason and evidence_refs"
+        )
+    return NotApplicableClaim(
+        claim_id,
+        _required_text(exemption, "reason"),
+        _text_tuple(exemption, "evidence_refs"),
+    )
 
 
 @dataclass(frozen=True)

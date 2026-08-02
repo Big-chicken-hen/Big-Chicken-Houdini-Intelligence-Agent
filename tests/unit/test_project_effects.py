@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 import hashlib
 import json
@@ -14,6 +15,7 @@ from services.bridge.hia_bridge.project_contracts import (
     ProjectState,
     ProjectStatus,
     Requirement,
+    RequirementStatus,
     Role,
     RoleThread,
     RuntimeBudget,
@@ -143,6 +145,25 @@ def _plan() -> dict:
     }
 
 
+def _plan_with_two_requirements() -> dict:
+    plan = copy.deepcopy(_plan())
+    plan["requirements"].append(
+        {
+            "requirement_id": "req-2",
+            "kind": "visual_quality",
+            "description": "Preserve the second independently reviewable constraint",
+            "source_ref": plan["task_description"]["source_anchors"][0],
+            "user_fact_ids": ["fact-1"],
+        }
+    )
+    for section in plan["blueprint_sections"]:
+        section["requirement_ids"].append("req-2")
+    stage = plan["stages"][0]
+    stage["requirement_ids"].append("req-2")
+    stage["ordered_steps"][0]["requirement_ids"].append("req-2")
+    return plan
+
+
 def _authorization(
     plan: dict | None = None,
     revision: int = 1,
@@ -202,17 +223,17 @@ def _authorization(
     }
 
 
-def _claim(disposition: str = "verified") -> dict:
+def _claim(disposition: str = "verified", claim_id: str = "req-1") -> dict:
     if disposition == "verified":
         return {
             "disposition": "verified",
-            "claim_id": "claim-1",
+            "claim_id": claim_id,
             "evidence_refs": ["tool-validate", "tool-capture"],
             "actual_evidence": "structured evidence inspected",
         }
     return {
         "disposition": "failed",
-        "claim_id": "claim-1",
+        "claim_id": claim_id,
         "evidence_refs": ["tool-validate", "tool-capture"],
         "deviation": "observed structural defect",
         "minimum_repair": "correct the observed contact relationship",
@@ -424,16 +445,34 @@ def _execution_payload():
     }
 
 
-def _review_payload(role: Role, disposition="verified"):
+def _review_payload(role: Role, disposition="verified", requirement_ids=("req-1",)):
     return {
         "schema": "hia-project-review/1",
         "stage_id": "stage-1",
         "reviewer": role.value,
-        "claims": [_claim(disposition)],
+        "claims": [_claim(disposition, requirement_id) for requirement_id in requirement_ids],
     }
 
 
-def _decision(decision="pass"):
+def _not_applicable_review(role: Role, requirement_id="req-1") -> dict:
+    return {
+        "schema": "hia-project-review/1",
+        "stage_id": "stage-1",
+        "reviewer": role.value,
+        "claims": [
+            {
+                "disposition": "not_applicable",
+                "claim_id": requirement_id,
+                "exemption": {
+                    "reason": "the stage requirement is demonstrably outside this review surface",
+                    "evidence_refs": ["tool-validate", "tool-capture"],
+                },
+            }
+        ],
+    }
+
+
+def _decision(decision="pass", approved_exemptions=None):
     repair = None
     if decision == "repair":
         repair = {
@@ -448,6 +487,7 @@ def _decision(decision="pass"):
         "decision": decision,
         "final_stage": True,
         "repair_card": repair,
+        "approved_exemptions": list(approved_exemptions or ()),
     }
 
 
@@ -551,6 +591,107 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         self.assertEqual("completed", goals[-1]["status"])
         self.assertEqual("thread-supervisor", goals[-1]["threadId"])
 
+    def test_each_reviewer_must_cover_every_stage_requirement_before_pass(self):
+        plan = _plan_with_two_requirements()
+        self.client.queue(
+            Role.SUPERVISOR,
+            "scene_task_eligibility",
+            {"schema": "hia-project-eligibility/1", "disposition": "eligible", "reason": "scene task"},
+        )
+        self.client.queue(Role.PLANNING, "create_plan_and_stage_cards", plan)
+        self.client.queue(Role.SUPERVISOR, "authorize_plan", _authorization(plan))
+        self.client.queue(Role.EXECUTION, "execute_stage", _execution_payload())
+        self.client.queue(
+            Role.VISUAL_REVIEW,
+            "review_stage",
+            _review_payload(Role.VISUAL_REVIEW, requirement_ids=("req-1",)),
+        )
+        self.client.queue(
+            Role.TECHNICAL_REVIEW,
+            "review_stage",
+            _review_payload(
+                Role.TECHNICAL_REVIEW, requirement_ids=("req-1", "req-2")
+            ),
+        )
+        self.client.queue(
+            Role.VISUAL_REVIEW,
+            "correct_stage_review",
+            _review_payload(
+                Role.VISUAL_REVIEW, requirement_ids=("req-1", "req-2")
+            ),
+        )
+        self.client.queue(Role.SUPERVISOR, "decide_stage_review", _decision())
+        harness = EffectHarness(self.root, self.client)
+        state = harness.run_to_terminal()
+        self.assertEqual(ProjectStatus.COMPLETED, state.status)
+        self.assertEqual(1, state.stage.schema_correction_count)
+        actions = [
+            json.loads(params["input"][0]["text"])["action"]
+            for method, params in self.client.calls
+            if method == "turn/start"
+        ]
+        self.assertIn("correct_stage_review", actions)
+        decision_request = next(
+            json.loads(params["input"][0]["text"])
+            for method, params in self.client.calls
+            if method == "turn/start"
+            and json.loads(params["input"][0]["text"])["action"]
+            == "decide_stage_review"
+        )
+        self.assertEqual(
+            ["req-1", "req-2"],
+            decision_request["review_coverage"]["requirement_ids"],
+        )
+        for proof in decision_request["review_coverage"]["reviewers"].values():
+            self.assertTrue(proof["complete"])
+            self.assertEqual(["req-1", "req-2"], proof["claim_ids"])
+
+    def test_unapproved_not_applicable_claim_cannot_be_passed(self):
+        self._queue_common()
+        self.client.queue(Role.EXECUTION, "execute_stage", _execution_payload())
+        self.client.queue(
+            Role.VISUAL_REVIEW,
+            "review_stage",
+            _not_applicable_review(Role.VISUAL_REVIEW),
+        )
+        self.client.queue(
+            Role.TECHNICAL_REVIEW,
+            "review_stage",
+            _review_payload(Role.TECHNICAL_REVIEW),
+        )
+        self.client.queue(Role.SUPERVISOR, "decide_stage_review", _decision())
+        harness = EffectHarness(self.root, self.client)
+        with self.assertRaises(ProjectEffectError) as raised:
+            harness.run_to_terminal()
+        self.assertEqual("INVALID_STAGE_DECISION", raised.exception.code)
+
+    def test_evidence_bound_not_applicable_claim_requires_exact_supervisor_approval(self):
+        self._queue_common()
+        self.client.queue(Role.EXECUTION, "execute_stage", _execution_payload())
+        self.client.queue(
+            Role.VISUAL_REVIEW,
+            "review_stage",
+            _not_applicable_review(Role.VISUAL_REVIEW),
+        )
+        self.client.queue(
+            Role.TECHNICAL_REVIEW,
+            "review_stage",
+            _review_payload(Role.TECHNICAL_REVIEW),
+        )
+        approval = {
+            "reviewer": Role.VISUAL_REVIEW.value,
+            "requirement_id": "req-1",
+            "reason": "the stage requirement is demonstrably outside this review surface",
+            "evidence_refs": ["tool-validate", "tool-capture"],
+        }
+        self.client.queue(
+            Role.SUPERVISOR,
+            "decide_stage_review",
+            _decision(approved_exemptions=[approval]),
+        )
+        harness = EffectHarness(self.root, self.client)
+        self.assertEqual(ProjectStatus.COMPLETED, harness.run_to_terminal().status)
+
     def test_visual_verified_claim_cannot_cite_only_technical_evidence(self):
         harness = EffectHarness(self.root, self.client)
         payload = _review_payload(Role.VISUAL_REVIEW)
@@ -575,6 +716,48 @@ class ProjectEffectExecutorTests(unittest.TestCase):
             )
         self.assertEqual("REVIEW_EVIDENCE_KIND_MISMATCH", raised.exception.code)
 
+    def test_review_claim_ids_reject_unknown_duplicate_and_missing_requirements(self):
+        harness = EffectHarness(self.root, self.client)
+        execution = {
+            "evidence": [
+                {
+                    "item_id": "tool-capture",
+                    "tool": "hia_capture_viewport",
+                    "artifact_paths": [str(self.capture.resolve())],
+                }
+            ]
+        }
+        stage_two = copy.deepcopy(_full_stage())
+        stage_two["requirement_ids"].append("req-2")
+        stage_two["ordered_steps"][0]["requirement_ids"].append("req-2")
+        cases = (
+            (
+                "UNKNOWN_REVIEW_CLAIM",
+                _review_payload(Role.VISUAL_REVIEW, requirement_ids=("req-x",)),
+                _full_stage(),
+            ),
+            (
+                "DUPLICATE_REVIEW_CLAIM",
+                _review_payload(
+                    Role.VISUAL_REVIEW, requirement_ids=("req-1", "req-1")
+                ),
+                _full_stage(),
+            ),
+            (
+                "MISSING_REVIEW_CLAIM",
+                _review_payload(Role.VISUAL_REVIEW, requirement_ids=("req-1",)),
+                stage_two,
+            ),
+        )
+        for expected_code, payload, stage in cases:
+            with self.subTest(code=expected_code), self.assertRaises(
+                ProjectEffectError
+            ) as raised:
+                harness.executor._parse_review_payload(
+                    payload, Role.VISUAL_REVIEW, stage, execution
+                )
+            self.assertEqual(expected_code, raised.exception.code)
+
     def test_visual_unverified_claim_does_not_invent_capture_binding(self):
         harness = EffectHarness(self.root, self.client)
         payload = {
@@ -584,7 +767,7 @@ class ProjectEffectExecutorTests(unittest.TestCase):
             "claims": [
                 {
                     "disposition": "unverified",
-                    "claim_id": "claim-missing-view",
+                    "claim_id": "req-1",
                     "missing_evidence": ["front capture"],
                     "minimum_next_observation": "capture the missing front view",
                 }
@@ -1008,25 +1191,26 @@ class ProjectEffectExecutorTests(unittest.TestCase):
 
         revised_plan = json.loads(json.dumps(_plan()))
         anchor = revised_plan["requirements"][0]["source_ref"]
-        revised_plan["requirements"].append(
+        revised_plan["requirements"] = [
             {
                 "requirement_id": "req-2",
                 "kind": "structure",
-                "description": "Add the new roof subsystem from user guidance",
+                "description": "Replace the broad structure with the smaller user scope",
                 "source_ref": anchor,
                 "user_fact_ids": ["fact-1"],
             }
-        )
-        revised_plan["stages"][0]["requirement_ids"].append("req-2")
-        revised_plan["stages"][0]["ordered_steps"][0]["requirement_ids"].append("req-2")
+        ]
+        revised_plan["stages"][0]["requirement_ids"] = ["req-2"]
+        revised_plan["stages"][0]["ordered_steps"][0]["requirement_ids"] = ["req-2"]
         for section in revised_plan["blueprint_sections"]:
-            section["requirement_ids"].append("req-2")
+            section["requirement_ids"] = ["req-2"]
 
         updated = publish_guidance(
             harness.state,
-            "add a roof subsystem",
+            "shrink the structure scope and replace the broad requirement",
             requirement_delta=RequirementDelta(
-                add=(Requirement("req-2", "structure", source_ref=anchor),)
+                add=(Requirement("req-2", "structure", source_ref=anchor),),
+                supersede={"req-1": "req-2"},
             ),
             force_replan=True,
         )
@@ -1053,7 +1237,7 @@ class ProjectEffectExecutorTests(unittest.TestCase):
             if method == "turn/start" and params["threadId"] == "thread-planning"
         ][-1]
         self.assertEqual(
-            "add a roof subsystem",
+            "shrink the structure scope and replace the broad requirement",
             planning_envelope["material_revision_requests"][0]["text"],
         )
         self.assertTrue(
@@ -1069,12 +1253,24 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         ][-1]
         self.assertEqual(1, planning["current_blueprint"]["_blueprint_revision"])
         self.assertEqual("req-2", planning["material_requirement_deltas"][0]["delta"]["add"][0]["requirement_id"])
+        self.assertEqual(
+            {"req-1": "req-2"},
+            planning["material_requirement_deltas"][0]["delta"]["supersede"],
+        )
         self.assertEqual(2, planning["target_blueprint_revision"])
         self.assertEqual(2, len(harness.artifacts.get_named("project-1", "plan_history")))
 
         harness.run_one()
         self.assertEqual(ProjectStatus.EXECUTING_STAGE, harness.state.status)
         self.assertEqual(2, harness.state.authorized_blueprint_revision)
+        requirement_status = {
+            item.requirement_id: item.status for item in harness.state.requirements
+        }
+        self.assertEqual(RequirementStatus.ACTIVE, requirement_status["req-2"])
+        self.assertEqual(
+            RequirementStatus.SUPERSEDED_BY_USER,
+            requirement_status["req-1"],
+        )
 
     def test_advance_stage_returns_exact_state_only_effect_result(self):
         harness = EffectHarness(self.root, self.client)

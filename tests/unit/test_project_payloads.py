@@ -209,7 +209,10 @@ class ProjectPayloadTests(unittest.TestCase):
                 {
                     "disposition": "not_applicable",
                     "claim_id": "C4",
-                    "reason": "task has no animation",
+                    "exemption": {
+                        "reason": "task has no animation",
+                        "evidence_refs": ["E4"],
+                    },
                 },
                 NotApplicableClaim,
             ),
@@ -228,6 +231,21 @@ class ProjectPayloadTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "exactly"):
             parse_review_claim(payload)
+
+    def test_not_applicable_requires_structured_reason_and_real_evidence_refs(self) -> None:
+        for exemption in (
+            {"reason": "", "evidence_refs": ["E1"]},
+            {"reason": "outside this stage", "evidence_refs": []},
+            {"reason": "outside this stage"},
+        ):
+            with self.subTest(exemption=exemption), self.assertRaises(ValueError):
+                parse_review_claim(
+                    {
+                        "disposition": "not_applicable",
+                        "claim_id": "C4",
+                        "exemption": exemption,
+                    }
+                )
 
     def test_direct_card_is_small_but_structured(self) -> None:
         card = parse_stage_card(
