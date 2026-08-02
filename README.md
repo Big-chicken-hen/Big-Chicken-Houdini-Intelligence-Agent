@@ -8,6 +8,10 @@ Build and revise editable Houdini node networks with Codex, natural language, re
 
 Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It embeds a conversation panel inside Houdini while the compatible local runtime supplies the connection to the scene that is already open. Codex remains the reasoning system. The default HIA MCP V2 backend lets Codex inspect the scene, search the installed node catalog, execute batched HOM Python on Houdini's UI thread, validate results, and capture the viewport when visual feedback is needed.
 
+The workflow badge above reports the repository's default branch. It is not
+evidence for an unmerged feature branch; use that pull request's own Checks view
+for branch-specific CI results.
+
 > **Preview software:** Big-Chicken Houdini Intelligence Agent can run Codex-generated HOM/Python that modifies the current HIP. Save or version important work before use and review the result in Houdini.
 
 ## Highlights
@@ -27,7 +31,8 @@ Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It emb
 |---|---|
 | Operating system | Windows x64 only |
 | Houdini | **21.0.440 with Python 3.11 is the tested configuration** |
-| Other Houdini versions | The launcher can discover them, but they are not yet claimed as verified |
+| Houdini 22 / Python 3.13 | A matching source UI-ready hook and CI compile/test lane are present; embedded Houdini acceptance is not yet verified |
+| Other Houdini versions | The launcher may discover them, but they are not claimed as verified |
 | Bridge and local knowledge Python | One project-managed CPython 3.10.11 virtual environment at `<project-root>\.venv` |
 | Codex | Project-pinned Codex CLI/app-server 0.144.3 |
 | Account and network | A valid Codex/ChatGPT sign-in and access to the OpenAI service |
@@ -319,11 +324,29 @@ Official sources: [Qwen3-Embedding-0.6B model card](https://huggingface.co/Qwen/
 - [Architecture](docs/ARCHITECTURE.md)
 - [HIA MCP V2](docs/HIA-MCP-V2.md)
 - [Runtime diagnostics](docs/DIAGNOSTICS.md)
+- [Project-team live acceptance](docs/PROJECT_TEAM_LIVE_ACCEPTANCE.md)
 - [Security policy](SECURITY.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 - [Changelog](CHANGELOG.md)
 
 ## Development verification
+
+### Evidence levels
+
+These labels are deliberately not interchangeable:
+
+| Label | What it proves |
+|---|---|
+| `unit-tested` | Deterministic Python tests passed in the named interpreter; no real app-server or Houdini process is implied |
+| `app-server smoke-tested` | A real Codex app-server exercised native Thread/Turn provisioning and cleanup; no Houdini scene integration is implied unless separately recorded |
+| `standalone Qt-tested` | The Panel ran under a standalone Qt harness; embedding, Houdini callbacks, and real scene writes are not implied |
+| `embedded Houdini-tested` | The exact Houdini/Python build completed the documented live Panel, HIA/HOM, evidence, review, repair, recovery, and path cases |
+| `unverified` | The named layer or target has not produced the required direct evidence |
+
+The current branch's status must be reported from its own test output and pull
+request checks, not inferred from the default-branch badge. Houdini 22/Python
+3.13 remains embedded-unverified until it completes
+[Project-team live acceptance](docs/PROJECT_TEAM_LIVE_ACCEPTANCE.md).
 
 Run the standard-library test suite from the repository root:
 
