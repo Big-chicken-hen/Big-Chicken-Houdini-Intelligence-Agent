@@ -33,6 +33,7 @@ from .project_payloads import (
     validate_plan_structure,
 )
 from .project_registry import ProjectRegistry
+from .scene_writer import SceneWriterOwnership
 from .project_runner import ProjectAction, ProjectActionResult
 from .project_turns import TurnOwnershipLedger
 
@@ -101,18 +102,18 @@ class ProjectRoleExecutor:
         *,
         client: ProjectRoleClient,
         registry: ProjectRegistry,
-        scene_write_lock: Any,
+        scene_writer: SceneWriterOwnership,
         allowed_evidence_roots: Sequence[str | Path],
         total_timeout_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if total_timeout_seconds <= 0:
             raise ValueError("total_timeout_seconds must be positive")
-        if scene_write_lock is None:
-            raise ValueError("scene_write_lock is required")
+        if scene_writer is None:
+            raise ValueError("scene_writer is required")
         self._client = client
         self._registry = registry
-        self._scene_write_lock = scene_write_lock
+        self._scene_writer = scene_writer
         self._allowed_roots = tuple(allowed_evidence_roots)
         self._timeout = float(total_timeout_seconds)
         self._clock = clock
@@ -319,16 +320,7 @@ class ProjectRoleExecutor:
     def _execute_stage(
         self, state: ProjectState, action: ProjectAction, deadline: float
     ) -> ProjectActionResult:
-        acquired = self._scene_write_lock.acquire(timeout=self._remaining(deadline))
-        if not acquired:
-            raise ProjectRoleError(
-                "SCENE_WRITE_BUSY",
-                "another project still owns the live Houdini scene write",
-            )
-        try:
-            return self._execute_stage_owned(state, action, deadline)
-        finally:
-            self._scene_write_lock.release()
+        return self._execute_stage_owned(state, action, deadline)
 
     def _execute_stage_owned(
         self, state: ProjectState, action: ProjectAction, deadline: float
@@ -714,19 +706,36 @@ class ProjectRoleExecutor:
         if schema == "hia-project-plan/1":
             current_request["response_rules"]["depth_policy"] = _plan_depth_policy()
         while True:
-            state, call = self._start_turn(
-                state,
-                role,
-                current_request,
-                deadline,
-                local_image_paths=local_image_paths,
-            )
+            reservation = None
+            scene_owner = None
+            if role is Role.EXECUTION:
+                reservation = self._scene_writer.reserve("project", state.project_id)
+            try:
+                state, call = self._start_turn(
+                    state,
+                    role,
+                    current_request,
+                    deadline,
+                    local_image_paths=local_image_paths,
+                )
+                if reservation is not None:
+                    scene_owner = self._scene_writer.bind(reservation, call.turn_id)
+            except Exception:
+                if reservation is not None:
+                    self._scene_writer.abandon_uncreated(reservation)
+                raise
             try:
                 completed = self._client.wait_for_turn(
                     call.thread_id, call.turn_id, self._remaining(deadline)
                 )
             except TimeoutError as exc:
                 raise _Interrupted(state, "project_role_turn_timeout") from exc
+            if scene_owner is not None:
+                if not self._scene_writer.turn_terminal(scene_owner):
+                    raise ProjectRoleError(
+                        "SCENE_WRITER_STILL_ACTIVE",
+                        "Execution ended while an HIA scene write was still active",
+                    )
             state = self._finish_turn(state, call, completed)
             state = self._refresh_guidance(state)
             try:

@@ -216,6 +216,8 @@ class ProjectRoleClient:
         delta_bytes = 0
         completed_texts: list[str] = []
         hia_events: list[Mapping[str, Any]] = []
+        active_hia_items: set[str] = set()
+        terminal_status: str | None = None
         payload_error: tuple[str, str] | None = None
 
         try:
@@ -278,34 +280,8 @@ class ProjectRoleClient:
                         if params.get("threadId") != thread_id or event_turn_id != turn_id:
                             continue
                         status = turn.get("status") if isinstance(turn, Mapping) else None
-                        if status != "completed":
-                            raise ProjectAppServerError(
-                                "PROJECT_TURN_NOT_COMPLETED",
-                                f"project Turn ended with status {status!r}",
-                            )
-                        payload, terminal_payload_error = self._parse_payload(
-                            deltas,
-                            completed_texts,
-                            payload_error,
-                        )
-                        return CompletedTurn(
-                            thread_id=thread_id,
-                            turn_id=turn_id,
-                            status="completed",
-                            payload=payload,
-                            events=tuple(hia_events),
-                            elapsed_seconds=max(0, int(self._clock() - tracked.started_at)),
-                            payload_error_code=(
-                                terminal_payload_error[0]
-                                if terminal_payload_error is not None
-                                else None
-                            ),
-                            payload_error_message=(
-                                terminal_payload_error[1]
-                                if terminal_payload_error is not None
-                                else None
-                            ),
-                        )
+                        terminal_status = status if isinstance(status, str) else "completed"
+                        continue
 
                     if not _belongs_to_turn(params, thread_id, turn_id):
                         continue
@@ -330,6 +306,14 @@ class ProjectRoleClient:
                         item = params.get("item")
                         if not isinstance(item, Mapping):
                             continue
+                        if _is_hia_item(item):
+                            item_id = item.get("id")
+                            if not isinstance(item_id, str) or not item_id:
+                                item_id = str(item.get("tool") or "hia-tool")
+                            if method_name == "item/started":
+                                active_hia_items.add(item_id)
+                            else:
+                                active_hia_items.discard(item_id)
                         if method_name == "item/completed" and item.get("type") == "agentMessage":
                             text = item.get("text")
                             if not isinstance(text, str):
@@ -354,6 +338,36 @@ class ProjectRoleClient:
                                 completed_texts.append(text)
                         if method_name == "item/completed" and _is_hia_item(item):
                             hia_events.append(dict(event))
+
+                if terminal_status is not None and not active_hia_items:
+                    if terminal_status != "completed":
+                        raise ProjectAppServerError(
+                            "PROJECT_TURN_NOT_COMPLETED",
+                            f"project Turn ended with status {terminal_status!r}",
+                        )
+                    payload, terminal_payload_error = self._parse_payload(
+                        deltas,
+                        completed_texts,
+                        payload_error,
+                    )
+                    return CompletedTurn(
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        status="completed",
+                        payload=payload,
+                        events=tuple(hia_events),
+                        elapsed_seconds=max(0, int(self._clock() - tracked.started_at)),
+                        payload_error_code=(
+                            terminal_payload_error[0]
+                            if terminal_payload_error is not None
+                            else None
+                        ),
+                        payload_error_message=(
+                            terminal_payload_error[1]
+                            if terminal_payload_error is not None
+                            else None
+                        ),
+                    )
 
                 if not raw_events and not self._client.is_running:
                     raise ProjectAppServerError(
