@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import re
 from typing import Any, Iterable, Mapping
 
@@ -474,13 +475,7 @@ def information_units(value: Any) -> int:
     seen: set[str] = set()
     units = 0
     for text in texts:
-        normalized = re.sub(r"\d+", "#", text.casefold())
-        normalized = "".join(
-            character
-            for character in normalized
-            if ("\u4e00" <= character <= "\u9fff")
-            or character.isascii() and (character.isalnum() or character in "/._=:\\-")
-        )
+        normalized = _sanitize_information_text(text)
         if not normalized:
             continue
         width = min(12, len(normalized))
@@ -492,3 +487,53 @@ def information_units(value: Any) -> int:
         seen.update(shingles)
         units += len(novel)
     return units
+
+
+_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+_VISIBLE_TOKEN = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9/._=:\\-]+")
+
+
+def _sanitize_information_text(text: str) -> str:
+    """Keep prose/technical names while removing machine-generated identity noise."""
+
+    pieces: list[str] = []
+    for match in _VISIBLE_TOKEN.finditer(text.casefold()):
+        token = match.group(0)
+        if "\u4e00" <= token[0] <= "\u9fff":
+            pieces.append(token)
+            continue
+        if _UUID.fullmatch(token) or _suspicious_identifier(token):
+            continue
+        components = re.split(r"[/._=:\\-]+", token)
+        kept = [
+            component
+            for component in components
+            if component and not _suspicious_identifier(component)
+        ]
+        if kept:
+            pieces.append("/".join(kept))
+    return "".join(pieces)
+
+
+def _suspicious_identifier(token: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]", "", token.casefold())
+    if not compact or compact.isdigit():
+        return True
+    if len(compact) >= 24 and all(character in "0123456789abcdef" for character in compact):
+        return True
+    # Paths remain useful because each component is checked separately below.
+    if any(separator in token for separator in ("/", "\\", ":")):
+        return False
+    if len(compact) >= 48:
+        return True
+    if len(compact) < 24:
+        return False
+    frequencies = {character: compact.count(character) for character in set(compact)}
+    entropy = -sum(
+        (count / len(compact)) * math.log2(count / len(compact))
+        for count in frequencies.values()
+    )
+    return entropy >= 3.7

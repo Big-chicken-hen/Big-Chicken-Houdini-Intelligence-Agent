@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import unittest
+import uuid
 
 from services.bridge.hia_bridge.project_payloads import (
     FULL_BLUEPRINT_SECTION_IDS,
@@ -11,18 +13,36 @@ from services.bridge.hia_bridge.project_payloads import (
     VerifiedClaim,
     parse_review_claim,
     parse_stage_card,
+    information_units,
     validate_blueprint_information,
     validate_plan_structure,
 )
 
 
 def _detail(label: str, size: int) -> str:
-    value = label
+    actors = "builder reviewer designer operator artist rigger architect modeler engineer craftsperson supervisor specialist technician planner fabricator inspector author coordinator animator researcher developer".split()
+    actions = "connects measures shapes aligns verifies documents constructs balances refines inspects positions configures preserves compares assembles routes exposes tests records evaluates repairs".split()
+    targets = "roof frame support surface control output facade railing window doorway foundation stair canopy chassis cabin material camera light geometry network profile joint panel".split()
+    reasons = "clearance editability silhouette contact evidence delivery proportion spacing continuity stability recognition dependency alignment accuracy hierarchy accessibility consistency readability integrity provenance".split()
+    qualities = "precise modular coherent readable durable procedural reversible measurable visible native bounded layered proportional connected stable explicit organized responsive clean consistent".split()
+    methods = "sweeping extruding beveling grouping routing sampling comparing capturing inspecting naming binding transforming merging filtering projecting validating".split()
+    contexts = "object geometry material lighting animation simulation rendering viewport timeline hierarchy branch network interface output reference assembly".split()
+    value = ""
     index = 0
-    translation = str.maketrans("0123456789", "abcdefghij")
+    seed = sum(ord(character) for character in label)
     while len(value) < size:
-        value += hashlib.sha256(f"{label}:{index}".encode()).hexdigest().translate(
-            translation
+        actor = actors[(seed + index * 5) % len(actors)]
+        action = actions[(seed + index * 7) % len(actions)]
+        target = targets[(seed + index * 11) % len(targets)]
+        reason = reasons[(seed + index * 13) % len(reasons)]
+        quality = qualities[(seed + index * 17) % len(qualities)]
+        method = methods[(seed + index * 19) % len(methods)]
+        context = contexts[(seed + index * 23) % len(contexts)]
+        value += (
+            f"{label} the {actor} {action} the editable {target} with native nodes "
+            f"through a {quality} {method} method inside the {context} context so the "
+            f"measured {reason} remains visible in the review evidence at "
+            f"/obj/asset/{actor}_{action}_{target}_{reason}. "
         )
         index += 1
     return value[:size]
@@ -53,10 +73,16 @@ def _step(step_id="STEP-1", requirement_id="REQ-1", dependencies=None):
 
 def _full_step():
     step = _step()
-    step["native_operation_strategy"]["operation"] = _detail("operation", 700)
-    step["expected_result"]["visible"] = _detail("visible", 700)
-    step["evidence"]["technical"] = _detail("technical", 700)
-    step["minimum_repair"]["operation"] = _detail("repair", 700)
+    step["target_network_region"]["target"] = _detail("network target", 2500)
+    step["native_operation_strategy"]["operation"] = _detail("native operation", 2500)
+    step["connections"][0]["purpose"] = _detail("connection purpose", 2500)
+    step["parameter_dependencies"][0]["effect"] = _detail("parameter effect", 2500)
+    step["expected_result"]["visible"] = _detail("visible result", 2500)
+    step["expected_result"]["editable"] = _detail("editable result", 2500)
+    step["evidence"]["visual"] = _detail("visual evidence", 2500)
+    step["evidence"]["technical"] = _detail("technical evidence", 2500)
+    step["minimum_repair"]["trigger"] = _detail("repair trigger", 2500)
+    step["minimum_repair"]["operation"] = _detail("repair operation", 2500)
     return step
 
 
@@ -106,6 +132,49 @@ def _plan_structure() -> dict:
 
 
 class ProjectPayloadTests(unittest.TestCase):
+    def test_information_units_keep_natural_language_and_houdini_paths(self) -> None:
+        text = (
+            "在 Houdini 中建立可编辑的屋顶结构并检查连接关系。 "
+            "Build the native support network and verify measured clearance at "
+            "/obj/HIA_RescueVehicle/OUT_FINAL using polyextrude height parameter."
+        )
+        self.assertGreater(information_units(text), 20)
+
+    def test_hash_uuid_and_high_entropy_garbage_cannot_meet_full_floor(self) -> None:
+        garbage_tokens = []
+        for index in range(800):
+            seed = f"semantic-floor-garbage-{index}".encode("utf-8")
+            garbage_tokens.extend(
+                (
+                    hashlib.sha256(seed).hexdigest(),
+                    str(uuid.uuid5(uuid.NAMESPACE_OID, seed.decode("utf-8"))),
+                    base64.urlsafe_b64encode(hashlib.sha512(seed).digest()).decode("ascii"),
+                )
+            )
+        garbage = " ".join(garbage_tokens)
+        self.assertGreater(len(garbage), 10000)
+        self.assertEqual(0, information_units(garbage))
+
+        step = _step()
+        step["target_network_region"]["target"] = garbage
+        step["native_operation_strategy"]["operation"] = garbage
+        step["connections"][0]["purpose"] = garbage
+        step["parameter_dependencies"][0]["effect"] = garbage
+        step["expected_result"] = {"visible": garbage, "editable": garbage}
+        step["evidence"] = {"visual": garbage, "technical": garbage}
+        step["minimum_repair"] = {"trigger": garbage, "operation": garbage}
+        payload = {
+            "depth": "full",
+            "stage_id": "S1",
+            "requirement_ids": ["REQ-1"],
+            "ordered_steps": [step],
+            "evidence_contract": {"capture": garbage, "technical": garbage},
+            "reviewers": ["visual_review", "technical_review"],
+            "failure_minimum_repair": garbage,
+        }
+        with self.assertRaisesRegex(ValueError, "2500 task-specific"):
+            parse_stage_card(payload)
+
     def test_review_claim_dispositions_have_only_applicable_fields(self) -> None:
         values = (
             (
