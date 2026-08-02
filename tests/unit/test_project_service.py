@@ -8,6 +8,17 @@ import unittest
 from services.bridge.hia_bridge.project_contracts import ProjectStatus, Role
 from services.bridge.hia_bridge.project_registry import ProjectRegistry
 from services.bridge.hia_bridge.project_service import ProjectTeamService, ProjectTeamSettings
+from services.bridge.hia_bridge.project_thread_factory import ProjectThreadFactory
+from tests.unit.project_test_support import server_transports
+
+
+def _factory(client, root: Path) -> ProjectThreadFactory:
+    return ProjectThreadFactory(
+        client,
+        root,
+        "hia_mcp_v2",
+        server_transports(),
+    )
 
 
 class FakeClient:
@@ -73,6 +84,7 @@ class ProjectServiceTests(unittest.TestCase):
             project_root=root,
             registry=self.registry,
             settings=self.settings,
+            thread_factory=_factory(self.client, root),
         )
 
     def tearDown(self) -> None:
@@ -112,6 +124,7 @@ class ProjectServiceTests(unittest.TestCase):
             project_root=Path(self.temp.name),
             registry=self.registry,
             settings=self.settings,
+            thread_factory=_factory(self.client, Path(self.temp.name)),
         )
         self.assertEqual(
             expected,
@@ -161,11 +174,13 @@ class ProjectServiceTests(unittest.TestCase):
 
     def test_goal_failure_reports_incomplete_precise_cleanup(self) -> None:
         root = Path(self.temp.name)
+        client = GoalAndCleanupFailingClient()
         service = ProjectTeamService(
-            client=GoalAndCleanupFailingClient(),
+            client=client,
             project_root=root,
             registry=ProjectRegistry(root / "failed-projects.json"),
             settings=self.settings,
+            thread_factory=_factory(client, root),
         )
         with self.assertRaisesRegex(
             RuntimeError,
@@ -181,6 +196,7 @@ class ProjectServiceTests(unittest.TestCase):
             project_root=root,
             registry=ProjectRegistry(root / "workflow-projects.json"),
             settings=self.settings,
+            thread_factory=_factory(self.client, root),
             workflow=workflow,
         )
         result = service.start_team_project(task_text="build a scene")

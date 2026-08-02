@@ -79,14 +79,14 @@ class ProjectTeamService:
         project_root: Path,
         registry: ProjectRegistry,
         settings: ProjectTeamSettings,
-        selected_backend: str = "hia_mcp_v2",
+        thread_factory: ProjectThreadFactory,
         workflow: ProjectWorkflowControl | None = None,
     ) -> None:
         self._client = client
         self._project_root = project_root.resolve()
         self._registry = registry
         self._settings = settings
-        self._factory = ProjectThreadFactory(client, project_root, selected_backend)
+        self._factory = thread_factory
         self._runner = ProjectRunner(registry)
         self._workflow = workflow
         self._lock = threading.RLock()

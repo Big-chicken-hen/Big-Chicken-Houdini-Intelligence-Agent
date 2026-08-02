@@ -16,6 +16,7 @@ from services.bridge.hia_bridge.project_permissions import (
     validate_role_permissions,
 )
 from services.bridge.hia_bridge.project_thread_factory import ProjectThreadFactory
+from tests.unit.project_test_support import server_transports
 
 
 class FakeClient:
@@ -57,7 +58,7 @@ class ProjectPermissionTests(unittest.TestCase):
     def test_only_execution_receives_hia_and_workspace_write(self) -> None:
         for role in Role:
             with self.subTest(role=role):
-                profile = permission_profile(role)
+                profile = permission_profile(role, "hia_mcp_v2", server_transports())
                 expected = role is Role.EXECUTION
                 self.assertEqual(expected, profile.scene_write)
                 self.assertEqual("workspace-write" if expected else "read-only", profile.sandbox)
@@ -65,25 +66,54 @@ class ProjectPermissionTests(unittest.TestCase):
                 self.assertFalse(profile.config[HIA_SERVER_KEYS[1]])
 
     def test_execution_enables_only_selected_backend(self) -> None:
-        profile = permission_profile(Role.EXECUTION, "houdini_intelligence")
+        profile = permission_profile(
+            Role.EXECUTION,
+            "houdini_intelligence",
+            server_transports(),
+        )
         self.assertFalse(profile.config[HIA_SERVER_KEYS[0]])
         self.assertTrue(profile.config[HIA_SERVER_KEYS[1]])
 
+    def test_complete_transports_are_required_for_both_inventories(self) -> None:
+        transports = server_transports()
+        del transports["houdini_intelligence"]
+        with self.assertRaisesRegex(ValueError, "both exact HIA MCP"):
+            permission_profile(Role.SUPERVISOR, "hia_mcp_v2", transports)
+
+    def test_transport_descriptor_requires_a_nonempty_command(self) -> None:
+        transports = server_transports()
+        transports["hia_mcp_v2"]["command"] = ""
+        with self.assertRaisesRegex(ValueError, "transport command is invalid"):
+            permission_profile(Role.EXECUTION, "hia_mcp_v2", transports)
+
     def test_permission_validation_rejects_read_only_escalation(self) -> None:
-        profile = permission_profile(Role.VISUAL_REVIEW)
+        transports = server_transports()
+        profile = permission_profile(Role.VISUAL_REVIEW, "hia_mcp_v2", transports)
         descriptor = {
             "sandbox": profile.sandbox,
             "approvalPolicy": profile.approval_policy,
             "config": dict(profile.config),
         }
-        validate_role_permissions(Role.VISUAL_REVIEW, descriptor)
+        validate_role_permissions(
+            Role.VISUAL_REVIEW,
+            descriptor,
+            "hia_mcp_v2",
+            transports,
+        )
         descriptor["config"][HIA_SERVER_KEYS[0]] = True
         with self.assertRaisesRegex(ValueError, "permission drift"):
-            validate_role_permissions(Role.VISUAL_REVIEW, descriptor)
+            validate_role_permissions(
+                Role.VISUAL_REVIEW,
+                descriptor,
+                "hia_mcp_v2",
+                transports,
+            )
 
     def test_lazy_provisioning_starts_only_supervisor_before_intake(self) -> None:
         client = FakeClient()
-        factory = ProjectThreadFactory(client, Path.cwd())
+        factory = ProjectThreadFactory(
+            client, Path.cwd(), "hia_mcp_v2", server_transports()
+        )
         state = factory.start_supervisor(_state(), model="gpt-test")
         self.assertEqual({Role.SUPERVISOR}, set(state.roles))
         self.assertEqual("thread-supervisor", state.goal_thread_id)
@@ -93,7 +123,10 @@ class ProjectPermissionTests(unittest.TestCase):
 
     def test_eligible_intake_provisions_exactly_five_native_threads(self) -> None:
         client = FakeClient()
-        factory = ProjectThreadFactory(client, Path.cwd())
+        transports = server_transports()
+        factory = ProjectThreadFactory(
+            client, Path.cwd(), "hia_mcp_v2", transports
+        )
         state = factory.start_supervisor(_state(), model="gpt-test")
         state = ProjectState(**{**state.__dict__, "status": ProjectStatus.PROVISIONING_ROLES})
         state = factory.provision_workers(state)
@@ -102,18 +135,22 @@ class ProjectPermissionTests(unittest.TestCase):
         self.assertEqual(5, len(client.calls))
         for _, params in client.calls:
             role = Role(params["threadSource"].rsplit("/", 1)[-1])
-            validate_role_permissions(role, params)
+            validate_role_permissions(role, params, "hia_mcp_v2", transports)
 
     def test_scene_write_readiness_rejects_partial_role_set(self) -> None:
         client = FakeClient()
-        factory = ProjectThreadFactory(client, Path.cwd())
+        factory = ProjectThreadFactory(
+            client, Path.cwd(), "hia_mcp_v2", server_transports()
+        )
         state = factory.start_supervisor(_state())
         with self.assertRaisesRegex(ValueError, "exactly five"):
             require_complete_project_roles(state.roles)
 
     def test_partial_worker_creation_is_precisely_rolled_back(self) -> None:
         client = FailingClient()
-        factory = ProjectThreadFactory(client, Path.cwd())
+        factory = ProjectThreadFactory(
+            client, Path.cwd(), "hia_mcp_v2", server_transports()
+        )
         state = factory.start_supervisor(_state())
         state = ProjectState(
             **{**state.__dict__, "status": ProjectStatus.PROVISIONING_ROLES}

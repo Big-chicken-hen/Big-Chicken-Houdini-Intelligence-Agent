@@ -27,6 +27,7 @@ from hia_bridge.project_contracts import (  # noqa: E402
 from hia_bridge.project_effects import EffectResult  # noqa: E402
 from hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent  # noqa: E402
 from hia_bridge.project_registry import ProjectRecord  # noqa: E402
+from tests.unit.project_test_support import server_transports  # noqa: E402
 
 
 class _RawClient:
@@ -132,6 +133,7 @@ class ProjectMainWiringTests(unittest.TestCase):
                 events=self.events,
                 project_root=self.root,
                 selected_backend="hia_mcp_v2",
+                server_transports=server_transports(),
                 allowed_evidence_roots=roots,
             )
             runtime.registry.put(_record("project-1"))
@@ -174,6 +176,7 @@ class ProjectMainWiringTests(unittest.TestCase):
                 events=self.events,
                 project_root=self.root,
                 selected_backend="hia_mcp_v2",
+                server_transports=server_transports(),
                 allowed_evidence_roots=(self.root / ".runtime",),
             )
             runtime.registry.put(_record("project-1", role_thread=True))

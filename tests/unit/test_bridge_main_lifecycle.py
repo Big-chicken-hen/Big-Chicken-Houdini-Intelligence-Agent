@@ -539,6 +539,11 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             events=mock.ANY,
             project_root=REPOSITORY_ROOT,
             selected_backend=bridge_main.HIA_MCP_V2_SERVER_ID,
+            server_transports=bridge_main._project_mcp_server_transports(
+                str(Path(sys.executable).resolve()),
+                backend=bridge_main.HIA_MCP_V2_BACKEND,
+                project_root=REPOSITORY_ROOT,
+            ),
             allowed_evidence_roots=(
                 REPOSITORY_ROOT / ".runtime",
                 REPOSITORY_ROOT / ".runtime" / "cache",

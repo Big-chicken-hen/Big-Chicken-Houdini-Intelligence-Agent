@@ -65,6 +65,18 @@ HIA_MCP_V2_BACKEND = "hia_v2"
 FXHOUDINI_MCP_BACKEND = "fxhoudini"
 HIA_MCP_V2_SERVER_ID = "hia_mcp_v2"
 FXHOUDINI_MCP_SERVER_ID = "houdini_intelligence"
+FXHOUDINI_MCP_CHILD_ENVIRONMENT = (
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONNOUSERSITE",
+    "TEMP",
+    "TMP",
+    "HIA_PROJECT_ROOT",
+    "HOUDINI_HOST",
+    "HOUDINI_PORT",
+    "FXHOUDINIMCP_TOKEN",
+)
 HIA_MCP_V2_HOST = "127.0.0.1"
 HIA_MCP_V2_EXECUTE_ROUTE = "/hia-mcp-v2/v1/execute"
 HIA_MCP_V2_HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
@@ -247,6 +259,7 @@ def _build_project_runtime(
     events: EventBuffer,
     project_root: Path,
     selected_backend: str,
+    server_transports: Mapping[str, Mapping[str, object]],
     allowed_evidence_roots: Sequence[Path],
 ) -> ProjectRuntime:
     """Compose the project runtime once around the owned app-server client."""
@@ -255,7 +268,10 @@ def _build_project_runtime(
     runner = ProjectRunner(registry)
     effect_client = ProjectEffectClient(client, events)
     thread_factory = ProjectThreadFactory(
-        effect_client, project_root, selected_backend
+        effect_client,
+        project_root,
+        selected_backend,
+        server_transports,
     )
     artifacts = ProjectArtifactStore(
         project_root / PROJECT_ARTIFACTS_RELATIVE_PATH
@@ -306,7 +322,7 @@ def _build_project_runtime(
         settings=ProjectTeamSettings(
             project_root / PROJECT_SETTINGS_RELATIVE_PATH
         ),
-        selected_backend=selected_backend,
+        thread_factory=thread_factory,
         workflow=workflow,
     )
     service_holder.append(service)
@@ -568,6 +584,43 @@ def _codex_app_server_command(
     return command
 
 
+def _project_mcp_server_transports(
+    mcp_python: str,
+    *,
+    backend: str,
+    project_root: Path,
+) -> dict[str, dict[str, object]]:
+    """Return complete per-Thread transports for both HIA inventories.
+
+    Codex 0.144.3 does not deep-merge an ``enabled``-only per-Thread MCP
+    override with the process configuration.  Every role therefore receives
+    complete transports, while its permission profile deterministically sets
+    ``enabled`` and ``required`` for each exact server.
+    """
+
+    if backend not in {HIA_MCP_V2_BACKEND, FXHOUDINI_MCP_BACKEND}:
+        raise BridgeError("INVALID_MCP_BACKEND", f"Unsupported MCP backend: {backend}")
+    common: dict[str, object] = {
+        "command": mcp_python,
+        "cwd": str(project_root),
+        "startup_timeout_sec": 15,
+        "tool_timeout_sec": 65,
+        "default_tools_approval_mode": "approve",
+    }
+    return {
+        HIA_MCP_V2_SERVER_ID: {
+            **common,
+            "args": ["-B", "-m", HIA_MCP_V2_SERVER_ID],
+            "env_vars": list(HIA_MCP_V2_CHILD_ENVIRONMENT),
+        },
+        FXHOUDINI_MCP_SERVER_ID: {
+            **common,
+            "args": ["-B", "-m", "fxhoudinimcp"],
+            "env_vars": list(FXHOUDINI_MCP_CHILD_ENVIRONMENT),
+        },
+    }
+
+
 def _validated_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
     project_root = Path(args.project_root)
     if not _same_windows_path(project_root, PROJECT_ROOT):
@@ -773,6 +826,11 @@ def run(argv: Sequence[str] | None = None) -> int:
                 HIA_MCP_V2_SERVER_ID
                 if backend == HIA_MCP_V2_BACKEND
                 else FXHOUDINI_MCP_SERVER_ID
+            ),
+            server_transports=_project_mcp_server_transports(
+                mcp_python,
+                backend=backend,
+                project_root=project_root,
             ),
             allowed_evidence_roots=_project_evidence_roots(
                 project_root, render_output_directory

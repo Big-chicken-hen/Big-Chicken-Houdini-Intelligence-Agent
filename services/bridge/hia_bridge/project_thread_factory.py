@@ -37,12 +37,18 @@ class ProjectThreadFactory:
         self,
         client: AppServerClient,
         project_root: Path,
-        selected_backend: str = "hia_mcp_v2",
+        selected_backend: str,
+        server_transports: Mapping[str, Mapping[str, Any]],
     ) -> None:
         self._client = client
         self._project_root = project_root.resolve()
         self._selected_backend = selected_backend
-        permission_profile(Role.EXECUTION, selected_backend)
+        self._server_transports = server_transports
+        permission_profile(
+            Role.EXECUTION,
+            selected_backend,
+            server_transports,
+        )
 
     def start_role(
         self,
@@ -57,7 +63,11 @@ class ProjectThreadFactory:
             raise ValueError(f"project already has a {role.value} Thread")
         if role is not Role.SUPERVISOR and state.status is not ProjectStatus.PROVISIONING_ROLES:
             raise ValueError("worker roles are provisioned only after eligible intake")
-        profile = permission_profile(role, self._selected_backend)
+        profile = permission_profile(
+            role,
+            self._selected_backend,
+            self._server_transports,
+        )
         params: dict[str, Any] = {
             "cwd": str(self._project_root),
             "approvalPolicy": profile.approval_policy,

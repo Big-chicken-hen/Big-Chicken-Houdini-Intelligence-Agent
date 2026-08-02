@@ -26,6 +26,7 @@ from services.bridge.hia_bridge.project_lifecycle import ProjectEvent, reduce_pr
 from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
 from services.bridge.hia_bridge.project_runner import _pending_effect
 from services.bridge.hia_bridge.project_thread_factory import ProjectThreadFactory
+from tests.unit.project_test_support import server_transports
 
 
 def _full_stage() -> dict:
@@ -215,7 +216,12 @@ class EffectHarness:
         self.executor = ProjectEffectExecutor(
             client=client,
             registry=self.registry,
-            thread_factory=ProjectThreadFactory(client, root),
+            thread_factory=ProjectThreadFactory(
+                client,
+                root,
+                "hia_mcp_v2",
+                server_transports(),
+            ),
             artifacts=self.artifacts,
             allowed_evidence_roots=[root],
             total_timeout_seconds=5,

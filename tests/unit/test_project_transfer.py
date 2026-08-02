@@ -16,6 +16,15 @@ from services.bridge.hia_bridge.project_transfer import (
     ProjectThreadTransfer,
     ProjectTransferError,
 )
+from tests.unit.project_test_support import server_transports
+
+
+def _transfer(client, *, enabled: bool) -> ProjectThreadTransfer:
+    return ProjectThreadTransfer(
+        client,
+        enabled=enabled,
+        server_transports=server_transports(),
+    )
 
 
 def state() -> ProjectState:
@@ -102,7 +111,7 @@ class ProjectTransferTests(unittest.TestCase):
     def test_disabled_never_forks_or_deletes(self) -> None:
         project = state()
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=False)
+        transfer = _transfer(client, enabled=False)
 
         with self.assertRaisesRegex(ProjectTransferError, "disabled"):
             transfer.prepare(project, Role.PLANNING)
@@ -112,14 +121,18 @@ class ProjectTransferTests(unittest.TestCase):
     def test_prepare_verifies_context_source_model_permissions_and_goal(self) -> None:
         project = state()
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
 
         prepared = transfer.prepare(project, Role.EXECUTION)
 
         self.assertEqual("old-execution", prepared.old_thread_id)
         self.assertEqual("new-old-execution", prepared.new_thread_id)
         fork = next(params for method, params in client.calls if method == "thread/fork")
-        profile = permission_profile(Role.EXECUTION)
+        profile = permission_profile(
+            Role.EXECUTION,
+            "hia_mcp_v2",
+            server_transports(),
+        )
         self.assertEqual(profile.sandbox, fork["sandbox"])
         self.assertEqual(dict(profile.config), fork["config"])
         self.assertEqual("hia-project/project-1/execution", fork["threadSource"])
@@ -139,7 +152,7 @@ class ProjectTransferTests(unittest.TestCase):
             return result
 
         client.request = bad_context  # type: ignore[method-assign]
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
 
         with self.assertRaisesRegex(ProjectTransferError, "context"):
             transfer.prepare(project, Role.VISUAL_REVIEW)
@@ -159,7 +172,7 @@ class ProjectTransferTests(unittest.TestCase):
             return result
 
         client.request = bad_profile  # type: ignore[method-assign]
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
 
         with self.assertRaisesRegex(ProjectTransferError, "permission drift"):
             transfer.prepare(project, Role.EXECUTION)
@@ -179,7 +192,7 @@ class ProjectTransferTests(unittest.TestCase):
             return result
 
         client.request = bad_model  # type: ignore[method-assign]
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
 
         with self.assertRaisesRegex(ProjectTransferError, "model changed"):
             transfer.prepare(project, Role.PLANNING)
@@ -191,7 +204,7 @@ class ProjectTransferTests(unittest.TestCase):
         project = state()
         client = FakeClient(project)
         client.threads["old-planning"]["nativeSubagent"] = True
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
 
         with self.assertRaisesRegex(ProjectTransferError, "subagent"):
             transfer.prepare(project, Role.PLANNING)
@@ -204,7 +217,7 @@ class ProjectTransferTests(unittest.TestCase):
         client.threads["old-planning"]["threadSource"] = (
             "hia-project/project-2/planning"
         )
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
 
         with self.assertRaisesRegex(ProjectTransferError, "exact native"):
             transfer.prepare(project, Role.PLANNING)
@@ -214,7 +227,7 @@ class ProjectTransferTests(unittest.TestCase):
     def test_commit_persists_new_identity_before_precise_old_delete(self) -> None:
         project = state()
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
         prepared = transfer.prepare(project, Role.TECHNICAL_REVIEW)
         order: list[str] = []
 
@@ -244,7 +257,7 @@ class ProjectTransferTests(unittest.TestCase):
     def test_persist_failure_rolls_back_new_and_keeps_old_identity(self) -> None:
         project = state()
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
         prepared = transfer.prepare(project, Role.PLANNING)
 
         def fail(_updated: ProjectState) -> None:
@@ -259,7 +272,7 @@ class ProjectTransferTests(unittest.TestCase):
     def test_old_delete_failure_reports_cleanup_without_corrupting_new_state(self) -> None:
         project = state()
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
         prepared = transfer.prepare(project, Role.EXECUTION)
         client.delete_failures.add(prepared.old_thread_id)
         persisted: list[ProjectState] = []
@@ -276,7 +289,7 @@ class ProjectTransferTests(unittest.TestCase):
     def test_explicit_rollback_never_deletes_old_thread(self) -> None:
         project = state()
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
         prepared = transfer.prepare(project, Role.PLANNING)
 
         error = transfer.rollback(prepared)
@@ -288,7 +301,7 @@ class ProjectTransferTests(unittest.TestCase):
     def test_restart_descriptor_is_reverified_without_another_fork(self) -> None:
         project = state()
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
         prepared = transfer.prepare(project, Role.SUPERVISOR)
         descriptor = prepared.restart_descriptor()
         calls_before = sum(method == "thread/fork" for method, _ in client.calls)
@@ -304,7 +317,7 @@ class ProjectTransferTests(unittest.TestCase):
     def test_restart_descriptor_rejects_changed_context(self) -> None:
         project = state()
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
         prepared = transfer.prepare(project, Role.PLANNING)
         client.threads[prepared.new_thread_id]["turns"] = []
 
@@ -325,7 +338,7 @@ class ProjectTransferTests(unittest.TestCase):
             },
         )
         client = FakeClient(project)
-        transfer = ProjectThreadTransfer(client, enabled=True)
+        transfer = _transfer(client, enabled=True)
 
         with self.assertRaisesRegex(ProjectTransferError, "active"):
             transfer.prepare(project, Role.EXECUTION)

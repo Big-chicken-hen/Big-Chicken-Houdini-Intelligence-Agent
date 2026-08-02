@@ -104,11 +104,17 @@ class ProjectThreadTransfer:
         *,
         enabled: bool = False,
         selected_backend: str = "hia_mcp_v2",
+        server_transports: Mapping[str, Mapping[str, Any]],
     ) -> None:
         self._client = client
         self._enabled = enabled
         self._selected_backend = selected_backend
-        permission_profile(Role.EXECUTION, selected_backend)
+        self._server_transports = server_transports
+        permission_profile(
+            Role.EXECUTION,
+            selected_backend,
+            server_transports,
+        )
 
     def prepare(self, state: ProjectState, role: Role) -> PreparedProjectTransfer:
         """Fork and verify a replacement while preserving the old identity."""
@@ -122,7 +128,11 @@ class ProjectThreadTransfer:
         self._validate_project_thread(old_read, binding.thread_id, source)
         old_context = self._context(old_read)
 
-        profile = permission_profile(role, self._selected_backend)
+        profile = permission_profile(
+            role,
+            self._selected_backend,
+            self._server_transports,
+        )
         params: dict[str, Any] = {
             "threadId": binding.thread_id,
             "approvalPolicy": profile.approval_policy,
@@ -352,7 +362,12 @@ class ProjectThreadTransfer:
             "approvalPolicy": result.get("approvalPolicy"),
             "config": config,
         }
-        validate_role_permissions(role, observable_profile, self._selected_backend)
+        validate_role_permissions(
+            role,
+            observable_profile,
+            self._selected_backend,
+            self._server_transports,
+        )
         if binding.model is not None and result.get("model") != binding.model:
             raise ProjectTransferError("forked Thread model changed")
         if binding.effort is not None and result.get("reasoningEffort") != binding.effort:

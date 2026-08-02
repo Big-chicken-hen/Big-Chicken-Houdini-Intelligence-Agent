@@ -12,6 +12,7 @@ HIA_SERVER_KEYS = (
     "mcp_servers.hia_mcp_v2.enabled",
     "mcp_servers.houdini_intelligence.enabled",
 )
+HIA_SERVER_IDS = ("hia_mcp_v2", "houdini_intelligence")
 
 
 @dataclass(frozen=True)
@@ -27,14 +28,25 @@ class RolePermissionProfile:
 
 
 def permission_profile(
-    role: Role, selected_backend: str = "hia_mcp_v2"
+    role: Role,
+    selected_backend: str,
+    server_transports: Mapping[str, Mapping[str, Any]],
 ) -> RolePermissionProfile:
     if selected_backend not in {"hia_mcp_v2", "houdini_intelligence"}:
         raise ValueError("selected_backend is invalid")
     read_only = role in READ_ONLY_ROLES
-    config: dict[str, Any] = {
-        key: (not read_only and selected_backend in key) for key in HIA_SERVER_KEYS
-    }
+    config: dict[str, Any] = {}
+    _validate_server_transports(server_transports)
+    for server_id in HIA_SERVER_IDS:
+        descriptor = server_transports[server_id]
+        prefix = f"mcp_servers.{server_id}"
+        for name, value in descriptor.items():
+            if name in {"enabled", "required"}:
+                continue
+            config[f"{prefix}.{name}"] = value
+        selected = not read_only and server_id == selected_backend
+        config[f"{prefix}.enabled"] = selected
+        config[f"{prefix}.required"] = selected
     config["multi_agent_mode"] = (
         "explicitRequestOnly" if role is Role.EXECUTION else "proactive"
     )
@@ -49,11 +61,12 @@ def permission_profile(
 def validate_role_permissions(
     role: Role,
     descriptor: Mapping[str, Any],
-    selected_backend: str = "hia_mcp_v2",
+    selected_backend: str,
+    server_transports: Mapping[str, Mapping[str, Any]],
 ) -> None:
     """Reject permission drift after start, resume, fork, or restart."""
 
-    expected = permission_profile(role, selected_backend)
+    expected = permission_profile(role, selected_backend, server_transports)
     if descriptor.get("sandbox") != expected.sandbox:
         raise ValueError(f"{role.value} sandbox permission drift")
     if descriptor.get("approvalPolicy") != expected.approval_policy:
@@ -64,6 +77,26 @@ def validate_role_permissions(
     for key, value in expected.config.items():
         if config.get(key) != value:
             raise ValueError(f"{role.value} config permission drift: {key}")
+
+
+def _validate_server_transports(
+    value: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if set(value) != set(HIA_SERVER_IDS):
+        raise ValueError("both exact HIA MCP server transports are required")
+    for server_id in HIA_SERVER_IDS:
+        descriptor = value.get(server_id)
+        if not isinstance(descriptor, Mapping):
+            raise ValueError(f"{server_id} transport is missing")
+        command = descriptor.get("command")
+        args = descriptor.get("args")
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(f"{server_id} transport command is invalid")
+        if args is not None and (
+            not isinstance(args, (list, tuple))
+            or any(not isinstance(item, str) for item in args)
+        ):
+            raise ValueError(f"{server_id} transport args are invalid")
 
 
 def require_complete_project_roles(roles: Mapping[Role, Any]) -> None:

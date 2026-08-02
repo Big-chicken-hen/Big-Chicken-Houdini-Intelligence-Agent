@@ -20,8 +20,10 @@ from hia_bridge.events import EventBuffer  # noqa: E402
 from hia_bridge.http_server import BridgeApplication, LoopbackHTTPServer  # noqa: E402
 from hia_bridge.project_registry import ProjectRegistry  # noqa: E402
 from hia_bridge.project_service import ProjectTeamService, ProjectTeamSettings  # noqa: E402
+from hia_bridge.project_thread_factory import ProjectThreadFactory  # noqa: E402
 from hia_bridge.protocol import ProtocolPolicy  # noqa: E402
 from hia_bridge.session import BridgeSession  # noqa: E402
+from tests.unit.project_test_support import server_transports  # noqa: E402
 
 
 class _Workflow:
@@ -65,6 +67,12 @@ class ProjectHTTPTests(unittest.TestCase):
             project_root=runtime,
             registry=ProjectRegistry(runtime / "registry.json"),
             settings=ProjectTeamSettings(runtime / "settings.json"),
+            thread_factory=ProjectThreadFactory(
+                self.client,
+                runtime,
+                "hia_mcp_v2",
+                server_transports(),
+            ),
             workflow=self.workflow,
         )
         application = BridgeApplication(
