@@ -29,7 +29,10 @@ MODEL_SERVICE_TIER_MAX_ENTRIES = 32
 MODEL_DISPLAY_NAME_MAX_LENGTH = 512
 MODEL_DESCRIPTION_MAX_LENGTH = 8192
 MODEL_CURSOR_MAX_LENGTH = 4096
-THREAD_LIST_LIMIT = 20
+THREAD_LIST_PAGE_SIZE = 100
+THREAD_LIST_MAX_PAGES = 32
+THREAD_LIST_MAX_ENTRIES = 4096
+THREAD_CURSOR_MAX_LENGTH = 4096
 THREAD_NAME_MAX_LENGTH = 512
 THREAD_PREVIEW_MAX_LENGTH = 8192
 THREAD_CWD_MAX_LENGTH = 32_767
@@ -904,80 +907,118 @@ class BridgeSession:
         }
 
     def list_threads(self) -> dict[str, Any]:
-        """Return one recent page for this project without local persistence."""
-
-        result = self._client.request(
-            "thread/list",
-            {
-                "cwd": _thread_cwd_filters(str(self._project_root)),
-                "archived": False,
-                "limit": THREAD_LIST_LIMIT,
-                "modelProviders": [],
-                "useStateDbOnly": True,
-                "sortKey": "recency_at",
-                "sortDirection": "desc",
-            },
-        )
-        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
-            raise self._invalid_thread_response("Response data must be an array")
+        """Return every bounded native Thread for this project."""
 
         project_root = _normalized_thread_cwd(str(self._project_root))
         threads: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for entry in result["data"][:THREAD_LIST_LIMIT]:
-            if not isinstance(entry, dict):
-                raise self._invalid_thread_response("Thread entry must be an object")
-            thread_id = self._validated_thread_response_string(
-                entry.get("id"), "id", MODEL_IDENTIFIER_MAX_LENGTH, allow_empty=False
-            )
-            cwd = self._validated_thread_response_string(
-                entry.get("cwd"), "cwd", THREAD_CWD_MAX_LENGTH, allow_empty=False
-            )
-            entry_root = _normalized_thread_cwd(cwd)
-            if entry_root != project_root:
-                continue
-            if thread_id in seen:
-                raise self._invalid_thread_response(
-                    "Response contains a duplicate thread id", field="id"
-                )
-            seen.add(thread_id)
+        seen_cursors: set[str] = set()
+        cursor: str | None = None
+        raw_entry_count = 0
 
-            raw_name = entry.get("name")
-            name = None
-            if raw_name is not None:
-                name = self._validated_thread_response_string(
-                    raw_name,
-                    "name",
-                    THREAD_NAME_MAX_LENGTH,
-                    allow_empty=True,
-                )
-            preview = self._sanitized_thread_preview(entry.get("preview"))
-            updated_at = entry.get("updatedAt")
-            if not isinstance(updated_at, int) or isinstance(updated_at, bool) or updated_at < 0:
-                raise self._invalid_thread_response(
-                    "Thread updatedAt must be a non-negative integer",
-                    field="updatedAt",
-                )
-            record: dict[str, Any] = {
-                "thread_id": thread_id,
-                "name": name,
-                "preview": preview,
-                "updated_at": updated_at,
+        for page_number in range(1, THREAD_LIST_MAX_PAGES + 1):
+            params: dict[str, Any] = {
+                "cwd": _thread_cwd_filters(str(self._project_root)),
+                "archived": False,
+                "limit": THREAD_LIST_PAGE_SIZE,
+                "modelProviders": [],
+                "useStateDbOnly": True,
+                "sortKey": "recency_at",
+                "sortDirection": "desc",
             }
-            recency_at = entry.get("recencyAt")
-            if recency_at is not None:
+            if cursor is not None:
+                params["cursor"] = cursor
+            result = self._client.request("thread/list", params)
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                raise self._invalid_thread_response("Response data must be an array")
+
+            raw_entry_count += len(result["data"])
+            if raw_entry_count > THREAD_LIST_MAX_ENTRIES:
+                raise BridgeError(
+                    "THREAD_LIST_LIMIT_EXCEEDED",
+                    "Codex Thread history exceeded the Bridge entry limit",
+                    http_status=502,
+                    details={"max_entries": THREAD_LIST_MAX_ENTRIES},
+                )
+            for entry in result["data"]:
+                if not isinstance(entry, dict):
+                    raise self._invalid_thread_response("Thread entry must be an object")
+                thread_id = self._validated_thread_response_string(
+                    entry.get("id"), "id", MODEL_IDENTIFIER_MAX_LENGTH, allow_empty=False
+                )
+                cwd = self._validated_thread_response_string(
+                    entry.get("cwd"), "cwd", THREAD_CWD_MAX_LENGTH, allow_empty=False
+                )
+                if thread_id in seen:
+                    raise self._invalid_thread_response(
+                        "Response contains a duplicate thread id", field="id"
+                    )
+                seen.add(thread_id)
+                if _normalized_thread_cwd(cwd) != project_root:
+                    continue
+
+                raw_name = entry.get("name")
+                name = None
+                if raw_name is not None:
+                    name = self._validated_thread_response_string(
+                        raw_name, "name", THREAD_NAME_MAX_LENGTH, allow_empty=True
+                    )
+                preview = self._sanitized_thread_preview(entry.get("preview"))
+                updated_at = entry.get("updatedAt")
                 if (
-                    not isinstance(recency_at, int)
-                    or isinstance(recency_at, bool)
-                    or recency_at < 0
+                    not isinstance(updated_at, int)
+                    or isinstance(updated_at, bool)
+                    or updated_at < 0
                 ):
                     raise self._invalid_thread_response(
-                        "Thread recencyAt must be a non-negative integer or null",
-                        field="recencyAt",
+                        "Thread updatedAt must be a non-negative integer",
+                        field="updatedAt",
                     )
-                record["recency_at"] = recency_at
-            threads.append(record)
-        return {"threads": threads}
+                record: dict[str, Any] = {
+                    "thread_id": thread_id,
+                    "name": name,
+                    "preview": preview,
+                    "updated_at": updated_at,
+                }
+                recency_at = entry.get("recencyAt")
+                if recency_at is not None:
+                    if (
+                        not isinstance(recency_at, int)
+                        or isinstance(recency_at, bool)
+                        or recency_at < 0
+                    ):
+                        raise self._invalid_thread_response(
+                            "Thread recencyAt must be a non-negative integer or null",
+                            field="recencyAt",
+                        )
+                    record["recency_at"] = recency_at
+                threads.append(record)
+
+            next_cursor = result.get("nextCursor")
+            if next_cursor is None:
+                return {"threads": threads}
+            next_cursor = self._validated_thread_response_string(
+                next_cursor,
+                "nextCursor",
+                THREAD_CURSOR_MAX_LENGTH,
+                allow_empty=False,
+            )
+            if next_cursor in seen_cursors:
+                raise self._invalid_thread_response(
+                    "Response contains a repeated pagination cursor",
+                    field="nextCursor",
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+            if page_number == THREAD_LIST_MAX_PAGES:
+                raise BridgeError(
+                    "THREAD_LIST_LIMIT_EXCEEDED",
+                    "Codex Thread history exceeded the Bridge page limit",
+                    http_status=502,
+                    details={"max_pages": THREAD_LIST_MAX_PAGES},
+                )
+
+        raise AssertionError("unreachable Thread pagination state")
 
     def rename_thread(self, thread_id: str, name: str) -> dict[str, Any]:
         thread_id = self._validated_identifier(thread_id, "thread_id")

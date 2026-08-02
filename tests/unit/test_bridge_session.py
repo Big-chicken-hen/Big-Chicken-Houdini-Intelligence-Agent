@@ -105,6 +105,20 @@ class _ThreadHistoryClient(_ClientStub):
         return super().request(method, params)
 
 
+class _PagedThreadHistoryClient(_ThreadHistoryClient):
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        super().__init__({})
+        self.responses = list(responses)
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method != "thread/list":
+            return super().request(method, params)
+        self.requests.append((method, dict(params)))
+        if not self.responses:
+            raise AssertionError("Unexpected extra thread/list page request")
+        return self.responses.pop(0)
+
+
 class _ThreadContentClient(_ClientStub):
     def __init__(self, response: dict[str, Any]) -> None:
         super().__init__()
@@ -1086,7 +1100,7 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
                             "\\\\?\\" + str(REPOSITORY_ROOT),
                         ],
                         "archived": False,
-                        "limit": 20,
+                        "limit": 100,
                         "modelProviders": [],
                         "useStateDbOnly": True,
                         "sortKey": "recency_at",
@@ -1110,6 +1124,48 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
             },
             result,
         )
+
+    def test_list_threads_reads_every_native_page(self) -> None:
+        def entry(thread_id: str, updated_at: int) -> dict[str, Any]:
+            return {
+                "id": thread_id,
+                "cwd": str(REPOSITORY_ROOT),
+                "name": thread_id,
+                "preview": thread_id,
+                "updatedAt": updated_at,
+            }
+
+        client = _PagedThreadHistoryClient(
+            [
+                {"data": [entry("thread-new", 20)], "nextCursor": "page-2"},
+                {"data": [entry("thread-old", 10)], "nextCursor": None},
+            ]
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.list_threads()
+
+        self.assertEqual(
+            ["thread-new", "thread-old"],
+            [thread["thread_id"] for thread in result["threads"]],
+        )
+        self.assertNotIn("cursor", client.requests[0][1])
+        self.assertEqual("page-2", client.requests[1][1]["cursor"])
+
+    def test_list_threads_rejects_repeated_pagination_cursor(self) -> None:
+        client = _PagedThreadHistoryClient(
+            [
+                {"data": [], "nextCursor": "same"},
+                {"data": [], "nextCursor": "same"},
+            ]
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        with self.assertRaises(BridgeError) as raised:
+            session.list_threads()
+
+        self.assertEqual("INVALID_THREAD_LIST_RESPONSE", raised.exception.code)
+        self.assertEqual("nextCursor", raised.exception.details["field"])
     @unittest.skipUnless(os.name == "nt", "Windows extended paths only")
     def test_list_threads_accepts_windows_extended_cwd(self) -> None:
         client = _ThreadHistoryClient(

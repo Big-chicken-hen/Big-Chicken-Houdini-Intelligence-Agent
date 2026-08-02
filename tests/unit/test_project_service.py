@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -137,6 +138,59 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual("single", self.service.route("single"))
         with self.assertRaises(ValueError):
             self.service.set_mode("default")
+
+    def test_snapshot_groups_exact_legacy_role_threads_read_only(self) -> None:
+        roles = [role.value for role in Role]
+        legacy_path = Path(self.temp.name) / "legacy-projects.json"
+        legacy_path.write_text(
+            json.dumps(
+                {
+                    "schema": "hia-project-thread-registry/1",
+                    "projects": [
+                        {
+                            "project_id": "legacy-project",
+                            "title": "旧项目",
+                            "root_thread_id": "legacy-supervisor",
+                            "threads": [
+                                {
+                                    "role": role,
+                                    "thread_id": (
+                                        "legacy-supervisor"
+                                        if role == "supervisor"
+                                        else f"legacy-{role}"
+                                    ),
+                                    "status": "completed" if role == "planning" else "pending",
+                                    "model": "gpt-legacy",
+                                }
+                                for role in roles
+                            ],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        service = ProjectTeamService(
+            client=self.client,
+            project_root=Path(self.temp.name),
+            registry=self.registry,
+            legacy_registry_path=legacy_path,
+            settings=self.settings,
+            thread_factory=_factory(self.client, Path(self.temp.name)),
+        )
+
+        snapshot = service.snapshot()
+
+        self.assertEqual(1, len(snapshot["projects"]))
+        project = snapshot["projects"][0]
+        self.assertEqual("legacy-project", project["project_id"])
+        self.assertEqual("interrupted", project["status"])
+        self.assertEqual(roles, [item["role"] for item in project["threads"]])
+        self.assertTrue(all(item["actions"]["open_thread"] for item in project["threads"]))
+        self.assertTrue(
+            all(not item["actions"]["append_guidance"] for item in project["threads"])
+        )
 
     def test_start_returns_after_supervisor_and_goal_ack_only(self) -> None:
         result = self.service.start_team_project(task_text="建造木屋", model="gpt-test")

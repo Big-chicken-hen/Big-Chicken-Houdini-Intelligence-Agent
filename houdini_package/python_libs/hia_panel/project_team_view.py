@@ -21,6 +21,30 @@ except ImportError:  # pragma: no cover - exercised by the pure view-model suite
 
 PYSIDE_AVAILABLE = QtWidgets is not None
 
+_STATUS_LABELS = {
+    "provisioning": "正在创建",
+    "intake": "正在接收任务",
+    "provisioning_roles": "正在创建团队",
+    "planning": "正在制定方案",
+    "authorization": "等待监督确认",
+    "executing_stage": "正在执行",
+    "reviewing_stage": "正在审查",
+    "repairing_stage": "正在修复",
+    "completing": "正在收尾",
+    "completed": "已完成",
+    "pending": "等待开始",
+    "waiting": "等待开始",
+    "running": "进行中",
+    "interrupted": "已中断",
+    "needs_attention": "需要处理",
+    "blocked": "已阻塞",
+    "failed": "失败",
+}
+
+
+def _status_label(value: str) -> str:
+    return _STATUS_LABELS.get(value, value or "未知")
+
 
 if PYSIDE_AVAILABLE:
 
@@ -198,7 +222,10 @@ if PYSIDE_AVAILABLE:
             self.guidance_edit.setPlaceholderText("为所选项目或角色追加指导")
             self.guidance_edit.setMinimumHeight(64)
             self.guidance_edit.setMaximumHeight(120)
-            guidance_scope = QtWidgets.QHBoxLayout()
+            self.guidance_scope_widget = QtWidgets.QWidget()
+            guidance_scope = QtWidgets.QVBoxLayout(self.guidance_scope_widget)
+            guidance_scope.setContentsMargins(0, 0, 0, 0)
+            guidance_scope.setSpacing(4)
             self.current_step_guidance_button = QtWidgets.QToolButton()
             self.current_step_guidance_button.setText("补充当前步骤")
             self.current_step_guidance_button.setCheckable(True)
@@ -212,8 +239,8 @@ if PYSIDE_AVAILABLE:
             )
             self.guidance_scope_group.addButton(self.replan_guidance_button, 1)
             self.current_step_guidance_button.setChecked(True)
-            guidance_scope.addWidget(self.current_step_guidance_button, 1)
-            guidance_scope.addWidget(self.replan_guidance_button, 1)
+            guidance_scope.addWidget(self.current_step_guidance_button)
+            guidance_scope.addWidget(self.replan_guidance_button)
             self.requirement_change_widget = QtWidgets.QWidget()
             requirement_change_layout = QtWidgets.QFormLayout(
                 self.requirement_change_widget
@@ -228,7 +255,7 @@ if PYSIDE_AVAILABLE:
             requirement_change_layout.addRow("已有需求", self.requirement_target_combo)
             self.guidance_button = QtWidgets.QPushButton("发送追加指导")
             detail.addWidget(self.guidance_edit)
-            detail.addLayout(guidance_scope)
+            detail.addWidget(self.guidance_scope_widget)
             detail.addWidget(self.requirement_change_widget)
             detail.addWidget(self.guidance_button)
             root.addWidget(self.detail_surface)
@@ -262,6 +289,12 @@ if PYSIDE_AVAILABLE:
             )
             self.collapse_button.toggled.connect(self._set_collapsed)
             self.tree.itemSelectionChanged.connect(self._selection_changed)
+            self.tree.itemExpanded.connect(
+                lambda item: self._remember_expansion(item, True)
+            )
+            self.tree.itemCollapsed.connect(
+                lambda item: self._remember_expansion(item, False)
+            )
             self.tree.itemDoubleClicked.connect(self._item_double_clicked)
             self.open_button.clicked.connect(self._open_selected)
             self.save_runtime_button.clicked.connect(self._save_runtime)
@@ -434,27 +467,36 @@ if PYSIDE_AVAILABLE:
             blocked = self.tree.blockSignals(True)
             self._items_by_key.clear()
             self.tree.clear()
-            projects_root = QtWidgets.QTreeWidgetItem(["项目"])
+            projects_root = QtWidgets.QTreeWidgetItem(
+                [f"项目（{len(self.state.tree.projects)}）"]
+            )
+            projects_root.setData(0, QtCore.Qt.ItemDataRole.UserRole + 1, "projects")
             projects_root.setFlags(
                 projects_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable
             )
             self.tree.addTopLevelItem(projects_root)
             for project in self.state.tree.projects:
                 project_item = QtWidgets.QTreeWidgetItem(
-                    [f"{project.title} · {project.status}"]
+                    [f"{project.title} · {_status_label(project.status)}"]
                 )
                 project_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, project.stable_key)
+                project_item.setData(
+                    0, QtCore.Qt.ItemDataRole.UserRole + 1, f"project:{project.project_id}"
+                )
                 project_item.setToolTip(0, f"阶段：{project.stage or '尚未开始'}")
                 projects_root.addChild(project_item)
                 self._items_by_key[project.stable_key] = project_item
                 for role in project.roles:
                     role_item = QtWidgets.QTreeWidgetItem(
-                        [f"{role.title} · {role.status}"]
+                        [f"{role.title} · {_status_label(role.status)}"]
                     )
                     role_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, role.stable_key)
                     project_item.addChild(role_item)
                     self._items_by_key[role.stable_key] = role_item
-            ordinary_root = QtWidgets.QTreeWidgetItem(["普通任务"])
+            ordinary_root = QtWidgets.QTreeWidgetItem(
+                [f"普通任务（{len(self.state.tree.ordinary_threads)}）"]
+            )
+            ordinary_root.setData(0, QtCore.Qt.ItemDataRole.UserRole + 1, "ordinary")
             ordinary_root.setFlags(
                 ordinary_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable
             )
@@ -465,14 +507,31 @@ if PYSIDE_AVAILABLE:
                 item.setToolTip(0, thread.preview)
                 ordinary_root.addChild(item)
                 self._items_by_key[thread.stable_key] = item
-            projects_root.setExpanded(True)
-            ordinary_root.setExpanded(True)
+            projects_root.setExpanded(self.state.projects_group_expanded)
+            ordinary_root.setExpanded(self.state.ordinary_group_expanded)
             for index in range(projects_root.childCount()):
-                projects_root.child(index).setExpanded(True)
+                project_item = projects_root.child(index)
+                project = self.state.tree.projects[index]
+                project_item.setExpanded(
+                    self.state.project_expanded.get(project.project_id, True)
+                )
             if selected_key in self._items_by_key:
                 self.tree.setCurrentItem(self._items_by_key[selected_key])
             self.tree.blockSignals(blocked)
             self._render_selection()
+
+        def _remember_expansion(
+            self,
+            item: QtWidgets.QTreeWidgetItem,
+            expanded: bool,
+        ) -> None:
+            marker = item.data(0, QtCore.Qt.ItemDataRole.UserRole + 1)
+            if marker == "projects":
+                self.state.projects_group_expanded = expanded
+            elif marker == "ordinary":
+                self.state.ordinary_group_expanded = expanded
+            elif isinstance(marker, str) and marker.startswith("project:"):
+                self.state.project_expanded[marker.removeprefix("project:")] = expanded
 
         def _set_collapsed(self, collapsed: bool) -> None:
             self.state.collapsed = bool(collapsed)
@@ -500,18 +559,22 @@ if PYSIDE_AVAILABLE:
 
         def _render_selection(self) -> None:
             selected = find_tree_item(self.state.tree, self.state.selected_key)
-            self.open_button.setEnabled(
+            can_open = (
                 isinstance(selected, (RoleViewModel, OrdinaryThreadViewModel))
                 and (
                     not isinstance(selected, RoleViewModel)
                     or selected.can_open
                 )
             )
+            self.open_button.setVisible(can_open)
+            self.open_button.setEnabled(can_open)
             self.runtime_widget.setVisible(isinstance(selected, RoleViewModel))
             project = self._selected_project(selected)
             self._render_requirement_choices(project)
-            self.guidance_edit.setVisible(project is not None)
-            self.guidance_button.setVisible(project is not None)
+            show_guidance = bool(project and project.can_guide)
+            self.guidance_edit.setVisible(show_guidance)
+            self.guidance_scope_widget.setVisible(show_guidance)
+            self.guidance_button.setVisible(show_guidance)
             self.guidance_button.setEnabled(
                 bool(
                     project
@@ -525,14 +588,14 @@ if PYSIDE_AVAILABLE:
             if isinstance(selected, ProjectViewModel):
                 self.selection_title.setText(selected.title)
                 self.selection_meta.setText(
-                    f"项目容器 · {selected.status} · 阶段 {selected.stage or '尚未开始'}\n"
+                    f"项目容器 · {_status_label(selected.status)} · 阶段 {selected.stage or '尚未开始'}\n"
                     "请选择下方角色进入真实对话。"
                 )
                 self.projectSelected.emit(selected.project_id)
             elif isinstance(selected, RoleViewModel):
                 self.selection_title.setText(selected.title)
                 self.selection_meta.setText(
-                    f"项目角色 · {selected.status}\nThread：{selected.thread_id}"
+                    f"项目角色 · {_status_label(selected.status)}\nThread：{selected.thread_id}"
                 )
                 draft = self.state.runtime_draft_for(selected)
                 self._set_model_value(draft.model)
@@ -576,6 +639,9 @@ if PYSIDE_AVAILABLE:
             else:
                 self.selection_title.setText("尚未选择任务")
                 self.selection_meta.setText("")
+            self.detail_surface.setVisible(
+                isinstance(selected, (ProjectViewModel, RoleViewModel))
+            )
             self._render_attention(project)
 
         def _render_requirement_choices(

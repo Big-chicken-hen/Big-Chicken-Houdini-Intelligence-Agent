@@ -163,6 +163,37 @@ class ProjectTeamQtTests(unittest.TestCase):
         self.assertEqual(300, self.view.minimumWidth())
         self.assertEqual([True, False], changes)
 
+    def test_project_and_ordinary_groups_keep_user_collapse_after_refresh(self) -> None:
+        self.state.apply_snapshot(
+            snapshot(),
+            [{"thread_id": "ordinary-a", "name": "普通任务 A", "updated_at": 2}],
+        )
+        self.view.refresh_view()
+        projects = self.view.tree.topLevelItem(0)
+        ordinary = self.view.tree.topLevelItem(1)
+        projects.setExpanded(False)
+        ordinary.setExpanded(False)
+        self.app.processEvents()
+
+        self.view.refresh_view()
+
+        self.assertFalse(self.view.tree.topLevelItem(0).isExpanded())
+        self.assertFalse(self.view.tree.topLevelItem(1).isExpanded())
+        self.assertEqual("项目（1）", self.view.tree.topLevelItem(0).text(0))
+        self.assertEqual("普通任务（1）", self.view.tree.topLevelItem(1).text(0))
+
+    def test_empty_and_ordinary_selection_do_not_show_project_detail_card(self) -> None:
+        self.state.apply_snapshot(
+            snapshot(),
+            [{"thread_id": "ordinary-a", "name": "普通任务 A", "updated_at": 2}],
+        )
+        self.state.select(None)
+        self.view.refresh_view()
+        self.assertFalse(self.view.detail_surface.isVisible())
+        self.state.select("thread:ordinary-a")
+        self.view.refresh_view()
+        self.assertFalse(self.view.detail_surface.isVisible())
+
     def test_role_runtime_uses_live_model_capabilities_without_free_text(self) -> None:
         models = [
             {

@@ -158,6 +158,9 @@ class ProjectPanelState:
     tree: WorkspaceTreeViewModel = field(default_factory=WorkspaceTreeViewModel)
     selected_key: str | None = None
     collapsed: bool = False
+    projects_group_expanded: bool = True
+    ordinary_group_expanded: bool = True
+    project_expanded: dict[str, bool] = field(default_factory=dict)
     runtime_drafts: dict[str, RoleRuntimeDraft] = field(default_factory=dict)
 
     def apply_snapshot(
@@ -178,6 +181,12 @@ class ProjectPanelState:
             key: value
             for key, value in self.runtime_drafts.items()
             if key in current_roles
+        }
+        project_ids = {project.project_id for project in self.tree.projects}
+        self.project_expanded = {
+            project_id: expanded
+            for project_id, expanded in self.project_expanded.items()
+            if project_id in project_ids
         }
         return self.tree
 

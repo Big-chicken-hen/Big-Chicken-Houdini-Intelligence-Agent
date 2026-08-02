@@ -102,6 +102,24 @@ class PanelProjectTeamWiringTests(unittest.TestCase):
 
         self.assertEqual([threads], controller.ordinary_snapshots)
 
+    def test_thread_history_does_not_truncate_after_twenty_items(self) -> None:
+        panel = _make_panel(selected_thread_id=None)
+        controller = _Controller()
+        panel._project_team_controller = controller
+        threads = [
+            {
+                "thread_id": f"ordinary-{index}",
+                "name": f"普通任务 {index}",
+                "updated_at": index,
+            }
+            for index in range(44)
+        ]
+
+        panel._apply_threads(threads)
+
+        self.assertEqual(44, len(panel._thread_history))
+        self.assertEqual(44, len(controller.ordinary_snapshots[-1]))
+
     def test_project_ack_clears_exact_draft_and_refreshes_tree(self) -> None:
         panel = self._team_panel()
         panel.input_edit.setPlainText("建造木屋")

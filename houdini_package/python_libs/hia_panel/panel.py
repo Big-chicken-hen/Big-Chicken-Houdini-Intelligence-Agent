@@ -537,7 +537,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.history_combo.setToolTip("当前项目最近 20 条未归档 Codex 会话")
+        self.history_combo.setToolTip("当前项目全部可打开的未归档 Codex 会话")
         left_layout.addWidget(self.history_combo)
         history_action_row = QtWidgets.QHBoxLayout()
         self.refresh_threads_button = QtWidgets.QPushButton("刷新")
@@ -4525,7 +4525,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         threads = raw_threads if isinstance(raw_threads, list) else []
         records: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for raw_record in threads[:20]:
+        for raw_record in threads[:4096]:
             if not isinstance(raw_record, dict):
                 continue
             thread_id = raw_record.get("thread_id")

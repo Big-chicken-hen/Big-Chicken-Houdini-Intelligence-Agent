@@ -48,6 +48,9 @@ FOCUS_STATE_RELATIVE_PATH = Path(".runtime/bridge/focus-mode.json")
 PROJECT_REGISTRY_RELATIVE_PATH = Path(
     ".runtime/bridge/project-team-registry.json"
 )
+LEGACY_PROJECT_REGISTRY_RELATIVE_PATH = Path(
+    ".runtime/bridge/project-threads.json"
+)
 PROJECT_SETTINGS_RELATIVE_PATH = Path(
     ".runtime/bridge/project-team-settings.json"
 )
@@ -545,6 +548,7 @@ def _build_project_runtime(
         client=effect_client,
         project_root=project_root,
         registry=registry,
+        legacy_registry_path=project_root / LEGACY_PROJECT_REGISTRY_RELATIVE_PATH,
         settings=ProjectTeamSettings(
             project_root / PROJECT_SETTINGS_RELATIVE_PATH
         ),

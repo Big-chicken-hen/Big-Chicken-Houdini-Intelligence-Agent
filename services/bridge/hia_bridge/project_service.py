@@ -119,6 +119,7 @@ class ProjectTeamService:
         client: AppServerClient,
         project_root: Path,
         registry: ProjectRegistry,
+        legacy_registry_path: Path | None = None,
         settings: ProjectTeamSettings,
         thread_factory: ProjectThreadFactory,
         model_catalog: Callable[[], Mapping[str, Any]] | None = None,
@@ -127,6 +128,9 @@ class ProjectTeamService:
         self._client = client
         self._project_root = project_root.resolve()
         self._registry = registry
+        self._legacy_registry_path = (
+            legacy_registry_path.resolve() if legacy_registry_path is not None else None
+        )
         self._settings = settings
         self._factory = thread_factory
         self._model_catalog = model_catalog
@@ -455,6 +459,16 @@ class ProjectTeamService:
     def snapshot(self) -> dict[str, Any]:
         records = self._registry.list()
         projects = [self._public_project(record) for record in records]
+        projects.extend(
+            self._legacy_public_projects(
+                {record.state.project_id for record in records},
+                {
+                    binding.thread_id
+                    for record in records
+                    for binding in record.state.roles.values()
+                },
+            )
+        )
         return {
             "schema": PROJECT_TEAM_SCHEMA,
             "revision": max((record.state.revision for record in records), default=0),
@@ -462,6 +476,131 @@ class ProjectTeamService:
             "settings": {"mode": self._settings.get(), "writable": True},
             "projects": projects,
         }
+
+    def _legacy_public_projects(
+        self,
+        registered_project_ids: set[str],
+        registered_thread_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """Expose exact legacy Project/Role IDs without reviving its old workflow.
+
+        The v1 registry is durable identity evidence.  It is used only as a
+        read-only compatibility view so old role Threads stay grouped and
+        openable after the v2 runtime upgrade.
+        """
+
+        path = self._legacy_registry_path
+        if path is None or not path.is_file():
+            return []
+        try:
+            if path.stat().st_size > 16 * 1024 * 1024:
+                return []
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return []
+        if (
+            not isinstance(raw, Mapping)
+            or raw.get("schema") != "hia-project-thread-registry/1"
+            or not isinstance(raw.get("projects"), list)
+        ):
+            return []
+
+        projects: list[dict[str, Any]] = []
+        seen_threads = set(registered_thread_ids)
+        for item in raw["projects"]:
+            if not isinstance(item, Mapping):
+                continue
+            project_id = item.get("project_id")
+            title = item.get("title")
+            raw_threads = item.get("threads")
+            if (
+                not isinstance(project_id, str)
+                or not project_id
+                or project_id in registered_project_ids
+                or not isinstance(title, str)
+                or not title.strip()
+                or not isinstance(raw_threads, list)
+            ):
+                continue
+            by_role: dict[Role, Mapping[str, Any]] = {}
+            local_threads: set[str] = set()
+            valid = True
+            for raw_thread in raw_threads:
+                if not isinstance(raw_thread, Mapping):
+                    valid = False
+                    break
+                try:
+                    role = Role(raw_thread.get("role"))
+                except (TypeError, ValueError):
+                    valid = False
+                    break
+                thread_id = raw_thread.get("thread_id")
+                if (
+                    not isinstance(thread_id, str)
+                    or not thread_id
+                    or role in by_role
+                    or thread_id in local_threads
+                    or thread_id in seen_threads
+                ):
+                    valid = False
+                    break
+                by_role[role] = raw_thread
+                local_threads.add(thread_id)
+            if not valid or set(by_role) != set(Role):
+                continue
+            root_thread_id = item.get("root_thread_id")
+            if root_thread_id != by_role[Role.SUPERVISOR].get("thread_id"):
+                continue
+            seen_threads.update(local_threads)
+            threads = []
+            for role in Role:
+                raw_thread = by_role[role]
+                threads.append(
+                    {
+                        "role": role.value,
+                        "role_title": ROLE_TITLES[role],
+                        "thread_id": raw_thread["thread_id"],
+                        "model": (
+                            raw_thread.get("model")
+                            if isinstance(raw_thread.get("model"), str)
+                            else None
+                        ),
+                        "effort": None,
+                        "service_tier": None,
+                        "status": (
+                            raw_thread.get("status")
+                            if isinstance(raw_thread.get("status"), str)
+                            else "interrupted"
+                        ),
+                        "actions": {
+                            "open_thread": True,
+                            "append_guidance": False,
+                            "set_role_runtime": False,
+                        },
+                    }
+                )
+            projects.append(
+                {
+                    "project_id": project_id,
+                    "title": title.strip()[:160],
+                    "status": "interrupted",
+                    "stage": "旧项目记录（可打开角色任务）",
+                    "root_thread_id": root_thread_id,
+                    "attention_reason": "旧版项目已保留；不会自动恢复旧工作流。",
+                    "consumed_turns": 0,
+                    "last_error": item.get("error") if isinstance(item.get("error"), str) else None,
+                    "latest_evidence_ids": [],
+                    "attachment_count": 0,
+                    "requirements": [],
+                    "actions": {
+                        "append_guidance": False,
+                        "continue": False,
+                        "stop": False,
+                    },
+                    "threads": threads,
+                }
+            )
+        return projects
 
     def _public_project(self, record: ProjectRecord) -> dict[str, Any]:
         state = record.state
