@@ -77,15 +77,8 @@ class _TurnCall:
 
 
 class ProjectRoleError(RuntimeError):
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        *,
-        state: ProjectState | None = None,
-    ) -> None:
+    def __init__(self, code: str, message: str) -> None:
         self.code = code
-        self.state = state
         super().__init__(message)
 
 
@@ -151,16 +144,6 @@ class ProjectRoleExecutor:
                     {"reason": "project_role_timeout"},
                 ),
             )
-        except ProjectRoleError as exc:
-            if exc.code != "INVALID_STRUCTURED_OUTPUT":
-                raise
-            return ProjectActionResult(
-                exc.state or state,
-                LifecycleEvent(
-                    ProjectEvent.PROJECT_BLOCKED,
-                    {"reason": str(exc)},
-                ),
-            )
 
     def _execute(
         self, state: ProjectState, action: ProjectAction, deadline: float
@@ -209,9 +192,6 @@ class ProjectRoleExecutor:
     ) -> ProjectActionResult:
         request = self._base_request(state, Role.PLANNING, "create_plan_and_stage_cards")
         request["authoritative_task"] = self._authoritative_task_capsule(state)
-        supervisor_feedback = action.data.get("supervisor_feedback")
-        if isinstance(supervisor_feedback, str) and supervisor_feedback.strip():
-            request["supervisor_feedback"] = supervisor_feedback.strip()
         state, completed = self._run_structured(
             state,
             Role.PLANNING,
@@ -219,10 +199,6 @@ class ProjectRoleExecutor:
             "hia-project-plan/1",
             deadline,
             local_image_paths=self._read_latest_images(state, Role.SUPERVISOR),
-            payload_validator=lambda payload: self._validate_plan_payload(
-                payload,
-                state,
-            ),
         )
         payload = completed.payload
         capsule = self._authoritative_task_capsule(state)
@@ -335,26 +311,9 @@ class ProjectRoleExecutor:
             or not all_pass
             or payload.get("stage_ids") != expected
         ):
-            failed_items = {
-                key: value
-                for key, value in payload["semantic_review"].items()
-                if isinstance(value, Mapping) and value.get("status") != "pass"
-            }
-            feedback = json.dumps(
-                {
-                    "reason": "Supervisor did not authorize the exact blueprint revision",
-                    "failed_semantic_items": failed_items,
-                    "stage_ids_match": payload.get("stage_ids") == expected,
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            return ProjectActionResult(
-                state,
-                LifecycleEvent(
-                    ProjectEvent.PLAN_REJECTED,
-                    {"feedback": feedback},
-                ),
+            raise ProjectRoleError(
+                "PLAN_NOT_AUTHORIZED",
+                "Supervisor did not pass every semantic item for the exact blueprint revision",
             )
         return ProjectActionResult(state, LifecycleEvent(ProjectEvent.PLAN_AUTHORIZED))
 
@@ -555,8 +514,7 @@ class ProjectRoleExecutor:
         visual_images = (
             _capture_image_paths(execution) if capture_required else ()
         )
-        required_roles = _stage_review_roles(stage)
-        for role in required_roles:
+        for role in (Role.VISUAL_REVIEW, Role.TECHNICAL_REVIEW):
             request = self._base_request(state, role, "review_stage")
             request.update({"stage_card": stage, "execution": execution})
             state, call = self._start_turn(
@@ -568,10 +526,7 @@ class ProjectRoleExecutor:
             )
             calls.append(call)
         remaining = self._remaining(deadline)
-        with ThreadPoolExecutor(
-            max_workers=len(required_roles),
-            thread_name_prefix="hia-project-review",
-        ) as pool:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hia-project-review") as pool:
             futures = {
                 pool.submit(self._client.wait_for_turn, call.thread_id, call.turn_id, remaining): call
                 for call in calls
@@ -699,7 +654,7 @@ class ProjectRoleExecutor:
             refs = getattr(claim, "evidence_refs", ())
             if not set(refs).issubset(available):
                 raise ProjectRoleError("UNKNOWN_REVIEW_EVIDENCE", "review cites unavailable evidence")
-            if claim.disposition in {"verified", "failed"}:
+            if claim.disposition in {"verified", "failed", "not_applicable"}:
                 required = capture_ids if role is Role.VISUAL_REVIEW else technical_ids
                 kind_required = (
                     capture_required
@@ -713,59 +668,6 @@ class ProjectRoleExecutor:
                         f"{role.value} {claim.disposition} claim requires current {kind} evidence",
                     )
         return json.loads(json.dumps(payload, ensure_ascii=False))
-
-    def _validate_plan_payload(
-        self,
-        payload: Mapping[str, Any],
-        state: ProjectState,
-    ) -> None:
-        capsule = self._authoritative_task_capsule(state)
-        validate_plan_structure(
-            payload,
-            allowed_source_anchors=(
-                capsule["task_anchor"],
-                *(item["attachment_anchor"] for item in capsule["attachments"]),
-                *(
-                    f"guidance:{revision}"
-                    for revision in range(1, state.guidance_revision + 1)
-                ),
-            ),
-        )
-        raw_requirements = payload.get("requirements")
-        raw_stages = payload.get("stages")
-        if not isinstance(raw_requirements, list) or not raw_requirements:
-            raise ValueError("requirements must be non-empty")
-        if not isinstance(raw_stages, list) or not raw_stages:
-            raise ValueError("stages must be non-empty")
-        requirements = tuple(
-            Requirement(
-                requirement_id=_text(raw.get("requirement_id"), "requirement_id"),
-                kind=_text(raw.get("kind"), "requirement kind"),
-                status=RequirementStatus.ACTIVE,
-                source_ref=_text(raw.get("source_ref"), "source_ref"),
-            )
-            for raw in raw_requirements
-            if isinstance(raw, Mapping)
-        )
-        if len(requirements) != len(raw_requirements):
-            raise ValueError("requirements are malformed")
-        cards = tuple(
-            parse_stage_card(raw)
-            for raw in raw_stages
-            if isinstance(raw, Mapping)
-        )
-        if len(cards) != len(raw_stages):
-            raise ValueError("stage cards are malformed")
-        validate_blueprint_information(payload, cards)
-        validate_requirement_coverage(
-            requirements,
-            (item for card in cards for item in card.requirement_ids),
-        )
-        if state.requirements:
-            validate_requirement_coverage(
-                state.requirements,
-                (item.requirement_id for item in requirements),
-            )
 
     def _validate_review_correction(
         self,
@@ -858,10 +760,7 @@ class ProjectRoleExecutor:
                 if correction >= (1 if allow_correction else 0):
                     raise ProjectRoleError(
                         "INVALID_STRUCTURED_OUTPUT",
-                        "role="
-                        f"{role.value}; stage={state.stage.stage_id or 'none'}; "
-                        f"schema={schema}; error={type(exc).__name__}: {exc}",
-                        state=state,
+                        f"{role.value} returned invalid {schema} twice",
                     ) from exc
                 correction += 1
                 state = self._record(
@@ -881,12 +780,7 @@ class ProjectRoleExecutor:
                 current_request["schema_correction"] = {
                     "attempt": correction,
                     "required_schema": schema,
-                    "error": (
-                        f"{completed.payload_error_code}: "
-                        f"{completed.payload_error_message or str(exc)}"
-                        if completed.payload_error_code is not None
-                        else f"{type(exc).__name__}: {exc}"
-                    ),
+                    "error": completed.payload_error_code or type(exc).__name__,
                 }
     def _start_turn(
         self,
@@ -1516,25 +1410,14 @@ def _capture_image_paths(execution: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def _stage_evidence_needs(stage: Mapping[str, Any]) -> tuple[bool, bool]:
-    """Return only the evidence kinds explicitly requested by the stage card."""
+    """Return only evidence kinds explicitly requested by a Full stage card."""
 
-    required = stage.get("required_evidence")
-    return required in {"visual", "both"}, required in {"technical", "both"}
-
-
-def _stage_review_roles(stage: Mapping[str, Any]) -> tuple[Role, ...]:
-    visual, technical = _stage_evidence_needs(stage)
-    roles: list[Role] = []
-    if visual:
-        roles.append(Role.VISUAL_REVIEW)
-    if technical:
-        roles.append(Role.TECHNICAL_REVIEW)
-    if not roles:
-        raise ProjectRoleError(
-            "INVALID_STAGE_EVIDENCE",
-            "stage required_evidence is missing or invalid",
-        )
-    return tuple(roles)
+    if stage.get("depth") != "full":
+        return False, False
+    contract = stage.get("evidence_contract")
+    if not isinstance(contract, Mapping):
+        return False, False
+    return bool(contract.get("capture")), bool(contract.get("technical"))
 
 
 def _review_exemptions(
@@ -1601,7 +1484,10 @@ def _review_coverage_proof(
     stage: Mapping[str, Any], reviews: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
     requirement_ids = tuple(stage.get("requirement_ids") or ())
-    expected_reviewers = {role.value for role in _stage_review_roles(stage)}
+    expected_reviewers = {
+        Role.VISUAL_REVIEW.value,
+        Role.TECHNICAL_REVIEW.value,
+    }
     by_reviewer: dict[str, list[str]] = {}
     for review in reviews:
         reviewer = str(review.get("reviewer") or "")
@@ -1616,12 +1502,12 @@ def _review_coverage_proof(
         ]
     if set(by_reviewer) != expected_reviewers:
         raise ProjectRoleError(
-            "MISSING_STAGE_REVIEW", "every applicable stage review is required"
+            "MISSING_STAGE_REVIEW", "both independent stage reviews are required"
         )
     if any(set(claim_ids) != set(requirement_ids) for claim_ids in by_reviewer.values()):
         raise ProjectRoleError(
             "INCOMPLETE_REVIEW_COVERAGE",
-            "every applicable reviewer must cover every stage requirement",
+            "both reviewers must cover every stage requirement",
         )
     return {
         "stage_id": stage.get("stage_id"),
@@ -1638,7 +1524,7 @@ def _plan_depth_policy() -> Mapping[str, Any]:
         "selection": "choose the smallest depth that fully covers the current task",
         "direct": (
             "one known deterministic scene operation; return one compact stage and "
-            "declare required_evidence and omit failure_minimum_repair"
+            "omit evidence_contract, reviewers, and failure_minimum_repair"
         ),
         "focused": (
             "a bounded subsystem or short multi-step change; keep the blueprint "
@@ -1646,7 +1532,7 @@ def _plan_depth_policy() -> Mapping[str, Any]:
         ),
         "full": (
             "a substantial multi-stage asset or consequential workflow only; use "
-            "all fourteen stable blueprint sections, applicable reviewers, every Full-only "
+            "all fourteen stable blueprint sections, both reviewers, every Full-only "
             "stage field, and the 10000/2500/350 information floors"
         ),
     }
@@ -1697,7 +1583,6 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                     "depth": "direct|focused|full",
                     "stage_id": "stable ordered ID",
                     "requirement_ids": ["covered requirement IDs"],
-                    "required_evidence": "visual|technical|both",
                     "ordered_steps": [
                         {
                             "step_id": "stable ID",

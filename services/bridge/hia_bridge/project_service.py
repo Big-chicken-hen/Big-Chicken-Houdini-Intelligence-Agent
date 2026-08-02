@@ -6,7 +6,6 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
-import re
 import threading
 from typing import Any, Callable, Mapping
 from typing import Protocol
@@ -25,12 +24,8 @@ from .project_identity import parse_project_thread_source
 from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_registry import ProjectRecord, ProjectRegistry
 from .project_runner import ProjectRunner
-from .project_thread_factory import (
-    AppServerClient,
-    ProjectRoleCreationError,
-    ProjectThreadFactory,
-    ROLE_TITLES,
-)
+from .project_thread_factory import AppServerClient, ProjectThreadFactory, ROLE_TITLES
+from .session import BridgeSession
 
 
 PROJECT_TEAM_SCHEMA = "hia-project-team/2"
@@ -181,6 +176,7 @@ class ProjectTeamService:
         self._model_catalog = model_catalog
         self._runner = runner
         self._workflow = workflow
+        self._stop_requested: set[str] = set()
         self._lock = threading.RLock()
 
     def set_mode(self, mode: str) -> dict[str, Any]:
@@ -230,7 +226,7 @@ class ProjectTeamService:
             "project_id": project_id,
             "role": role.value,
             "thread_id": thread_id,
-            "read": self._project_role_messages(result, thread_id),
+            "read": BridgeSession._project_thread_messages(result, thread_id),
         }
 
     def start_team_project(
@@ -250,20 +246,13 @@ class ProjectTeamService:
             authoritative_task_id=task_id,
             authoritative_task_sha256=digest,
         )
-        try:
-            state = self._factory.create_all_roles(
-                state,
-                model=model,
-                effort=effort,
-                service_tier=service_tier,
-            )
-        except ProjectRoleCreationError as exc:
-            raise BridgeError(
-                "PROJECT_ROLE_CREATION_FAILED",
-                str(exc),
-                500,
-                {"orphan_thread_ids": list(exc.orphan_thread_ids)},
-            ) from exc
+        state = self._factory.start_supervisor(
+            state,
+            model=model,
+            effort=effort,
+            service_tier=service_tier,
+        )
+        state = self._factory.provision_workers(state)
         supervisor_id = state.supervisor_thread_id
         record = ProjectRecord(state, task_text)
         self._registry.put(record)
@@ -307,7 +296,10 @@ class ProjectTeamService:
             raise ValueError("guidance text must be non-empty")
         with self._lock:
             record = self._registry.require(project_id)
-            if record.state.status in _GUIDANCE_INACTIVE:
+            if (
+                project_id in self._stop_requested
+                or record.state.status in _GUIDANCE_INACTIVE
+            ):
                 raise ProjectGuidanceUnavailable(project_id, record.state.status)
             target_role = None
             if thread_id is not None:
@@ -424,12 +416,8 @@ class ProjectTeamService:
                 ProjectStatus.STOPPED,
             }:
                 raise ValueError("only a waiting or stopped project can continue")
-        continuation = self._resolve_continuation(record)
-        with self._lock:
-            current = self._registry.require(project_id)
-            if current.state.revision != record.state.revision:
-                raise ValueError("project changed while continuation was inspected")
-            if not self._workflow.resume(project_id, continuation):
+            self._stop_requested.discard(project_id)
+            if not self._workflow.resume(project_id):
                 raise RuntimeError("project workflow did not resume")
         return self.snapshot()
 
@@ -438,8 +426,7 @@ class ProjectTeamService:
             record = self._registry.require(project_id)
             if record.state.status in _TERMINAL:
                 raise ValueError("terminal project cannot be stopped")
-            if record.state.status is ProjectStatus.STOPPED:
-                return self.snapshot()
+            self._stop_requested.add(project_id)
             self._workflow.stop(project_id)
         return self.snapshot()
 
@@ -602,7 +589,10 @@ class ProjectTeamService:
     def _public_project(self, record: ProjectRecord) -> dict[str, Any]:
         state = record.state
         runtime_allowed = state.status not in _TERMINAL
-        guidance_allowed = state.status not in _GUIDANCE_INACTIVE
+        guidance_allowed = (
+            state.project_id not in self._stop_requested
+            and state.status not in _GUIDANCE_INACTIVE
+        )
         threads = []
         for role in Role:
             binding = state.roles.get(role)
@@ -678,154 +668,3 @@ class ProjectTeamService:
                 raise ValueError("project images exceed 128 MiB")
             paths.append(str(path))
         return tuple(paths)
-
-    def _resolve_continuation(self, record: ProjectRecord) -> dict[str, object]:
-        """Choose one new role Turn from native history; ambiguity stays user-visible."""
-
-        plan = self._latest_role_payload(
-            record,
-            Role.PLANNING,
-            "hia-project-plan/1",
-        )
-        if plan is None:
-            return {"command": "request_plan"}
-        authorization = self._latest_role_payload(
-            record,
-            Role.SUPERVISOR,
-            "hia-project-authorization/1",
-        )
-        if authorization is None or authorization.get("authorized") is not True:
-            return {"command": "request_authorization"}
-        stage_id = record.state.stage.stage_id
-        stages = plan.get("stages")
-        if not isinstance(stage_id, str) or not isinstance(stages, list):
-            return {}
-        stage = next(
-            (
-                item
-                for item in stages
-                if isinstance(item, Mapping) and item.get("stage_id") == stage_id
-            ),
-            None,
-        )
-        if stage is None:
-            return {}
-        execution = self._latest_role_payload(
-            record,
-            Role.EXECUTION,
-            "hia-project-execution/1",
-            stage_id=stage_id,
-        )
-        if execution is None:
-            return {"command": "start_execution"}
-        decision = self._latest_role_payload(
-            record,
-            Role.SUPERVISOR,
-            "hia-project-stage-decision/1",
-            stage_id=stage_id,
-        )
-        if decision is None:
-            return {"command": "start_reviews"}
-        if decision.get("decision") == "repair":
-            return {
-                "command": "start_execution",
-                "action_data": {"repair": True},
-            }
-        return {}
-
-    def _latest_role_payload(
-        self,
-        record: ProjectRecord,
-        role: Role,
-        schema: str,
-        *,
-        stage_id: str | None = None,
-    ) -> Mapping[str, Any] | None:
-        binding = record.state.roles.get(role)
-        if binding is None:
-            return None
-        projected = self.read_role_thread(binding.thread_id).get("read")
-        thread = projected.get("thread") if isinstance(projected, Mapping) else None
-        turns = thread.get("turns") if isinstance(thread, Mapping) else None
-        if not isinstance(turns, list):
-            return None
-        for turn in reversed(turns):
-            items = turn.get("items") if isinstance(turn, Mapping) else None
-            if not isinstance(items, list):
-                continue
-            for item in reversed(items):
-                if not isinstance(item, Mapping) or item.get("type") != "agentMessage":
-                    continue
-                text = item.get("text")
-                if not isinstance(text, str):
-                    continue
-                candidate = text.strip()
-                if candidate.startswith("```") and candidate.endswith("```"):
-                    candidate = re.sub(
-                        r"\A```(?:json)?\s*|\s*```\Z",
-                        "",
-                        candidate,
-                        flags=re.IGNORECASE,
-                    )
-                try:
-                    payload = json.loads(candidate)
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(payload, Mapping) or payload.get("schema") != schema:
-                    continue
-                if stage_id is not None and payload.get("stage_id") != stage_id:
-                    continue
-                return payload
-        return None
-
-    @staticmethod
-    def _project_role_messages(result: Any, expected_thread_id: str) -> dict[str, Any]:
-        """Project-only read projection without importing the ordinary Session."""
-
-        thread = result.get("thread") if isinstance(result, Mapping) else None
-        if not isinstance(thread, Mapping) or thread.get("id") != expected_thread_id:
-            raise ValueError("project Thread response identity is invalid")
-        turns = thread.get("turns")
-        if not isinstance(turns, list):
-            raise ValueError("project Thread response has no turns array")
-        projected_turns: list[dict[str, Any]] = []
-        for turn in turns:
-            if not isinstance(turn, Mapping) or not isinstance(turn.get("items"), list):
-                raise ValueError("project Thread response contains an invalid turn")
-            projected_items: list[dict[str, Any]] = []
-            for item in turn["items"]:
-                if not isinstance(item, Mapping):
-                    continue
-                if item.get("type") == "userMessage":
-                    content = item.get("content")
-                    if not isinstance(content, list):
-                        continue
-                    safe_content = [
-                        {"type": entry["type"], **({"text": entry["text"]} if entry.get("type") == "text" else {"path": entry["path"]})}
-                        for entry in content
-                        if isinstance(entry, Mapping)
-                        and (
-                            (entry.get("type") == "text" and isinstance(entry.get("text"), str))
-                            or (
-                                entry.get("type") == "localImage"
-                                and isinstance(entry.get("path"), str)
-                            )
-                        )
-                    ]
-                    projected_items.append(
-                        {"type": "userMessage", "content": safe_content}
-                    )
-                elif item.get("type") == "agentMessage" and isinstance(
-                    item.get("text"), str
-                ):
-                    markers = {
-                        str(item.get(name) or "").strip().casefold()
-                        for name in ("channel", "phase")
-                    }
-                    if markers & {"analysis", "commentary", "internal", "reasoning"}:
-                        continue
-                    projected_items.append(
-                        {"type": "agentMessage", "text": item["text"]}
-                    )
-            projected_turns.append({"items": projected_items})
-        return {"thread": {"id": expected_thread_id, "turns": projected_turns}}

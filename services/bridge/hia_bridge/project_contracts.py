@@ -108,7 +108,6 @@ class ProjectState:
     roles: Mapping[Role, RoleThread] = field(default_factory=dict)
     requirements: tuple[Requirement, ...] = ()
     guidance_revision: int = 0
-    plan_rejection_count: int = 0
     stage: StageState = field(default_factory=StageState)
     turns: Mapping[Role, TurnState] = field(default_factory=dict)
     budget: RuntimeBudget = field(default_factory=RuntimeBudget)
@@ -128,12 +127,12 @@ class ProjectState:
             raise ValueError("authoritative_task_sha256 must be a SHA-256 hex digest")
         if self.elapsed_seconds < 0 or self.total_evidence_bytes < 0:
             raise ValueError("project counters cannot be negative")
-        revision_values = (self.guidance_revision, self.plan_rejection_count)
+        revision_values = (self.guidance_revision,)
         if any(
             not isinstance(item, int) or isinstance(item, bool) or item < 0
             for item in revision_values
         ):
-            raise ValueError("project revisions must be non-negative integers")
+            raise ValueError("guidance revision must be a non-negative integer")
         role_values = dict(self.roles)
         thread_ids = [binding.thread_id for binding in role_values.values()]
         if len(thread_ids) != len(set(thread_ids)):
