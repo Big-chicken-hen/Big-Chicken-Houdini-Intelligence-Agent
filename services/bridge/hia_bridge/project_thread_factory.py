@@ -44,8 +44,9 @@ _PROJECT_PROTOCOL_INSTRUCTION = (
     "it is the only current project action. Follow its response_contract "
     "exactly, return one JSON object "
     "only, and do not call update_goal. Do not start independent work outside "
-    "the envelope. Do not create, fork, or delegate to internal subagents; the "
-    "five native project-role Threads are the complete team. On the first "
+    "the envelope. Read-only roles may use native subagents only for genuinely "
+    "parallel, non-overlapping read-only research or review; Execution must never "
+    "delegate because it owns the live scene writer. On the first "
     "project Turn, respond naturally to the user's task. If fulfilling it "
     "requires the live Houdini scene, hand it to Planning; otherwise answer it "
     "yourself and complete the project. Never expose an eligibility classifier "
@@ -60,6 +61,12 @@ ROLE_INSTRUCTIONS = {
     role: instruction + _PROJECT_PROTOCOL_INSTRUCTION
     for role, instruction in ROLE_INSTRUCTIONS.items()
 }
+
+
+class ProjectRoleCreationError(RuntimeError):
+    def __init__(self, message: str, orphan_thread_ids: tuple[str, ...] = ()) -> None:
+        self.orphan_thread_ids = orphan_thread_ids
+        super().__init__(message)
 
 
 class ProjectThreadFactory:
@@ -124,9 +131,9 @@ class ProjectThreadFactory:
                 expected_model=model,
             )
         except Exception as exc:
-            raise ValueError(
-                "thread/start observable profile mismatch; the returned Thread "
-                f"may remain visible and must not be deleted automatically: {exc}"
+            raise ProjectRoleCreationError(
+                f"thread/start observable profile mismatch: {exc}",
+                (thread_id,),
             ) from exc
         actual_model = result.get("model", model) if isinstance(result, Mapping) else model
         actual_tier = (
@@ -193,3 +200,45 @@ class ProjectThreadFactory:
             )
         require_complete_project_roles(state.roles)
         return state
+
+    def create_all_roles(
+        self,
+        state: ProjectState,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+    ) -> ProjectState:
+        """Create exactly five roles or delete every newly created Thread."""
+
+        if state.roles:
+            raise ValueError("project role creation requires an empty role set")
+        created: list[str] = []
+        try:
+            for role in Role:
+                state = self.start_role(
+                    state,
+                    role,
+                    model=model,
+                    effort=effort,
+                    service_tier=service_tier,
+                )
+                created.append(state.roles[role].thread_id)
+            require_complete_project_roles(state.roles)
+            return state
+        except Exception as exc:
+            candidates = list(created)
+            if isinstance(exc, ProjectRoleCreationError):
+                candidates.extend(exc.orphan_thread_ids)
+            orphans: list[str] = []
+            for thread_id in dict.fromkeys(candidates):
+                try:
+                    self._client.request("thread/delete", {"threadId": thread_id})
+                except Exception:
+                    orphans.append(thread_id)
+            raise ProjectRoleCreationError(
+                "project role creation failed; all known role Threads were cleaned"
+                if not orphans
+                else "project role creation failed and cleanup was incomplete",
+                tuple(orphans),
+            ) from exc

@@ -46,12 +46,11 @@ class ProjectWorkflowHost:
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hia-project")
         self._lock = threading.RLock()
         self._inflight: dict[str, Future[ProjectRecord]] = {}
-        self._stopped: set[str] = set()
         self._closed = False
 
     def start(self, project_id: str) -> bool:
         with self._lock:
-            if self._closed or project_id in self._stopped:
+            if self._closed:
                 return False
             current = self._inflight.get(project_id)
             if current is not None and not current.done():
@@ -68,27 +67,27 @@ class ProjectWorkflowHost:
 
     def stop(self, project_id: str) -> bool:
         with self._lock:
-            self._stopped.add(project_id)
             future = self._inflight.get(project_id)
             active = future is not None and not future.done()
         if active and self._interrupt_hook is not None:
             self._interrupt_hook(project_id)
-        if not active:
-            self._mark_stopped(project_id)
+        self._mark_stopped(project_id)
         return active
 
-    def resume(self, project_id: str) -> bool:
+    def resume(self, project_id: str, continuation: dict[str, object]) -> bool:
         with self._lock:
             if self._closed:
                 return False
-            self._stopped.discard(project_id)
         if self._registry.require(project_id).state.status in {
             ProjectStatus.STOPPED,
             ProjectStatus.WAITING_USER,
         }:
-            self._runner.cancel_and_dispatch(
-                project_id, LifecycleEvent(ProjectEvent.USER_CONTINUE)
+            resumed = self._runner.cancel_and_dispatch(
+                project_id,
+                LifecycleEvent(ProjectEvent.USER_CONTINUE, continuation),
             )
+            if resumed.state.status is ProjectStatus.WAITING_USER:
+                return True
         return self.start(project_id)
 
     def is_inflight(self, project_id: str) -> bool:
@@ -102,7 +101,6 @@ class ProjectWorkflowHost:
         with self._lock:
             self._closed = True
             items = tuple(self._inflight.items())
-            self._stopped.update(project_id for project_id, _ in items)
         if self._interrupt_hook is not None:
             for project_id, future in items:
                 if not future.done():
@@ -122,7 +120,12 @@ class ProjectWorkflowHost:
             record = future.result()
         except BaseException as error:
             try:
-                record = self._runner.fail(project_id, error)
+                current = self._registry.require(project_id)
+                record = (
+                    current
+                    if current.state.status is ProjectStatus.STOPPED
+                    else self._runner.fail(project_id, error)
+                )
             except BaseException:
                 with self._lock:
                     self._inflight.pop(project_id, None)
@@ -134,21 +137,21 @@ class ProjectWorkflowHost:
                 pass
         with self._lock:
             self._inflight.pop(project_id, None)
-            stopped = project_id in self._stopped
             should_continue = (
                 not self._closed
-                and not stopped
                 and record.state.status not in _INACTIVE
                 and self._runner.has_pending(project_id)
             )
-        if stopped and record.state.status not in _INACTIVE:
-            self._mark_stopped(project_id)
-        elif should_continue:
+        if should_continue:
             self.start(project_id)
 
     def _mark_stopped(self, project_id: str) -> None:
         record = self._registry.require(project_id)
-        if record.state.status in _INACTIVE:
+        if record.state.status in {
+            ProjectStatus.COMPLETED,
+            ProjectStatus.FAILED,
+            ProjectStatus.STOPPED,
+        }:
             return
         stopped = self._runner.cancel_and_dispatch(
             project_id, LifecycleEvent(ProjectEvent.PROJECT_INTERRUPTED)
