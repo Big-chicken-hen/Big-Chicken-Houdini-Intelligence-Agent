@@ -84,6 +84,23 @@ class ProjectRegistry:
             records[record.state.project_id] = record
             self._write_all(records)
 
+    def remove(self, project_id: str, *, expected_revision: int) -> ProjectRecord:
+        """Atomically remove one exact persisted project identity."""
+
+        with self._lock:
+            records = self._read_all()
+            existing = records.get(project_id)
+            if existing is None:
+                raise KeyError(project_id)
+            if existing.state.revision != expected_revision:
+                raise ValueError(
+                    "project revision mismatch: "
+                    f"expected {expected_revision}, got {existing.state.revision}"
+                )
+            removed = records.pop(project_id)
+            self._write_all(records)
+            return removed
+
     def _read_all(self) -> dict[str, ProjectRecord]:
         if not self._path.exists():
             return {}

@@ -29,10 +29,34 @@ ROLE_TITLES: Mapping[Role, str] = {
 
 ROLE_INSTRUCTIONS: Mapping[Role, str] = {
     Role.SUPERVISOR: "监督项目约束和证据，只读；不得调用 HIA/HOM 或修改 HIP。",
-    Role.PLANNING: "维护 requirement 覆盖和当前阶段卡，只读；不得调用 HIA/HOM 或修改 HIP。",
+    Role.PLANNING: (
+        "维护 requirement 覆盖和当前阶段卡，只读；不得调用 HIA/HOM 或修改 HIP。"
+        "必须按任务真实复杂度选择最小充分的 direct、focused 或 full 深度；"
+        "只有实质性多阶段任务才使用 Full，禁止把单一确定操作扩写成万字蓝图。"
+    ),
     Role.EXECUTION: "你是当前 HIP 的唯一写入者；一次只执行已授权的当前阶段或修复。",
     Role.VISUAL_REVIEW: "只读审查真实截图与参考一致性，不得调用 HIA/HOM 或修改 HIP。",
     Role.TECHNICAL_REVIEW: "只读审查结构、依赖和真实工具证据，不得调用 HIA/HOM 或修改 HIP。",
+}
+
+_PROJECT_PROTOCOL_INSTRUCTION = (
+    " When the newest user message is a hia-project-role-request/1 envelope, "
+    "it is the only current project action. Native Goal continuation context "
+    "preserves the overall objective but never replaces or broadens that "
+    "envelope. Follow its response_contract exactly, return one JSON object "
+    "only, and do not call update_goal. Do not start independent work outside "
+    "the envelope. For scene_task_eligibility, decide semantically whether the "
+    "user request requires reading or changing the live Houdini scene; do not "
+    "use task-example keywords or inspect project files. When it is ineligible, "
+    "write reason as a concise, natural reply to the user's actual request, not "
+    "as an internal classification report. On repeated intake, classify the "
+    "explicit current_submission; the original task is context, not a reason to "
+    "ignore the newest user message."
+)
+
+ROLE_INSTRUCTIONS = {
+    role: instruction + _PROJECT_PROTOCOL_INSTRUCTION
+    for role, instruction in ROLE_INSTRUCTIONS.items()
 }
 
 

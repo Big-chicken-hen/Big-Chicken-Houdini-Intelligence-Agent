@@ -23,6 +23,7 @@ from .project_contracts import (
 from .project_guidance import RequirementDelta, publish_guidance
 from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_registry import ProjectAttachment, ProjectRecord, ProjectRegistry
+from .project_artifacts import ProjectArtifactStore
 from .project_runner import ProjectRunner
 from .project_thread_factory import AppServerClient, ProjectThreadFactory, ROLE_TITLES
 
@@ -35,11 +36,19 @@ _TERMINAL = frozenset(
 )
 _GUIDANCE_INACTIVE = frozenset(
     {
-        *_TERMINAL,
+        *(_TERMINAL - {ProjectStatus.NOT_APPLICABLE}),
         ProjectStatus.BLOCKED,
         ProjectStatus.INTERRUPTED,
         ProjectStatus.PAUSING,
         ProjectStatus.COMPLETING,
+    }
+)
+_DELETABLE = frozenset(
+    {
+        *_TERMINAL,
+        ProjectStatus.BLOCKED,
+        ProjectStatus.INTERRUPTED,
+        ProjectStatus.NEEDS_ATTENTION,
     }
 )
 
@@ -124,6 +133,8 @@ class ProjectTeamService:
         thread_factory: ProjectThreadFactory,
         model_catalog: Callable[[], Mapping[str, Any]] | None = None,
         workflow: ProjectWorkflowControl | None = None,
+        thread_deleter: Callable[[str], Any] | None = None,
+        artifacts: ProjectArtifactStore | None = None,
     ) -> None:
         self._client = client
         self._project_root = project_root.resolve()
@@ -136,6 +147,8 @@ class ProjectTeamService:
         self._model_catalog = model_catalog
         self._runner = ProjectRunner(registry)
         self._workflow = workflow
+        self._thread_deleter = thread_deleter
+        self._artifacts = artifacts
         self._stop_requested: set[str] = set()
         self._lock = threading.RLock()
 
@@ -197,11 +210,14 @@ class ProjectTeamService:
                 {
                     "threadId": supervisor_id,
                     "objective": native_goal_objective(task_text, task_id),
-                    "status": "active",
+                    # ProjectWorkflowHost owns role Turns.  Keeping the native
+                    # Goal paused prevents its independent auto-continuation
+                    # from racing the persisted project effect queue.
+                    "status": "paused",
                     "tokenBudget": None,
                 },
             )
-            _validate_goal_result(goal_result, supervisor_id)
+            _validate_goal_result(goal_result, supervisor_id, "paused")
         except Exception as original_error:
             try:
                 self._client.request("thread/delete", {"threadId": supervisor_id})
@@ -251,6 +267,11 @@ class ProjectTeamService:
                 or record.state.status in _GUIDANCE_INACTIVE
             ):
                 raise ProjectGuidanceUnavailable(project_id, record.state.status)
+            restart_intake = (
+                record.state.status
+                in {ProjectStatus.INTAKE, ProjectStatus.NOT_APPLICABLE}
+                and not record.state.pending_effects
+            )
             target_role = None
             if thread_id is not None:
                 matches = [
@@ -274,7 +295,12 @@ class ProjectTeamService:
                 ),
                 expected_revision=record.state.revision,
             )
-        if material and self._workflow is not None:
+            if restart_intake:
+                self._runner.dispatch(
+                    project_id,
+                    LifecycleEvent(ProjectEvent.INTAKE_MESSAGE_RECEIVED),
+                )
+        if (material or restart_intake) and self._workflow is not None:
             self._workflow.start(project_id)
         return self.snapshot()
 
@@ -303,6 +329,59 @@ class ProjectTeamService:
             self._stop_requested.add(project_id)
             self._workflow.stop(project_id)
         return self.snapshot()
+
+    def delete_project(self, *, project_id: str) -> dict[str, Any]:
+        """Permanently delete one explicitly selected inactive project.
+
+        The five exact role identities are deleted before their container is
+        forgotten, so a failed native deletion cannot spill role Threads into
+        the ordinary-task list.
+        """
+
+        with self._lock:
+            record = self._registry.get(project_id)
+            if record is not None:
+                if record.state.status not in _DELETABLE:
+                    raise ValueError("running project cannot be deleted")
+                thread_ids = tuple(
+                    record.state.roles[role].thread_id for role in Role
+                    if role in record.state.roles
+                )
+                revision = record.state.revision
+                legacy = False
+            else:
+                legacy_item = self._legacy_project(project_id)
+                if legacy_item is None:
+                    raise KeyError(project_id)
+                thread_ids = tuple(
+                    item["thread_id"] for item in legacy_item["threads"]
+                )
+                revision = None
+                legacy = True
+
+        deleted_threads: list[str] = []
+        for thread_id in thread_ids:
+            if self._thread_deleter is not None:
+                self._thread_deleter(thread_id)
+            else:
+                self._client.request("thread/delete", {"threadId": thread_id})
+            deleted_threads.append(thread_id)
+
+        with self._lock:
+            if legacy:
+                self._remove_legacy_project(project_id)
+            else:
+                assert revision is not None
+                self._registry.remove(project_id, expected_revision=revision)
+                if self._artifacts is not None:
+                    self._artifacts.remove_project(project_id)
+            self._stop_requested.discard(project_id)
+        return {
+            "project_id": project_id,
+            "deleted": True,
+            "deleted_thread_ids": deleted_threads,
+            "project_team": self.snapshot(),
+        }
 
     def set_role_runtime(
         self,
@@ -596,11 +675,49 @@ class ProjectTeamService:
                         "append_guidance": False,
                         "continue": False,
                         "stop": False,
+                        "delete": True,
                     },
                     "threads": threads,
                 }
             )
         return projects
+
+    def _legacy_project(self, project_id: str) -> dict[str, Any] | None:
+        path = self._legacy_registry_path
+        if path is None or not path.is_file():
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(raw, dict)
+            or raw.get("schema") != "hia-project-thread-registry/1"
+            or not isinstance(raw.get("projects"), list)
+        ):
+            raise ValueError("legacy project registry is invalid")
+        matches = [
+            item for item in raw["projects"]
+            if isinstance(item, dict) and item.get("project_id") == project_id
+        ]
+        if len(matches) > 1:
+            raise ValueError("legacy project registry contains duplicate project_id")
+        return matches[0] if matches else None
+
+    def _remove_legacy_project(self, project_id: str) -> None:
+        path = self._legacy_registry_path
+        item = self._legacy_project(project_id)
+        if path is None or item is None:
+            raise KeyError(project_id)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["projects"] = [
+            value for value in raw["projects"]
+            if not (isinstance(value, dict) and value.get("project_id") == project_id)
+        ]
+        raw["revision"] = int(raw.get("revision", 0)) + 1
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps(raw, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
 
     def _public_project(self, record: ProjectRecord) -> dict[str, Any]:
         state = record.state
@@ -657,6 +774,7 @@ class ProjectTeamService:
                 "append_guidance": guidance_allowed,
                 "continue": state.status is ProjectStatus.NEEDS_ATTENTION,
                 "stop": state.status not in _TERMINAL,
+                "delete": state.status in _DELETABLE,
             },
             "threads": threads,
         }
@@ -685,10 +803,12 @@ class ProjectTeamService:
         return tuple(attachments)
 
 
-def _validate_goal_result(value: Any, expected_thread_id: str) -> None:
+def _validate_goal_result(
+    value: Any, expected_thread_id: str, expected_status: str
+) -> None:
     goal = value.get("goal") if isinstance(value, Mapping) else None
     if not isinstance(goal, Mapping):
         raise ValueError("thread/goal/set did not return a Goal")
     thread_id = goal.get("threadId", expected_thread_id)
-    if thread_id != expected_thread_id or goal.get("status") != "active":
+    if thread_id != expected_thread_id or goal.get("status") != expected_status:
         raise ValueError("native Goal identity or status is invalid")

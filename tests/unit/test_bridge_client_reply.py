@@ -312,6 +312,7 @@ class BridgeClientQueueTests(unittest.TestCase):
         )
         client.continue_project(project_id="project-a")
         client.stop_project(project_id="project-a")
+        client.delete_project(project_id="project-a")
         client.set_project_role_runtime(
             "project-a",
             "thread-review",
@@ -320,7 +321,7 @@ class BridgeClientQueueTests(unittest.TestCase):
             service_tier="priority",
         )
 
-        requests = transport.submissions[-7:]
+        requests = transport.submissions[-8:]
         self.assertEqual(
             [
                 ("GET", "/v1/project-team", "project_team_get", None),
@@ -363,6 +364,12 @@ class BridgeClientQueueTests(unittest.TestCase):
                     "/v1/project-team/actions",
                     "project_team_stop",
                     {"action": "stop", "project_id": "project-a"},
+                ),
+                (
+                    "POST",
+                    "/v1/project-team/actions",
+                    "project_team_delete",
+                    {"action": "delete", "project_id": "project-a"},
                 ),
                 (
                     "POST",

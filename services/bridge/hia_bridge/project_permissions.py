@@ -47,9 +47,6 @@ def permission_profile(
         selected = not read_only and server_id == selected_backend
         config[f"{prefix}.enabled"] = selected
         config[f"{prefix}.required"] = selected
-    config["multi_agent_mode"] = (
-        "explicitRequestOnly" if role is Role.EXECUTION else "proactive"
-    )
     return RolePermissionProfile(
         role=role,
         sandbox="read-only" if read_only else "workspace-write",

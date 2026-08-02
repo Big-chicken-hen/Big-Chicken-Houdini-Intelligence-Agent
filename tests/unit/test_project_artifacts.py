@@ -31,6 +31,16 @@ class ProjectArtifactStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "JSON"):
                 store.put_named("project-1", "bad", {"value": object()})
 
+    def test_remove_project_preserves_other_projects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectArtifactStore(Path(directory) / "artifacts.json")
+            store.put_named("project-1", "plan", {"value": 1})
+            store.put_named("project-2", "plan", {"value": 2})
+            self.assertTrue(store.remove_project("project-1"))
+            self.assertFalse(store.remove_project("project-1"))
+            self.assertEqual({}, store.project("project-1"))
+            self.assertEqual(2, store.project("project-2")["plan"]["value"])
+
 
 if __name__ == "__main__":
     unittest.main()

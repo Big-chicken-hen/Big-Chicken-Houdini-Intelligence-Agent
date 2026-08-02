@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import sys
 import tempfile
@@ -18,6 +19,7 @@ sys.path.insert(0, str(ROOT / "services" / "bridge"))
 from hia_bridge.codex_stdio import CodexStdioClient  # noqa: E402
 from hia_bridge.events import EventBuffer  # noqa: E402
 from hia_bridge.http_server import BridgeApplication, LoopbackHTTPServer  # noqa: E402
+from hia_bridge.project_contracts import ProjectStatus  # noqa: E402
 from hia_bridge.project_registry import ProjectRegistry  # noqa: E402
 from hia_bridge.project_service import ProjectTeamService, ProjectTeamSettings  # noqa: E402
 from hia_bridge.project_thread_factory import ProjectThreadFactory  # noqa: E402
@@ -134,6 +136,36 @@ class ProjectHTTPTests(unittest.TestCase):
         self.assertEqual("start_intake", result["pending_effect"])
         self.assertTrue(result["project_id"].startswith("project-"))
         self.assertEqual(1, len(result["project_team"]["projects"]))
+
+    def test_interrupted_project_delete_returns_fresh_snapshot(self) -> None:
+        started = self.request(
+            "POST",
+            "/v1/turn",
+            {"text": "build a Houdini cabin", "team_override": "team"},
+        )
+        record = self.project_team._registry.require(started["project_id"])
+        self.project_team._registry.put(
+            type(record)(
+                replace(
+                    record.state,
+                    status=ProjectStatus.INTERRUPTED,
+                    pending_effects=(),
+                    revision=record.state.revision + 1,
+                ),
+                record.authoritative_task_text,
+                record.attachments,
+            ),
+            expected_revision=record.state.revision,
+        )
+
+        deleted = self.request(
+            "POST",
+            "/v1/project-team/actions",
+            {"action": "delete", "project_id": started["project_id"]},
+        )
+
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual([], deleted["project_team"]["projects"])
 
     def test_project_role_cannot_bypass_workflow_through_ordinary_turn_route(self) -> None:
         started = self.request(

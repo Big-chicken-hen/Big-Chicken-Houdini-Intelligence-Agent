@@ -364,10 +364,21 @@ class ProjectPayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fourteen stable IDs"):
             validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
 
-    def test_project_team_plan_cannot_downgrade_full_depth(self) -> None:
+    def test_project_team_plan_can_use_a_compact_focused_depth(self) -> None:
         payload = _plan_structure()
         payload["stages"][0]["depth"] = "focused"
-        with self.assertRaisesRegex(ValueError, "must all use full depth"):
+        payload["blueprint_sections"] = payload["blueprint_sections"][:1]
+        validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
+
+    def test_project_team_plan_rejects_mixed_depths(self) -> None:
+        payload = _plan_structure()
+        second = dict(payload["stages"][0])
+        second["stage_id"] = "STAGE-2"
+        second["depth"] = "focused"
+        payload["stages"].append(second)
+        for section in payload["blueprint_sections"]:
+            section["stage_ids"].append("STAGE-2")
+        with self.assertRaisesRegex(ValueError, "one valid depth"):
             validate_plan_structure(payload, allowed_source_anchors=("task:TASK-1",))
 
     def test_every_ordered_step_reverse_references_a_user_fact(self) -> None:

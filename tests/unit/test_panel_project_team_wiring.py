@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from tests.unit.test_panel_wiring import _CloseEvent, _make_panel
+from hia_panel.project_team import ProjectPanelState
 
 
 class _TeamClient:
@@ -22,6 +24,8 @@ class _Controller:
         self.events = []
         self.ordinary_snapshots = []
         self.pending_ordinary_selections = []
+        self.guidance_calls = []
+        self.guidance_result = True
 
     def refresh(self) -> None:
         self.refresh_calls += 1
@@ -39,8 +43,41 @@ class _Controller:
     def select_ordinary_thread_when_available(self, thread_id) -> None:
         self.pending_ordinary_selections.append(thread_id)
 
+    def submit_guidance(self, **kwargs) -> bool:
+        self.guidance_calls.append(kwargs)
+        return self.guidance_result
+
 
 class PanelProjectTeamWiringTests(unittest.TestCase):
+    @staticmethod
+    def _project_snapshot(*, can_guide=True):
+        return {
+            "schema": "hia-project-team/2",
+            "settings": {"mode": "team", "writable": True},
+            "projects": [
+                {
+                    "project_id": "project-house",
+                    "title": "House",
+                    "status": "planning" if can_guide else "completed",
+                    "stage": "planning",
+                    "actions": {"append_guidance": can_guide},
+                    "threads": [
+                        {
+                            "role": "supervisor",
+                            "role_title": "Supervisor",
+                            "thread_id": "thread-supervisor",
+                            "status": "waiting",
+                            "actions": {
+                                "open_thread": True,
+                                "append_guidance": can_guide,
+                                "set_role_runtime": can_guide,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
     def _team_panel(self):
         panel = _make_panel(selected_thread_id=None)
         panel._new_task_route = "team"
@@ -180,6 +217,47 @@ class PanelProjectTeamWiringTests(unittest.TestCase):
         panel._render_event(event)
 
         self.assertEqual([event], controller.events)
+
+    def test_second_project_message_routes_to_guidance_not_ordinary_turn(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        controller = _Controller()
+        panel._project_team_controller = controller
+        panel.project_team_view = SimpleNamespace(state=ProjectPanelState())
+        panel.project_team_view.state.apply_snapshot(self._project_snapshot())
+        panel.project_team_view.state.select("role:project-house:supervisor")
+        panel.input_edit.setPlainText("change the roof")
+
+        panel._send()
+
+        self.assertEqual(
+            [
+                {
+                    "project_id": "project-house",
+                    "thread_id": "thread-supervisor",
+                    "text": "change the roof",
+                }
+            ],
+            controller.guidance_calls,
+        )
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual("", panel.input_edit.toPlainText())
+
+    def test_finished_project_message_is_preserved_without_raw_turn_error(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        controller = _Controller()
+        panel._project_team_controller = controller
+        panel.project_team_view = SimpleNamespace(state=ProjectPanelState())
+        panel.project_team_view.state.apply_snapshot(
+            self._project_snapshot(can_guide=False)
+        )
+        panel.project_team_view.state.select("role:project-house:supervisor")
+        panel.input_edit.setPlainText("follow up")
+
+        panel._send()
+
+        self.assertEqual([], controller.guidance_calls)
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual("follow up", panel.input_edit.toPlainText())
 
     def test_close_event_closes_controller_before_client_disposal(self) -> None:
         panel = _make_panel()

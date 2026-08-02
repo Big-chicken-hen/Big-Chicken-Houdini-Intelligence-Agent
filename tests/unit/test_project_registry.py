@@ -95,6 +95,15 @@ class ProjectRegistryTests(unittest.TestCase):
         self.registry.put(changed, expected_revision=0)
         self.assertEqual(ProjectStatus.INTAKE, self.registry.require("project-1").state.status)
 
+    def test_remove_requires_exact_identity_and_revision(self) -> None:
+        record = _record()
+        self.registry.put(record)
+        with self.assertRaisesRegex(ValueError, "revision mismatch"):
+            self.registry.remove("project-1", expected_revision=1)
+        self.assertIsNotNone(self.registry.get("project-1"))
+        self.assertEqual(record, self.registry.remove("project-1", expected_revision=0))
+        self.assertIsNone(self.registry.get("project-1"))
+
     def test_corrupt_schema_fails_closed(self) -> None:
         self.registry.path.parent.mkdir(parents=True, exist_ok=True)
         self.registry.path.write_text('{"schema":"wrong","projects":[]}', encoding="utf-8")

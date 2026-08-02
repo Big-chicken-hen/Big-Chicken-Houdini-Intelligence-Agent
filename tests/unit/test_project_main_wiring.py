@@ -172,7 +172,7 @@ class ProjectMainWiringTests(unittest.TestCase):
             }
             self.client.native_goals[supervisor_id] = {
                 "threadId": supervisor_id,
-                "status": "active",
+                    "status": "paused",
             }
             self.assertEqual(("project-1",), runtime.recover())
             self._wait_until(
@@ -316,7 +316,7 @@ class ProjectMainWiringTests(unittest.TestCase):
             if method == "thread/goal/set"
         ]
         self.assertEqual(1, len(goal_sets))
-        self.assertEqual("active", goal_sets[0]["status"])
+        self.assertEqual("paused", goal_sets[0]["status"])
         self.assertTrue(runtime.close(1))
 
     def test_runtime_recovery_rejects_registry_without_authoritative_task(self) -> None:
@@ -396,7 +396,7 @@ class ProjectMainWiringTests(unittest.TestCase):
         self.assertEqual((), recovered.state.pending_effects)
         self.assertIsNone(recovered.state.resume_status)
         self.assertEqual(
-            "active", self.client.native_goals[supervisor_id]["status"]
+            "paused", self.client.native_goals[supervisor_id]["status"]
         )
         self.assertEqual(
             [{"threadId": supervisor_id, "includeTurns": False}],

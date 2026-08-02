@@ -109,6 +109,19 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.assertIsNone(state.resume_status)
         self.assertEqual((), commands)
 
+    def test_interrupted_empty_planning_recovery_reissues_the_plan(self) -> None:
+        state = replace(
+            _state(ProjectStatus.RESUMING),
+            resume_status=ProjectStatus.PLANNING,
+            pending_effects=(),
+        )
+        state, commands = self.apply(state, ProjectEvent.GOAL_RESUMED)
+        self.assertEqual(ProjectStatus.PLANNING, state.status)
+        self.assertEqual(
+            [ProjectCommand.REQUEST_PLAN],
+            [item.kind for item in commands],
+        )
+
     def test_budget_and_no_progress_need_attention_without_auto_pass(self) -> None:
         for event in (ProjectEvent.BUDGET_EXHAUSTED, ProjectEvent.NO_PROGRESS):
             with self.subTest(event=event):
@@ -238,18 +251,37 @@ class ProjectLifecycleTests(unittest.TestCase):
                 self.assertEqual(expected, state.status)
 
     def test_ineligible_and_unclear_do_not_provision_workers(self) -> None:
-        for event, expected in (
-            (ProjectEvent.SCENE_INELIGIBLE, ProjectStatus.NOT_APPLICABLE),
-            (ProjectEvent.INTAKE_UNCLEAR, ProjectStatus.NEEDS_ATTENTION),
-        ):
-            with self.subTest(event=event):
-                state, commands = self.apply(_state(ProjectStatus.INTAKE), event)
-                self.assertEqual(ProjectStatus.PAUSING, state.status)
-                state, pause_commands = self.apply(state, ProjectEvent.GOAL_PAUSED)
-                self.assertEqual(expected, state.status)
+        state, commands = self.apply(
+            _state(ProjectStatus.INTAKE), ProjectEvent.SCENE_INELIGIBLE
+        )
+        self.assertEqual(ProjectStatus.INTAKE, state.status)
+        self.assertEqual((), commands)
+
+        state, commands = self.apply(
+            _state(ProjectStatus.INTAKE), ProjectEvent.INTAKE_UNCLEAR
+        )
+        self.assertEqual(ProjectStatus.PAUSING, state.status)
+        state, pause_commands = self.apply(state, ProjectEvent.GOAL_PAUSED)
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
+        self.assertNotIn(
+            ProjectCommand.PROVISION_WORKERS,
+            [item.kind for item in (*commands, *pause_commands)],
+        )
+
+    def test_new_message_restarts_intake_without_provisioning_workers(self) -> None:
+        for status in (ProjectStatus.INTAKE, ProjectStatus.NOT_APPLICABLE):
+            with self.subTest(status=status):
+                state, commands = self.apply(
+                    _state(status), ProjectEvent.INTAKE_MESSAGE_RECEIVED
+                )
+                self.assertEqual(ProjectStatus.INTAKE, state.status)
+                self.assertEqual(
+                    [ProjectCommand.START_INTAKE],
+                    [item.kind for item in commands],
+                )
                 self.assertNotIn(
                     ProjectCommand.PROVISION_WORKERS,
-                    [item.kind for item in (*commands, *pause_commands)],
+                    [item.kind for item in commands],
                 )
 
     def test_worker_provisioning_failure_needs_attention(self) -> None:

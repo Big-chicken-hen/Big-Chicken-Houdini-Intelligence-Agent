@@ -42,6 +42,12 @@ def project_snapshot(*, role_thread_id: str = "thread-supervisor", status: str =
                     "append_guidance": True,
                     "continue": status == "needs_attention",
                     "stop": True,
+                    "delete": status in {
+                        "needs_attention",
+                        "interrupted",
+                        "failed",
+                        "completed",
+                    },
                 },
                 "threads": [
                     {
@@ -240,6 +246,8 @@ class FakeView:
         self.refreshRequested = FakeSignal()
         self.newTaskRequested = FakeSignal()
         self.openThreadRequested = FakeSignal()
+        self.deleteThreadRequested = FakeSignal()
+        self.deleteProjectRequested = FakeSignal()
         self.appendGuidanceRequested = FakeSignal()
         self.roleRuntimeRequested = FakeSignal()
         self.modelCatalogRefreshRequested = FakeSignal()
@@ -287,6 +295,7 @@ class FakeGateway:
     def __getattr__(self, name):
         def call(*args, **kwargs):
             self.calls.append((name, args, kwargs))
+            return f"request-{len(self.calls)}"
 
         return call
 
@@ -297,12 +306,14 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.gateway = FakeGateway()
         self.new_routes = []
         self.opened = []
+        self.deleted = []
         self.errors = []
         self.controller = ProjectTeamController(
             self.view,
             self.gateway,
             on_new_task=self.new_routes.append,
             on_open_thread=self.opened.append,
+            on_delete_thread=self.deleted.append,
             on_error=self.errors.append,
         )
 
@@ -311,6 +322,8 @@ class ProjectTeamControllerTests(unittest.TestCase):
             self.view.refreshRequested,
             self.view.newTaskRequested,
             self.view.openThreadRequested,
+            self.view.deleteThreadRequested,
+            self.view.deleteProjectRequested,
             self.view.appendGuidanceRequested,
             self.view.roleRuntimeRequested,
             self.view.modelCatalogRefreshRequested,
@@ -326,6 +339,18 @@ class ProjectTeamControllerTests(unittest.TestCase):
             ["get_project_team", "get_threads", "get_models"],
             [call[0] for call in self.gateway.calls],
         )
+
+    def test_delete_signal_only_forwards_while_controller_is_active(self) -> None:
+        self.view.deleteThreadRequested.emit("thread-hidden")
+        self.assertEqual([], self.deleted)
+
+        self.controller.show()
+        self.view.deleteThreadRequested.emit("thread-ordinary")
+        self.assertEqual(["thread-ordinary"], self.deleted)
+
+        self.view.deleteProjectRequested.emit("project-house")
+        self.assertEqual("delete_project", self.gateway.calls[-1][0])
+        self.assertEqual("project-house", self.gateway.calls[-1][2]["project_id"])
 
     def test_close_reopen_reconnects_gateway_once_without_reconnecting_view(self) -> None:
         self.controller.show()

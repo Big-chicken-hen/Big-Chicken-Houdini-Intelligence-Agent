@@ -203,6 +203,19 @@ class BridgeClient(QtCore.QObject):
             context=context,
         )
 
+    def delete_project(
+        self,
+        *,
+        project_id: str,
+        context: str = "project_team_delete",
+    ) -> str | None:
+        return self._request(
+            "POST",
+            "/v1/project-team/actions",
+            {"action": "delete", "project_id": project_id},
+            context=context,
+        )
+
     def get_goal(self, thread_id: str) -> str | None:
         return self._request(
             "GET",

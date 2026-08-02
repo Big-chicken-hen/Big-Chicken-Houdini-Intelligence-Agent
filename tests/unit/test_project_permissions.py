@@ -15,7 +15,10 @@ from services.bridge.hia_bridge.project_permissions import (
     require_complete_project_roles,
     validate_role_permissions,
 )
-from services.bridge.hia_bridge.project_thread_factory import ProjectThreadFactory
+from services.bridge.hia_bridge.project_thread_factory import (
+    ROLE_INSTRUCTIONS,
+    ProjectThreadFactory,
+)
 from tests.unit.project_test_support import observable_thread_response, server_transports
 
 
@@ -51,6 +54,21 @@ def _state(status: ProjectStatus = ProjectStatus.PROVISIONING) -> ProjectState:
 
 
 class ProjectPermissionTests(unittest.TestCase):
+    def test_every_role_prioritizes_generic_project_envelopes_over_goal_context(self) -> None:
+        for role, instruction in ROLE_INSTRUCTIONS.items():
+            with self.subTest(role=role):
+                self.assertIn("hia-project-role-request/1", instruction)
+                self.assertIn("response_contract", instruction)
+                self.assertIn("do not call update_goal", instruction)
+                self.assertIn("semantically", instruction)
+                self.assertIn("natural reply", instruction)
+                self.assertNotIn("box", instruction.lower())
+                self.assertNotIn("house", instruction.lower())
+        planning = ROLE_INSTRUCTIONS[Role.PLANNING]
+        self.assertIn("direct", planning)
+        self.assertIn("focused", planning)
+        self.assertIn("full", planning.lower())
+
     def test_only_execution_receives_hia_and_workspace_write(self) -> None:
         for role in Role:
             with self.subTest(role=role):
@@ -60,6 +78,7 @@ class ProjectPermissionTests(unittest.TestCase):
                 self.assertEqual("workspace-write" if expected else "read-only", profile.sandbox)
                 self.assertEqual(expected, profile.config[HIA_SERVER_KEYS[0]])
                 self.assertFalse(profile.config[HIA_SERVER_KEYS[1]])
+                self.assertNotIn("multi_agent_mode", profile.config)
 
     def test_execution_enables_only_selected_backend(self) -> None:
         profile = permission_profile(

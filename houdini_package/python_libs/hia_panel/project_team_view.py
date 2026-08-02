@@ -15,8 +15,10 @@ from .project_team import (
 
 try:  # Houdini supplies PySide6; ordinary unit-test Python intentionally may not.
     from PySide6 import QtCore, QtGui, QtWidgets
+    from .composer import ExpandableTextEdit
 except ImportError:  # pragma: no cover - exercised by the pure view-model suite.
     QtCore = QtGui = QtWidgets = None  # type: ignore[assignment]
+    ExpandableTextEdit = None  # type: ignore[assignment,misc]
 
 
 PYSIDE_AVAILABLE = QtWidgets is not None
@@ -32,6 +34,7 @@ _STATUS_LABELS = {
     "repairing_stage": "正在修复",
     "completing": "正在收尾",
     "completed": "已完成",
+    "not_applicable": "已由监督 AI 处理",
     "pending": "等待开始",
     "waiting": "等待开始",
     "running": "进行中",
@@ -58,7 +61,10 @@ if PYSIDE_AVAILABLE:
         refreshRequested = QtCore.Signal()
         newTaskRequested = QtCore.Signal(str)
         openThreadRequested = QtCore.Signal(str)
+        deleteThreadRequested = QtCore.Signal(str)
+        deleteProjectRequested = QtCore.Signal(str)
         projectSelected = QtCore.Signal(str)
+        projectContextChanged = QtCore.Signal(bool)
         appendGuidanceRequested = QtCore.Signal(str, object, str, object, bool)
         continueProjectRequested = QtCore.Signal(str)
         stopProjectRequested = QtCore.Signal(str)
@@ -83,6 +89,7 @@ if PYSIDE_AVAILABLE:
             self.state = state or ProjectPanelState()
             self._items_by_key: dict[str, QtWidgets.QTreeWidgetItem] = {}
             self._model_catalog: dict[str, dict[str, Any]] = {}
+            self._delete_project_confirmation: str | None = None
             self._build_ui()
             self._connect_signals_once()
             self.refresh_view()
@@ -133,6 +140,7 @@ if PYSIDE_AVAILABLE:
             self.title_label.setStyleSheet("font-weight: 600;")
             header.addWidget(self.title_label, 1)
             self.collapse_button = QtWidgets.QToolButton()
+            self.collapse_button.setMinimumWidth(56)
             self.collapse_button.setText("收起")
             self.collapse_button.setCheckable(True)
             self.collapse_button.setToolTip("折叠或展开左侧项目与任务导航")
@@ -170,9 +178,12 @@ if PYSIDE_AVAILABLE:
 
             action_grid = QtWidgets.QGridLayout()
             self.refresh_button = QtWidgets.QPushButton("刷新")
-            self.open_button = QtWidgets.QPushButton("打开所选任务")
+            self.delete_button = QtWidgets.QPushButton("删除所选任务")
+            self.delete_button.setToolTip(
+                "永久删除所选普通任务、原生聊天记录和该任务的本地附件缓存"
+            )
             action_grid.addWidget(self.refresh_button, 0, 0)
-            action_grid.addWidget(self.open_button, 0, 1)
+            action_grid.addWidget(self.delete_button, 0, 1)
             action_grid.setColumnStretch(1, 1)
             navigation_layout.addLayout(action_grid)
             root.addWidget(self.navigation_body, 1)
@@ -218,7 +229,9 @@ if PYSIDE_AVAILABLE:
             self._show_catalog_unavailable()
             detail.addWidget(self.runtime_widget)
 
-            self.guidance_edit = QtWidgets.QPlainTextEdit()
+            # Reuse the main composer editor: it deliberately leaves IME
+            # composition to Qt and binds sending only to Ctrl+Enter.
+            self.guidance_edit = ExpandableTextEdit()
             self.guidance_edit.setPlaceholderText("为所选项目或角色追加指导")
             self.guidance_edit.setMinimumHeight(64)
             self.guidance_edit.setMaximumHeight(120)
@@ -241,6 +254,9 @@ if PYSIDE_AVAILABLE:
             self.current_step_guidance_button.setChecked(True)
             guidance_scope.addWidget(self.current_step_guidance_button)
             guidance_scope.addWidget(self.replan_guidance_button)
+            # Natural-language guidance is classified by the project roles.
+            # Do not expose internal routing or requirement-delta controls.
+            self.guidance_scope_widget.setVisible(False)
             self.requirement_change_widget = QtWidgets.QWidget()
             requirement_change_layout = QtWidgets.QFormLayout(
                 self.requirement_change_widget
@@ -257,6 +273,7 @@ if PYSIDE_AVAILABLE:
             detail.addWidget(self.guidance_edit)
             detail.addWidget(self.guidance_scope_widget)
             detail.addWidget(self.requirement_change_widget)
+            self.requirement_change_widget.setVisible(False)
             detail.addWidget(self.guidance_button)
             root.addWidget(self.detail_surface)
 
@@ -296,7 +313,7 @@ if PYSIDE_AVAILABLE:
                 lambda item: self._remember_expansion(item, False)
             )
             self.tree.itemDoubleClicked.connect(self._item_double_clicked)
-            self.open_button.clicked.connect(self._open_selected)
+            self.delete_button.clicked.connect(self._delete_selected)
             self.save_runtime_button.clicked.connect(self._save_runtime)
             self.refresh_models_button.clicked.connect(
                 self.modelCatalogRefreshRequested.emit
@@ -305,6 +322,7 @@ if PYSIDE_AVAILABLE:
             self.effort_combo.currentTextChanged.connect(self._capture_runtime_draft)
             self.tier_combo.currentTextChanged.connect(self._capture_runtime_draft)
             self.guidance_button.clicked.connect(self._send_guidance)
+            self.guidance_edit.sendRequested.connect(self._send_guidance)
             self.replan_guidance_button.toggled.connect(
                 self.requirement_change_widget.setVisible
             )
@@ -555,25 +573,24 @@ if PYSIDE_AVAILABLE:
 
         def _selection_changed(self) -> None:
             self.state.select(self._selected_key())
+            self.set_delete_confirmation(None)
             self._render_selection()
 
         def _render_selection(self) -> None:
             selected = find_tree_item(self.state.tree, self.state.selected_key)
-            can_open = (
-                isinstance(selected, (RoleViewModel, OrdinaryThreadViewModel))
-                and (
-                    not isinstance(selected, RoleViewModel)
-                    or selected.can_open
+            self.delete_button.setEnabled(
+                isinstance(selected, OrdinaryThreadViewModel)
+                or (
+                    isinstance(selected, ProjectViewModel)
+                    and selected.can_delete
                 )
             )
-            self.open_button.setVisible(can_open)
-            self.open_button.setEnabled(can_open)
             self.runtime_widget.setVisible(isinstance(selected, RoleViewModel))
             project = self._selected_project(selected)
             self._render_requirement_choices(project)
             show_guidance = bool(project and project.can_guide)
             self.guidance_edit.setVisible(show_guidance)
-            self.guidance_scope_widget.setVisible(show_guidance)
+            self.guidance_scope_widget.setVisible(False)
             self.guidance_button.setVisible(show_guidance)
             self.guidance_button.setEnabled(
                 bool(
@@ -593,7 +610,11 @@ if PYSIDE_AVAILABLE:
                 )
                 self.projectSelected.emit(selected.project_id)
             elif isinstance(selected, RoleViewModel):
-                self.selection_title.setText(selected.title)
+                self.selection_title.setText(
+                    f"{selected.title}（项目 Goal 持有者）"
+                    if selected.role == "supervisor"
+                    else selected.title
+                )
                 self.selection_meta.setText(
                     f"项目角色 · {_status_label(selected.status)}\nThread：{selected.thread_id}"
                 )
@@ -642,6 +663,7 @@ if PYSIDE_AVAILABLE:
             self.detail_surface.setVisible(
                 isinstance(selected, (ProjectViewModel, RoleViewModel))
             )
+            self.projectContextChanged.emit(project is not None)
             self._render_attention(project)
 
         def _render_requirement_choices(
@@ -666,9 +688,7 @@ if PYSIDE_AVAILABLE:
             index = self.requirement_target_combo.findData(current)
             self.requirement_target_combo.setCurrentIndex(index if index >= 0 else 0)
             self.requirement_target_combo.blockSignals(blocked)
-            self.requirement_change_widget.setVisible(
-                project is not None and self.replan_guidance_button.isChecked()
-            )
+            self.requirement_change_widget.setVisible(False)
             self._update_requirement_change_controls()
 
         def _update_requirement_change_controls(self, _index: int = 0) -> None:
@@ -715,6 +735,37 @@ if PYSIDE_AVAILABLE:
             if thread_id:
                 self.openThreadRequested.emit(thread_id)
 
+        def _delete_selected(self) -> None:
+            selected = find_tree_item(self.state.tree, self.state.selected_key)
+            if isinstance(selected, OrdinaryThreadViewModel):
+                self.deleteThreadRequested.emit(selected.thread_id)
+            elif isinstance(selected, ProjectViewModel) and selected.can_delete:
+                if self._delete_project_confirmation != selected.project_id:
+                    self._delete_project_confirmation = selected.project_id
+                    self.delete_button.setText("再次点击确认删除项目")
+                    self.delete_button.setToolTip(
+                        "永久删除该项目容器、五个角色任务及其本地缓存"
+                    )
+                    return
+                self._delete_project_confirmation = None
+                self.deleteProjectRequested.emit(selected.project_id)
+
+        def set_delete_confirmation(self, thread_id: str | None) -> None:
+            self._delete_project_confirmation = None
+            selected = find_tree_item(self.state.tree, self.state.selected_key)
+            confirmed = (
+                isinstance(selected, OrdinaryThreadViewModel)
+                and selected.thread_id == thread_id
+            )
+            self.delete_button.setText(
+                "再次点击确认删除" if confirmed else "删除所选任务"
+            )
+            self.delete_button.setToolTip(
+                "再次点击将永久删除该普通任务和本地附件缓存"
+                if confirmed
+                else "永久删除所选普通任务、原生聊天记录和该任务的本地附件缓存"
+            )
+
         def _save_runtime(self) -> None:
             selected = find_tree_item(self.state.tree, self.state.selected_key)
             if not isinstance(selected, RoleViewModel) or not selected.can_set_runtime:
@@ -750,32 +801,17 @@ if PYSIDE_AVAILABLE:
             project = self._selected_project(selected)
             if not text or project is None or not project.can_guide:
                 return
-            force_replan = self.replan_guidance_button.isChecked()
-            requirement_change = None
-            if force_replan:
-                operation = self.requirement_change_combo.currentData()
-                target = self.requirement_target_combo.currentData()
-                if operation in {"replace", "remove"} and not isinstance(target, str):
-                    return
-                requirement_change = {
-                    "operation": operation,
-                    **(
-                        {"target_requirement_id": target}
-                        if operation in {"replace", "remove"} and target
-                        else {}
-                    ),
-                }
             thread_id = (
                 selected.thread_id
-                if isinstance(selected, RoleViewModel) and not force_replan
+                if isinstance(selected, RoleViewModel)
                 else None
             )
             self.appendGuidanceRequested.emit(
                 project.project_id,
                 thread_id,
                 text,
-                requirement_change,
-                force_replan,
+                None,
+                False,
             )
 
         def acknowledge_guidance(
@@ -788,12 +824,9 @@ if PYSIDE_AVAILABLE:
 
             if self.guidance_edit.toPlainText().strip() != submitted_text:
                 return False
-            if self.replan_guidance_button.isChecked() != force_replan:
-                return False
-            if self._current_requirement_change() != requirement_change:
+            if requirement_change is not None or force_replan:
                 return False
             self.guidance_edit.clear()
-            self.current_step_guidance_button.setChecked(True)
             return True
 
         def _current_requirement_change(self) -> dict[str, Any] | None:

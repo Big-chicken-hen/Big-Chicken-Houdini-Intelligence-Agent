@@ -107,6 +107,7 @@ class ProjectViewModel:
     can_continue: bool
     can_guide: bool
     can_stop: bool
+    can_delete: bool
 
     @property
     def stable_key(self) -> str:
@@ -299,6 +300,7 @@ def _normalize_project(raw: Mapping[str, Any]) -> ProjectViewModel | None:
         can_continue=_boolean_action(actions, "continue"),
         can_guide=_boolean_action(actions, "append_guidance"),
         can_stop=_boolean_action(actions, "stop"),
+        can_delete=_boolean_action(actions, "delete"),
     )
 
 

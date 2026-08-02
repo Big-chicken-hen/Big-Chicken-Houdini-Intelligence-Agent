@@ -19,6 +19,7 @@ from services.bridge.hia_bridge.project_contracts import (
     Role,
     RoleThread,
     RuntimeBudget,
+    TurnState,
     authoritative_task_identity,
 )
 from services.bridge.hia_bridge.project_effects import (
@@ -108,9 +109,10 @@ def _full_stage() -> dict:
     }
 
 
-def _plan() -> dict:
-    task_id, _ = authoritative_task_identity("build a Houdini asset")
-    anchor = f"task:{task_id}"
+def _plan(anchor: str | None = None) -> dict:
+    if anchor is None:
+        task_id, _ = authoritative_task_identity("build a Houdini asset")
+        anchor = f"task:{task_id}"
     return {
         "schema": "hia-project-plan/1",
         "task_description": {
@@ -143,6 +145,17 @@ def _plan() -> dict:
         ],
         "stages": [_full_stage()],
     }
+
+
+def _direct_plan(anchor: str | None = None) -> dict:
+    plan = copy.deepcopy(_plan(anchor))
+    plan["blueprint_sections"] = plan["blueprint_sections"][:1]
+    stage = plan["stages"][0]
+    stage["depth"] = "direct"
+    stage.pop("evidence_contract")
+    stage.pop("reviewers")
+    stage.pop("failure_minimum_repair")
+    return plan
 
 
 def _plan_with_two_requirements() -> dict:
@@ -514,6 +527,32 @@ class ProjectEffectExecutorTests(unittest.TestCase):
             "authorize_plan",
             _authorization(),
         )
+
+    def test_recovered_active_goal_is_held_before_oldest_effect_turn(self):
+        self.client.queue(
+            Role.SUPERVISOR,
+            "scene_task_eligibility",
+            {
+                "schema": "hia-project-eligibility/1",
+                "disposition": "eligible",
+                "reason": "requires the live scene",
+            },
+        )
+        harness = EffectHarness(self.root, self.client)
+
+        harness.run_one()
+
+        goal_index = next(
+            index
+            for index, (method, params) in enumerate(self.client.calls)
+            if method == "thread/goal/set" and params["status"] == "paused"
+        )
+        turn_index = next(
+            index
+            for index, (method, _params) in enumerate(self.client.calls)
+            if method == "turn/start"
+        )
+        self.assertLess(goal_index, turn_index)
 
     def test_single_stage_pass_reaches_goal_complete_with_exact_ownership(self):
         self._queue_common()
@@ -956,7 +995,7 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         self.assertIn("execute_repair", actions)
         self.assertEqual(1, state.stage.repair_count)
 
-    def test_ineligible_creates_no_worker_threads_and_pauses_goal(self):
+    def test_ineligible_keeps_supervisor_project_open_for_the_next_message(self):
         self.client.queue(
             Role.SUPERVISOR,
             "scene_task_eligibility",
@@ -968,11 +1007,92 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         )
         harness = EffectHarness(self.root, self.client)
         state = harness.run_to_terminal()
-        self.assertEqual(ProjectStatus.NOT_APPLICABLE, state.status)
+        self.assertEqual(ProjectStatus.INTAKE, state.status)
         self.assertEqual({Role.SUPERVISOR}, set(state.roles))
         self.assertFalse(any(method == "thread/start" for method, _ in self.client.calls))
-        goal = [params for method, params in self.client.calls if method == "thread/goal/set"][-1]
-        self.assertEqual("paused", goal["status"])
+        goal_updates = [
+            params for method, params in self.client.calls
+            if method == "thread/goal/set"
+        ]
+        self.assertEqual(1, len(goal_updates))
+        self.assertEqual("paused", goal_updates[0]["status"])
+
+    def test_second_message_is_current_intake_and_a_valid_plan_source(self):
+        self.client.queue(
+            Role.SUPERVISOR,
+            "scene_task_eligibility",
+            {
+                "schema": "hia-project-eligibility/1",
+                "disposition": "ineligible",
+                "reason": "你好！",
+            },
+            {
+                "schema": "hia-project-eligibility/1",
+                "disposition": "eligible",
+                "reason": "最新消息要求操作 Houdini 场景",
+            },
+        )
+        harness = EffectHarness(self.root, self.client)
+        harness.run_to_terminal()
+        updated = publish_guidance(
+            harness.state,
+            "创建一个可编辑的程序化资产",
+            target_role=Role.SUPERVISOR,
+        )
+        guidance = updated.guidance[-1]
+        harness.state = replace(
+            updated,
+            pending_effects=(
+                PendingEffect("effect-start-intake-second", "start_intake"),
+            ),
+        )
+        record = harness.registry.require("project-1")
+        harness.registry.put(
+            ProjectRecord(
+                harness.state,
+                record.authoritative_task_text,
+                record.attachments,
+            ),
+            expected_revision=record.state.revision,
+        )
+        self.client.queue(
+            Role.PLANNING,
+            "create_plan_and_stage_cards",
+            _direct_plan(anchor=f"guidance:{guidance.guidance_id}"),
+        )
+
+        harness.run_one()
+        eligibility_turns = [
+            json.loads(params["input"][0]["text"])
+            for method, params in self.client.calls
+            if method == "turn/start"
+            and json.loads(params["input"][0]["text"])["action"]
+            == "scene_task_eligibility"
+        ]
+        self.assertEqual(
+            "创建一个可编辑的程序化资产",
+            eligibility_turns[-1]["current_submission"]["text"],
+        )
+        self.assertEqual(
+            f"guidance:{guidance.guidance_id}",
+            eligibility_turns[-1]["current_submission"]["source_anchor"],
+        )
+        harness.run_one()
+        harness.run_one()
+        self.assertEqual(ProjectStatus.AUTHORIZATION, harness.state.status)
+        planning_envelope = next(
+            json.loads(params["input"][0]["text"])
+            for method, params in self.client.calls
+            if method == "turn/start"
+            and json.loads(params["input"][0]["text"])["action"]
+            == "create_plan_and_stage_cards"
+        )
+        self.assertIn("smallest depth", planning_envelope["response_rules"]["depth_policy"]["selection"])
+        self.assertEqual(
+            "direct|focused|full",
+            planning_envelope["response_contract"]["stages"][0]["depth"],
+        )
+        self.assertEqual(1, len(planning_envelope["response_contract"]["blueprint_sections"]))
 
     def test_resume_goal_returns_typed_ack_event_before_lifecycle_activation(self):
         harness = EffectHarness(self.root, self.client)
@@ -987,13 +1107,41 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         self.assertEqual(ProjectStatus.RESUMING, result.state.status)
         self.assertEqual(ProjectEvent.GOAL_RESUMED, result.event.kind)
         goal = [params for method, params in self.client.calls if method == "thread/goal/set"][-1]
-        self.assertEqual("active", goal["status"])
+        self.assertEqual("paused", goal["status"])
+
+    def test_verified_recovery_clears_only_stale_persisted_turn_activity(self):
+        harness = EffectHarness(self.root, self.client)
+        harness.executor._factory = type(
+            "RecoveryFactory",
+            (),
+            {"validate_recovery_identity": lambda _self, _state: None},
+        )()
+        active_turn = TurnState(
+            role=Role.PLANNING,
+            thread_id="thread-planning",
+            turn_id="turn-timed-out",
+            active=True,
+            consumed_turns=0,
+        )
+        state = replace(
+            harness.state,
+            status=ProjectStatus.INTERRUPTED,
+            resume_status=ProjectStatus.PLANNING,
+            turns={Role.PLANNING: active_turn},
+            pending_effects=(PendingEffect("verify-recovery", "verify_recovery"),),
+        )
+
+        result = harness.executor.execute(state, state.pending_effects[0])
+
+        self.assertEqual(ProjectEvent.RECOVERY_VALIDATED, result.event.kind)
+        self.assertFalse(result.state.turns[Role.PLANNING].active)
+        self.assertIsNone(result.state.turns[Role.PLANNING].turn_id)
 
     def test_resume_goal_rejects_missing_or_mismatched_native_goal_identity(self):
         for goal in (
-            {"status": "active"},
-            {"threadId": "wrong-thread", "status": "active"},
-            {"threadId": "thread-supervisor", "status": "paused"},
+            {"status": "paused"},
+            {"threadId": "wrong-thread", "status": "paused"},
+            {"threadId": "thread-supervisor", "status": "active"},
         ):
             with self.subTest(goal=goal):
                 self.client.goal_ack_override = goal

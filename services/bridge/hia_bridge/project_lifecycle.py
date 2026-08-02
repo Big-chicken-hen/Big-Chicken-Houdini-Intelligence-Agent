@@ -11,6 +11,7 @@ from .project_contracts import ProjectState, ProjectStatus, Role
 
 class ProjectEvent(str, Enum):
     INTAKE_STARTED = "intake_started"
+    INTAKE_MESSAGE_RECEIVED = "intake_message_received"
     SCENE_ELIGIBLE = "scene_eligible"
     ROLES_PROVISIONED = "roles_provisioned"
     ROLE_PROVISIONING_FAILED = "role_provisioning_failed"
@@ -152,6 +153,19 @@ def reduce_project(
 
     if kind is ProjectEvent.INTAKE_STARTED and status is ProjectStatus.PROVISIONING:
         return _next(state, ProjectStatus.INTAKE, LifecycleCommand(ProjectCommand.START_INTAKE))
+    if kind is ProjectEvent.INTAKE_MESSAGE_RECEIVED and status in {
+        ProjectStatus.INTAKE,
+        ProjectStatus.NOT_APPLICABLE,
+    }:
+        return _next(
+            state,
+            ProjectStatus.INTAKE,
+            LifecycleCommand(ProjectCommand.START_INTAKE),
+            pause_target=None,
+            resume_status=None,
+            attention_reason=None,
+            last_error=None,
+        )
     if kind is ProjectEvent.SCENE_ELIGIBLE and status is ProjectStatus.INTAKE:
         return _next(
             state,
@@ -177,8 +191,12 @@ def reduce_project(
         )
         return replace(paused, last_error=error), commands
     if kind is ProjectEvent.SCENE_INELIGIBLE and status is ProjectStatus.INTAKE:
-        reason = str(data.get("reason") or "not_a_houdini_scene_task")
-        return _pause(state, ProjectStatus.NOT_APPLICABLE, reason)
+        return _next(
+            state,
+            ProjectStatus.INTAKE,
+            attention_reason=None,
+            last_error=None,
+        )
     if kind is ProjectEvent.INTAKE_UNCLEAR and status is ProjectStatus.INTAKE:
         reason = str(data.get("reason") or "scene_task_eligibility_unclear")
         return _pause(
@@ -367,6 +385,15 @@ def reduce_project(
                 recovery_required=False,
                 recovery_return_status=None,
                 recovery_pending_effects=(),
+                attention_reason=None,
+                last_error=None,
+            )
+        if target is ProjectStatus.PLANNING and not state.pending_effects:
+            return _next(
+                state,
+                ProjectStatus.PLANNING,
+                LifecycleCommand(ProjectCommand.REQUEST_PLAN, {"recovery": True}),
+                resume_status=None,
                 attention_reason=None,
                 last_error=None,
             )

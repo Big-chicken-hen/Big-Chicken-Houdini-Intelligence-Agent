@@ -57,6 +57,8 @@ class ProjectTeamGateway(Protocol):
 
     def stop_project(self, *, project_id: str, context: str) -> str | None: ...
 
+    def delete_project(self, *, project_id: str, context: str) -> str | None: ...
+
 
 class ProjectTeamController:
     def __init__(
@@ -66,12 +68,14 @@ class ProjectTeamController:
         *,
         on_new_task: Callable[[str], None],
         on_open_thread: Callable[[str], None],
+        on_delete_thread: Callable[[str], None] | None = None,
         on_error: Callable[[str], None] | None = None,
     ) -> None:
         self.view = view
         self.gateway = gateway
         self._on_new_task = on_new_task
         self._on_open_thread = on_open_thread
+        self._on_delete_thread = on_delete_thread or (lambda _thread_id: None)
         self._on_error = on_error or (lambda _message: None)
         self._gateway_connected = False
         self._closed = True
@@ -80,7 +84,7 @@ class ProjectTeamController:
         self._pending_ordinary_selection: str | None = None
         self._provisional_ordinary_thread_id: str | None = None
         self._pending_guidance: dict[
-            str, tuple[str, str | None, str, Mapping[str, Any] | None, bool]
+            str, tuple[str, str | None, str, Mapping[str, Any] | None, bool, bool]
         ] = {}
         self._connect_view_once()
 
@@ -176,6 +180,8 @@ class ProjectTeamController:
         self.view.refreshRequested.connect(self.refresh)
         self.view.newTaskRequested.connect(self._new_task)
         self.view.openThreadRequested.connect(self._open_thread)
+        self.view.deleteThreadRequested.connect(self._delete_thread)
+        self.view.deleteProjectRequested.connect(self._delete_project)
         self.view.appendGuidanceRequested.connect(self._append_guidance)
         self.view.roleRuntimeRequested.connect(self._set_role_runtime)
         self.view.modelCatalogRefreshRequested.connect(self.refresh_models)
@@ -189,6 +195,17 @@ class ProjectTeamController:
     def _open_thread(self, thread_id: str) -> None:
         if self.active and isinstance(thread_id, str) and thread_id:
             self._on_open_thread(thread_id)
+
+    def _delete_thread(self, thread_id: str) -> None:
+        if self.active and isinstance(thread_id, str) and thread_id:
+            self._on_delete_thread(thread_id)
+
+    def _delete_project(self, project_id: str) -> None:
+        if self.active and isinstance(project_id, str) and project_id:
+            self.gateway.delete_project(
+                project_id=project_id,
+                context=f"project_delete:{project_id}",
+            )
 
     def _connect_gateway(self) -> None:
         if self._gateway_connected:
@@ -211,9 +228,10 @@ class ProjectTeamController:
         text: str,
         requirement_change: Mapping[str, Any] | None = None,
         force_replan: bool = False,
-    ) -> None:
+        acknowledge_view: bool = True,
+    ) -> bool:
         if not self.active:
-            return
+            return False
         context = f"project_guidance:{uuid.uuid4().hex}"
         requirement_delta = _requirement_delta(requirement_change, context)
         self._pending_guidance[context] = (
@@ -222,14 +240,37 @@ class ProjectTeamController:
             text,
             requirement_change,
             force_replan,
+            acknowledge_view,
         )
-        self.gateway.append_project_guidance(
+        request_id = self.gateway.append_project_guidance(
             project_id=project_id,
             thread_id=thread_id,
             text=text,
             requirement_delta=requirement_delta,
             force_replan=force_replan,
             context=context,
+        )
+        if request_id is None:
+            self._pending_guidance.pop(context, None)
+            return False
+        return True
+
+    def submit_guidance(
+        self,
+        *,
+        project_id: str,
+        thread_id: str | None,
+        text: str,
+    ) -> bool:
+        """Route the central composer through the owned project workflow."""
+
+        return self._append_guidance(
+            project_id,
+            thread_id,
+            text,
+            None,
+            False,
+            acknowledge_view=False,
         )
 
     def _set_role_runtime(
@@ -288,8 +329,9 @@ class ProjectTeamController:
                     submitted_text,
                     requirement_change,
                     force_replan,
+                    acknowledge_view,
                 ) = pending
-                if not self.view.acknowledge_guidance(
+                if acknowledge_view and not self.view.acknowledge_guidance(
                     submitted_text, requirement_change, force_replan
                 ):
                     self._on_error(

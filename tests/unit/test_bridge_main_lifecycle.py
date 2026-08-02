@@ -151,6 +151,19 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         stack.enter_context(
             mock.patch.object(bridge_main, "BridgeSession", return_value=session)
         )
+        isolated_project_runtime = SimpleNamespace(
+            service=object(),
+            observe_codex_event=lambda *_args, **_kwargs: None,
+            recover=lambda: (),
+            close=lambda *_args, **_kwargs: True,
+        )
+        stack.enter_context(
+            mock.patch.object(
+                bridge_main,
+                "_build_project_runtime",
+                return_value=isolated_project_runtime,
+            )
+        )
         stack.enter_context(mock.patch.object(bridge_main.signal, "signal"))
         return stack, client_constructor
 
@@ -548,6 +561,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                 REPOSITORY_ROOT / ".runtime",
                 REPOSITORY_ROOT / ".runtime" / "cache",
             ),
+            thread_deleter=None,
         )
 
     def test_http_provider_command_is_escaped_process_local_and_secret_free(self) -> None:

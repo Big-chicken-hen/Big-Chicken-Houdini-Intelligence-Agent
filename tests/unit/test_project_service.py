@@ -191,6 +191,87 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertTrue(
             all(not item["actions"]["append_guidance"] for item in project["threads"])
         )
+        self.assertTrue(project["actions"]["delete"])
+
+        deleted = service.delete_project(project_id="legacy-project")
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(roles, [
+            thread_id.removeprefix("legacy-")
+            if thread_id != "legacy-supervisor" else "supervisor"
+            for thread_id in deleted["deleted_thread_ids"]
+        ])
+        self.assertEqual([], service.snapshot()["projects"])
+
+    def test_interrupted_project_delete_removes_exact_roles_and_registry(self) -> None:
+        deleted_threads = []
+        root = Path(self.temp.name)
+        service = ProjectTeamService(
+            client=self.client,
+            project_root=root,
+            registry=self.registry,
+            settings=self.settings,
+            thread_factory=_factory(self.client, root),
+            model_catalog=_model_catalog,
+            thread_deleter=lambda thread_id: deleted_threads.append(thread_id),
+        )
+        started = service.start_team_project(task_text="build")
+        record = self.registry.require(started["project_id"])
+        interrupted = replace(
+            record.state,
+            status=ProjectStatus.INTERRUPTED,
+            pending_effects=(),
+            revision=record.state.revision + 1,
+        )
+        self.registry.put(
+            replace(record, state=interrupted),
+            expected_revision=record.state.revision,
+        )
+
+        result = service.delete_project(project_id=started["project_id"])
+
+        self.assertEqual([started["root_thread_id"]], deleted_threads)
+        self.assertTrue(result["deleted"])
+        self.assertIsNone(self.registry.get(started["project_id"]))
+
+    def test_running_project_delete_is_rejected_without_deleting_threads(self) -> None:
+        started = self.service.start_team_project(task_text="build")
+        with self.assertRaisesRegex(ValueError, "running project"):
+            self.service.delete_project(project_id=started["project_id"])
+        self.assertIsNotNone(self.registry.get(started["project_id"]))
+        self.assertFalse(any(method == "thread/delete" for method, _ in self.client.calls))
+
+    def test_needs_attention_project_can_be_explicitly_deleted(self) -> None:
+        deleted_threads = []
+        root = Path(self.temp.name)
+        service = ProjectTeamService(
+            client=self.client,
+            project_root=root,
+            registry=self.registry,
+            settings=self.settings,
+            thread_factory=_factory(self.client, root),
+            model_catalog=_model_catalog,
+            thread_deleter=lambda thread_id: deleted_threads.append(thread_id),
+        )
+        started = service.start_team_project(task_text="build")
+        record = self.registry.require(started["project_id"])
+        attention = replace(
+            record.state,
+            status=ProjectStatus.NEEDS_ATTENTION,
+            pending_effects=(),
+            revision=record.state.revision + 1,
+        )
+        self.registry.put(
+            replace(record, state=attention),
+            expected_revision=record.state.revision,
+        )
+
+        snapshot = service.snapshot()["projects"][0]
+        self.assertTrue(snapshot["actions"]["delete"])
+        result = service.delete_project(project_id=started["project_id"])
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual([started["root_thread_id"]], deleted_threads)
+        self.assertIsNone(self.registry.get(started["project_id"]))
 
     def test_start_returns_after_supervisor_and_goal_ack_only(self) -> None:
         result = self.service.start_team_project(task_text="建造木屋", model="gpt-test")
@@ -201,6 +282,7 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual(2, len(self.client.calls))
         self.assertEqual("thread/start", self.client.calls[0][0])
         self.assertEqual("thread/goal/set", self.client.calls[1][0])
+        self.assertEqual("paused", self.client.calls[1][1]["status"])
 
     def test_role_identity_is_resolved_only_from_persisted_registry_membership(self) -> None:
         result = self.service.start_team_project(task_text="建造木屋")
@@ -421,6 +503,55 @@ class ProjectServiceTests(unittest.TestCase):
         )
         self.assertEqual([project_id, project_id], workflow.started)
         self.assertTrue(registry.require(project_id).state.plan_stale)
+
+    def test_non_scene_reply_keeps_same_supervisor_project_open_for_next_message(self) -> None:
+        root = Path(self.temp.name)
+        workflow = FakeWorkflow()
+        registry = ProjectRegistry(root / "continuing-intake-projects.json")
+        service = ProjectTeamService(
+            client=self.client,
+            project_root=root,
+            registry=registry,
+            settings=self.settings,
+            thread_factory=_factory(self.client, root),
+            workflow=workflow,
+        )
+        result = service.start_team_project(task_text="你好")
+        project_id = result["project_id"]
+        supervisor_id = result["root_thread_id"]
+        record = registry.require(project_id)
+        legacy_waiting = replace(
+            record.state,
+            status=ProjectStatus.NOT_APPLICABLE,
+            pending_effects=(),
+            revision=record.state.revision + 1,
+        )
+        registry.put(
+            type(record)(
+                legacy_waiting,
+                record.authoritative_task_text,
+                record.attachments,
+            ),
+            expected_revision=record.state.revision,
+        )
+
+        before = service.snapshot()["projects"][0]
+        self.assertTrue(before["actions"]["append_guidance"])
+        self.assertTrue(before["threads"][0]["actions"]["append_guidance"])
+        service.append_guidance(
+            project_id=project_id,
+            thread_id=supervisor_id,
+            text="请处理我接下来的 Houdini 场景任务",
+        )
+
+        state = registry.require(project_id).state
+        self.assertEqual(ProjectStatus.INTAKE, state.status)
+        self.assertEqual("start_intake", state.pending_effects[0].kind)
+        self.assertEqual(
+            "请处理我接下来的 Houdini 场景任务",
+            state.guidance[-1].text,
+        )
+        self.assertEqual([project_id, project_id], workflow.started)
 
     def test_completing_rejects_project_and_role_guidance_while_active_allows_it(self) -> None:
         result = self.service.start_team_project(task_text="build a scene")

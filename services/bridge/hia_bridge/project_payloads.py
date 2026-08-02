@@ -281,8 +281,21 @@ def validate_plan_structure(
         raise ValueError("requirement source_ref is not authoritative")
     if len(stage_ids) != len(stages):
         raise ValueError("stages are malformed or duplicated")
-    if any(item.get("depth") != "full" for item in stages):
-        raise ValueError("project-team blueprint stages must all use full depth")
+    stage_depth_values = [
+        item.get("depth")
+        for item in stages
+        if isinstance(item, Mapping)
+    ]
+    if (
+        any(
+            not isinstance(value, str)
+            or value not in {"direct", "focused", "full"}
+            for value in stage_depth_values
+        )
+        or len(set(stage_depth_values)) != 1
+    ):
+        raise ValueError("project-team blueprint stages must use one valid depth")
+    full_depth = stage_depth_values[0] == "full"
 
     covered_requirement_facts: set[str] = set()
     requirement_facts: dict[str, set[str]] = {}
@@ -310,7 +323,7 @@ def validate_plan_structure(
         for section in sections
         if isinstance(section, Mapping)
     )
-    if observed_section_ids != FULL_BLUEPRINT_SECTION_IDS:
+    if full_depth and observed_section_ids != FULL_BLUEPRINT_SECTION_IDS:
         raise ValueError("blueprint sections must use all fourteen stable IDs in order")
     section_ids: set[str] = set()
     covered_facts: set[str] = set()

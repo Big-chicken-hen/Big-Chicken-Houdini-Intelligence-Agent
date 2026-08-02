@@ -76,6 +76,19 @@ class ProjectArtifactStore:
         _require_id(name, "artifact name")
         return self.project(project_id).get(name)
 
+    def remove_project(self, project_id: str) -> bool:
+        """Remove only one project's durable work products."""
+
+        _require_id(project_id, "project_id")
+        with self._lock:
+            root = self._read()
+            projects = root["projects"]
+            if project_id not in projects:
+                return False
+            del projects[project_id]
+            self._write(root)
+            return True
+
     def _read(self) -> dict[str, Any]:
         if not self._path.exists():
             return {"schema": ARTIFACT_SCHEMA, "projects": {}}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -1329,6 +1330,135 @@ class PanelWiringTests(unittest.TestCase):
         self.assertTrue(panel.send_button.isEnabled())
         self.assertFalse(panel.stop_button.isEnabled())
 
+    def test_project_role_message_wrapper_is_hidden_from_conversation(self) -> None:
+        self.assertEqual(
+            "我的消息",
+            HoudiniIntelligencePanel._project_role_user_text(
+                "message{我的消息}",
+                "监督 AI",
+            ),
+        )
+
+    def test_project_role_protocol_request_is_rendered_as_readable_task(self) -> None:
+        envelope = {
+            "schema": "hia-project-role-request/1",
+            "action": "create_plan_and_stage_cards",
+            "authoritative_task": {
+                "task_text": "建造一栋克制写实的近未来住宅"
+            },
+        }
+
+        rendered = HoudiniIntelligencePanel._project_role_user_text(
+            json.dumps(envelope, ensure_ascii=False),
+            "方案 AI",
+        )
+
+        self.assertIn("项目任务", rendered)
+        self.assertIn("近未来住宅", rendered)
+        self.assertNotIn("hia-project-role-request", rendered)
+
+    def test_project_role_protocol_response_is_not_raw_json(self) -> None:
+        response = {
+            "schema": "hia-project-eligibility/1",
+            "disposition": "eligible",
+            "reason": "任务适合项目团队执行",
+        }
+
+        rendered = HoudiniIntelligencePanel._project_role_agent_text(
+            json.dumps(response, ensure_ascii=False),
+            "监督 AI",
+        )
+
+        self.assertIn("监督 AI已完成本轮工作", rendered)
+        self.assertIn("任务适合项目团队执行", rendered)
+        self.assertNotIn("\"schema\"", rendered)
+
+    def test_ineligible_project_response_reads_as_a_supervisor_reply(self) -> None:
+        response = {
+            "schema": "hia-project-eligibility/1",
+            "disposition": "ineligible",
+            "reason": "你好！有什么 Houdini 场景任务需要我帮忙？",
+        }
+
+        rendered = HoudiniIntelligencePanel._project_role_agent_text(
+            json.dumps(response, ensure_ascii=False),
+            "监督 AI",
+        )
+
+        self.assertIn("你好！有什么 Houdini 场景任务需要我帮忙？", rendered)
+        self.assertIn("未创建其他角色", rendered)
+        self.assertNotIn("任务判定", rendered)
+        self.assertNotIn("已完成本轮工作", rendered)
+        self.assertNotIn("\"schema\"", rendered)
+
+    def test_project_role_response_safely_handles_fenced_or_invalid_protocol(self) -> None:
+        response = {
+            "schema": "hia-project-eligibility/1",
+            "disposition": "ineligible",
+            "reason": "你好！请告诉我需要处理的 Houdini 场景任务。",
+        }
+        fenced = HoudiniIntelligencePanel._project_role_agent_text(
+            "```json\n" + json.dumps(response, ensure_ascii=False) + "\n```",
+            "监督 AI",
+        )
+        invalid = HoudiniIntelligencePanel._project_role_agent_text(
+            '{"schema":"hia-project-eligibility/1","disposition":',
+            "监督 AI",
+        )
+
+        self.assertIn("你好！请告诉我需要处理的 Houdini 场景任务。", fenced)
+        self.assertNotIn("```", fenced)
+        self.assertIn("结构化响应无效", invalid)
+        self.assertNotIn("hia-project-eligibility", invalid)
+
+    def test_supervisor_project_remains_writable_after_non_scene_reply(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        role = types.SimpleNamespace(thread_id="thread-supervisor")
+        project = types.SimpleNamespace(
+            status="not_applicable",
+            can_guide=False,
+            roles=(role,),
+        )
+        panel.project_team_view = types.SimpleNamespace(
+            state=types.SimpleNamespace(
+                tree=types.SimpleNamespace(projects=(project,))
+            )
+        )
+
+        panel._refresh_controls()
+
+        self.assertTrue(panel.input_edit.isEnabled())
+        self.assertTrue(panel.send_button.isEnabled())
+
+    def test_project_role_plan_keeps_complete_human_readable_content(self) -> None:
+        response = {
+            "schema": "hia-project-plan/1",
+            "requirements": [
+                {
+                    "requirement_id": "REQ-structure",
+                    "description": "主体必须采用可编辑的承重结构",
+                }
+            ],
+            "stages": [
+                {
+                    "stage_id": "stage-structure",
+                    "title": "主体结构",
+                    "steps": ["建立立柱与梁", "检查连接和净空"],
+                }
+            ],
+        }
+
+        rendered = HoudiniIntelligencePanel._project_role_agent_text(
+            json.dumps(response, ensure_ascii=False),
+            "方案 AI",
+        )
+
+        self.assertIn("REQ-structure", rendered)
+        self.assertIn("可编辑的承重结构", rendered)
+        self.assertIn("建立立柱与梁", rendered)
+        self.assertIn("检查连接和净空", rendered)
+        self.assertNotIn("\"requirements\"", rendered)
+
     def test_mcp_backend_initialization_defaults_to_hia_and_rejects_unknown(self) -> None:
         cases = (
             (None, "hia_v2"),
@@ -1536,7 +1666,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("self.main_splitter.setCollapsible(2, False)", panel_source)
         self.assertIn("self.main_splitter.setStretchFactor(1, 4)", panel_source)
         self.assertEqual(5, panel_source.count("self.task_tabs.addTab("))
-        for label in ("任务蓝图", "阶段进度", "审阅", "团队", "知识与记忆"):
+        for label in ("任务蓝图", "阶段进度", "审阅", "项目团队", "知识与记忆"):
             self.assertIn(f'"{label}"', panel_source)
         self.assertEqual(
             4,
@@ -8305,6 +8435,49 @@ class PanelWiringTests(unittest.TestCase):
                 panel._on_events({"events": events, "gap": False})
                 self.assertEqual(1, len(panel._client.turn_requests))
 
+    def test_project_role_never_uses_ordinary_goal_auto_continuation(self) -> None:
+        panel = _make_panel()
+        goal = {
+            "threadId": "thread-1",
+            "objective": "project objective",
+            "status": "active",
+        }
+        panel._apply_goal("thread-1", goal)
+        panel._apply_focus_mode("thread-1", True)
+        _context, turn_id = _start_active_turn(panel, 1)
+        panel._project_role_context_for_thread = lambda thread_id: (
+            (object(), object()) if thread_id == "thread-1" else None
+        )
+
+        panel._on_events(
+            {"events": [_completed_notification(turn_id)], "gap": False}
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertIsNone(panel._goal_continuation_boundary)
+        self.assertFalse(panel._goal_continuation_is_safe())
+
+    def test_project_goal_rejects_every_ordinary_goal_mutation_handler(self) -> None:
+        panel = _make_panel()
+        panel._project_role_context_for_thread = lambda thread_id: (
+            (object(), object()) if thread_id == "thread-1" else None
+        )
+        panel._current_goal = {
+            "threadId": "thread-1",
+            "objective": "project objective",
+            "status": "paused",
+        }
+
+        panel._save_goal()
+        panel._clear_goal()
+        panel._set_focus_mode(True)
+        panel._continue_goal()
+
+        self.assertEqual([], panel._client.goal_set_requests)
+        self.assertEqual([], panel._client.goal_clear_requests)
+        self.assertEqual([], panel._client.focus_mode_requests)
+        self.assertEqual([], panel._client.turn_requests)
+
     def test_empty_auto_continuation_pauses_without_a_fast_loop(self) -> None:
         panel = _make_panel()
         goal = {
@@ -8642,6 +8815,26 @@ class PanelWiringTests(unittest.TestCase):
         panel.goal_focus_checkbox.setChecked(True)
         panel._set_focus_mode(True)
         self.assertEqual([("thread-1", True)], panel._client.focus_mode_requests)
+
+    def test_project_goal_hides_internal_task_suffix_but_preserves_it_on_save(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-1")
+        objective = "Build a cabin · task-670d9743542cae3ea7ebe36a"
+
+        self.assertTrue(
+            panel._apply_goal(
+                "thread-1",
+                {
+                    "threadId": "thread-1",
+                    "objective": objective,
+                    "status": "active",
+                },
+            )
+        )
+        self.assertEqual("Build a cabin", panel.goal_objective_edit.toPlainText())
+
+        panel._save_goal()
+
+        self.assertEqual(objective, panel._client.goal_set_requests[-1][1])
 
     def test_goal_inflight_blocks_thread_switch_and_rebinds_after_resume(self) -> None:
         panel = _make_panel()

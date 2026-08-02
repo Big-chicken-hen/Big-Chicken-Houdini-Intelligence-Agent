@@ -34,7 +34,12 @@ def snapshot():
                     {"requirement_id": "REQ-structure", "kind": "structure", "status": "active"},
                     {"requirement_id": "REQ-animation", "kind": "animation", "status": "active"},
                 ],
-                "actions": {"append_guidance": True, "continue": True, "stop": True},
+                "actions": {
+                    "append_guidance": True,
+                    "continue": True,
+                    "stop": True,
+                    "delete": True,
+                },
                 "threads": [
                     {
                         "role": "supervisor",
@@ -126,6 +131,83 @@ class ProjectTeamQtTests(unittest.TestCase):
         self.state.select("role:project-a:supervisor")
         self.view._open_selected()
         self.assertEqual(["thread-supervisor"], opened)
+
+    def test_not_applicable_is_presented_as_handled_not_interrupted(self) -> None:
+        value = snapshot()
+        value["projects"][0]["status"] = "not_applicable"
+        value["projects"][0]["actions"]["append_guidance"] = False
+        self.state.apply_snapshot(value)
+        self.state.select("project:project-a")
+        self.view.refresh_view()
+
+        self.assertIn("已由监督 AI 处理", self.view.selection_meta.text())
+        self.assertNotIn("中断", self.view.selection_meta.text())
+
+    def test_double_click_opens_and_redundant_open_button_is_removed(self) -> None:
+        from PySide6 import QtWidgets
+
+        opened = []
+        self.view.openThreadRequested.connect(opened.append)
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+
+        self.view._item_double_clicked(None, 0)
+
+        self.assertEqual(["thread-supervisor"], opened)
+        self.assertNotIn(
+            "打开所选任务",
+            [button.text() for button in self.view.findChildren(QtWidgets.QPushButton)],
+        )
+
+    def test_delete_is_available_for_ordinary_threads_and_inactive_projects(self) -> None:
+        deleted = []
+        deleted_projects = []
+        self.view.deleteThreadRequested.connect(deleted.append)
+        self.view.deleteProjectRequested.connect(deleted_projects.append)
+        self.state.apply_snapshot(
+            snapshot(),
+            [{"thread_id": "ordinary-a", "name": "普通任务 A", "updated_at": 2}],
+        )
+
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.view._delete_selected()
+        self.assertFalse(self.view.delete_button.isEnabled())
+        self.assertEqual([], deleted)
+
+        self.state.select("thread:ordinary-a")
+        self.view.refresh_view()
+        self.view._delete_selected()
+        self.assertTrue(self.view.delete_button.isEnabled())
+        self.assertEqual(["ordinary-a"], deleted)
+
+        inactive = snapshot()
+        inactive["projects"][0]["status"] = "interrupted"
+        inactive["projects"][0]["actions"]["delete"] = True
+        self.state.apply_snapshot(inactive)
+        self.state.select("project:project-a")
+        self.view.refresh_view()
+        self.assertTrue(self.view.delete_button.isEnabled())
+        self.view._delete_selected()
+        self.assertEqual([], deleted_projects)
+        self.view._delete_selected()
+        self.assertEqual(["project-a"], deleted_projects)
+
+    def test_project_context_signal_clears_when_ordinary_task_is_selected(self) -> None:
+        contexts = []
+        self.view.projectContextChanged.connect(contexts.append)
+        self.state.apply_snapshot(
+            snapshot(),
+            [{"thread_id": "ordinary-a", "name": "普通任务 A", "updated_at": 2}],
+        )
+
+        self.state.select("project:project-a")
+        self.view.refresh_view()
+        self.state.select("thread:ordinary-a")
+        self.view.refresh_view()
+
+        self.assertEqual([True, False], contexts[-2:])
+        self.assertFalse(self.view.detail_surface.isVisible())
 
     def test_ordinary_selection_clears_project_only_detail(self) -> None:
         data = snapshot()
@@ -310,7 +392,7 @@ class ProjectTeamQtTests(unittest.TestCase):
         self.view.refresh_models_button.click()
         self.assertEqual([True], requested)
 
-    def test_guidance_scope_is_mutually_exclusive_and_ack_matches_mode(self) -> None:
+    def _obsolete_guidance_scope_contract(self) -> None:
         emitted = []
         self.view.appendGuidanceRequested.connect(
             lambda project_id, thread_id, text, requirement_change, force_replan: emitted.append(
@@ -354,6 +436,50 @@ class ProjectTeamQtTests(unittest.TestCase):
         )
         self.assertTrue(self.view.current_step_guidance_button.isChecked())
 
+    def test_guidance_hides_internal_change_controls(self) -> None:
+        emitted = []
+        self.view.appendGuidanceRequested.connect(
+            lambda *values: emitted.append(values)
+        )
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.assertFalse(self.view.guidance_scope_widget.isVisible())
+        self.assertFalse(self.view.requirement_change_widget.isVisible())
+        self.view.guidance_edit.setPlainText("change the roof and update the plan")
+        self.view._send_guidance()
+        self.assertEqual(
+            [
+                (
+                    "project-a",
+                    "thread-supervisor",
+                    "change the roof and update the plan",
+                    None,
+                    False,
+                )
+            ],
+            emitted,
+        )
+        self.assertTrue(
+            self.view.acknowledge_guidance(
+                "change the roof and update the plan", None, False
+            )
+        )
+
+    def test_guidance_editor_accepts_chinese_input_method_commit(self) -> None:
+        from PySide6 import QtCore, QtGui
+        from hia_panel.composer import ExpandableTextEdit
+
+        self.assertIsInstance(self.view.guidance_edit, ExpandableTextEdit)
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.view.guidance_edit.setFocus()
+        event = QtGui.QInputMethodEvent("", [])
+        event.setCommitString("中文输入")
+
+        QtCore.QCoreApplication.sendEvent(self.view.guidance_edit, event)
+
+        self.assertEqual("中文输入", self.view.guidance_edit.toPlainText())
+
     def test_complete_panel_goal_card_renders_dark_instead_of_white(self) -> None:
         from hia_panel.panel import HoudiniIntelligencePanel
 
@@ -378,6 +504,96 @@ class ProjectTeamQtTests(unittest.TestCase):
                 for color in samples
             )
             self.assertLess(near_white, max(1, len(samples) // 10))
+        finally:
+            panel.close()
+            panel.deleteLater()
+            self.app.processEvents()
+
+    def test_complete_panel_shows_project_controls_only_for_project_context(self) -> None:
+        from hia_panel.panel import HoudiniIntelligencePanel
+
+        with mock.patch.dict(
+            os.environ,
+            {"HIA_BRIDGE_URL": "", "HIA_BRIDGE_TOKEN": ""},
+        ):
+            panel = HoudiniIntelligencePanel(hou_module=None)
+        try:
+            panel.project_team_view.state.apply_snapshot(
+                snapshot(),
+                [{"thread_id": "ordinary-a", "name": "普通任务 A", "updated_at": 2}],
+            )
+            team_page = panel.task_tabs.widget(3)
+            self.assertIs(team_page, panel.project_team_view.detail_surface.parent())
+            self.assertIs(team_page, panel.project_team_view.attention_surface.parent())
+            panel.task_tabs.setCurrentIndex(3)
+            panel.show()
+            self.app.processEvents()
+
+            panel.project_team_view.state.select("thread:ordinary-a")
+            panel.project_team_view.refresh_view()
+            self.app.processEvents()
+            self.assertTrue(panel.project_team_placeholder.isVisible())
+            self.assertFalse(panel.team_group.isVisible())
+            self.assertFalse(panel.performance_group.isVisible())
+
+            panel.project_team_view.state.select("role:project-a:supervisor")
+            panel.project_team_view.refresh_view()
+            self.app.processEvents()
+            self.assertFalse(panel.project_team_placeholder.isVisible())
+            self.assertTrue(panel.project_team_view.runtime_widget.isVisible())
+            self.assertTrue(panel.team_group.isVisible())
+            self.assertTrue(panel.performance_group.isVisible())
+        finally:
+            panel.close()
+            panel.deleteLater()
+            self.app.processEvents()
+
+    def test_project_goal_is_read_only_while_ordinary_goal_remains_editable(self) -> None:
+        from hia_panel.panel import HoudiniIntelligencePanel
+
+        with mock.patch.dict(
+            os.environ,
+            {"HIA_BRIDGE_URL": "", "HIA_BRIDGE_TOKEN": ""},
+        ):
+            panel = HoudiniIntelligencePanel(hou_module=None)
+        try:
+            panel.project_team_view.state.apply_snapshot(
+                snapshot(),
+                [{"thread_id": "ordinary-a", "name": "ordinary", "updated_at": 2}],
+            )
+            panel._connected = True
+            panel._authenticated = True
+            panel._selected_thread_id = "thread-supervisor"
+            panel.project_team_view.state.select("role:project-a:supervisor")
+            panel._current_goal = {
+                "threadId": "thread-supervisor",
+                "objective": "project objective",
+                "status": "paused",
+            }
+
+            panel._refresh_controls()
+
+            self.assertFalse(panel.goal_objective_edit.isEnabled())
+            self.assertFalse(panel.goal_budget_edit.isEnabled())
+            self.assertFalse(panel.goal_save_button.isEnabled())
+            self.assertFalse(panel.goal_clear_button.isEnabled())
+            self.assertFalse(panel.goal_focus_checkbox.isEnabled())
+            self.assertFalse(panel.goal_continue_button.isEnabled())
+            self.assertTrue(panel.goal_refresh_button.isEnabled())
+
+            panel._selected_thread_id = "ordinary-a"
+            panel.project_team_view.state.select("thread:ordinary-a")
+            panel._current_goal = {
+                "threadId": "ordinary-a",
+                "objective": "ordinary objective",
+                "status": "active",
+            }
+            panel._refresh_controls()
+
+            self.assertTrue(panel.goal_objective_edit.isEnabled())
+            self.assertTrue(panel.goal_save_button.isEnabled())
+            self.assertTrue(panel.goal_clear_button.isEnabled())
+            self.assertTrue(panel.goal_focus_checkbox.isEnabled())
         finally:
             panel.close()
             panel.deleteLater()

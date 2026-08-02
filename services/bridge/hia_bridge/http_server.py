@@ -1002,20 +1002,25 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                             "next_action": "refresh_models",
                         },
                     ) from exc
-            elif action in {"continue", "stop"}:
+            elif action in {"continue", "stop", "delete"}:
                 self._require_exact_fields(body, {"action", "project_id"})
                 if action == "continue":
                     snapshot = application.project_team.continue_project(
                         project_id=body.get("project_id")
                     )
-                else:
+                elif action == "stop":
                     snapshot = application.project_team.stop_project(
                         project_id=body.get("project_id")
                     )
+                else:
+                    deleted = application.project_team.delete_project(
+                        project_id=body.get("project_id")
+                    )
+                    return {"ok": True, **deleted}, HTTPStatus.OK
             else:
                 raise BridgeError(
                     "INVALID_PROJECT_ACTION",
-                    "Project action must be append_guidance, set_role_runtime, continue, or stop",
+                    "Project action must be append_guidance, set_role_runtime, continue, stop, or delete",
                 )
             return {"ok": True, "project_team": snapshot}, HTTPStatus.OK
         if path == "/v1/project-memory":

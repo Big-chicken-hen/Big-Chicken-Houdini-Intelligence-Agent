@@ -1245,6 +1245,30 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
         self.assertFalse(result["was_selected"])
         self.assertEqual("thread-test", session.snapshot()["thread_id"])
 
+    def test_delete_removes_only_the_exact_thread_attachment_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            deleted_cache = (
+                project_root / ".runtime" / "attachments" / "thread-delete"
+            )
+            kept_cache = project_root / ".runtime" / "attachments" / "thread-keep"
+            deleted_cache.mkdir(parents=True)
+            kept_cache.mkdir(parents=True)
+            (deleted_cache / "image.png").write_bytes(b"delete")
+            (kept_cache / "image.png").write_bytes(b"keep")
+            client = _ThreadHistoryClient({"data": []})
+            session = BridgeSession(project_root, client, EventBuffer())
+
+            result = session.delete_thread("thread-delete")
+
+            self.assertFalse(deleted_cache.exists())
+            self.assertTrue((kept_cache / "image.png").is_file())
+            self.assertTrue(result["cache_cleanup"]["complete"])
+            self.assertEqual(
+                [str(deleted_cache.resolve())],
+                result["cache_cleanup"]["removed_paths"],
+            )
+
     def test_delete_response_does_not_clear_thread_selected_during_rpc(self) -> None:
         client = _ThreadHistoryClient({"data": []})
         session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
@@ -2698,6 +2722,9 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         self.assertLessEqual(len(instructions), 1_320)
         for required_text in (
             "HIA MCP V2 与 HOM",
+            "确定操作不枚举",
+            "HOM先编译",
+            "类别API仅在对象支持时调用",
             "明确小改只读目标值后直接执行",
             "修改既有网络先用 hia_context/hia_inspect",
             "输入输出、两层上游",

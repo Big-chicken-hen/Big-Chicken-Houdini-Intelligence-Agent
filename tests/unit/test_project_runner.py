@@ -102,7 +102,11 @@ class ProjectRunnerTests(unittest.TestCase):
         updated = self.runner.execute_next("p1", FakeExecutor(ProjectEvent.GOAL_RESUMED))
         self.assertEqual(ProjectStatus.PLANNING, updated.state.status)
         self.assertIsNone(updated.state.resume_status)
-        self.assertEqual((), updated.state.pending_effects)
+        self.assertEqual(1, len(updated.state.pending_effects))
+        self.assertEqual("request_plan", updated.state.pending_effects[0].kind)
+        self.assertEqual(
+            {"recovery": True}, dict(updated.state.pending_effects[0].data)
+        )
 
     def test_persist_recovery_failure_holds_original_effect_for_revalidation(self) -> None:
         original = PendingEffect("original", "start_execution", {"repair": True})

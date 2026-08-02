@@ -8,6 +8,7 @@ import json
 import ntpath
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -696,6 +697,7 @@ class BridgeSession:
     def _developer_instructions(self) -> str:
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             backend_instructions = (
+                "确定操作不枚举，直接调用目标；HOM先编译，类别API仅在对象支持时调用。"
                 "场景默认用 HIA MCP V2 与 HOM。明确小改只读目标值后直接执行；"
                 "修改既有网络先用 hia_context/hia_inspect 读取目标、输入输出、两层上游、"
                 "公共控制、材质入口、引用和允许 scope。优先现有节点和标准原生节点网络；"
@@ -1056,6 +1058,9 @@ class BridgeSession:
             "thread/delete",
             {"threadId": thread_id},
         )
+        removed_cache_paths, cache_cleanup_error = self._cleanup_thread_cache(
+            thread_id
+        )
 
         cleanup_warning: dict[str, Any] | None = None
         with self._lock:
@@ -1078,12 +1083,37 @@ class BridgeSession:
             "deleted": True,
             "was_selected": was_selected,
             "result": result,
+            "cache_cleanup": {
+                "complete": cache_cleanup_error is None,
+                "removed_paths": removed_cache_paths,
+            },
         }
+        if cache_cleanup_error is not None:
+            event_fields["cache_cleanup_error"] = cache_cleanup_error
+            response["cache_cleanup"]["error"] = cache_cleanup_error
         if cleanup_warning is not None:
             event_fields["cleanup_warning"] = cleanup_warning
             response["cleanup_warning"] = cleanup_warning
         self._events.publish("thread_deleted", **event_fields)
         return response
+
+    def _cleanup_thread_cache(self, thread_id: str) -> tuple[list[str], str | None]:
+        """Remove only the deleted Thread's project-local attachment cache."""
+
+        attachments_root = (
+            self._project_root / ".runtime" / "attachments"
+        ).resolve()
+        candidate = attachments_root / thread_id
+        if not candidate.exists():
+            return [], None
+        try:
+            resolved = candidate.resolve(strict=True)
+            if resolved.parent != attachments_root or not resolved.is_dir():
+                raise OSError("attachment cache target is not one safe Thread directory")
+            shutil.rmtree(resolved)
+        except (OSError, RuntimeError) as exc:
+            return [], f"{type(exc).__name__}: {exc}"
+        return [str(resolved)], None
 
     def get_goal(self, expected_thread_id: str) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)

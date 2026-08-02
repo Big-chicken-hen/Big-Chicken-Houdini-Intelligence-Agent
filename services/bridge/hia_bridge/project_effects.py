@@ -36,7 +36,6 @@ from .project_guidance import (
 )
 from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_payloads import (
-    FULL_BLUEPRINT_SECTION_IDS,
     parse_review_claim,
     parse_stage_card,
     validate_blueprint_information,
@@ -143,6 +142,13 @@ class ProjectEffectExecutor:
             self._clock() + max(0, state.budget.max_elapsed_seconds - state.elapsed_seconds),
         )
         try:
+            if effect.kind not in {
+                "verify_recovery",
+                "pause_goal",
+                "resume_goal",
+                "complete_goal",
+            }:
+                self._hold_native_goal(state)
             return self._execute(state, effect, deadline)
         except _BudgetStop as stop:
             return EffectResult(
@@ -166,6 +172,38 @@ class ProjectEffectExecutor:
                     ProjectEvent.PROJECT_INTERRUPTED,
                     {"reason": "project_effect_timeout"},
                 ),
+            )
+
+    def _hold_native_goal(self, state: ProjectState) -> None:
+        """Keep project Turns under the persisted workflow, including recovery.
+
+        Older projects may have an active native Goal from before project-held
+        Goals were introduced.  Reasserting paused is idempotent and prevents
+        native auto-continuation from racing the oldest persisted effect.
+        """
+
+        record = self._registry.require(state.project_id)
+        result = self._client.request(
+            "thread/goal/set",
+            {
+                "threadId": state.goal_thread_id,
+                "objective": native_goal_objective(
+                    record.authoritative_task_text,
+                    state.authoritative_task_id,
+                ),
+                "status": "paused",
+                "tokenBudget": None,
+            },
+        )
+        goal = result.get("goal") if isinstance(result, Mapping) else None
+        if (
+            not isinstance(goal, Mapping)
+            or goal.get("threadId") != state.goal_thread_id
+            or goal.get("status") != "paused"
+        ):
+            raise ProjectEffectError(
+                "PROJECT_GOAL_HOLD_FAILED",
+                "project workflow could not hold the native Goal",
             )
 
     def _execute(
@@ -223,6 +261,17 @@ class ProjectEffectExecutor:
                     {"error": f"{type(exc).__name__}: {exc}"},
                 ),
             )
+        state = replace(
+            state,
+            turns={
+                role: (
+                    replace(turn, active=False, turn_id=None)
+                    if turn.active
+                    else turn
+                )
+                for role, turn in state.turns.items()
+            },
+        )
         self._artifacts.put_effect(
             state.project_id,
             effect.effect_id,
@@ -292,6 +341,7 @@ class ProjectEffectExecutor:
                 allowed_source_anchors=(
                     capsule["task_anchor"],
                     *(item["attachment_anchor"] for item in capsule["attachments"]),
+                    *(f"guidance:{item.guidance_id}" for item in state.guidance),
                 ),
             )
         except ValueError as exc:
@@ -908,6 +958,8 @@ class ProjectEffectExecutor:
             "task_specific": True,
             "no_placeholder_or_filler": True,
         }
+        if schema == "hia-project-plan/1":
+            current_request["response_rules"]["depth_policy"] = _plan_depth_policy()
         while correction <= state.budget.max_schema_corrections:
             state, call = self._start_turn(
                 state,
@@ -942,6 +994,8 @@ class ProjectEffectExecutor:
                     "task_specific": True,
                     "no_placeholder_or_filler": True,
                 }
+                if schema == "hia-project-plan/1":
+                    current_request["response_rules"]["depth_policy"] = _plan_depth_policy()
                 current_request["revision_of_turn_id"] = completed.turn_id
                 continue
             try:
@@ -977,6 +1031,8 @@ class ProjectEffectExecutor:
                     "task_specific": True,
                     "no_placeholder_or_filler": True,
                 }
+                if schema == "hia-project-plan/1":
+                    current_request["response_rules"]["depth_policy"] = _plan_depth_policy()
                 current_request["schema_correction"] = {
                     "attempt": correction,
                     "required_schema": schema,
@@ -1034,9 +1090,24 @@ class ProjectEffectExecutor:
                 "revision": item.revision,
                 "text": item.text,
                 "force_replan": item.force_replan,
+                "source_anchor": f"guidance:{item.guidance_id}",
             }
             for item in guidance
         ]
+        if action == "scene_task_eligibility":
+            if guidance:
+                latest = guidance[-1]
+                envelope["current_submission"] = {
+                    "text": latest.text,
+                    "source_anchor": f"guidance:{latest.guidance_id}",
+                }
+            else:
+                task = envelope.get("authoritative_task")
+                if isinstance(task, Mapping):
+                    envelope["current_submission"] = {
+                        "text": task.get("task_text"),
+                        "source_anchor": task.get("task_anchor"),
+                    }
         request_id = hashlib.sha256(
             f"{state.project_id}\0{role.value}\0{state.revision}\0{self._clock()}".encode("utf-8")
         ).hexdigest()[:24]
@@ -1211,6 +1282,7 @@ class ProjectEffectExecutor:
         event: ProjectEvent | None,
     ) -> EffectResult:
         record = self._registry.require(state.project_id)
+        requested_status = "paused" if effect.kind == "resume_goal" else status
         try:
             result = self._client.request(
                 "thread/goal/set",
@@ -1220,7 +1292,7 @@ class ProjectEffectExecutor:
                         record.authoritative_task_text,
                         state.authoritative_task_id,
                     ),
-                    "status": status,
+                    "status": requested_status,
                     "tokenBudget": None,
                 },
             )
@@ -1235,14 +1307,17 @@ class ProjectEffectExecutor:
         if (
             not isinstance(goal, Mapping)
             or goal.get("threadId") != state.goal_thread_id
-            or goal.get("status") != status
+            or goal.get("status") != requested_status
         ):
             return EffectResult(
                 state,
                 _goal_failure_event(status, "goal_ack_mismatch"),
             )
         self._artifacts.put_effect(
-            state.project_id, effect.effect_id, effect.kind, {"thread_id": state.goal_thread_id, "status": status}
+            state.project_id,
+            effect.effect_id,
+            effect.kind,
+            {"thread_id": state.goal_thread_id, "status": requested_status},
         )
         return EffectResult(state, LifecycleEvent(event) if event is not None else None)
 
@@ -1678,6 +1753,25 @@ def _review_coverage_proof(
     }
 
 
+def _plan_depth_policy() -> Mapping[str, Any]:
+    return {
+        "selection": "choose the smallest depth that fully covers the current task",
+        "direct": (
+            "one known deterministic scene operation; return one compact stage and "
+            "omit evidence_contract, reviewers, and failure_minimum_repair"
+        ),
+        "focused": (
+            "a bounded subsystem or short multi-step change; keep the blueprint "
+            "proportional and omit Full-only stage fields"
+        ),
+        "full": (
+            "a substantial multi-stage asset or consequential workflow only; use "
+            "all fourteen stable blueprint sections, both reviewers, every Full-only "
+            "stage field, and the 10000/2500/350 information floors"
+        ),
+    }
+
+
 def _response_contract(schema: str) -> Mapping[str, Any]:
     contracts: dict[str, Mapping[str, Any]] = {
         "hia-project-eligibility/1": {
@@ -1695,12 +1789,12 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                 {
                     "fact_id": "stable user-fact ID",
                     "description": "one explicit user fact without invention",
-                    "source_anchor": "task:<task ID> or attachment:<sha256>",
+                    "source_anchor": "task:<ID>, attachment:<sha256>, or guidance:<ID>",
                 }
             ],
             "blueprint_sections": [
                 {
-                    "section_id": section_id,
+                    "section_id": "task-specific ID; Full uses all fourteen stable IDs",
                     "title": "user-visible section title",
                     "description": "complete task-specific section content",
                     "source_anchors": ["authoritative source anchors"],
@@ -1708,20 +1802,19 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                     "requirement_ids": ["covered requirement IDs"],
                     "stage_ids": ["covered stage IDs"],
                 }
-                for section_id in FULL_BLUEPRINT_SECTION_IDS
             ],
             "requirements": [
                 {
                     "requirement_id": "stable task-specific ID",
                     "kind": "hard_constraint|structure|visual|material|behavior|delivery",
                     "description": "complete requirement meaning and observable consequence",
-                    "source_ref": "authoritative task or attachment anchor",
+                    "source_ref": "authoritative task, attachment, or guidance anchor",
                     "user_fact_ids": ["authoritative facts represented by this requirement"],
                 }
             ],
             "stages": [
                 {
-                    "depth": "full",
+                    "depth": "direct|focused|full",
                     "stage_id": "stable ordered ID",
                     "requirement_ids": ["covered requirement IDs"],
                     "ordered_steps": [
@@ -1758,12 +1851,6 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                             },
                         }
                     ],
-                    "evidence_contract": {
-                        "visual": "required views/frames",
-                        "technical": "required measurements or HIA tools",
-                    },
-                    "reviewers": ["visual_review", "technical_review"],
-                    "failure_minimum_repair": "repair only evidence-backed deviations",
                 }
             ],
         },

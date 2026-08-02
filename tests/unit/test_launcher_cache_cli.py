@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -83,6 +84,13 @@ class LauncherCacheCliTests(unittest.TestCase):
         path.write_bytes(content)
         return path
 
+    def stabilize_cache_directory_metadata(self, root: Path) -> None:
+        """Remove NTFS lazy directory-timestamp noise from snapshot tests."""
+        stable_ns = 1_700_000_000_000_000_000
+        directories = [root, *(path for path in root.rglob("*") if path.is_dir())]
+        for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+            os.utime(directory, ns=(stable_ns, stable_ns))
+
     def make_junction(self, link: Path, target: Path) -> None:
         link.parent.mkdir(parents=True, exist_ok=True)
         target.mkdir(parents=True, exist_ok=True)
@@ -144,6 +152,10 @@ class LauncherCacheCliTests(unittest.TestCase):
         adjacent.mkdir(parents=True)
         adjacent_sentinel = adjacent / "screenshots.png"
         adjacent_sentinel.write_bytes(b"adjacent")
+
+        self.stabilize_cache_directory_metadata(
+            self.project / ".runtime" / "cache"
+        )
 
         preview_payload = self.run_cli(
             "list", categories="previews,screenshots"
@@ -288,6 +300,9 @@ class LauncherCacheCliTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"protected")
             protected.append(path)
+        self.stabilize_cache_directory_metadata(
+            self.project / ".runtime" / "cache" / "embedding"
+        )
         listed = self.run_cli("list", categories="embedding-runtime")
         self.assertTrue(listed["ok"])
         self.assertEqual(15, listed["total_bytes"])

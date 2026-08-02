@@ -481,6 +481,7 @@ def _build_project_runtime(
     server_transports: Mapping[str, Mapping[str, object]],
     allowed_evidence_roots: Sequence[Path],
     model_catalog: Callable[[], Mapping[str, object]] | None = None,
+    thread_deleter: Callable[[str], object] | None = None,
 ) -> ProjectRuntime:
     """Compose the project runtime once around the owned app-server client."""
 
@@ -555,6 +556,8 @@ def _build_project_runtime(
         thread_factory=thread_factory,
         model_catalog=model_catalog,
         workflow=workflow,
+        thread_deleter=thread_deleter,
+        artifacts=artifacts,
     )
     service_holder.append(service)
     runtime = ProjectRuntime(
@@ -1069,6 +1072,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             ),
             allowed_evidence_roots=_project_evidence_roots(
                 project_root, render_output_directory
+            ),
+            thread_deleter=(
+                session.delete_thread
+                if callable(getattr(session, "delete_thread", None))
+                else None
             ),
         )
         session_model_catalog = getattr(session, "list_models", None)
