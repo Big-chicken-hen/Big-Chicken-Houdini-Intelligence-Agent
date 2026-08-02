@@ -12,7 +12,7 @@ import json
 import os
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, Mapping
 
 from .project_contracts import (
     ProjectState,
@@ -27,9 +27,17 @@ REGISTRY_MAX_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
+class ProjectAttachment:
+    path: str
+    sha256: str
+    size_bytes: int
+
+
+@dataclass(frozen=True)
 class ProjectRecord:
     state: ProjectState
     authoritative_task_text: str
+    attachments: tuple[ProjectAttachment, ...] = ()
 
     def __post_init__(self) -> None:
         task_id, digest = authoritative_task_identity(self.authoritative_task_text)
@@ -95,7 +103,30 @@ class ProjectRegistry:
             state = item.get("state")
             if not isinstance(text, str) or not isinstance(state, dict):
                 raise ValueError("project registry entry is incomplete")
-            record = ProjectRecord(project_state_from_dict(state), text)
+            raw_attachments = item.get("attachments", [])
+            if not isinstance(raw_attachments, list):
+                raise ValueError("project attachments must be a list")
+            attachments: list[ProjectAttachment] = []
+            for raw_attachment in raw_attachments:
+                if not isinstance(raw_attachment, Mapping):
+                    raise ValueError("project attachment is malformed")
+                path = raw_attachment.get("path")
+                digest = raw_attachment.get("sha256")
+                size = raw_attachment.get("size_bytes")
+                if (
+                    not isinstance(path, str)
+                    or not path
+                    or not isinstance(digest, str)
+                    or len(digest) != 64
+                    or not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or size < 0
+                ):
+                    raise ValueError("project attachment identity is invalid")
+                attachments.append(ProjectAttachment(path, digest, size))
+            record = ProjectRecord(
+                project_state_from_dict(state), text, tuple(attachments)
+            )
             if record.state.project_id in parsed:
                 raise ValueError("project registry contains a duplicate project_id")
             parsed[record.state.project_id] = record
@@ -113,6 +144,14 @@ class ProjectRegistry:
             "projects": [
                 {
                     "authoritative_task_text": record.authoritative_task_text,
+                    "attachments": [
+                        {
+                            "path": attachment.path,
+                            "sha256": attachment.sha256,
+                            "size_bytes": attachment.size_bytes,
+                        }
+                        for attachment in record.attachments
+                    ],
                     "state": project_state_to_dict(record.state),
                 }
                 for _, record in sorted(records.items())

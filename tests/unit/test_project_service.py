@@ -95,6 +95,19 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual("line one", project["title"])
         self.assertNotIn("long private body", str(project["threads"]))
 
+    def test_project_attachments_keep_path_hash_and_size_identity(self) -> None:
+        attachment = Path(self.temp.name) / "reference.png"
+        attachment.write_bytes(b"reference-bytes")
+        result = self.service.start_team_project(
+            task_text="build from reference",
+            local_image_paths=[str(attachment)],
+        )
+        record = self.registry.require(result["project_id"])
+        self.assertEqual(1, len(record.attachments))
+        self.assertEqual(str(attachment.resolve()), record.attachments[0].path)
+        self.assertEqual(len(b"reference-bytes"), record.attachments[0].size_bytes)
+        self.assertEqual(64, len(record.attachments[0].sha256))
+
 
 if __name__ == "__main__":
     unittest.main()

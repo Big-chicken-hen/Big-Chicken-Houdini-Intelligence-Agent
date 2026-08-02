@@ -34,7 +34,9 @@ class ProjectRunner:
             for index, command in enumerate(commands)
         )
         next_state = replace(next_state, pending_effects=effects)
-        updated = ProjectRecord(next_state, record.authoritative_task_text)
+        updated = ProjectRecord(
+            next_state, record.authoritative_task_text, record.attachments
+        )
         self._registry.put(updated, expected_revision=record.state.revision)
         return updated
 
@@ -66,7 +68,9 @@ class ProjectRunner:
             next_state,
             pending_effects=(*base.pending_effects, *appended),
         )
-        updated = ProjectRecord(next_state, record.authoritative_task_text)
+        updated = ProjectRecord(
+            next_state, record.authoritative_task_text, record.attachments
+        )
         self._registry.put(updated, expected_revision=record.state.revision)
         return updated
 

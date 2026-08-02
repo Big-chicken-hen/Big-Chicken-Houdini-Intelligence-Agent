@@ -22,6 +22,8 @@ from .errors import BridgeError
 from .events import EventBuffer
 from .http_server import BridgeApplication, LoopbackHTTPServer
 from .protocol import ProtocolPolicy
+from .project_registry import ProjectRegistry
+from .project_service import ProjectTeamService, ProjectTeamSettings
 from .scene_queue import B2_READ_ONLY_PROFILE, SceneQueue
 from .session import BridgeSession
 
@@ -597,6 +599,21 @@ def run(argv: Sequence[str] | None = None) -> int:
             mcp_backend=backend,
             focus_state_path=focus_state_path,
         )
+        project_team = ProjectTeamService(
+            client=client,
+            project_root=project_root,
+            registry=ProjectRegistry(
+                project_root / ".runtime" / "bridge" / "project-team-registry.json"
+            ),
+            settings=ProjectTeamSettings(
+                project_root / ".runtime" / "bridge" / "project-team-settings.json"
+            ),
+            selected_backend=(
+                HIA_MCP_V2_SERVER_ID
+                if backend == HIA_MCP_V2_BACKEND
+                else FXHOUDINI_MCP_SERVER_ID
+            ),
+        )
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
         houdini_process_nonce = f"houdini-{secrets.token_hex(16)}"
@@ -623,6 +640,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             houdini_mcp_backend=backend,
             houdini_launcher_session_id=houdini_launcher_session_id,
             houdini_executor_path=houdini_executor_path,
+            project_team=project_team,
         )
         server = LoopbackHTTPServer(
             ("127.0.0.1", requested_bridge_port),

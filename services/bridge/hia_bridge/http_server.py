@@ -29,6 +29,7 @@ from .scene_queue import (
     SceneQueueError,
 )
 from .session import BridgeSession
+from .project_service import ProjectTeamService
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -255,11 +256,13 @@ class BridgeApplication:
         houdini_launcher_session_id: str | None = None,
         houdini_executor_path: Path | None = None,
         knowledge_cli: KnowledgeCliRunner | None = None,
+        project_team: ProjectTeamService | None = None,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Bearer token must contain at least 32 characters")
         self.session = session
         self.events = events
+        self.project_team = project_team
         if scene_queue is None and scene_registry is not None:
             raise ValueError("A scene registry cannot be enabled without a scene queue")
         self.scene_queue = scene_queue
@@ -697,6 +700,17 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/threads":
             result = application.session.list_threads()
             return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/project-team":
+            if application.project_team is None:
+                raise BridgeError(
+                    "PROJECT_TEAM_UNAVAILABLE",
+                    "Project team runtime is not configured",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            return {
+                "ok": True,
+                "project_team": application.project_team.snapshot(),
+            }, HTTPStatus.OK
         if path == "/v1/goal":
             values = parse_qs(query, keep_blank_values=True)
             thread_ids = values.get("thread_id", [])
@@ -790,14 +804,94 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/turn":
-            result = application.session.start_turn(
-                text=body.get("text"),
-                model=body.get("model"),
-                effort=body.get("effort"),
-                local_image_paths=body.get("local_image_paths"),
-                service_tier=body.get("service_tier"),
+            team_override = body.get("team_override")
+            if team_override is not None and application.project_team is None:
+                raise BridgeError(
+                    "PROJECT_TEAM_UNAVAILABLE",
+                    "Project team runtime is not configured",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            route = (
+                application.project_team.route(team_override)
+                if application.project_team is not None
+                else "single"
             )
+            if route == "team":
+                if application.project_team is None:
+                    raise BridgeError(
+                        "PROJECT_TEAM_UNAVAILABLE",
+                        "Project team runtime is not configured",
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                result = application.project_team.start_team_project(
+                    task_text=body.get("text"),
+                    model=body.get("model"),
+                    effort=body.get("effort"),
+                    service_tier=body.get("service_tier"),
+                    local_image_paths=body.get("local_image_paths"),
+                )
+            else:
+                result = application.session.start_turn(
+                    text=body.get("text"),
+                    model=body.get("model"),
+                    effort=body.get("effort"),
+                    local_image_paths=body.get("local_image_paths"),
+                    service_tier=body.get("service_tier"),
+                )
+                result["routing"] = "single"
             return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/project-team":
+            if application.project_team is None:
+                raise BridgeError(
+                    "PROJECT_TEAM_UNAVAILABLE",
+                    "Project team runtime is not configured",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            self._require_exact_fields(body, {"mode"})
+            return {
+                "ok": True,
+                "project_team": application.project_team.set_mode(body.get("mode")),
+            }, HTTPStatus.OK
+        if path == "/v1/project-team/actions":
+            if application.project_team is None:
+                raise BridgeError(
+                    "PROJECT_TEAM_UNAVAILABLE",
+                    "Project team runtime is not configured",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            action = body.get("action")
+            if action == "append_guidance":
+                allowed = {"action", "project_id", "thread_id", "text"}
+                if set(body) - allowed:
+                    raise BridgeError("INVALID_REQUEST", "Unexpected guidance fields")
+                snapshot = application.project_team.append_guidance(
+                    project_id=body.get("project_id"),
+                    thread_id=body.get("thread_id"),
+                    text=body.get("text"),
+                )
+            elif action == "set_role_runtime":
+                expected = {
+                    "action",
+                    "project_id",
+                    "thread_id",
+                    "model",
+                    "effort",
+                    "service_tier",
+                }
+                self._require_exact_fields(body, expected)
+                snapshot = application.project_team.set_role_runtime(
+                    project_id=body.get("project_id"),
+                    thread_id=body.get("thread_id"),
+                    model=body.get("model"),
+                    effort=body.get("effort"),
+                    service_tier=body.get("service_tier"),
+                )
+            else:
+                raise BridgeError(
+                    "INVALID_PROJECT_ACTION",
+                    "Project action must be append_guidance or set_role_runtime",
+                )
+            return {"ok": True, "project_team": snapshot}, HTTPStatus.OK
         if path == "/v1/project-memory":
             result = application.project_memory(body)
             return {"ok": True, **result}, HTTPStatus.OK

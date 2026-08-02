@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ from .project_contracts import (
 )
 from .project_guidance import RequirementDelta, publish_guidance
 from .project_lifecycle import LifecycleEvent, ProjectEvent
-from .project_registry import ProjectRecord, ProjectRegistry
+from .project_registry import ProjectAttachment, ProjectRecord, ProjectRegistry
 from .project_runner import ProjectRunner
 from .project_thread_factory import AppServerClient, ProjectThreadFactory, ROLE_TITLES
 
@@ -72,6 +73,7 @@ class ProjectTeamService:
         selected_backend: str = "hia_mcp_v2",
     ) -> None:
         self._client = client
+        self._project_root = project_root.resolve()
         self._registry = registry
         self._settings = settings
         self._factory = ProjectThreadFactory(client, project_root, selected_backend)
@@ -94,6 +96,7 @@ class ProjectTeamService:
         model: str | None = None,
         effort: str | None = None,
         service_tier: str | None = None,
+        local_image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         task_id, digest = authoritative_task_identity(task_text)
         project_id = f"project-{uuid.uuid4()}"
@@ -125,7 +128,11 @@ class ProjectTeamService:
         except Exception:
             self._client.request("thread/delete", {"threadId": supervisor_id})
             raise
-        record = ProjectRecord(state, task_text)
+        record = ProjectRecord(
+            state,
+            task_text,
+            self._attachment_refs(local_image_paths or []),
+        )
         self._registry.put(record)
         record = self._runner.dispatch(
             project_id, LifecycleEvent(ProjectEvent.INTAKE_STARTED)
@@ -167,7 +174,9 @@ class ProjectTeamService:
                 requirement_delta=requirement_delta,
             )
             self._registry.put(
-                ProjectRecord(state, record.authoritative_task_text),
+                ProjectRecord(
+                    state, record.authoritative_task_text, record.attachments
+                ),
                 expected_revision=record.state.revision,
             )
         return self.snapshot()
@@ -202,7 +211,9 @@ class ProjectTeamService:
             )
             state = replace(record.state, roles=roles, revision=record.state.revision + 1)
             self._registry.put(
-                ProjectRecord(state, record.authoritative_task_text),
+                ProjectRecord(
+                    state, record.authoritative_task_text, record.attachments
+                ),
                 expected_revision=record.state.revision,
             )
         return self.snapshot()
@@ -255,6 +266,7 @@ class ProjectTeamService:
             "consumed_turns": sum(item.consumed_turns for item in state.turns.values()),
             "last_error": state.last_error,
             "latest_evidence_ids": list(state.stage.latest_evidence_ids),
+            "attachment_count": len(record.attachments),
             "actions": {
                 "append_guidance": guidance_allowed,
                 "continue": state.status is ProjectStatus.NEEDS_ATTENTION,
@@ -262,6 +274,29 @@ class ProjectTeamService:
             },
             "threads": threads,
         }
+
+    def _attachment_refs(self, values: list[str]) -> tuple[ProjectAttachment, ...]:
+        if len(values) > 16:
+            raise ValueError("a project task accepts at most 16 attachments")
+        attachments: list[ProjectAttachment] = []
+        total = 0
+        for value in values:
+            if not isinstance(value, str) or not value:
+                raise ValueError("attachment path must be a non-empty string")
+            path = Path(value).resolve(strict=True)
+            try:
+                path.relative_to(self._project_root)
+            except ValueError as exc:
+                raise ValueError("attachment path must stay inside the project") from exc
+            if not path.is_file():
+                raise ValueError("attachment path must reference a file")
+            size = path.stat().st_size
+            total += size
+            if total > 128 * 1024 * 1024:
+                raise ValueError("project task attachments exceed 128 MiB")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            attachments.append(ProjectAttachment(str(path), digest, size))
+        return tuple(attachments)
 
 
 def _validate_goal_result(value: Any, expected_thread_id: str) -> None:
