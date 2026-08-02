@@ -139,6 +139,12 @@ class FakeProjectClient:
             callback(role, action, envelope)
         with self._lock:
             payload = self.responses[(role, action)].pop(0)
+        payload_error_code = None
+        payload_error_message = None
+        if isinstance(payload, dict) and "__payload_error__" in payload:
+            payload_error_code = str(payload["__payload_error__"])
+            payload_error_message = "simulated terminal payload error"
+            payload = {}
         events = ()
         if action in {"execute_stage", "execute_repair"}:
             events = self._execution_events(thread_id, turn_id)
@@ -149,6 +155,8 @@ class FakeProjectClient:
             payload=payload,
             events=events,
             elapsed_seconds=1,
+            payload_error_code=payload_error_code,
+            payload_error_message=payload_error_message,
         )
 
     def _execution_events(self, thread_id: str, turn_id: str):
@@ -477,6 +485,36 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         self.assertEqual(ProjectEvent.BUDGET_EXHAUSTED, result.event.kind)
         self.assertEqual("max_schema_corrections", result.event.data["reason"])
         self.assertNotEqual(ProjectStatus.PROVISIONING_ROLES, harness.state.status)
+
+    def test_terminal_invalid_json_closes_turn_before_bounded_correction(self):
+        self.client.queue(
+            Role.SUPERVISOR,
+            "scene_task_eligibility",
+            {"__payload_error__": "INVALID_AGENT_JSON"},
+            {
+                "schema": "hia-project-eligibility/1",
+                "disposition": "eligible",
+                "reason": "scene task",
+            },
+        )
+        harness = EffectHarness(self.root, self.client)
+
+        result = harness.run_one()
+
+        self.assertEqual(ProjectEvent.SCENE_ELIGIBLE, result.event.kind)
+        turn = result.state.turns[Role.SUPERVISOR]
+        self.assertFalse(turn.active)
+        self.assertEqual(2, turn.consumed_turns)
+        self.assertEqual(1, result.state.stage.schema_correction_count)
+        starts = [
+            json.loads(params["input"][0]["text"])
+            for method, params in self.client.calls
+            if method == "turn/start"
+        ]
+        self.assertEqual(
+            "INVALID_AGENT_JSON",
+            starts[-1]["schema_correction"]["error"],
+        )
 
     def test_repeated_repairs_with_no_new_evidence_enter_needs_attention(self):
         self._queue_common()

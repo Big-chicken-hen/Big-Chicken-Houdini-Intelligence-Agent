@@ -150,6 +150,7 @@ class ProjectEffectClient:
         completed_texts: list[str] = []
         hia_events: list[Mapping[str, Any]] = []
         subagents: set[str] = set()
+        payload_error: tuple[str, str] | None = None
 
         try:
             while True:
@@ -216,7 +217,11 @@ class ProjectEffectClient:
                                 "PROJECT_TURN_NOT_COMPLETED",
                                 f"project Turn ended with status {status!r}",
                             )
-                        payload = self._parse_payload(deltas, completed_texts)
+                        payload, terminal_payload_error = self._parse_payload(
+                            deltas,
+                            completed_texts,
+                            payload_error,
+                        )
                         return CompletedTurn(
                             thread_id=thread_id,
                             turn_id=turn_id,
@@ -225,6 +230,16 @@ class ProjectEffectClient:
                             events=tuple(hia_events),
                             elapsed_seconds=max(0, int(self._clock() - tracked.started_at)),
                             native_subagents=len(subagents),
+                            payload_error_code=(
+                                terminal_payload_error[0]
+                                if terminal_payload_error is not None
+                                else None
+                            ),
+                            payload_error_message=(
+                                terminal_payload_error[1]
+                                if terminal_payload_error is not None
+                                else None
+                            ),
                         )
 
                     if not _belongs_to_turn(params, thread_id, turn_id):
@@ -232,15 +247,20 @@ class ProjectEffectClient:
                     if method_name == "item/agentMessage/delta":
                         delta = params.get("delta")
                         if not isinstance(delta, str):
-                            raise ProjectAppServerError(
-                                "INVALID_AGENT_MESSAGE", "agentMessage delta must be text"
+                            payload_error = payload_error or (
+                                "INVALID_AGENT_MESSAGE",
+                                "agentMessage delta must be text",
                             )
+                            continue
                         delta_bytes += len(delta.encode("utf-8"))
                         if delta_bytes > self._max_message_bytes:
-                            raise ProjectAppServerError(
-                                "AGENT_MESSAGE_TOO_LARGE", "agentMessage exceeded its byte budget"
+                            payload_error = payload_error or (
+                                "AGENT_MESSAGE_TOO_LARGE",
+                                "agentMessage exceeded its byte budget",
                             )
-                        deltas.append(delta)
+                            continue
+                        if payload_error is None:
+                            deltas.append(delta)
                     elif method_name in {"item/started", "item/completed"}:
                         item = params.get("item")
                         if not isinstance(item, Mapping):
@@ -248,19 +268,25 @@ class ProjectEffectClient:
                         if method_name == "item/completed" and item.get("type") == "agentMessage":
                             text = item.get("text")
                             if not isinstance(text, str):
-                                raise ProjectAppServerError(
-                                    "INVALID_AGENT_MESSAGE", "completed agentMessage must contain text"
+                                payload_error = payload_error or (
+                                    "INVALID_AGENT_MESSAGE",
+                                    "completed agentMessage must contain text",
                                 )
+                                continue
                             if len(text.encode("utf-8")) > self._max_message_bytes:
-                                raise ProjectAppServerError(
-                                    "AGENT_MESSAGE_TOO_LARGE", "agentMessage exceeded its byte budget"
+                                payload_error = payload_error or (
+                                    "AGENT_MESSAGE_TOO_LARGE",
+                                    "agentMessage exceeded its byte budget",
                                 )
+                                continue
                             if completed_texts and text != completed_texts[0]:
-                                raise ProjectAppServerError(
+                                payload_error = payload_error or (
                                     "CONFLICTING_AGENT_MESSAGES",
                                     "the Turn emitted contradictory final agent messages",
                                 )
-                            completed_texts.append(text)
+                                continue
+                            if payload_error is None:
+                                completed_texts.append(text)
                         if method_name == "item/completed" and _is_hia_item(item):
                             hia_events.append(dict(event))
                         _collect_subagents(item, subagents)
@@ -275,35 +301,44 @@ class ProjectEffectClient:
                 self._turns.pop(key, None)
 
     def _parse_payload(
-        self, deltas: list[str], completed_texts: list[str]
-    ) -> Mapping[str, Any]:
+        self,
+        deltas: list[str],
+        completed_texts: list[str],
+        observed_error: tuple[str, str] | None = None,
+    ) -> tuple[Mapping[str, Any], tuple[str, str] | None]:
+        if observed_error is not None:
+            return {}, observed_error
         streamed = "".join(deltas)
         completed = completed_texts[0] if completed_texts else ""
         if streamed and completed and streamed != completed:
-            raise ProjectAppServerError(
+            return {}, (
                 "CONFLICTING_AGENT_MESSAGES",
                 "streamed and completed agent messages disagree",
             )
         text = completed or streamed
         if not text:
-            raise ProjectAppServerError(
-                "MISSING_AGENT_MESSAGE", "completed Turn has no structured agent message"
+            return {}, (
+                "MISSING_AGENT_MESSAGE",
+                "completed Turn has no structured agent message",
             )
         if len(text.encode("utf-8")) > self._max_message_bytes:
-            raise ProjectAppServerError(
-                "AGENT_MESSAGE_TOO_LARGE", "agentMessage exceeded its byte budget"
+            return {}, (
+                "AGENT_MESSAGE_TOO_LARGE",
+                "agentMessage exceeded its byte budget",
             )
         try:
             payload = json.loads(text)
-        except (TypeError, ValueError) as exc:
-            raise ProjectAppServerError(
-                "INVALID_AGENT_JSON", "agentMessage is not valid JSON"
-            ) from exc
-        if not isinstance(payload, Mapping):
-            raise ProjectAppServerError(
-                "INVALID_AGENT_PAYLOAD", "agentMessage JSON must be an object"
+        except (TypeError, ValueError):
+            return {}, (
+                "INVALID_AGENT_JSON",
+                "agentMessage is not valid JSON",
             )
-        return dict(payload)
+        if not isinstance(payload, Mapping):
+            return {}, (
+                "INVALID_AGENT_PAYLOAD",
+                "agentMessage JSON must be an object",
+            )
+        return dict(payload), None
 
 def _identifier(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())

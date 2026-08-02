@@ -177,7 +177,7 @@ class ProjectAppServerTests(unittest.TestCase):
             adapter.wait_for_turn("thread-a", "turn-a", 0.01)
         self.assertEqual("UNACKNOWLEDGED_TURN", raised.exception.code)
 
-    def test_rejects_invalid_or_non_object_agent_json(self) -> None:
+    def test_returns_terminal_receipt_for_invalid_or_non_object_agent_json(self) -> None:
         for body, code in (("not json", "INVALID_AGENT_JSON"), ("[]", "INVALID_AGENT_PAYLOAD")):
             with self.subTest(body=body):
                 events = EventBuffer()
@@ -186,9 +186,12 @@ class ProjectAppServerTests(unittest.TestCase):
                 _start(adapter, client, "thread-a", "turn-a")
                 _agent(events, "thread-a", "turn-a", body)
                 _terminal(events, "thread-a", "turn-a")
-                with self.assertRaises(ProjectAppServerError) as raised:
-                    adapter.wait_for_turn("thread-a", "turn-a", 0.2)
-                self.assertEqual(code, raised.exception.code)
+                completed = adapter.wait_for_turn("thread-a", "turn-a", 0.2)
+                self.assertEqual("completed", completed.status)
+                self.assertEqual("thread-a", completed.thread_id)
+                self.assertEqual("turn-a", completed.turn_id)
+                self.assertEqual({}, completed.payload)
+                self.assertEqual(code, completed.payload_error_code)
 
     def test_rejects_conflicting_or_oversized_agent_messages(self) -> None:
         events = EventBuffer()
@@ -198,9 +201,8 @@ class ProjectAppServerTests(unittest.TestCase):
         _agent(events, "thread-a", "turn-a", '{"value":1}')
         _agent(events, "thread-a", "turn-a", '{"value":2}')
         _terminal(events, "thread-a", "turn-a")
-        with self.assertRaises(ProjectAppServerError) as raised:
-            adapter.wait_for_turn("thread-a", "turn-a", 0.2)
-        self.assertEqual("CONFLICTING_AGENT_MESSAGES", raised.exception.code)
+        completed = adapter.wait_for_turn("thread-a", "turn-a", 0.2)
+        self.assertEqual("CONFLICTING_AGENT_MESSAGES", completed.payload_error_code)
 
         events = EventBuffer()
         client = _Client(events)
@@ -208,9 +210,9 @@ class ProjectAppServerTests(unittest.TestCase):
         _start(adapter, client, "thread-b", "turn-b")
         _delta(events, "thread-b", "turn-b", '{"long":')
         _delta(events, "thread-b", "turn-b", '"value"}')
-        with self.assertRaises(ProjectAppServerError) as raised:
-            adapter.wait_for_turn("thread-b", "turn-b", 0.2)
-        self.assertEqual("AGENT_MESSAGE_TOO_LARGE", raised.exception.code)
+        _terminal(events, "thread-b", "turn-b")
+        completed = adapter.wait_for_turn("thread-b", "turn-b", 0.2)
+        self.assertEqual("AGENT_MESSAGE_TOO_LARGE", completed.payload_error_code)
 
     def test_process_exit_and_failed_terminal_are_explicit_failures(self) -> None:
         events = EventBuffer()

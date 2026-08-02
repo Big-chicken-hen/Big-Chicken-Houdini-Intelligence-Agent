@@ -57,6 +57,8 @@ class CompletedTurn:
     events: tuple[Mapping[str, Any], ...] = ()
     elapsed_seconds: int = 0
     native_subagents: int = 0
+    payload_error_code: str | None = None
+    payload_error_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -620,6 +622,8 @@ class ProjectEffectExecutor:
                 current_request["revision_of_turn_id"] = completed.turn_id
                 continue
             try:
+                if completed.payload_error_code is not None:
+                    raise ValueError(completed.payload_error_code)
                 if completed.payload.get("schema") != schema:
                     raise ValueError(f"expected schema {schema}")
                 _validate_payload_shape(schema, completed.payload)
@@ -651,7 +655,7 @@ class ProjectEffectExecutor:
                 current_request["schema_correction"] = {
                     "attempt": correction,
                     "required_schema": schema,
-                    "error": type(exc).__name__,
+                    "error": completed.payload_error_code or type(exc).__name__,
                 }
         raise _BudgetStop(state, "max_schema_corrections")
 
