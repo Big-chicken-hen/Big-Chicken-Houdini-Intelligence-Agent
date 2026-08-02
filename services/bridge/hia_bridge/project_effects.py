@@ -193,6 +193,8 @@ class ProjectEffectExecutor:
             return self._review_stage(state, effect, deadline)
         if kind == "request_repair":
             return self._authorize_repair(state, effect, deadline)
+        if kind == "verify_recovery":
+            return self._verify_recovery(state, effect)
         if kind == "complete_goal":
             return self._set_goal(state, effect, "completed", ProjectEvent.GOAL_COMPLETED)
         if kind == "pause_goal":
@@ -205,6 +207,40 @@ class ProjectEffectExecutor:
         if kind == "advance_stage":
             return self._advance_stage(state, effect)
         raise ProjectEffectError("UNKNOWN_PROJECT_EFFECT", f"unsupported effect kind: {kind}")
+
+    def _verify_recovery(
+        self, state: ProjectState, effect: PendingEffect
+    ) -> EffectResult:
+        """Validate persisted native identities without consulting Turn history."""
+
+        try:
+            self._factory.validate_recovery_identity(state)
+        except Exception as exc:
+            return EffectResult(
+                state,
+                LifecycleEvent(
+                    ProjectEvent.RECOVERY_FAILED,
+                    {"error": f"{type(exc).__name__}: {exc}"},
+                ),
+            )
+        self._artifacts.put_effect(
+            state.project_id,
+            effect.effect_id,
+            effect.kind,
+            {
+                "task_id": state.authoritative_task_id,
+                "task_sha256": state.authoritative_task_sha256,
+                "role_threads": {
+                    role.value: binding.thread_id
+                    for role, binding in state.roles.items()
+                },
+                "goal_thread_id": state.goal_thread_id,
+            },
+        )
+        return EffectResult(
+            state,
+            LifecycleEvent(ProjectEvent.RECOVERY_VALIDATED),
+        )
 
     def _intake(
         self, state: ProjectState, effect: PendingEffect, deadline: float

@@ -24,7 +24,8 @@ from .events import EventBuffer
 from .http_server import BridgeApplication, LoopbackHTTPServer
 from .ordinary_transfer import OrdinaryThreadTransfer
 from .protocol import ProtocolPolicy
-from .project_contracts import ProjectState, Role
+from .project_contracts import ProjectState, ProjectStatus, Role
+from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_registry import ProjectRecord, ProjectRegistry
 from .project_app_server import ProjectEffectClient
 from .project_artifacts import ProjectArtifactStore
@@ -410,11 +411,47 @@ class ProjectRuntime:
             )
 
     def recover(self) -> tuple[str, ...]:
-        scheduled = self.workflow.recover()
+        recoverable: list[str] = []
+        failures: list[dict[str, str]] = []
+        for record in self.registry.list():
+            if record.state.status is ProjectStatus.INTERRUPTED:
+                if not record.state.pending_effects:
+                    record = self.runner.dispatch(
+                        record.state.project_id,
+                        LifecycleEvent(ProjectEvent.RESTART_REQUESTED),
+                    )
+                if (
+                    record.state.pending_effects
+                    and record.state.pending_effects[0].kind == "verify_recovery"
+                ):
+                    recoverable.append(record.state.project_id)
+                else:
+                    failures.append(
+                        {
+                            "project_id": record.state.project_id,
+                            "error": "interrupted project has unresolved non-recovery work",
+                        }
+                    )
+                continue
+            if not record.state.pending_effects and not record.state.plan_stale:
+                continue
+            try:
+                self.thread_factory.validate_recovery_identity(record.state)
+            except Exception as exc:
+                failures.append(
+                    {
+                        "project_id": record.state.project_id,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            recoverable.append(record.state.project_id)
+        scheduled = self.workflow.recover(recoverable)
         self.events.publish(
             "project_team_updated",
             project_team=self.service.snapshot(),
             recovered_project_ids=list(scheduled),
+            recovery_failures=failures,
         )
         return scheduled
 

@@ -170,10 +170,13 @@ class ProjectServiceTests(unittest.TestCase):
         result = self.service.start_team_project(task_text="建造木屋")
         project_id = result["project_id"]
         thread_id = result["root_thread_id"]
+        calls_before_guidance = list(self.client.calls)
         snapshot = self.service.append_guidance(
             project_id=project_id, thread_id=thread_id, text="保留屋顶"
         )
-        self.assertEqual(1, len(self.registry.require(project_id).state.guidance))
+        record = self.registry.require(project_id)
+        self.assertEqual(1, len(record.state.guidance))
+        self.assertEqual(calls_before_guidance, self.client.calls)
         snapshot = self.service.set_role_runtime(
             project_id=project_id,
             thread_id=thread_id,

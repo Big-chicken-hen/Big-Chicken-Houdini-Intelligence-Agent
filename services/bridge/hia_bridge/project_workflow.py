@@ -11,7 +11,7 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 import threading
 import time
-from typing import Callable
+from typing import Callable, Iterable
 
 from .project_contracts import ProjectStatus
 from .project_effects import EffectResult
@@ -100,7 +100,12 @@ class ProjectWorkflowHost:
                     project_id,
                     LifecycleEvent(ProjectEvent.MATERIAL_REPLAN_REQUIRED),
                 )
-            if record.state.status in _WAITING_STATUSES:
+            recovery_effect = (
+                record.state.status is ProjectStatus.INTERRUPTED
+                and bool(record.state.pending_effects)
+                and record.state.pending_effects[0].kind == "verify_recovery"
+            )
+            if record.state.status in _WAITING_STATUSES and not recovery_effect:
                 return False
             if not record.state.pending_effects:
                 return False
@@ -131,17 +136,27 @@ class ProjectWorkflowHost:
             )
             return True
 
-    def recover(self) -> tuple[str, ...]:
+    def recover(self, project_ids: Iterable[str] | None = None) -> tuple[str, ...]:
         """Reschedule persisted work after Bridge startup.
 
         Waiting and terminal projects remain untouched; recovery never invents a
         lifecycle event when no pending effect was durably recorded.
         """
 
+        selected = None if project_ids is None else frozenset(project_ids)
         scheduled: list[str] = []
         for record in self._registry.list():
+            recovery_effect = (
+                record.state.status is ProjectStatus.INTERRUPTED
+                and bool(record.state.pending_effects)
+                and record.state.pending_effects[0].kind == "verify_recovery"
+            )
             if (
-                record.state.status not in _WAITING_STATUSES
+                (selected is None or record.state.project_id in selected)
+                and (
+                    record.state.status not in _WAITING_STATUSES
+                    or recovery_effect
+                )
                 and (record.state.pending_effects or record.state.plan_stale)
                 and self.start(record.state.project_id)
             ):

@@ -193,3 +193,56 @@ class ProjectThreadFactory:
             raise
         require_complete_project_roles(state.roles)
         return state
+
+    def validate_recovery_identity(self, state: ProjectState) -> None:
+        """Verify persisted native identities without depending on chat history.
+
+        The project registry is the authority for the original task text and
+        its digest.  Native history can be paged, compacted, or replaced by a
+        verified Thread migration, so recovery deliberately requests no Turns
+        and never searches user messages for another copy of the task.
+        """
+
+        supervisor = state.roles.get(Role.SUPERVISOR)
+        if supervisor is None or supervisor.thread_id != state.goal_thread_id:
+            raise ValueError("persisted Supervisor/Goal owner identity is invalid")
+
+        for role, binding in state.roles.items():
+            expected_source = f"hia-project/{state.project_id}/{role.value}"
+            result = self._client.request(
+                "thread/read",
+                {"threadId": binding.thread_id, "includeTurns": False},
+            )
+            thread = result.get("thread") if isinstance(result, Mapping) else None
+            if not isinstance(thread, Mapping) or thread.get("id") != binding.thread_id:
+                raise ValueError(f"persisted {role.value} Thread identity is missing")
+            source = thread.get("threadSource", thread.get("source"))
+            if source != expected_source:
+                raise ValueError(f"persisted {role.value} Thread source is invalid")
+            status = thread.get("status")
+            status_type = status.get("type") if isinstance(status, Mapping) else None
+            if status_type == "active":
+                raise ValueError(f"persisted {role.value} Thread still has an active Turn")
+            session_source = thread.get("source")
+            if (
+                thread.get("nativeSubagent") is True
+                or thread.get("parentThreadId")
+                or (
+                    isinstance(session_source, Mapping)
+                    and "subAgent" in session_source
+                )
+            ):
+                raise ValueError(f"persisted {role.value} identity is a native subagent")
+
+            goal_result = self._client.request(
+                "thread/goal/get", {"threadId": binding.thread_id}
+            )
+            goal = goal_result.get("goal") if isinstance(goal_result, Mapping) else None
+            if role is Role.SUPERVISOR:
+                if (
+                    not isinstance(goal, Mapping)
+                    or goal.get("threadId") != state.goal_thread_id
+                ):
+                    raise ValueError("persisted Supervisor no longer owns the native Goal")
+            elif goal is not None:
+                raise ValueError(f"persisted {role.value} unexpectedly owns a native Goal")
