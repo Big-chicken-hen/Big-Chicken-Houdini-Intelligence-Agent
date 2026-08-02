@@ -140,6 +140,7 @@ class ProjectWorkflowHost:
             self._interrupt_hook(project_id)
         if not active:
             self._transition_to_stopped(project_id)
+            self._start_stop_control(project_id)
         return active
 
     def resume(self, project_id: str) -> bool:
