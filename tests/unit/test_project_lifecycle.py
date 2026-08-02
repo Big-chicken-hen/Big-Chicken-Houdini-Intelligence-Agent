@@ -180,7 +180,7 @@ class ProjectLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
         self.assertEqual("goal/update failed", state.last_error)
-        self.assertEqual(ProjectCommand.SHOW_ATTENTION, commands[0].kind)
+        self.assertEqual((), commands)
 
 
 if __name__ == "__main__":

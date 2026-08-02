@@ -223,21 +223,12 @@ def reduce_project(
             ProjectStatus.BLOCKED,
         }:
             raise InvalidTransition(status, kind)
-        commands = (
-            (LifecycleCommand(
-                ProjectCommand.SHOW_ATTENTION,
-                {"reason": state.attention_reason or "needs_attention"},
-            ),)
-            if target is ProjectStatus.NEEDS_ATTENTION
-            else ()
-        )
-        return _next(state, target, *commands, pause_target=None)
+        return _next(state, target, pause_target=None)
     if kind is ProjectEvent.GOAL_PAUSE_FAILED and status is ProjectStatus.PAUSING:
         error = str(data.get("error") or "goal_pause_failed")
         return _next(
             state,
             ProjectStatus.NEEDS_ATTENTION,
-            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": error}),
             pause_target=None,
             attention_reason=error,
             last_error=error,
@@ -254,7 +245,6 @@ def reduce_project(
         return _next(
             state,
             ProjectStatus.NEEDS_ATTENTION,
-            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": error}),
             resume_status=ProjectStatus.COMPLETING,
             attention_reason=error,
             last_error=error,
@@ -282,7 +272,6 @@ def reduce_project(
         return _next(
             state,
             ProjectStatus.NEEDS_ATTENTION,
-            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": error}),
             attention_reason=error,
             last_error=error,
         )
