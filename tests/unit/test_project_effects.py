@@ -454,6 +454,25 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         self.assertEqual(ProjectStatus.INTERRUPTED, harness.state.status)
         self.assertEqual({Role.SUPERVISOR}, set(harness.state.roles))
 
+    def test_every_role_request_carries_an_explicit_structured_contract(self):
+        self.client.queue(
+            Role.SUPERVISOR,
+            "scene_task_eligibility",
+            {
+                "schema": "hia-project-eligibility/1",
+                "disposition": "ineligible",
+                "reason": "not a scene task",
+            },
+        )
+        harness = EffectHarness(self.root, self.client)
+        harness.run_one()
+        envelope = next(iter(self.client.turns.values()))[2]
+        self.assertEqual(
+            "hia-project-eligibility/1",
+            envelope["response_contract"]["schema"],
+        )
+        self.assertEqual("one JSON object only", envelope["response_rules"]["format"])
+
     def test_late_guidance_is_consumed_in_a_revision_turn_before_plan_is_used(self):
         self._queue_common()
         self.client.queue(Role.PLANNING, "create_plan_and_stage_cards", _plan())

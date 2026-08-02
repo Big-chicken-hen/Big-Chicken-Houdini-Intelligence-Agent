@@ -582,6 +582,13 @@ class ProjectEffectExecutor:
     ) -> tuple[ProjectState, CompletedTurn]:
         correction = 0
         current_request = dict(request)
+        current_request["response_contract"] = _response_contract(schema)
+        current_request["response_rules"] = {
+            "format": "one JSON object only",
+            "no_markdown_fence": True,
+            "task_specific": True,
+            "no_placeholder_or_filler": True,
+        }
         while correction <= state.budget.max_schema_corrections:
             state, call = self._start_turn(state, role, current_request, deadline)
             try:
@@ -603,6 +610,13 @@ class ProjectEffectExecutor:
                     ),
                 )
                 current_request = dict(request)
+                current_request["response_contract"] = _response_contract(schema)
+                current_request["response_rules"] = {
+                    "format": "one JSON object only",
+                    "no_markdown_fence": True,
+                    "task_specific": True,
+                    "no_placeholder_or_filler": True,
+                }
                 current_request["revision_of_turn_id"] = completed.turn_id
                 continue
             try:
@@ -627,6 +641,13 @@ class ProjectEffectExecutor:
                     ProgressObservation(role=role, kind="schema_correction"),
                 )
                 current_request = dict(request)
+                current_request["response_contract"] = _response_contract(schema)
+                current_request["response_rules"] = {
+                    "format": "one JSON object only",
+                    "no_markdown_fence": True,
+                    "task_specific": True,
+                    "no_placeholder_or_filler": True,
+                }
                 current_request["schema_correction"] = {
                     "attempt": correction,
                     "required_schema": schema,
@@ -988,3 +1009,110 @@ def _capture_hash(evidence: EvidenceValidationResult) -> str | None:
     for path in sorted(paths):
         digest.update(Path(path).read_bytes())
     return digest.hexdigest()
+
+
+def _response_contract(schema: str) -> Mapping[str, Any]:
+    contracts: dict[str, Mapping[str, Any]] = {
+        "hia-project-eligibility/1": {
+            "schema": schema,
+            "disposition": "eligible|ineligible|unclear",
+            "reason": "specific reason",
+        },
+        "hia-project-plan/1": {
+            "schema": schema,
+            "requirements": [
+                {
+                    "requirement_id": "stable task-specific ID",
+                    "kind": "hard_constraint|structure|visual|material|behavior|delivery",
+                    "source_ref": "authoritative task or attachment anchor",
+                }
+            ],
+            "stages": [
+                {
+                    "depth": "full",
+                    "stage_id": "stable ordered ID",
+                    "requirement_ids": ["covered requirement IDs"],
+                    "ordered_steps": [
+                        {
+                            "step_id": "stable ID",
+                            "operation": "specific construction or validation operation",
+                            "dependencies": ["earlier step IDs only"],
+                            "requirement_ids": ["requirements covered by this step"],
+                            "inputs": [{"source": "specific input", "use": "specific use"}],
+                            "outputs": [{"artifact": "specific editable output"}],
+                            "acceptance": {"method": "specific observable acceptance"},
+                        }
+                    ],
+                    "evidence_contract": {
+                        "visual": "required views/frames",
+                        "technical": "required measurements or HIA tools",
+                    },
+                    "reviewers": ["visual_review", "technical_review"],
+                    "failure_minimum_repair": "repair only evidence-backed deviations",
+                }
+            ],
+        },
+        "hia-project-authorization/1": {
+            "schema": schema,
+            "authorized": True,
+            "stage_ids": ["exact persisted stage IDs in order"],
+        },
+        "hia-project-execution/1": {
+            "schema": schema,
+            "stage_id": "exact current stage ID",
+            "evidence_refs": [
+                {"item_id": "completed current-Turn HIA item ID"},
+                {
+                    "item_id": "current-Turn hia_capture_viewport item ID",
+                    "frame": "exact numeric frame",
+                    "path": "optional exact returned path",
+                },
+            ],
+            "claims_visual_change": "boolean",
+        },
+        "hia-project-review/1": {
+            "schema": schema,
+            "stage_id": "exact current stage ID",
+            "reviewer": "exact visual_review or technical_review role",
+            "claims": [
+                {
+                    "disposition": "verified",
+                    "claim_id": "stable requirement claim ID",
+                    "evidence_refs": ["available evidence item IDs"],
+                    "actual_evidence": "specific observed evidence",
+                },
+                {
+                    "disposition": "failed",
+                    "claim_id": "stable requirement claim ID",
+                    "evidence_refs": ["available evidence item IDs"],
+                    "deviation": "specific observed deviation",
+                    "minimum_repair": "minimum evidence-backed repair",
+                },
+                {
+                    "disposition": "unverified",
+                    "claim_id": "stable requirement claim ID",
+                    "missing_evidence": ["missing observation"],
+                    "minimum_next_observation": "smallest next observation",
+                },
+            ],
+        },
+        "hia-project-stage-decision/1": {
+            "schema": schema,
+            "stage_id": "exact current stage ID",
+            "decision": "pass|repair",
+            "final_stage": "boolean derived from persisted plan",
+            "repair_card": "null for pass; structured repair card for repair",
+        },
+        "hia-project-repair-authorization/1": {
+            "schema": schema,
+            "stage_id": "exact current stage ID",
+            "authorized": True,
+            "repair_hash": "exact persisted repair hash",
+        },
+    }
+    contract = contracts.get(schema)
+    if contract is None:
+        raise ProjectEffectError(
+            "UNKNOWN_RESPONSE_SCHEMA", f"no response contract for {schema}"
+        )
+    return contract
