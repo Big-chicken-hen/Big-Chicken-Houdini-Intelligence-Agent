@@ -2562,13 +2562,20 @@ function Invoke-HiaProjectChecks {
     if ($McpBackend -eq 'hia_v2') {
         $hiaService = Join-Path $ProjectRoot 'services\hia_mcp_v2\hia_mcp_v2\__main__.py'
         $hiaRuntime = Join-Path $ProjectRoot 'houdini_package\python_libs\hia_mcp_runtime\http_server.py'
-        $hiaUiReady310 = Join-Path $ProjectRoot 'houdini_package\python3.10libs\uiready.py'
-        $hiaUiReady311 = Join-Path $ProjectRoot 'houdini_package\python3.11libs\uiready.py'
+        $hiaUiReadyVersions = @('3.10', '3.11', '3.13')
+        $hiaUiReadyFilesPresent = @(
+            $hiaUiReadyVersions | ForEach-Object {
+                Test-Path -LiteralPath (
+                    Join-Path $ProjectRoot (
+                        'houdini_package\python{0}libs\uiready.py' -f $_
+                    )
+                ) -PathType Leaf
+            }
+        ) -notcontains $false
         $hiaFilesPresent = (
             (Test-Path -LiteralPath $hiaService -PathType Leaf) -and
             (Test-Path -LiteralPath $hiaRuntime -PathType Leaf) -and
-            (Test-Path -LiteralPath $hiaUiReady310 -PathType Leaf) -and
-            (Test-Path -LiteralPath $hiaUiReady311 -PathType Leaf)
+            $hiaUiReadyFilesPresent
         )
         $checks += New-HiaCheckResult -Id 'hia_mcp_v2.runtime' -Name 'HIA MCP V2' `
             -Level $(if ($hiaFilesPresent) { 'green' } else { 'red' }) `

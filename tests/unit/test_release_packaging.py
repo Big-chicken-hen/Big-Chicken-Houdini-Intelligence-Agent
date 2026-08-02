@@ -213,6 +213,12 @@ class ReleasePackagingTests(unittest.TestCase):
             "'houdini_package/python_libs/hia_mcp_runtime/viewport_quality.py'",
             allowlist_source,
         )
+        for python_version in ("3.10", "3.11", "3.13"):
+            self.assertIn(
+                f"'houdini_package/python{python_version}libs/uiready.py'",
+                allowlist_source,
+            )
+        self.assertIn("'docs/PROJECT_TEAM_LIVE_ACCEPTANCE.md'", allowlist_source)
         executor_source = (
             REPOSITORY_ROOT
             / "houdini_package"

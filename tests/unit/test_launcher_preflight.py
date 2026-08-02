@@ -36,6 +36,7 @@ EXE_BUILD_SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "build-launcher.ps1"
 UI_READY_PATHS = (
     REPOSITORY_ROOT / "houdini_package" / "python3.10libs" / "uiready.py",
     REPOSITORY_ROOT / "houdini_package" / "python3.11libs" / "uiready.py",
+    REPOSITORY_ROOT / "houdini_package" / "python3.13libs" / "uiready.py",
 )
 
 
@@ -502,6 +503,38 @@ $selected | ConvertTo-Json -Depth 5 -Compress
             },
             checks,
         )
+
+    def test_hia_preflight_requires_every_supported_ui_ready_hook(self) -> None:
+        fake_root = self.sandbox / "versioned-ui-ready-project"
+        required_files = (
+            fake_root / "services" / "hia_mcp_v2" / "hia_mcp_v2" / "__main__.py",
+            fake_root
+            / "houdini_package"
+            / "python_libs"
+            / "hia_mcp_runtime"
+            / "http_server.py",
+            *(fake_root / path.relative_to(REPOSITORY_ROOT) for path in UI_READY_PATHS),
+        )
+        for path in required_files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# test fixture\n", encoding="utf-8")
+
+        def hia_level() -> str:
+            output = self.run_powershell(
+                f"""
+$result = Invoke-HiaPreflight `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -HoudiniExe {_ps_literal(fake_root / 'missing' / 'houdini.exe')} `
+    -BridgePython {_ps_literal(fake_root / 'missing' / 'python.exe')} `
+    -ProbeOverrides @{{ runtime_writable = $true; loopback = $true }}
+($result.checks | Where-Object id -eq 'hia_mcp_v2.runtime').level
+"""
+            )
+            return output.strip()
+
+        self.assertEqual("green", hia_level())
+        (fake_root / "houdini_package" / "python3.13libs" / "uiready.py").unlink()
+        self.assertEqual("red", hia_level())
 
     def test_explicit_advanced_bridge_override_accepts_python_org_install(
         self,
@@ -5151,7 +5184,8 @@ Add-Type -TypeDefinition $source -Language CSharp
 
     def test_uiready_starts_only_the_selected_backend_and_checks_hia_readiness(self) -> None:
         sources = [path.read_text(encoding="utf-8") for path in UI_READY_PATHS]
-        self.assertEqual(sources[0], sources[1])
+        self.assertTrue(sources)
+        self.assertEqual(1, len(set(sources)))
         self.assertIn('if _backend == "hia_v2"', sources[0])
         self.assertIn('elif _backend == "fxhoudini"', sources[0])
 

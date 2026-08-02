@@ -14,23 +14,34 @@ jobs:
   windows-python:
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.13"
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Compile Python sources
         shell: pwsh
-        run: >-
-          python -B -m compileall -q
-          src
-          services
-          houdini_package/python_libs
+        run: |
+          $compileTargets = @('src', 'services')
+          $compileTargets += Get-ChildItem -LiteralPath houdini_package -Directory |
+            Where-Object { $_.Name -match '^python(?:\d+\.\d+)?libs$' } |
+            ForEach-Object { $_.FullName }
+          python -B -m compileall -q @compileTargets
+          if ($LASTEXITCODE -ne 0) {
+            throw "Python compile failed with exit code $LASTEXITCODE"
+          }
 
       - name: Parse PowerShell sources
         shell: pwsh
