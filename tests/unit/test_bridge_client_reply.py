@@ -277,6 +277,7 @@ class BridgeClientQueueTests(unittest.TestCase):
             effort="high",
             service_tier="priority",
             local_image_paths=image_paths,
+            team_override="team",
         )
 
         submission = transport.submissions[-1]
@@ -289,9 +290,86 @@ class BridgeClientQueueTests(unittest.TestCase):
                 "effort": "high",
                 "service_tier": "priority",
                 "local_image_paths": image_paths,
+                "team_override": "team",
             },
             submission["payload"],
         )
+
+    def test_project_team_requests_use_one_fast_authenticated_route(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.get_project_team()
+        client.set_project_mode("team")
+        client.append_project_guidance("project-a", "keep the roof low")
+        client.append_project_guidance(
+            "project-a",
+            "check the clearance",
+            thread_id="thread-review",
+        )
+        client.set_project_role_runtime(
+            "project-a",
+            "thread-review",
+            model="model-review",
+            effort="high",
+            service_tier="priority",
+        )
+
+        requests = transport.submissions[-5:]
+        self.assertEqual(
+            [
+                ("GET", "/v1/project-team", "project_team_get", None),
+                (
+                    "POST",
+                    "/v1/project-team",
+                    "project_team_mode",
+                    {"mode": "team"},
+                ),
+                (
+                    "POST",
+                    "/v1/project-team/actions",
+                    "project_team_guidance",
+                    {
+                        "action": "append_guidance",
+                        "project_id": "project-a",
+                        "text": "keep the roof low",
+                    },
+                ),
+                (
+                    "POST",
+                    "/v1/project-team/actions",
+                    "project_team_guidance",
+                    {
+                        "action": "append_guidance",
+                        "project_id": "project-a",
+                        "thread_id": "thread-review",
+                        "text": "check the clearance",
+                    },
+                ),
+                (
+                    "POST",
+                    "/v1/project-team/actions",
+                    "project_team_role_runtime",
+                    {
+                        "action": "set_role_runtime",
+                        "project_id": "project-a",
+                        "thread_id": "thread-review",
+                        "model": "model-review",
+                        "effort": "high",
+                        "service_tier": "priority",
+                    },
+                ),
+            ],
+            [
+                (
+                    item["method"],
+                    item["path"],
+                    item["context"],
+                    item["payload"],
+                )
+                for item in requests
+            ],
+        )
+        self.assertTrue(all(item["timeout_ms"] == 15_000 for item in requests))
 
     def test_thread_start_and_resume_forward_dynamic_service_tier(self) -> None:
         client, transport = _load_transport_bridge_client()
