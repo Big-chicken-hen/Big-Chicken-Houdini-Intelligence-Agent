@@ -621,7 +621,11 @@ if PYSIDE_AVAILABLE:
                     return
                 requirement_change = {
                     "operation": operation,
-                    **({"target_requirement_id": target} if target else {}),
+                    **(
+                        {"target_requirement_id": target}
+                        if operation in {"replace", "remove"} and target
+                        else {}
+                    ),
                 }
             thread_id = (
                 selected.thread_id
@@ -661,7 +665,11 @@ if PYSIDE_AVAILABLE:
             target = self.requirement_target_combo.currentData()
             return {
                 "operation": operation,
-                **({"target_requirement_id": target} if target else {}),
+                **(
+                    {"target_requirement_id": target}
+                    if operation in {"replace", "remove"} and target
+                    else {}
+                ),
             }
 
         def _continue_project(self) -> None:
