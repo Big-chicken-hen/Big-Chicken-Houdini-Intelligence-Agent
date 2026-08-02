@@ -30,7 +30,6 @@ from .project_runner import ProjectRunner
 from .project_service import ProjectTeamService, ProjectTeamSettings
 from .project_thread_factory import ProjectThreadFactory
 from .project_workflow import ProjectWorkflowHost
-from .scene_writer import SceneWriterOwnership
 from .scene_queue import B2_READ_ONLY_PROFILE, SceneQueue
 from .session import BridgeSession
 
@@ -249,12 +248,12 @@ def _build_project_runtime(
     server_transports: Mapping[str, Mapping[str, object]],
     allowed_evidence_roots: Sequence[Path],
     model_catalog: Callable[[], Mapping[str, object]],
-    scene_writer: SceneWriterOwnership,
 ) -> ProjectRuntime:
     """Compose the project runtime once around the owned app-server client."""
 
     registry = ProjectRegistry(project_root / PROJECT_REGISTRY_RELATIVE_PATH)
     runner = ProjectRunner(registry)
+    scene_write_lock = threading.Lock()
     role_client = ProjectRoleClient(client, events)
     thread_factory = ProjectThreadFactory(
         role_client,
@@ -289,7 +288,7 @@ def _build_project_runtime(
         return ProjectRoleExecutor(
             client=role_client,
             registry=registry,
-            scene_writer=scene_writer,
+            scene_write_lock=scene_write_lock,
             allowed_evidence_roots=allowed_evidence_roots,
         )
 
@@ -786,7 +785,6 @@ def run(argv: Sequence[str] | None = None) -> int:
             }
         )
         events = EventBuffer()
-        scene_writer = SceneWriterOwnership()
         client = CodexStdioClient(
             _codex_app_server_command(
                 codex_exe,
@@ -805,7 +803,6 @@ def run(argv: Sequence[str] | None = None) -> int:
             events,
             mcp_backend=backend,
             focus_state_path=focus_state_path,
-            scene_writer=scene_writer,
         )
         project_runtime_arguments = dict(
             client=client,
@@ -824,7 +821,6 @@ def run(argv: Sequence[str] | None = None) -> int:
             allowed_evidence_roots=_project_evidence_roots(
                 project_root, render_output_directory
             ),
-            scene_writer=scene_writer,
         )
         session_model_catalog = getattr(session, "list_models", None)
         if callable(session_model_catalog):

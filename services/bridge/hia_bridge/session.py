@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .codex_stdio import CodexStdioClient, RequestId
 from .errors import BridgeError, CodexRPCError
@@ -22,7 +22,6 @@ from .project_identity import (
     ProjectThreadIdentity,
     parse_project_thread_source,
 )
-from .scene_writer import SceneWriterOwnership, SceneWriterReservation
 
 
 MODEL_LIST_PAGE_SIZE = 100
@@ -127,7 +126,6 @@ class BridgeSession:
         *,
         mcp_backend: str = HIA_MCP_V2_BACKEND,
         focus_state_path: Path | None = None,
-        scene_writer: SceneWriterOwnership | None = None,
     ) -> None:
         if mcp_backend not in {HIA_MCP_V2_BACKEND, FXHOUDINI_MCP_BACKEND}:
             raise ValueError(f"Unsupported Houdini MCP backend: {mcp_backend}")
@@ -140,7 +138,6 @@ class BridgeSession:
         self._client = client
         self._events = events
         self._mcp_backend = mcp_backend
-        self._scene_writer = scene_writer or SceneWriterOwnership()
         self._lock = threading.RLock()
         self._turn_condition = threading.Condition(self._lock)
         self._connected = False
@@ -158,9 +155,6 @@ class BridgeSession:
         self._start_source_turn_id: str | None = None
         self._last_tool_name: str | None = None
         self._last_tool_status: str | None = None
-        self._scene_writer_reservation: SceneWriterReservation | None = None
-        self._scene_writer_owner: str | None = None
-        self._active_hia_item_ids: set[str] = set()
         self._closed = False
         self._client.set_event_sink(self._on_client_event)
 
@@ -1014,10 +1008,6 @@ class BridgeSession:
                     "Natural-language input or at least one image is required",
                 )
             self._require_no_active_turn_locked()
-            reservation = self._scene_writer.reserve("ordinary", thread_id)
-            self._scene_writer_reservation = reservation
-            self._scene_writer_owner = None
-            self._active_hia_item_ids.clear()
             self._turn_generation += 1
             generation = self._turn_generation
             self._start_source_turn_id = self._turn_id or self._start_source_turn_id
@@ -1070,10 +1060,6 @@ class BridgeSession:
                     self._start_source_turn_id = None
                     confirmed_not_created = True
             if confirmed_not_created:
-                self._scene_writer.abandon_uncreated(reservation)
-                with self._lock:
-                    if self._scene_writer_reservation == reservation:
-                        self._scene_writer_reservation = None
                 details = dict(exc.details or {})
                 details.update(
                     {
@@ -1102,9 +1088,6 @@ class BridgeSession:
             raise
 
         publish_selection = False
-        writer_terminal = False
-        writer_items: tuple[str, ...] = ()
-        owner: str | None = None
         with self._lock:
             if generation == self._turn_generation:
                 if self._turn_id not in {None, turn_id}:
@@ -1121,22 +1104,10 @@ class BridgeSession:
                     )
                 self._turn_created = True
                 self._turn_id = turn_id
-                owner = self._scene_writer.bind(reservation, turn_id)
-                self._scene_writer_owner = owner
-                writer_items = tuple(self._active_hia_item_ids)
-                writer_terminal = not self._turn_active
                 self._start_source_turn_id = None
                 if self._turn_active and self._turn_status == "starting":
                     self._turn_status = "inProgress"
                 publish_selection = True
-        if owner is not None:
-            for item_id in writer_items:
-                self._scene_writer.hia_started(owner, item_id)
-            if writer_terminal and self._scene_writer.turn_terminal(owner):
-                with self._lock:
-                    if self._scene_writer_owner == owner:
-                        self._scene_writer_owner = None
-                        self._scene_writer_reservation = None
         if publish_selection:
             self._events.publish(
                 "turn_selected",
@@ -1436,21 +1407,6 @@ class BridgeSession:
                 or not self._turn_active
             ):
                 snapshot = self.snapshot()
-                owner = self._scene_writer_owner
-                if (
-                    isinstance(owner, str)
-                    and self._scene_writer.retained_after_terminal(owner)
-                ):
-                    raise BridgeError(
-                        "SCENE_WRITER_STILL_ACTIVE",
-                        "The Turn stopped, but an HIA scene write is still active",
-                        http_status=409,
-                        details={
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "owner": owner,
-                        },
-                    )
                 return {
                     "thread_id": thread_id,
                     "turn_id": turn_id,
@@ -1960,14 +1916,6 @@ class BridgeSession:
         self._last_tool_status = None
 
     @staticmethod
-    def _is_hia_item(item: Mapping[str, Any]) -> bool:
-        server = item.get("server")
-        tool = item.get("tool")
-        return server in {"hia_mcp_v2", "houdini_intelligence"} or (
-            isinstance(tool, str) and tool.startswith("hia_")
-        )
-
-    @staticmethod
     def _extract_thread_id(result: Any) -> str:
         if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
             raise BridgeError("INVALID_CODEX_RESPONSE", "Thread response has no thread object", 502)
@@ -2298,13 +2246,6 @@ class BridgeSession:
                         )
                         self._turn_active = False
                         self._turn_created = True
-                        owner = self._scene_writer_owner
-                        if (
-                            isinstance(owner, str)
-                            and self._scene_writer.turn_terminal(owner)
-                        ):
-                            self._scene_writer_owner = None
-                            self._scene_writer_reservation = None
                         self._turn_condition.notify_all()
                 elif method in {"item/started", "item/completed"}:
                     item = params.get("item")
@@ -2316,23 +2257,6 @@ class BridgeSession:
                         and turn_id == self._turn_id
                         and item.get("type") == "mcpToolCall"
                     ):
-                        owner = self._scene_writer_owner
-                        item_id = item.get("id")
-                        if not isinstance(item_id, str) or not item_id:
-                            item_id = str(item.get("tool") or "hia-tool")
-                        is_hia_item = self._is_hia_item(item)
-                        if method == "item/started" and is_hia_item:
-                            self._active_hia_item_ids.add(item_id)
-                            if isinstance(owner, str):
-                                self._scene_writer.hia_started(owner, item_id)
-                        elif method == "item/completed" and is_hia_item:
-                            self._active_hia_item_ids.discard(item_id)
-                            if (
-                                isinstance(owner, str)
-                                and self._scene_writer.hia_finished(owner, item_id)
-                            ):
-                                self._scene_writer_owner = None
-                                self._scene_writer_reservation = None
                         tool_name = item.get("tool")
                         if isinstance(tool_name, str) and tool_name:
                             self._last_tool_name = " ".join(tool_name.split())[:128]
