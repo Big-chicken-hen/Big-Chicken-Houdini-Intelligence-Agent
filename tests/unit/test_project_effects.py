@@ -439,6 +439,8 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         harness = EffectHarness(self.root, self.client)
         result = harness.run_one()
         self.assertEqual(ProjectEvent.PROJECT_INTERRUPTED, result.event.kind)
+        self.assertEqual(ProjectStatus.PAUSING, harness.state.status)
+        harness.run_one()
         self.assertEqual(ProjectStatus.INTERRUPTED, harness.state.status)
         self.assertEqual({Role.SUPERVISOR}, set(harness.state.roles))
 

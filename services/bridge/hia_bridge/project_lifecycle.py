@@ -23,6 +23,8 @@ class ProjectEvent(str, Enum):
     REVIEWS_FAILED = "reviews_failed"
     GOAL_COMPLETED = "goal_completed"
     GOAL_COMPLETION_FAILED = "goal_completion_failed"
+    GOAL_PAUSED = "goal_paused"
+    GOAL_PAUSE_FAILED = "goal_pause_failed"
     REPAIR_READY = "repair_ready"
     PROJECT_INTERRUPTED = "project_interrupted"
     RESTART_REQUESTED = "restart_requested"
@@ -98,6 +100,23 @@ def _next(
     )
 
 
+def _pause(
+    state: ProjectState,
+    target: ProjectStatus,
+    reason: str,
+    *,
+    resume_status: ProjectStatus | None = None,
+) -> tuple[ProjectState, tuple[LifecycleCommand, ...]]:
+    return _next(
+        state,
+        ProjectStatus.PAUSING,
+        LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": reason}),
+        pause_target=target,
+        resume_status=resume_status,
+        attention_reason=reason,
+    )
+
+
 def reduce_project(
     state: ProjectState, event: LifecycleEvent
 ) -> tuple[ProjectState, tuple[LifecycleCommand, ...]]:
@@ -126,32 +145,23 @@ def reduce_project(
         and status is ProjectStatus.PROVISIONING_ROLES
     ):
         error = str(data.get("error") or "role_provisioning_failed")
-        return _next(
+        paused, commands = _pause(
             state,
             ProjectStatus.NEEDS_ATTENTION,
-            LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": error}),
-            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": error}),
+            error,
             resume_status=ProjectStatus.PROVISIONING_ROLES,
-            attention_reason=error,
-            last_error=error,
         )
+        return replace(paused, last_error=error), commands
     if kind is ProjectEvent.SCENE_INELIGIBLE and status is ProjectStatus.INTAKE:
         reason = str(data.get("reason") or "not_a_houdini_scene_task")
-        return _next(
-            state,
-            ProjectStatus.NOT_APPLICABLE,
-            LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": reason}),
-            attention_reason=reason,
-        )
+        return _pause(state, ProjectStatus.NOT_APPLICABLE, reason)
     if kind is ProjectEvent.INTAKE_UNCLEAR and status is ProjectStatus.INTAKE:
         reason = str(data.get("reason") or "scene_task_eligibility_unclear")
-        return _next(
+        return _pause(
             state,
             ProjectStatus.NEEDS_ATTENTION,
-            LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": reason}),
-            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": reason}),
+            reason,
             resume_status=ProjectStatus.INTAKE,
-            attention_reason=reason,
         )
     if kind is ProjectEvent.PLAN_READY and status is ProjectStatus.PLANNING:
         return _next(
@@ -198,12 +208,39 @@ def reduce_project(
         )
     if kind is ProjectEvent.PROJECT_INTERRUPTED and status in _ACTIVE:
         reason = str(data.get("reason") or "interrupted")
-        return _next(
+        return _pause(
             state,
             ProjectStatus.INTERRUPTED,
-            LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": reason}),
+            reason,
             resume_status=status,
-            attention_reason=reason,
+        )
+    if kind is ProjectEvent.GOAL_PAUSED and status is ProjectStatus.PAUSING:
+        target = state.pause_target
+        if target not in {
+            ProjectStatus.INTERRUPTED,
+            ProjectStatus.NEEDS_ATTENTION,
+            ProjectStatus.NOT_APPLICABLE,
+            ProjectStatus.BLOCKED,
+        }:
+            raise InvalidTransition(status, kind)
+        commands = (
+            (LifecycleCommand(
+                ProjectCommand.SHOW_ATTENTION,
+                {"reason": state.attention_reason or "needs_attention"},
+            ),)
+            if target is ProjectStatus.NEEDS_ATTENTION
+            else ()
+        )
+        return _next(state, target, *commands, pause_target=None)
+    if kind is ProjectEvent.GOAL_PAUSE_FAILED and status is ProjectStatus.PAUSING:
+        error = str(data.get("error") or "goal_pause_failed")
+        return _next(
+            state,
+            ProjectStatus.NEEDS_ATTENTION,
+            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": error}),
+            pause_target=None,
+            attention_reason=error,
+            last_error=error,
         )
     if kind is ProjectEvent.GOAL_COMPLETED and status is ProjectStatus.COMPLETING:
         return _next(
@@ -261,22 +298,15 @@ def reduce_project(
         )
     if kind in {ProjectEvent.BUDGET_EXHAUSTED, ProjectEvent.NO_PROGRESS} and status in _ACTIVE:
         reason = str(data.get("reason") or kind.value)
-        return _next(
+        return _pause(
             state,
             ProjectStatus.NEEDS_ATTENTION,
-            LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": reason}),
-            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": reason}),
+            reason,
             resume_status=status,
-            attention_reason=reason,
         )
     if kind is ProjectEvent.PROJECT_BLOCKED and status in _ACTIVE:
         reason = str(data.get("reason") or "blocked")
-        return _next(
-            state,
-            ProjectStatus.BLOCKED,
-            LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": reason}),
-            attention_reason=reason,
-        )
+        return _pause(state, ProjectStatus.BLOCKED, reason)
     if kind is ProjectEvent.PROJECT_FAILED and status not in {
         ProjectStatus.COMPLETED,
         ProjectStatus.FAILED,

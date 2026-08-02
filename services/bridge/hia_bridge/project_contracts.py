@@ -24,6 +24,7 @@ class ProjectStatus(str, Enum):
     REVIEWING_STAGE = "reviewing_stage"
     REPAIRING_STAGE = "repairing_stage"
     COMPLETING = "completing"
+    PAUSING = "pausing"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     INTERRUPTED = "interrupted"
@@ -166,6 +167,7 @@ class ProjectState:
     elapsed_seconds: int = 0
     total_evidence_bytes: int = 0
     resume_status: ProjectStatus | None = None
+    pause_target: ProjectStatus | None = None
     attention_reason: str | None = None
     last_error: str | None = None
     pending_effects: tuple[PendingEffect, ...] = ()
@@ -261,6 +263,7 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
         "elapsed_seconds": state.elapsed_seconds,
         "total_evidence_bytes": state.total_evidence_bytes,
         "resume_status": state.resume_status.value if state.resume_status else None,
+        "pause_target": state.pause_target.value if state.pause_target else None,
         "attention_reason": state.attention_reason,
         "last_error": state.last_error,
         "pending_effects": [
@@ -383,6 +386,7 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
             ),
         )
     resume = value.get("resume_status")
+    pause_target = value.get("pause_target")
     raw_effects = value.get("pending_effects", [])
     if not isinstance(raw_effects, list):
         raise ValueError("pending_effects must be a list")
@@ -446,6 +450,9 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
             value.get("total_evidence_bytes", 0), "total_evidence_bytes"
         ),
         resume_status=ProjectStatus(resume) if resume is not None else None,
+        pause_target=(
+            ProjectStatus(pause_target) if pause_target is not None else None
+        ),
         attention_reason=_optional_text(
             value.get("attention_reason"), "attention_reason"
         ),

@@ -76,7 +76,12 @@ class ProjectLifecycleTests(unittest.TestCase):
 
     def test_interruption_and_exact_restart(self) -> None:
         state = _state(ProjectStatus.EXECUTING_STAGE)
-        state, _ = self.apply(state, ProjectEvent.PROJECT_INTERRUPTED, reason="bridge_restart")
+        state, commands = self.apply(
+            state, ProjectEvent.PROJECT_INTERRUPTED, reason="bridge_restart"
+        )
+        self.assertEqual(ProjectStatus.PAUSING, state.status)
+        self.assertEqual(ProjectCommand.PAUSE_GOAL, commands[0].kind)
+        state, _ = self.apply(state, ProjectEvent.GOAL_PAUSED)
         self.assertEqual(ProjectStatus.INTERRUPTED, state.status)
         self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.resume_status)
         state, commands = self.apply(state, ProjectEvent.RESTART_REQUESTED)
@@ -92,6 +97,9 @@ class ProjectLifecycleTests(unittest.TestCase):
                 state, commands = self.apply(
                     _state(ProjectStatus.REPAIRING_STAGE), event, reason="limit"
                 )
+                self.assertEqual(ProjectStatus.PAUSING, state.status)
+                self.assertEqual(ProjectCommand.PAUSE_GOAL, commands[0].kind)
+                state, commands = self.apply(state, ProjectEvent.GOAL_PAUSED)
                 self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
                 self.assertNotIn(
                     ProjectCommand.COMPLETE_GOAL, [item.kind for item in commands]
@@ -106,9 +114,12 @@ class ProjectLifecycleTests(unittest.TestCase):
         ):
             with self.subTest(event=event):
                 state, commands = self.apply(_state(ProjectStatus.INTAKE), event)
+                self.assertEqual(ProjectStatus.PAUSING, state.status)
+                state, pause_commands = self.apply(state, ProjectEvent.GOAL_PAUSED)
                 self.assertEqual(expected, state.status)
                 self.assertNotIn(
-                    ProjectCommand.PROVISION_WORKERS, [item.kind for item in commands]
+                    ProjectCommand.PROVISION_WORKERS,
+                    [item.kind for item in (*commands, *pause_commands)],
                 )
 
     def test_worker_provisioning_failure_needs_attention(self) -> None:
@@ -116,8 +127,13 @@ class ProjectLifecycleTests(unittest.TestCase):
         state, commands = self.apply(
             state, ProjectEvent.ROLE_PROVISIONING_FAILED, error="thread/start failed"
         )
+        self.assertEqual(ProjectStatus.PAUSING, state.status)
+        state, followup = self.apply(state, ProjectEvent.GOAL_PAUSED)
         self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
-        self.assertNotIn(ProjectCommand.REQUEST_PLAN, [item.kind for item in commands])
+        self.assertNotIn(
+            ProjectCommand.REQUEST_PLAN,
+            [item.kind for item in (*commands, *followup)],
+        )
 
     def test_goal_completion_failure_never_claims_completed(self) -> None:
         state, _ = self.apply(
@@ -150,6 +166,21 @@ class ProjectLifecycleTests(unittest.TestCase):
         state, _ = self.apply(state, ProjectEvent.RESTART_REQUESTED)
         with self.assertRaises(InvalidTransition):
             self.apply(state, ProjectEvent.RECOVERY_VALIDATED)
+
+    def test_pause_failure_never_claims_interrupted_or_stopped(self) -> None:
+        state, _ = self.apply(
+            _state(ProjectStatus.EXECUTING_STAGE),
+            ProjectEvent.PROJECT_INTERRUPTED,
+            reason="user_stop",
+        )
+        state, commands = self.apply(
+            state,
+            ProjectEvent.GOAL_PAUSE_FAILED,
+            error="goal/update failed",
+        )
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
+        self.assertEqual("goal/update failed", state.last_error)
+        self.assertEqual(ProjectCommand.SHOW_ATTENTION, commands[0].kind)
 
 
 if __name__ == "__main__":

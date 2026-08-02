@@ -177,7 +177,7 @@ class ProjectEffectExecutor:
         if kind == "complete_goal":
             return self._set_goal(state, effect, "completed", ProjectEvent.GOAL_COMPLETED)
         if kind == "pause_goal":
-            return self._set_goal(state, effect, "paused", None)
+            return self._set_goal(state, effect, "paused", ProjectEvent.GOAL_PAUSED)
         if kind == "resume_goal":
             return self._set_goal(state, effect, "active", None)
         if kind in {"show_attention", "record_failure"}:
@@ -795,6 +795,8 @@ class ProjectEffectExecutor:
             failure = (
                 LifecycleEvent(ProjectEvent.GOAL_COMPLETION_FAILED, {"error": "goal_ack_mismatch"})
                 if status == "completed"
+                else LifecycleEvent(ProjectEvent.GOAL_PAUSE_FAILED, {"error": "goal_ack_mismatch"})
+                if status == "paused"
                 else LifecycleEvent(ProjectEvent.PROJECT_INTERRUPTED, {"reason": "goal_ack_mismatch"})
             )
             return EffectResult(state, failure)
