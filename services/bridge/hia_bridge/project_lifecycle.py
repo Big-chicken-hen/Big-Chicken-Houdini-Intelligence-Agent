@@ -19,6 +19,7 @@ class ProjectEvent(str, Enum):
     PROJECT_ACCEPTED = "project_accepted"
     PROJECT_ANSWERED = "project_answered"
     PLAN_READY = "plan_ready"
+    PLAN_REJECTED = "plan_rejected"
     PLAN_AUTHORIZED = "plan_authorized"
     STAGE_EXECUTED = "stage_executed"
     REVIEWS_PASSED = "reviews_passed"
@@ -113,6 +114,26 @@ def reduce_project(
             state,
             ProjectStatus.EXECUTING,
             LifecycleCommand(ProjectCommand.START_EXECUTION),
+            plan_rejection_count=0,
+        )
+    if kind is ProjectEvent.PLAN_REJECTED and status is ProjectStatus.PLANNING:
+        rejection_count = state.plan_rejection_count + 1
+        feedback = str(data.get("feedback") or "Supervisor rejected the plan")
+        if rejection_count >= 2:
+            return _next(
+                state,
+                ProjectStatus.WAITING_USER,
+                plan_rejection_count=rejection_count,
+                attention_reason=feedback,
+            )
+        return _next(
+            state,
+            ProjectStatus.PLANNING,
+            LifecycleCommand(
+                ProjectCommand.REQUEST_PLAN,
+                {"supervisor_feedback": feedback},
+            ),
+            plan_rejection_count=rejection_count,
         )
     if kind is ProjectEvent.STAGE_EXECUTED and status is ProjectStatus.EXECUTING:
         return _next(
@@ -153,26 +174,11 @@ def reduce_project(
                 latest_evidence_ids=(),
             ),
         )
-    if kind is ProjectEvent.PROJECT_INTERRUPTED and status in _ACTIVE:
+    if kind is ProjectEvent.PROJECT_INTERRUPTED and status in {
+        *_ACTIVE,
+        ProjectStatus.WAITING_USER,
+    }:
         return _next(state, ProjectStatus.STOPPED)
-    if kind is ProjectEvent.USER_CONTINUE and status is ProjectStatus.STOPPED:
-        target = (
-            ProjectStatus.EXECUTING
-            if state.stage.stage_id is not None
-            else ProjectStatus.PLANNING
-        )
-        command = (
-            ProjectCommand.START_EXECUTION
-            if target is ProjectStatus.EXECUTING
-            else ProjectCommand.REQUEST_PLAN
-        )
-        return _next(
-            state,
-            target,
-            LifecycleCommand(command, {"restart_stage": True}),
-            attention_reason=None,
-            last_error=None,
-        )
     if kind in {
         ProjectEvent.PROJECT_BLOCKED,
         ProjectEvent.BUDGET_EXHAUSTED,
@@ -183,21 +189,41 @@ def reduce_project(
             ProjectStatus.WAITING_USER,
             attention_reason=reason,
         )
-    if kind is ProjectEvent.USER_CONTINUE and status is ProjectStatus.WAITING_USER:
-        target = (
-            ProjectStatus.EXECUTING
-            if state.stage.stage_id is not None
-            else ProjectStatus.PLANNING
-        )
-        command = (
-            ProjectCommand.START_EXECUTION
-            if target is ProjectStatus.EXECUTING
-            else ProjectCommand.REQUEST_PLAN
-        )
+    if kind is ProjectEvent.USER_CONTINUE and status in {
+        ProjectStatus.STOPPED,
+        ProjectStatus.WAITING_USER,
+    }:
+        requested = data.get("command")
+        commands = {
+            ProjectCommand.REQUEST_PLAN.value: (
+                ProjectStatus.PLANNING,
+                ProjectCommand.REQUEST_PLAN,
+            ),
+            ProjectCommand.REQUEST_AUTHORIZATION.value: (
+                ProjectStatus.PLANNING,
+                ProjectCommand.REQUEST_AUTHORIZATION,
+            ),
+            ProjectCommand.START_EXECUTION.value: (
+                ProjectStatus.EXECUTING,
+                ProjectCommand.START_EXECUTION,
+            ),
+            ProjectCommand.START_REVIEWS.value: (
+                ProjectStatus.REVIEWING,
+                ProjectCommand.START_REVIEWS,
+            ),
+        }
+        resolved = commands.get(requested)
+        if resolved is None:
+            return _next(
+                state,
+                ProjectStatus.WAITING_USER,
+                attention_reason="continue_state_ambiguous",
+            )
+        target, command = resolved
         return _next(
             state,
             target,
-            LifecycleCommand(command, {"continue": True}),
+            LifecycleCommand(command, dict(data.get("action_data") or {})),
             attention_reason=None,
             last_error=None,
         )

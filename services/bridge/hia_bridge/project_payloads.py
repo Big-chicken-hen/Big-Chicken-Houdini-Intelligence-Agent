@@ -132,7 +132,7 @@ def parse_review_claim(value: Mapping[str, Any]) -> ReviewClaim:
     return NotApplicableClaim(
         claim_id,
         _required_text(exemption, "reason"),
-        _text_tuple(exemption, "evidence_refs"),
+        _optional_text_tuple(exemption, "evidence_refs"),
     )
 
 
@@ -142,8 +142,7 @@ class StageCard:
     stage_id: str
     requirement_ids: tuple[str, ...]
     ordered_steps: tuple[Mapping[str, Any], ...]
-    evidence_contract: Mapping[str, Any] | None = None
-    reviewers: tuple[str, ...] = ()
+    required_evidence: str | None = None
     failure_minimum_repair: str | None = None
 
 
@@ -151,8 +150,14 @@ def parse_stage_card(value: Mapping[str, Any]) -> StageCard:
     depth = value.get("depth")
     if depth not in {"direct", "focused", "full"}:
         raise ValueError("stage depth is invalid")
-    common = {"depth", "stage_id", "requirement_ids", "ordered_steps"}
-    full = common | {"evidence_contract", "reviewers", "failure_minimum_repair"}
+    common = {
+        "depth",
+        "stage_id",
+        "requirement_ids",
+        "ordered_steps",
+        "required_evidence",
+    }
+    full = common | {"failure_minimum_repair"}
     expected = full if depth == "full" else common
     if set(value) != expected:
         raise ValueError(f"{depth} stage fields must be exactly {sorted(expected)}")
@@ -161,19 +166,17 @@ def parse_stage_card(value: Mapping[str, Any]) -> StageCard:
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("ordered_steps must be a non-empty list")
     steps = _validate_ordered_steps(raw_steps, set(requirement_ids))
+    required_evidence = value.get("required_evidence")
+    if required_evidence not in {"visual", "technical", "both"}:
+        raise ValueError("required_evidence must be visual, technical, or both")
     if depth != "full":
         return StageCard(
             depth,
             _required_text(value, "stage_id"),
             requirement_ids,
             steps,
+            required_evidence,
         )
-    evidence = value.get("evidence_contract")
-    if not isinstance(evidence, Mapping) or not evidence:
-        raise ValueError("full stage evidence_contract must be a non-empty object")
-    reviewers = _text_tuple(value, "reviewers")
-    if set(reviewers) != {"visual_review", "technical_review"}:
-        raise ValueError("full stage requires both independent reviewers")
     if information_units(value) < FULL_STAGE_INFORMATION_UNITS:
         raise ValueError("full stage has fewer than 2500 task-specific information units")
     for index, step in enumerate(steps, 1):
@@ -186,8 +189,7 @@ def parse_stage_card(value: Mapping[str, Any]) -> StageCard:
         _required_text(value, "stage_id"),
         requirement_ids,
         steps,
-        evidence,
-        reviewers,
+        required_evidence,
         _required_text(value, "failure_minimum_repair"),
     )
 
@@ -401,6 +403,15 @@ def _text_tuple(value: Mapping[str, Any], key: str) -> tuple[str, ...]:
         isinstance(item, str) and item.strip() for item in items
     ):
         raise ValueError(f"{key} must be a non-empty string list")
+    return tuple(items)
+
+
+def _optional_text_tuple(value: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    items = value.get(key)
+    if not isinstance(items, list) or not all(
+        isinstance(item, str) and item.strip() for item in items
+    ):
+        raise ValueError(f"{key} must be a string list")
     return tuple(items)
 
 
