@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+from pathlib import Path
+
+
+REPOSITORY_ROOT = Path(__file__).parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT / "houdini_package" / "python_libs"))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from hia_panel.project_team import ProjectPanelState  # noqa: E402
+from hia_panel.project_team_view import (  # noqa: E402
+    PYSIDE_AVAILABLE,
+    ProjectTeamView,
+)
+
+
+def snapshot():
+    return {
+        "schema": "hia-project-team/2",
+        "settings": {"mode": "team", "writable": True},
+        "projects": [
+            {
+                "project_id": "project-a",
+                "title": "极长但仍必须在窄面板中安全省略而不是撑出横向滚动条的项目名称",
+                "status": "needs_attention",
+                "stage": "review",
+                "attention_reason": "视觉证据显示栏杆穿插",
+                "consumed_turns": 8,
+                "actions": {"append_guidance": True, "continue": True, "stop": True},
+                "threads": [
+                    {
+                        "role": "supervisor",
+                        "role_title": "监督 AI",
+                        "thread_id": "thread-supervisor",
+                        "status": "waiting",
+                        "actions": {
+                            "open_thread": True,
+                            "append_guidance": True,
+                            "set_role_runtime": True,
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@unittest.skipUnless(PYSIDE_AVAILABLE, "PySide6 is available only in Houdini/runtime Qt")
+class ProjectTeamQtTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PySide6 import QtWidgets
+
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def setUp(self) -> None:
+        self.state = ProjectPanelState()
+        self.state.apply_snapshot(snapshot())
+        self.view = ProjectTeamView(self.state)
+        self.view.resize(470, 760)
+        self.view.show()
+        self.app.processEvents()
+
+    def tearDown(self) -> None:
+        self.view.close()
+        self.view.deleteLater()
+        self.app.processEvents()
+
+    def test_buttons_are_complete_and_project_entry_exists_once(self) -> None:
+        from PySide6 import QtWidgets
+
+        self.assertEqual("新建普通任务（单个 AI）", self.view.new_single_button.text())
+        self.assertEqual("新建项目（项目团队）", self.view.new_project_button.text())
+        project_buttons = [
+            button
+            for button in self.view.findChildren(QtWidgets.QPushButton)
+            if button.text() == "新建项目（项目团队）"
+        ]
+        self.assertEqual(1, len(project_buttons))
+        self.assertNotIn("...", self.view.new_single_button.text())
+        self.assertNotIn("…", self.view.new_project_button.text())
+
+    def test_470px_view_has_no_tree_horizontal_scroll_and_dark_background(self) -> None:
+        from PySide6 import QtCore
+
+        self.assertEqual(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+            self.view.tree.horizontalScrollBarPolicy(),
+        )
+        color = self.view.palette().window().color()
+        self.assertLess(color.red(), 64)
+        self.assertLess(color.green(), 64)
+        self.assertLess(color.blue(), 64)
+
+    def test_project_container_does_not_open_chat_but_role_does(self) -> None:
+        opened = []
+        self.view.openThreadRequested.connect(opened.append)
+        self.state.select("project:project-a")
+        self.view._open_selected()
+        self.assertEqual([], opened)
+        self.state.select("role:project-a:supervisor")
+        self.view._open_selected()
+        self.assertEqual(["thread-supervisor"], opened)
+
+    def test_collapse_and_expand_restore_navigation(self) -> None:
+        self.view.collapse_button.setChecked(True)
+        self.app.processEvents()
+        self.assertFalse(self.view.navigation_body.isVisible())
+        self.view.collapse_button.setChecked(False)
+        self.app.processEvents()
+        self.assertTrue(self.view.navigation_body.isVisible())
+
+
+if __name__ == "__main__":
+    unittest.main()
