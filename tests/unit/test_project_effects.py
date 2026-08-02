@@ -42,12 +42,29 @@ from tests.unit.project_test_support import observable_thread_response, server_t
 
 
 def _detail(label: str, size: int) -> str:
-    value = label
+    actors = "builder reviewer designer operator artist rigger architect modeler engineer craftsperson supervisor specialist technician planner fabricator inspector author coordinator animator researcher developer".split()
+    actions = "connects measures shapes aligns verifies documents constructs balances refines inspects positions configures preserves compares assembles routes exposes tests records evaluates repairs".split()
+    targets = "roof frame support surface control output facade railing window doorway foundation stair canopy chassis cabin material camera light geometry network profile joint panel".split()
+    reasons = "clearance editability silhouette contact evidence delivery proportion spacing continuity stability recognition dependency alignment accuracy hierarchy accessibility consistency readability integrity provenance".split()
+    qualities = "precise modular coherent readable durable procedural reversible measurable visible native bounded layered proportional connected stable explicit organized responsive clean consistent".split()
+    methods = "sweeping extruding beveling grouping routing sampling comparing capturing inspecting naming binding transforming merging filtering projecting validating".split()
+    contexts = "object geometry material lighting animation simulation rendering viewport timeline hierarchy branch network interface output reference assembly".split()
+    value = ""
     index = 0
-    translation = str.maketrans("0123456789", "abcdefghij")
+    seed = sum(ord(character) for character in label)
     while len(value) < size:
-        value += hashlib.sha256(f"{label}:{index}".encode()).hexdigest().translate(
-            translation
+        actor = actors[(seed + index * 5) % len(actors)]
+        action = actions[(seed + index * 7) % len(actions)]
+        target = targets[(seed + index * 11) % len(targets)]
+        reason = reasons[(seed + index * 13) % len(reasons)]
+        quality = qualities[(seed + index * 17) % len(qualities)]
+        method = methods[(seed + index * 19) % len(methods)]
+        context = contexts[(seed + index * 23) % len(contexts)]
+        value += (
+            f"{label} the {actor} {action} the editable {target} with native nodes "
+            f"through a {quality} {method} method inside the {context} context so the "
+            f"measured {reason} remains visible in the review evidence at "
+            f"/obj/asset/{actor}_{action}_{target}_{reason}. "
         )
         index += 1
     return value[:size]
@@ -66,21 +83,21 @@ def _full_stage() -> dict:
                 "user_fact_ids": ["fact-1"],
                 "target_network_region": {
                     "context": "SOP",
-                    "target": _detail("networktarget", 700),
+                    "target": _detail("networktarget", 2500),
                 },
                 "native_operation_strategy": {
                     "native_nodes": ["polyextrude", "sweep"],
-                    "operation": _detail("nativeoperation", 700),
+                    "operation": _detail("nativeoperation", 2500),
                 },
                 "connections": [
-                    {"from": "source/0", "to": "body/0", "purpose": _detail("connection", 700)}
+                    {"from": "source/0", "to": "body/0", "purpose": _detail("connection", 2500)}
                 ],
                 "parameter_dependencies": [
-                    {"parameter": "body/height", "depends_on": "fact-1", "effect": _detail("parameter", 700)}
+                    {"parameter": "body/height", "depends_on": "fact-1", "effect": _detail("parameter", 2500)}
                 ],
-                "expected_result": {"visible": _detail("visible", 700), "editable": _detail("editable", 700)},
-                "evidence": {"visual": _detail("visualevidence", 700), "technical": _detail("technicalevidence", 700)},
-                "minimum_repair": {"trigger": _detail("repairtrigger", 700), "operation": _detail("repairoperation", 700)},
+                "expected_result": {"visible": _detail("visible", 2500), "editable": _detail("editable", 2500)},
+                "evidence": {"visual": _detail("visualevidence", 2500), "technical": _detail("technicalevidence", 2500)},
+                "minimum_repair": {"trigger": _detail("repairtrigger", 2500), "operation": _detail("repairoperation", 2500)},
             }
         ],
         "evidence_contract": {"capture": True, "technical": True},
@@ -95,17 +112,17 @@ def _plan() -> dict:
     return {
         "schema": "hia-project-plan/1",
         "task_description": {
-            "description": _detail("taskdescription", 1200),
+            "description": _detail("taskdescription", 2500),
             "source_anchors": [anchor],
         },
         "user_facts": [
-            {"fact_id": "fact-1", "description": _detail("userfact", 1200), "source_anchor": anchor}
+            {"fact_id": "fact-1", "description": _detail("userfact", 2500), "source_anchor": anchor}
         ],
         "blueprint_sections": [
             {
                 "section_id": section_id,
                 "title": section_id.replace("_", " "),
-                "description": _detail(f"blueprintsection{section_id}", 350),
+                "description": _detail(f"blueprint section {section_id}", 3000),
                 "source_anchors": [anchor],
                 "user_fact_ids": ["fact-1"],
                 "requirement_ids": ["req-1"],
@@ -123,6 +140,65 @@ def _plan() -> dict:
             }
         ],
         "stages": [_full_stage()],
+    }
+
+
+def _authorization(
+    plan: dict | None = None,
+    revision: int = 1,
+    *,
+    failed_key: str | None = None,
+) -> dict:
+    plan = plan or _plan()
+    digest = hashlib.sha256(
+        json.dumps(
+            plan,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    stage_ids = [str(stage["stage_id"]) for stage in plan["stages"]]
+    step_ids = [
+        str(step["step_id"])
+        for stage in plan["stages"]
+        for step in stage["ordered_steps"]
+    ]
+    anchors = set(plan["task_description"]["source_anchors"])
+    anchors.update(str(item["source_anchor"]) for item in plan["user_facts"])
+    references = {
+        "task_anchors": anchors,
+        "blueprint_sections": {
+            str(item["section_id"]) for item in plan["blueprint_sections"]
+        },
+        "requirements": {
+            str(item["requirement_id"]) for item in plan["requirements"]
+        },
+        "stages_and_steps": set((*stage_ids, *step_ids)),
+        "anti_filler": {f"blueprint:{revision}", digest},
+        "native_strategy_and_dependencies": set(step_ids),
+        "evidence_contracts": set((*stage_ids, *step_ids)),
+        "minimum_repairs": set((*stage_ids, *step_ids)),
+    }
+    semantic_review = {
+        name: {
+            "status": "fail" if name == failed_key else "pass",
+            "referenced_ids": sorted(identifiers),
+            "findings": (
+                [f"{name} does not meet the task-specific semantic contract"]
+                if name == failed_key
+                else []
+            ),
+        }
+        for name, identifiers in references.items()
+    }
+    return {
+        "schema": "hia-project-authorization/1",
+        "authorized": True,
+        "blueprint_revision": revision,
+        "blueprint_sha256": digest,
+        "stage_ids": stage_ids,
+        "semantic_review": semantic_review,
     }
 
 
@@ -396,11 +472,7 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         self.client.queue(
             Role.SUPERVISOR,
             "authorize_plan",
-            {
-                "schema": "hia-project-authorization/1",
-                "authorized": True,
-                "stage_ids": ["stage-1"],
-            },
+            _authorization(),
         )
 
     def test_single_stage_pass_reaches_goal_complete_with_exact_ownership(self):
@@ -581,6 +653,67 @@ class ProjectEffectExecutorTests(unittest.TestCase):
                 [{"type": "localImage", "path": str(self.root / "brief.webp")}],
                 images,
             )
+
+    def test_authorization_must_reference_every_actual_blueprint_identifier(self):
+        self.client.queue(
+            Role.SUPERVISOR,
+            "scene_task_eligibility",
+            {"schema": "hia-project-eligibility/1", "disposition": "eligible", "reason": "scene task"},
+        )
+        self.client.queue(Role.PLANNING, "create_plan_and_stage_cards", _plan())
+        authorization = _authorization()
+        authorization["semantic_review"]["blueprint_sections"]["referenced_ids"].pop()
+        self.client.queue(Role.SUPERVISOR, "authorize_plan", authorization)
+        harness = EffectHarness(self.root, self.client)
+        for _ in range(3):
+            harness.run_one()
+        with self.assertRaises(ProjectEffectError) as raised:
+            harness.run_one()
+        self.assertEqual("INVALID_AUTHORIZATION_SCHEMA", raised.exception.code)
+
+    def test_authorization_rejects_failed_semantic_item_even_when_boolean_is_true(self):
+        self.client.queue(
+            Role.SUPERVISOR,
+            "scene_task_eligibility",
+            {"schema": "hia-project-eligibility/1", "disposition": "eligible", "reason": "scene task"},
+        )
+        self.client.queue(Role.PLANNING, "create_plan_and_stage_cards", _plan())
+        self.client.queue(
+            Role.SUPERVISOR,
+            "authorize_plan",
+            _authorization(failed_key="native_strategy_and_dependencies"),
+        )
+        harness = EffectHarness(self.root, self.client)
+        for _ in range(3):
+            harness.run_one()
+        with self.assertRaises(ProjectEffectError) as raised:
+            harness.run_one()
+        self.assertEqual("PLAN_NOT_AUTHORIZED", raised.exception.code)
+
+    def test_authorization_is_bound_to_exact_blueprint_revision_and_hash(self):
+        for field, value in (
+            ("blueprint_revision", 99),
+            ("blueprint_sha256", "0" * 64),
+        ):
+            with self.subTest(field=field):
+                client = FakeProjectClient(self.capture)
+                client.queue(
+                    Role.SUPERVISOR,
+                    "scene_task_eligibility",
+                    {"schema": "hia-project-eligibility/1", "disposition": "eligible", "reason": "scene task"},
+                )
+                client.queue(Role.PLANNING, "create_plan_and_stage_cards", _plan())
+                authorization = _authorization()
+                authorization[field] = value
+                client.queue(Role.SUPERVISOR, "authorize_plan", authorization)
+                case_root = self.root / field
+                case_root.mkdir()
+                harness = EffectHarness(case_root, client)
+                for _ in range(3):
+                    harness.run_one()
+                with self.assertRaises(ProjectEffectError) as raised:
+                    harness.run_one()
+                self.assertEqual("PLAN_NOT_AUTHORIZED", raised.exception.code)
 
     def test_failed_reviews_drive_supervisor_repair_and_execution_repair(self):
         self._queue_common()
@@ -877,6 +1010,7 @@ class ProjectEffectExecutorTests(unittest.TestCase):
             requirement_delta=RequirementDelta(
                 add=(Requirement("req-2", "structure", source_ref=anchor),)
             ),
+            force_replan=True,
         )
         replanning, commands = reduce_project(
             updated, LifecycleEvent(ProjectEvent.MATERIAL_REPLAN_REQUIRED)
@@ -891,14 +1025,22 @@ class ProjectEffectExecutorTests(unittest.TestCase):
         self.client.queue(
             Role.SUPERVISOR,
             "authorize_plan",
-            {
-                "schema": "hia-project-authorization/1",
-                "authorized": True,
-                "stage_ids": ["stage-1"],
-            },
+            _authorization(revised_plan, revision=2),
         )
 
         harness.run_one()
+        planning_envelope = [
+            json.loads(params["input"][0]["text"])
+            for method, params in self.client.calls
+            if method == "turn/start" and params["threadId"] == "thread-planning"
+        ][-1]
+        self.assertEqual(
+            "add a roof subsystem",
+            planning_envelope["material_revision_requests"][0]["text"],
+        )
+        self.assertTrue(
+            planning_envelope["material_revision_requests"][0]["force_replan"]
+        )
         self.assertEqual(ProjectStatus.AUTHORIZATION, harness.state.status)
         self.assertEqual(2, harness.state.blueprint_revision)
         self.assertEqual(1, harness.state.authorized_blueprint_revision)

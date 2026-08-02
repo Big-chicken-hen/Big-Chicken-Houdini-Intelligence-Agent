@@ -26,6 +26,7 @@ from .project_contracts import (
     RequirementStatus,
     Role,
     StageState,
+    native_goal_objective,
 )
 from .project_evidence import EvidenceValidationResult, validate_evidence
 from .project_guidance import (
@@ -357,12 +358,34 @@ class ProjectEffectExecutor:
             local_image_paths=self._authoritative_image_paths(state),
         )
         payload = completed.payload
-        if set(payload) != {"schema", "authorized", "stage_ids"}:
+        if set(payload) != {
+            "schema",
+            "authorized",
+            "blueprint_revision",
+            "blueprint_sha256",
+            "stage_ids",
+            "semantic_review",
+        }:
             raise ProjectEffectError("INVALID_AUTHORIZATION_SCHEMA", "authorization fields are invalid")
         expected = [stage["stage_id"] for stage in plan["stages"]]
-        if payload.get("authorized") is not True or payload.get("stage_ids") != expected:
+        try:
+            _validate_semantic_authorization(payload["semantic_review"], plan)
+        except ValueError as exc:
+            raise ProjectEffectError("INVALID_AUTHORIZATION_SCHEMA", str(exc)) from exc
+        all_pass = all(
+            item["status"] == "pass"
+            for item in payload["semantic_review"].values()
+        )
+        if (
+            payload.get("authorized") is not True
+            or not all_pass
+            or payload.get("blueprint_revision") != state.blueprint_revision
+            or payload.get("blueprint_sha256") != plan.get("_blueprint_sha256")
+            or payload.get("stage_ids") != expected
+        ):
             raise ProjectEffectError(
-                "PLAN_NOT_AUTHORIZED", "Supervisor did not authorize the exact persisted stage set"
+                "PLAN_NOT_AUTHORIZED",
+                "Supervisor did not pass every semantic item for the exact blueprint revision",
             )
         self._artifacts.put_effect(state.project_id, effect.effect_id, effect.kind, payload)
         return EffectResult(
@@ -829,8 +852,23 @@ class ProjectEffectExecutor:
                 if item.revision > previous_guidance_revision
                 and item.requirement_delta is not None
             ]
+            envelope["material_revision_requests"] = [
+                {
+                    "guidance_id": item.guidance_id,
+                    "revision": item.revision,
+                    "text": item.text,
+                    "force_replan": True,
+                }
+                for item in state.guidance
+                if item.revision > previous_guidance_revision and item.force_replan
+            ]
         envelope["guidance"] = [
-            {"guidance_id": item.guidance_id, "revision": item.revision, "text": item.text}
+            {
+                "guidance_id": item.guidance_id,
+                "revision": item.revision,
+                "text": item.text,
+                "force_replan": item.force_replan,
+            }
             for item in guidance
         ]
         request_id = hashlib.sha256(
@@ -1007,12 +1045,16 @@ class ProjectEffectExecutor:
         status: str,
         event: ProjectEvent | None,
     ) -> EffectResult:
+        record = self._registry.require(state.project_id)
         try:
             result = self._client.request(
                 "thread/goal/set",
                 {
                     "threadId": state.goal_thread_id,
-                    "objective": f"Houdini project {state.authoritative_task_id}",
+                    "objective": native_goal_objective(
+                        record.authoritative_task_text,
+                        state.authoritative_task_id,
+                    ),
                     "status": status,
                     "tokenBudget": None,
                 },
@@ -1105,7 +1147,14 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             "requirements",
             "stages",
         },
-        "hia-project-authorization/1": {"schema", "authorized", "stage_ids"},
+        "hia-project-authorization/1": {
+            "schema",
+            "authorized",
+            "blueprint_revision",
+            "blueprint_sha256",
+            "stage_ids",
+            "semantic_review",
+        },
         "hia-project-execution/1": {
             "schema",
             "stage_id",
@@ -1169,7 +1218,13 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
     elif schema == "hia-project-authorization/1":
         if not isinstance(payload.get("authorized"), bool):
             raise ValueError("authorized must be boolean")
+        if not isinstance(payload.get("blueprint_revision"), int) or isinstance(
+            payload.get("blueprint_revision"), bool
+        ):
+            raise ValueError("blueprint_revision must be an integer")
+        _plain_text(payload.get("blueprint_sha256"))
         _text_list(payload.get("stage_ids"))
+        _validate_semantic_review_shape(payload.get("semantic_review"))
     elif schema == "hia-project-execution/1":
         _plain_text(payload.get("stage_id"))
         refs = payload.get("evidence_refs")
@@ -1210,6 +1265,76 @@ def _text_list(value: Any) -> None:
         isinstance(item, str) and item.strip() for item in value
     ):
         raise ValueError("required string list is invalid")
+
+
+_SEMANTIC_REVIEW_KEYS = (
+    "task_anchors",
+    "blueprint_sections",
+    "requirements",
+    "stages_and_steps",
+    "anti_filler",
+    "native_strategy_and_dependencies",
+    "evidence_contracts",
+    "minimum_repairs",
+)
+
+
+def _validate_semantic_review_shape(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != set(_SEMANTIC_REVIEW_KEYS):
+        raise ValueError("semantic_review must contain every fixed review item")
+    for name in _SEMANTIC_REVIEW_KEYS:
+        item = value[name]
+        if not isinstance(item, Mapping) or set(item) != {
+            "status",
+            "referenced_ids",
+            "findings",
+        }:
+            raise ValueError(f"semantic review item {name} has invalid fields")
+        if item.get("status") not in {"pass", "fail"}:
+            raise ValueError(f"semantic review item {name} has invalid status")
+        _text_list(item.get("referenced_ids"))
+        findings = item.get("findings")
+        if not isinstance(findings, list) or not all(
+            isinstance(finding, str) and finding.strip() for finding in findings
+        ):
+            raise ValueError(f"semantic review item {name} findings are invalid")
+        if item.get("status") == "fail" and not findings:
+            raise ValueError(f"failed semantic review item {name} requires findings")
+
+
+def _validate_semantic_authorization(value: Any, plan: Mapping[str, Any]) -> None:
+    _validate_semantic_review_shape(value)
+    stage_ids = [str(stage["stage_id"]) for stage in plan["stages"]]
+    step_ids = [
+        str(step["step_id"])
+        for stage in plan["stages"]
+        for step in stage["ordered_steps"]
+    ]
+    anchors = set(plan["task_description"]["source_anchors"])
+    anchors.update(str(item["source_anchor"]) for item in plan["user_facts"])
+    expected = {
+        "task_anchors": anchors,
+        "blueprint_sections": {
+            str(item["section_id"]) for item in plan["blueprint_sections"]
+        },
+        "requirements": {
+            str(item["requirement_id"]) for item in plan["requirements"]
+        },
+        "stages_and_steps": set((*stage_ids, *step_ids)),
+        "anti_filler": {
+            f"blueprint:{plan['_blueprint_revision']}",
+            str(plan["_blueprint_sha256"]),
+        },
+        "native_strategy_and_dependencies": set(step_ids),
+        "evidence_contracts": set((*stage_ids, *step_ids)),
+        "minimum_repairs": set((*stage_ids, *step_ids)),
+    }
+    for name, identifiers in expected.items():
+        actual = set(value[name]["referenced_ids"])
+        if actual != identifiers:
+            raise ValueError(
+                f"semantic review item {name} must reference its complete actual ID set"
+            )
 
 
 def _parse_repair_card(
@@ -1379,7 +1504,17 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
         "hia-project-authorization/1": {
             "schema": schema,
             "authorized": True,
+            "blueprint_revision": "exact plan._blueprint_revision integer",
+            "blueprint_sha256": "exact plan._blueprint_sha256",
             "stage_ids": ["exact persisted stage IDs in order"],
+            "semantic_review": {
+                name: {
+                    "status": "pass|fail",
+                    "referenced_ids": ["complete actual IDs from the supplied plan"],
+                    "findings": ["specific finding; empty list is allowed only for pass"],
+                }
+                for name in _SEMANTIC_REVIEW_KEYS
+            },
         },
         "hia-project-execution/1": {
             "schema": schema,
