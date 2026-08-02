@@ -1239,6 +1239,86 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
         )
         store.close()
 
+    def test_builtin_pack_directory_publish_retries_transient_windows_denial(self) -> None:
+        root = self.project_root / "windows-pack-retry"
+        root.mkdir()
+        self._write_pack(
+            root,
+            version="1.0.0",
+            cards=[("cloth", "Cloth", "WindowsRetryToken")],
+        )
+        index = LocalKnowledgeIndex(root)
+        pack = knowledge_index._load_builtin_pack(  # noqa: SLF001
+            root / "knowledge" / "sidefx-official" / "manifest.json"
+        )
+        target = index.builtin_root / "test-official-workflows" / "retry-target"
+        target.parent.mkdir(parents=True)
+        real_rename = os.rename
+        attempts = 0
+
+        def transient_rename(source, destination):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                error = PermissionError(13, "transient directory denial")
+                error.winerror = 32
+                raise error
+            return real_rename(source, destination)
+
+        with (
+            mock.patch.object(knowledge_index.os, "name", "nt"),
+            mock.patch.object(knowledge_index.os, "rename", transient_rename),
+            mock.patch.object(
+                knowledge_index.os,
+                "replace",
+                side_effect=AssertionError("directory publication must not replace"),
+            ),
+            mock.patch.object(knowledge_index.time, "sleep") as sleep,
+        ):
+            index._copy_builtin_pack(pack, target)  # noqa: SLF001
+
+        self.assertEqual(3, attempts)
+        self.assertEqual(2, sleep.call_count)
+        self.assertTrue(knowledge_index._installed_pack_matches(target, pack))  # noqa: SLF001
+
+    def test_builtin_pack_directory_publish_reuses_matching_concurrent_winner(self) -> None:
+        root = self.project_root / "windows-pack-collision"
+        root.mkdir()
+        self._write_pack(
+            root,
+            version="1.0.0",
+            cards=[("cloth", "Cloth", "WindowsCollisionToken")],
+        )
+        index = LocalKnowledgeIndex(root)
+        pack = knowledge_index._load_builtin_pack(  # noqa: SLF001
+            root / "knowledge" / "sidefx-official" / "manifest.json"
+        )
+        target = index.builtin_root / "test-official-workflows" / "collision-target"
+        target.parent.mkdir(parents=True)
+        staged_paths = []
+
+        def concurrent_winner(source, destination):
+            staged_paths.append(Path(source))
+            shutil.copytree(source, destination)
+            error = PermissionError(13, "target appeared concurrently")
+            error.winerror = 5
+            raise error
+
+        with (
+            mock.patch.object(knowledge_index.os, "name", "nt"),
+            mock.patch.object(knowledge_index.os, "rename", concurrent_winner),
+            mock.patch.object(
+                knowledge_index.os,
+                "replace",
+                side_effect=AssertionError("directory publication must not replace"),
+            ),
+        ):
+            index._copy_builtin_pack(pack, target)  # noqa: SLF001
+
+        self.assertTrue(knowledge_index._installed_pack_matches(target, pack))  # noqa: SLF001
+        self.assertEqual(1, len(staged_paths))
+        self.assertFalse(staged_paths[0].exists())
+
     def test_deep_workflow_long_query_compact_and_full_card(self) -> None:
         long_body = (
             "# Velocity-advected ripple field workflow\n\n"
