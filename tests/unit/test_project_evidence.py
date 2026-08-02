@@ -147,6 +147,13 @@ class ProjectEvidenceTests(unittest.TestCase):
                             "requested_frame": frame,
                             "actual_frame": frame,
                             "quality_frame": frame,
+                            "mode": "viewport",
+                            "width": 640,
+                            "height": 360,
+                            "source_state": {
+                                "camera": {"path": "/obj/review_cam"},
+                                "viewport": {"name": "persp1"},
+                            },
                         },
                     },
                 )
@@ -156,6 +163,17 @@ class ProjectEvidenceTests(unittest.TestCase):
                     root,
                 )
                 self.assertEqual(str(path.resolve()), result.evidence[0].artifact_paths[0])
+                self.assertEqual(frame, result.evidence[0].capture_frame)
+                self.assertEqual(
+                    {
+                        "mode": "viewport",
+                        "width": 640,
+                        "height": 360,
+                        "camera": {"path": "/obj/review_cam"},
+                        "viewport": {"name": "persp1"},
+                    },
+                    result.evidence[0].capture_view,
+                )
 
     def test_capture_rejects_wrong_tool_frame_path_and_fake_header(self) -> None:
         with tempfile.TemporaryDirectory() as allowed_directory, tempfile.TemporaryDirectory() as outside_directory:

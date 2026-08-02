@@ -58,6 +58,8 @@ class ValidatedEvidence:
     payload: Mapping[str, Any]
     artifact_paths: tuple[str, ...]
     evidence_bytes: int
+    capture_frame: float | None = None
+    capture_view: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,8 @@ def validate_evidence(
 
         artifact_paths: tuple[str, ...] = ()
         artifact_bytes = 0
+        capture_frame: float | None = None
+        capture_view: Mapping[str, Any] | None = None
         if item.get("tool") == _CAPTURE_TOOL:
             frame = _require_frame(reference.get("frame"), "frame")
             requested_path = reference.get("path")
@@ -156,6 +160,8 @@ def validate_evidence(
             capture_path = _select_capture_path(item, frame, requested_path)
             resolved, file_size = _validate_capture_file(capture_path, roots)
             artifact_paths = (str(resolved),)
+            capture_frame = frame
+            capture_view = _capture_view_metadata(item)
             if resolved not in counted_paths:
                 counted_paths.add(resolved)
                 artifact_bytes = file_size
@@ -193,6 +199,8 @@ def validate_evidence(
                 payload=safe_payload,
                 artifact_paths=artifact_paths,
                 evidence_bytes=item_bytes,
+                capture_frame=capture_frame,
+                capture_view=capture_view,
             )
         )
 
@@ -330,6 +338,26 @@ def _structured_content(item: Mapping[str, Any]) -> Mapping[str, Any]:
         return {}
     structured = result.get("structuredContent")
     return structured if isinstance(structured, Mapping) else {}
+
+
+def _capture_view_metadata(item: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Preserve the capture's observable view identity without inventing one."""
+
+    payload = _structured_content(item).get("result")
+    if not isinstance(payload, Mapping):
+        return {}
+    source_state = payload.get("source_state")
+    view: dict[str, Any] = {
+        "mode": payload.get("mode"),
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+    }
+    if isinstance(source_state, Mapping):
+        for key in ("camera", "viewport", "resolution"):
+            value = source_state.get(key)
+            if isinstance(value, Mapping):
+                view[key] = json.loads(json.dumps(value, ensure_ascii=False))
+    return {key: value for key, value in view.items() if value is not None}
 
 
 def _validate_capture_file(path: str, roots: tuple[Path, ...]) -> tuple[Path, int]:
