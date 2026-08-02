@@ -16,11 +16,13 @@ from typing import Any, Mapping
 class ProjectStatus(str, Enum):
     PROVISIONING = "provisioning"
     INTAKE = "intake"
+    PROVISIONING_ROLES = "provisioning_roles"
     PLANNING = "planning"
     AUTHORIZATION = "authorization"
     EXECUTING_STAGE = "executing_stage"
     REVIEWING_STAGE = "reviewing_stage"
     REPAIRING_STAGE = "repairing_stage"
+    COMPLETING = "completing"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     INTERRUPTED = "interrupted"
@@ -143,7 +145,7 @@ class ProjectState:
     guidance: tuple[GuidanceRecord, ...] = ()
     guidance_consumed: Mapping[Role, int] = field(default_factory=dict)
     stage: StageState = field(default_factory=StageState)
-    turn: TurnState = field(default_factory=TurnState)
+    turns: Mapping[Role, TurnState] = field(default_factory=dict)
     budget: RuntimeBudget = field(default_factory=RuntimeBudget)
     elapsed_seconds: int = 0
     total_evidence_bytes: int = 0
@@ -217,9 +219,12 @@ def project_state_to_dict(state: ProjectState) -> dict[str, Any]:
             for role, revision in state.guidance_consumed.items()
         },
         "stage": asdict(state.stage),
-        "turn": {
-            **asdict(state.turn),
-            "role": state.turn.role.value if state.turn.role else None,
+        "turns": {
+            role.value: {
+                **asdict(turn),
+                "role": turn.role.value if turn.role else None,
+            }
+            for role, turn in state.turns.items()
         },
         "budget": asdict(state.budget),
         "elapsed_seconds": state.elapsed_seconds,
@@ -312,16 +317,32 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
         consumed[Role(key)] = _non_negative_int(raw_revision, "consumed revision")
 
     raw_stage = value.get("stage", {})
-    raw_turn = value.get("turn", {})
+    raw_turns = value.get("turns", {})
     raw_budget = value.get("budget", {})
-    if not all(isinstance(item, Mapping) for item in (raw_stage, raw_turn, raw_budget)):
-        raise ValueError("stage, turn, and budget must be objects")
+    if not all(isinstance(item, Mapping) for item in (raw_stage, raw_turns, raw_budget)):
+        raise ValueError("stage, turns, and budget must be objects")
     raw_evidence = raw_stage.get("latest_evidence_ids", [])
     if not isinstance(raw_evidence, (list, tuple)) or not all(
         isinstance(item, str) and item for item in raw_evidence
     ):
         raise ValueError("latest_evidence_ids must contain non-empty strings")
-    raw_turn_role = raw_turn.get("role")
+    turns: dict[Role, TurnState] = {}
+    for key, raw_turn in raw_turns.items():
+        if not isinstance(raw_turn, Mapping):
+            raise ValueError("turn entry is malformed")
+        role = Role(key)
+        raw_turn_role = raw_turn.get("role")
+        if raw_turn_role is not None and Role(raw_turn_role) is not role:
+            raise ValueError("turn key does not match role")
+        turns[role] = TurnState(
+            role=role,
+            thread_id=_optional_text(raw_turn.get("thread_id"), "thread_id"),
+            turn_id=_optional_text(raw_turn.get("turn_id"), "turn_id"),
+            active=bool(raw_turn.get("active", False)),
+            consumed_turns=_non_negative_int(
+                raw_turn.get("consumed_turns", 0), "consumed_turns"
+            ),
+        )
     resume = value.get("resume_status")
     return ProjectState(
         project_id=required_text("project_id"),
@@ -354,15 +375,7 @@ def project_state_from_dict(value: Mapping[str, Any]) -> ProjectState:
                 raw_stage.get("latest_repair_hash"), "latest_repair_hash"
             ),
         ),
-        turn=TurnState(
-            role=Role(raw_turn_role) if raw_turn_role is not None else None,
-            thread_id=_optional_text(raw_turn.get("thread_id"), "thread_id"),
-            turn_id=_optional_text(raw_turn.get("turn_id"), "turn_id"),
-            active=bool(raw_turn.get("active", False)),
-            consumed_turns=_non_negative_int(
-                raw_turn.get("consumed_turns", 0), "consumed_turns"
-            ),
-        ),
+        turns=turns,
         budget=RuntimeBudget(**dict(raw_budget)),
         elapsed_seconds=_non_negative_int(
             value.get("elapsed_seconds", 0), "elapsed_seconds"

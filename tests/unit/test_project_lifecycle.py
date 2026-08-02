@@ -49,7 +49,8 @@ class ProjectLifecycleTests(unittest.TestCase):
         state = _state()
         expected = (
             (ProjectEvent.INTAKE_STARTED, ProjectStatus.INTAKE),
-            (ProjectEvent.SCENE_ELIGIBLE, ProjectStatus.PLANNING),
+            (ProjectEvent.SCENE_ELIGIBLE, ProjectStatus.PROVISIONING_ROLES),
+            (ProjectEvent.ROLES_PROVISIONED, ProjectStatus.PLANNING),
             (ProjectEvent.PLAN_READY, ProjectStatus.AUTHORIZATION),
             (ProjectEvent.PLAN_AUTHORIZED, ProjectStatus.EXECUTING_STAGE),
             (ProjectEvent.STAGE_EXECUTED, ProjectStatus.REVIEWING_STAGE),
@@ -58,8 +59,11 @@ class ProjectLifecycleTests(unittest.TestCase):
             state, _ = self.apply(state, event)
             self.assertEqual(status, state.status)
         state, commands = self.apply(state, ProjectEvent.REVIEWS_PASSED, final_stage=True)
-        self.assertEqual(ProjectStatus.COMPLETED, state.status)
+        self.assertEqual(ProjectStatus.COMPLETING, state.status)
         self.assertEqual([ProjectCommand.COMPLETE_GOAL], [item.kind for item in commands])
+        state, commands = self.apply(state, ProjectEvent.GOAL_COMPLETED)
+        self.assertEqual(ProjectStatus.COMPLETED, state.status)
+        self.assertEqual((), commands)
 
     def test_review_repair_cycle(self) -> None:
         state = _state(ProjectStatus.REVIEWING_STAGE)
@@ -76,6 +80,9 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.assertEqual(ProjectStatus.INTERRUPTED, state.status)
         self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.resume_status)
         state, commands = self.apply(state, ProjectEvent.RESTART_REQUESTED)
+        self.assertEqual(ProjectStatus.INTERRUPTED, state.status)
+        self.assertEqual(ProjectCommand.VERIFY_RECOVERY, commands[0].kind)
+        state, commands = self.apply(state, ProjectEvent.RECOVERY_VALIDATED)
         self.assertEqual(ProjectStatus.EXECUTING_STAGE, state.status)
         self.assertEqual(ProjectCommand.RESUME_GOAL, commands[0].kind)
 
@@ -104,6 +111,25 @@ class ProjectLifecycleTests(unittest.TestCase):
                     ProjectCommand.PROVISION_WORKERS, [item.kind for item in commands]
                 )
 
+    def test_worker_provisioning_failure_needs_attention(self) -> None:
+        state, _ = self.apply(_state(ProjectStatus.INTAKE), ProjectEvent.SCENE_ELIGIBLE)
+        state, commands = self.apply(
+            state, ProjectEvent.ROLE_PROVISIONING_FAILED, error="thread/start failed"
+        )
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
+        self.assertNotIn(ProjectCommand.REQUEST_PLAN, [item.kind for item in commands])
+
+    def test_goal_completion_failure_never_claims_completed(self) -> None:
+        state, _ = self.apply(
+            _state(ProjectStatus.REVIEWING_STAGE),
+            ProjectEvent.REVIEWS_PASSED,
+            final_stage=True,
+        )
+        state, _ = self.apply(
+            state, ProjectEvent.GOAL_COMPLETION_FAILED, error="goal/update failed"
+        )
+        self.assertEqual(ProjectStatus.NEEDS_ATTENTION, state.status)
+
     def test_failure_is_terminal(self) -> None:
         state, _ = self.apply(
             _state(ProjectStatus.PLANNING), ProjectEvent.PROJECT_FAILED, error="rpc"
@@ -121,8 +147,9 @@ class ProjectLifecycleTests(unittest.TestCase):
 
     def test_restart_without_resume_status_is_illegal(self) -> None:
         state = replace(_state(ProjectStatus.INTERRUPTED), resume_status=None)
+        state, _ = self.apply(state, ProjectEvent.RESTART_REQUESTED)
         with self.assertRaises(InvalidTransition):
-            self.apply(state, ProjectEvent.RESTART_REQUESTED)
+            self.apply(state, ProjectEvent.RECOVERY_VALIDATED)
 
 
 if __name__ == "__main__":

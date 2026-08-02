@@ -12,6 +12,8 @@ from .project_contracts import ProjectState, ProjectStatus, Role
 class ProjectEvent(str, Enum):
     INTAKE_STARTED = "intake_started"
     SCENE_ELIGIBLE = "scene_eligible"
+    ROLES_PROVISIONED = "roles_provisioned"
+    ROLE_PROVISIONING_FAILED = "role_provisioning_failed"
     SCENE_INELIGIBLE = "scene_ineligible"
     INTAKE_UNCLEAR = "intake_unclear"
     PLAN_READY = "plan_ready"
@@ -19,9 +21,13 @@ class ProjectEvent(str, Enum):
     STAGE_EXECUTED = "stage_executed"
     REVIEWS_PASSED = "reviews_passed"
     REVIEWS_FAILED = "reviews_failed"
+    GOAL_COMPLETED = "goal_completed"
+    GOAL_COMPLETION_FAILED = "goal_completion_failed"
     REPAIR_READY = "repair_ready"
     PROJECT_INTERRUPTED = "project_interrupted"
     RESTART_REQUESTED = "restart_requested"
+    RECOVERY_VALIDATED = "recovery_validated"
+    RECOVERY_FAILED = "recovery_failed"
     PROJECT_BLOCKED = "project_blocked"
     PROJECT_FAILED = "project_failed"
     BUDGET_EXHAUSTED = "budget_exhausted"
@@ -39,6 +45,7 @@ class ProjectCommand(str, Enum):
     REQUEST_REPAIR = "request_repair"
     ADVANCE_STAGE = "advance_stage"
     COMPLETE_GOAL = "complete_goal"
+    VERIFY_RECOVERY = "verify_recovery"
     PAUSE_GOAL = "pause_goal"
     RESUME_GOAL = "resume_goal"
     SHOW_ATTENTION = "show_attention"
@@ -68,11 +75,13 @@ _ACTIVE = frozenset(
     {
         ProjectStatus.PROVISIONING,
         ProjectStatus.INTAKE,
+        ProjectStatus.PROVISIONING_ROLES,
         ProjectStatus.PLANNING,
         ProjectStatus.AUTHORIZATION,
         ProjectStatus.EXECUTING_STAGE,
         ProjectStatus.REVIEWING_STAGE,
         ProjectStatus.REPAIRING_STAGE,
+        ProjectStatus.COMPLETING,
     }
 )
 
@@ -103,9 +112,28 @@ def reduce_project(
     if kind is ProjectEvent.SCENE_ELIGIBLE and status is ProjectStatus.INTAKE:
         return _next(
             state,
-            ProjectStatus.PLANNING,
+            ProjectStatus.PROVISIONING_ROLES,
             LifecycleCommand(ProjectCommand.PROVISION_WORKERS),
+        )
+    if kind is ProjectEvent.ROLES_PROVISIONED and status is ProjectStatus.PROVISIONING_ROLES:
+        return _next(
+            state,
+            ProjectStatus.PLANNING,
             LifecycleCommand(ProjectCommand.REQUEST_PLAN),
+        )
+    if (
+        kind is ProjectEvent.ROLE_PROVISIONING_FAILED
+        and status is ProjectStatus.PROVISIONING_ROLES
+    ):
+        error = str(data.get("error") or "role_provisioning_failed")
+        return _next(
+            state,
+            ProjectStatus.NEEDS_ATTENTION,
+            LifecycleCommand(ProjectCommand.PAUSE_GOAL, {"reason": error}),
+            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": error}),
+            resume_status=ProjectStatus.PROVISIONING_ROLES,
+            attention_reason=error,
+            last_error=error,
         )
     if kind is ProjectEvent.SCENE_INELIGIBLE and status is ProjectStatus.INTAKE:
         reason = str(data.get("reason") or "not_a_houdini_scene_task")
@@ -159,10 +187,8 @@ def reduce_project(
         if bool(data.get("final_stage")):
             return _next(
                 state,
-                ProjectStatus.COMPLETED,
+                ProjectStatus.COMPLETING,
                 LifecycleCommand(ProjectCommand.COMPLETE_GOAL),
-                resume_status=None,
-                attention_reason=None,
             )
         return _next(
             state,
@@ -179,7 +205,31 @@ def reduce_project(
             resume_status=status,
             attention_reason=reason,
         )
+    if kind is ProjectEvent.GOAL_COMPLETED and status is ProjectStatus.COMPLETING:
+        return _next(
+            state,
+            ProjectStatus.COMPLETED,
+            resume_status=None,
+            attention_reason=None,
+        )
+    if kind is ProjectEvent.GOAL_COMPLETION_FAILED and status is ProjectStatus.COMPLETING:
+        error = str(data.get("error") or "goal_completion_failed")
+        return _next(
+            state,
+            ProjectStatus.NEEDS_ATTENTION,
+            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": error}),
+            resume_status=ProjectStatus.COMPLETING,
+            attention_reason=error,
+            last_error=error,
+        )
     if kind is ProjectEvent.RESTART_REQUESTED and status is ProjectStatus.INTERRUPTED:
+        return _next(
+            state,
+            ProjectStatus.INTERRUPTED,
+            LifecycleCommand(ProjectCommand.VERIFY_RECOVERY),
+            attention_reason="recovery_validation_pending",
+        )
+    if kind is ProjectEvent.RECOVERY_VALIDATED and status is ProjectStatus.INTERRUPTED:
         target = state.resume_status
         if target not in _ACTIVE:
             raise InvalidTransition(status, kind)
@@ -189,6 +239,15 @@ def reduce_project(
             LifecycleCommand(ProjectCommand.RESUME_GOAL),
             attention_reason=None,
             last_error=None,
+        )
+    if kind is ProjectEvent.RECOVERY_FAILED and status is ProjectStatus.INTERRUPTED:
+        error = str(data.get("error") or "recovery_validation_failed")
+        return _next(
+            state,
+            ProjectStatus.NEEDS_ATTENTION,
+            LifecycleCommand(ProjectCommand.SHOW_ATTENTION, {"reason": error}),
+            attention_reason=error,
+            last_error=error,
         )
     if kind is ProjectEvent.USER_CONTINUE and status is ProjectStatus.NEEDS_ATTENTION:
         target = state.resume_status

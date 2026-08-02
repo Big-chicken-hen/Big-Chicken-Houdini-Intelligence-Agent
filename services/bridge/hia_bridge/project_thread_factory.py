@@ -48,7 +48,7 @@ class ProjectThreadFactory:
     ) -> ProjectState:
         if role in state.roles:
             raise ValueError(f"project already has a {role.value} Thread")
-        if role is not Role.SUPERVISOR and state.status is not ProjectStatus.PLANNING:
+        if role is not Role.SUPERVISOR and state.status is not ProjectStatus.PROVISIONING_ROLES:
             raise ValueError("worker roles are provisioned only after eligible intake")
         profile = permission_profile(role)
         params: dict[str, Any] = {
@@ -115,18 +115,34 @@ class ProjectThreadFactory:
         if set(state.roles) != {Role.SUPERVISOR}:
             raise ValueError("eligible provisioning requires exactly one Supervisor")
         supervisor = state.roles[Role.SUPERVISOR]
-        for role in (
-            Role.PLANNING,
-            Role.EXECUTION,
-            Role.VISUAL_REVIEW,
-            Role.TECHNICAL_REVIEW,
-        ):
-            state = self.start_role(
-                state,
-                role,
-                model=supervisor.model,
-                effort=supervisor.effort,
-                service_tier=supervisor.service_tier,
-            )
+        created: list[str] = []
+        try:
+            for role in (
+                Role.PLANNING,
+                Role.EXECUTION,
+                Role.VISUAL_REVIEW,
+                Role.TECHNICAL_REVIEW,
+            ):
+                state = self.start_role(
+                    state,
+                    role,
+                    model=supervisor.model,
+                    effort=supervisor.effort,
+                    service_tier=supervisor.service_tier,
+                )
+                created.append(state.roles[role].thread_id)
+        except Exception:
+            cleanup_errors: list[str] = []
+            for thread_id in reversed(created):
+                try:
+                    self._client.request("thread/delete", {"threadId": thread_id})
+                except Exception as cleanup_error:
+                    cleanup_errors.append(f"{thread_id}: {cleanup_error}")
+            if cleanup_errors:
+                raise RuntimeError(
+                    "role provisioning failed and precise cleanup was incomplete: "
+                    + "; ".join(cleanup_errors)
+                )
+            raise
         require_complete_project_roles(state.roles)
         return state

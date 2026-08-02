@@ -32,6 +32,16 @@ class FakeClient:
         }
 
 
+class FailingClient(FakeClient):
+    def request(self, method: str, params: dict):
+        if method == "thread/start" and params["threadSource"].endswith("/execution"):
+            raise RuntimeError("injected start failure")
+        if method == "thread/delete":
+            self.calls.append((method, params))
+            return {"deleted": True}
+        return super().request(method, params)
+
+
 def _state(status: ProjectStatus = ProjectStatus.PROVISIONING) -> ProjectState:
     task_id, digest = authoritative_task_identity("build a Houdini scene")
     return ProjectState(
@@ -80,7 +90,7 @@ class ProjectPermissionTests(unittest.TestCase):
         client = FakeClient()
         factory = ProjectThreadFactory(client, Path.cwd())
         state = factory.start_supervisor(_state(), model="gpt-test")
-        state = ProjectState(**{**state.__dict__, "status": ProjectStatus.PLANNING})
+        state = ProjectState(**{**state.__dict__, "status": ProjectStatus.PROVISIONING_ROLES})
         state = factory.provision_workers(state)
         require_complete_project_roles(state.roles)
         self.assertEqual(set(Role), set(state.roles))
@@ -95,6 +105,18 @@ class ProjectPermissionTests(unittest.TestCase):
         state = factory.start_supervisor(_state())
         with self.assertRaisesRegex(ValueError, "exactly five"):
             require_complete_project_roles(state.roles)
+
+    def test_partial_worker_creation_is_precisely_rolled_back(self) -> None:
+        client = FailingClient()
+        factory = ProjectThreadFactory(client, Path.cwd())
+        state = factory.start_supervisor(_state())
+        state = ProjectState(
+            **{**state.__dict__, "status": ProjectStatus.PROVISIONING_ROLES}
+        )
+        with self.assertRaisesRegex(RuntimeError, "injected start failure"):
+            factory.provision_workers(state)
+        deletes = [params["threadId"] for method, params in client.calls if method == "thread/delete"]
+        self.assertEqual(["thread-planning"], deletes)
 
 
 if __name__ == "__main__":
