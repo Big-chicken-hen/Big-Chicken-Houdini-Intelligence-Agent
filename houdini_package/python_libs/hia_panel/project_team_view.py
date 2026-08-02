@@ -59,7 +59,7 @@ if PYSIDE_AVAILABLE:
             self._items_by_key: dict[str, QtWidgets.QTreeWidgetItem] = {}
             self._build_ui()
             self._connect_signals_once()
-            self.render()
+            self.refresh_view()
 
         def _build_ui(self) -> None:
             self.setObjectName("hiaProjectTeamViewV2")
@@ -248,7 +248,7 @@ if PYSIDE_AVAILABLE:
             self.model_combo.setCurrentText(current or "默认")
             self.model_combo.blockSignals(False)
 
-        def render(self) -> None:
+        def refresh_view(self) -> None:
             self._items_by_key.clear()
             self.tree.clear()
             projects_root = QtWidgets.QTreeWidgetItem(["项目"])

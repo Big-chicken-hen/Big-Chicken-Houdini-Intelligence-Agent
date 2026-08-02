@@ -244,7 +244,7 @@ class FakeView:
         self.render_count = 0
         self.guidance_ack_count = 0
 
-    def render(self) -> None:
+    def refresh_view(self) -> None:
         self.render_count += 1
 
     def acknowledge_guidance(self) -> None:

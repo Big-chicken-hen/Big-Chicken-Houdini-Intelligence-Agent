@@ -213,7 +213,7 @@ class ProjectTeamController:
             self._project_snapshot,
             self._ordinary_threads,
         )
-        self.view.render()
+        self.view.refresh_view()
 
 
 def _disconnect(signal: Any, callback: Callable[..., Any]) -> None:
