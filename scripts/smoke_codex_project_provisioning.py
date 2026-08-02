@@ -44,8 +44,16 @@ class RecordingClient:
             self.accepted_starts.append(
                 {
                     "thread_id": thread_id,
-                    "sandbox": params.get("sandbox"),
-                    "approvalPolicy": params.get("approvalPolicy"),
+                    "requested_sandbox": params.get("sandbox"),
+                    "effective_sandbox": (
+                        result.get("sandbox") if isinstance(result, dict) else None
+                    ),
+                    "requested_approvalPolicy": params.get("approvalPolicy"),
+                    "effective_approvalPolicy": (
+                        result.get("approvalPolicy")
+                        if isinstance(result, dict)
+                        else None
+                    ),
                     "config": dict(params.get("config", {})),
                     "threadSource": params.get("threadSource"),
                 }
@@ -54,7 +62,7 @@ class RecordingClient:
 
 
 def _write_inert_mcp_config(run_root: Path) -> None:
-    """Provide valid transports that are never started because no Turn runs."""
+    """Provide valid empty transports for effective-inventory inspection."""
 
     config_directory = run_root / ".codex"
     config_directory.mkdir(parents=True, exist_ok=False)
@@ -134,6 +142,13 @@ def main() -> int:
         text=True,
         timeout=15,
     ).strip()
+    production_policy = ProtocolPolicy.from_project_root(PROJECT_ROOT)
+    smoke_policy = replace(
+        production_policy,
+        client_requests=(
+            production_policy.client_requests | {"mcpServerStatus/list"}
+        ),
+    )
     client = CodexStdioClient(
         [
             str(codex_exe),
@@ -149,7 +164,9 @@ def main() -> int:
         ],
         cwd=run_root,
         environment=environment,
-        policy=ProtocolPolicy.from_project_root(PROJECT_ROOT),
+        # Schema-pinned read-only status inspection is smoke-only; production
+        # retains its narrower frozen allowlist.
+        policy=smoke_policy,
         request_timeout=15.0,
     )
     recorder = RecordingClient(client)
@@ -234,8 +251,9 @@ def main() -> int:
             if accepted is None or accepted.get("thread_id") != binding.thread_id:
                 raise RuntimeError(f"missing acknowledged thread/start for {role.value}")
             matched = (
-                accepted.get("sandbox") == expected.sandbox
-                and accepted.get("approvalPolicy") == expected.approval_policy
+                accepted.get("requested_sandbox") == expected.sandbox
+                and accepted.get("requested_approvalPolicy")
+                == expected.approval_policy
                 and accepted.get("config") == dict(expected.config)
             )
             if not matched:
@@ -245,8 +263,14 @@ def main() -> int:
                     "role": role.value,
                     "thread_id": binding.thread_id,
                     "threadSource": source,
-                    "sandbox": accepted["sandbox"],
-                    "approvalPolicy": accepted["approvalPolicy"],
+                    "requested_sandbox": accepted["requested_sandbox"],
+                    "effective_sandbox": accepted["effective_sandbox"],
+                    "requested_approvalPolicy": accepted[
+                        "requested_approvalPolicy"
+                    ],
+                    "effective_approvalPolicy": accepted[
+                        "effective_approvalPolicy"
+                    ],
                     "config": accepted["config"],
                     "production_profile_match": True,
                 }
@@ -258,6 +282,44 @@ def main() -> int:
             thread = read.get("thread") if isinstance(read, dict) else None
             if not isinstance(thread, dict) or thread.get("id") != binding.thread_id:
                 raise RuntimeError(f"thread/read identity mismatch for {role.value}")
+            status_result = client.request(
+                "mcpServerStatus/list",
+                {
+                    "threadId": binding.thread_id,
+                    "detail": "toolsAndAuthOnly",
+                },
+            )
+            status_data = (
+                status_result.get("data")
+                if isinstance(status_result, dict)
+                else None
+            )
+            if not isinstance(status_data, list):
+                raise RuntimeError(f"MCP status is not observable for {role.value}")
+            observed_servers = {
+                item.get("name"): {
+                    "tools": sorted((item.get("tools") or {}).keys()),
+                    "initialized": isinstance(item.get("serverInfo"), dict),
+                }
+                for item in status_data
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            }
+            expected_servers = {
+                "hia_mcp_v2": {
+                    "tools": [],
+                    "initialized": role is Role.EXECUTION,
+                },
+                "houdini_intelligence": {
+                    "tools": [],
+                    "initialized": False,
+                },
+            }
+            if observed_servers != expected_servers:
+                raise RuntimeError(
+                    f"effective MCP inventory drift for {role.value}: "
+                    f"{observed_servers!r}"
+                )
+            permission_records[-1]["effective_mcp_inventory"] = observed_servers
             read_ids.append(binding.thread_id)
             final_role_ids[role.value] = binding.thread_id
     finally:
