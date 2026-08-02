@@ -1024,6 +1024,84 @@ class HybridKnowledgeTests(unittest.TestCase):
         self.assertEqual([], official_only["matches"])
         store.close()
 
+    def test_short_query_relevance_precedes_cross_major_version_hint(
+        self,
+    ) -> None:
+        index = LocalKnowledgeIndex(self.project_root)
+        query = "vellum adhesion"
+        _seed_document(
+            index,
+            source_key="older-exact-workflow",
+            title="Vellum adhesion production workflow",
+            bodies=(
+                "vellum adhesion vellum adhesion vellum adhesion "
+                "constraint workflow and collision validation",
+            ),
+            collection="community",
+            source_group="project",
+            source="community_tutorial",
+        )
+        _seed_document(
+            index,
+            source_key="current-weak-note",
+            title="General simulation notes",
+            bodies=(
+                "A broad current-release overview mentions vellum adhesion "
+                "once among unrelated rendering and UI notes.",
+            ),
+            collection="community",
+            source_group="project",
+            source="community_tutorial",
+        )
+        with closing(index._connect()) as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE documents SET houdini_version = ? "
+                "WHERE source_key = ?",
+                ("H20-H21; verify current", "older-exact-workflow"),
+            )
+            connection.execute(
+                "UPDATE documents SET houdini_version = ? "
+                "WHERE source_key = ?",
+                ("H22", "current-weak-note"),
+            )
+            connection.commit()
+
+        for current_version in ("22.0.100", "27.5.7"):
+            with self.subTest(current_version=current_version):
+                if current_version.startswith("27"):
+                    with closing(index._connect()) as connection:  # noqa: SLF001
+                        connection.execute(
+                            "UPDATE documents SET houdini_version = ? "
+                            "WHERE source_key = ?",
+                            ("H27", "current-weak-note"),
+                        )
+                        connection.commit()
+                result = index.search(
+                    query,
+                    {"project"},
+                    current_houdini_version=current_version,
+                    offset=0,
+                    limit=10,
+                )
+                self.assertEqual(2, result["total"])
+                self.assertEqual(
+                    {"older-exact-workflow", "current-weak-note"},
+                    {
+                        match["metadata"]["source_key"]
+                        for match in result["matches"]
+                    },
+                )
+                self.assertEqual(
+                    "older-exact-workflow",
+                    result["matches"][0]["metadata"]["source_key"],
+                )
+                self.assertEqual(
+                    "mismatch",
+                    result["matches"][0]["metadata"][
+                        "current_version_status"
+                    ],
+                )
+
     def test_vector_ranking_streams_one_cursor_with_bounded_top_k(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)
         for number in range(120):
@@ -1478,6 +1556,84 @@ class HybridKnowledgeTests(unittest.TestCase):
                     match["provenance"]["source_key"],
                 )
                 self.assertTrue(match["provenance"]["content_hash"])
+
+    def test_non_user_cross_source_duplicates_fold_by_body_hash(self) -> None:
+        shared_hash = "a" * 64
+
+        def match(
+            source: str,
+            source_key: str,
+            sha256: str,
+            *,
+            content_hash: str = shared_hash,
+            provenance_content_hash: str = "",
+        ) -> dict[str, Any]:
+            metadata: dict[str, Any] = {
+                "source_key": source_key,
+                "content_hash": content_hash,
+                "sha256": sha256,
+            }
+            if provenance_content_hash:
+                metadata["provenance"] = {
+                    "content_hash": provenance_content_hash,
+                }
+            return {
+                "source": source,
+                "title": source_key,
+                "snippet": source_key,
+                "metadata": metadata,
+            }
+
+        def fold_counts(matches: tuple[dict[str, Any], ...]) -> tuple[int, int]:
+            combined = HybridKnowledgeStore._combine_matches(  # noqa: SLF001
+                matches,
+                (),
+                "hybrid",
+                query="shared procedural workflow",
+            )
+            canonical = hybrid_module._fold_canonical_matches(  # noqa: SLF001
+                tuple(
+                    hybrid_module._with_source_kind(value)  # noqa: SLF001
+                    for value in matches
+                )
+            )
+            return len(combined), len(canonical)
+
+        non_user = (
+            match("builtin_official_workflow", "official", "b" * 64),
+            match("community_tutorial", "community", "c" * 64),
+        )
+        self.assertEqual((1, 1), fold_counts(non_user))
+
+        user_uploads = (
+            match("user_document", "user-a", "d" * 64),
+            match("user_document", "user-b", "e" * 64),
+        )
+        self.assertEqual((2, 2), fold_counts(user_uploads))
+
+        legacy_sha = (
+            match("project_docs", "legacy-a", shared_hash, content_hash=""),
+            match("community_tutorial", "legacy-b", shared_hash, content_hash=""),
+        )
+        self.assertEqual((1, 1), fold_counts(legacy_sha))
+
+        nested_provenance = (
+            match(
+                "project_docs",
+                "nested-a",
+                "1" * 64,
+                content_hash="",
+                provenance_content_hash=shared_hash,
+            ),
+            match(
+                "community_tutorial",
+                "nested-b",
+                "2" * 64,
+                content_hash="",
+                provenance_content_hash=shared_hash,
+            ),
+        )
+        self.assertEqual((1, 1), fold_counts(nested_provenance))
 
     def test_vector_signature_switch_rebuilds_only_vector_layer(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)

@@ -695,6 +695,357 @@ class BridgeHTTPTests(unittest.TestCase):
                     set(effort),
                 )
 
+    def test_project_team_get_and_mode_only_post_round_trip(self) -> None:
+        initial = self.request("GET", "/v1/project-team")["project_team"]
+
+        self.assertEqual("hia-project-team/1", initial["schema"])
+        self.assertEqual({"mode": "single", "writable": True}, initial["settings"])
+        self.assertEqual([], initial["projects"])
+        self.assertNotIn("mode", initial)
+        self.assertNotIn("boundary", initial)
+
+        saved = self.request(
+            "POST",
+            "/v1/project-team",
+            {"mode": "team"},
+        )["project_team"]
+        refreshed = self.request("GET", "/v1/project-team")["project_team"]
+
+        self.assertEqual("team", saved["settings"]["mode"])
+        self.assertEqual("team", refreshed["settings"]["mode"])
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/project-team",
+                {"mode": "team", "roles": []},
+            )
+        self.assertEqual(400, raised.exception.code)
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/project-team",
+                {"action": "start", "task": "建一个木屋"},
+            )
+        self.assertEqual(400, raised.exception.code)
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/project-team/actions",
+                {
+                    "action": "start",
+                    "project_id": "project-missing",
+                    "thread_id": "thread-missing",
+                    "text": "开始",
+                },
+            )
+        self.assertEqual(400, raised.exception.code)
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/project-team/actions",
+                {
+                    "action": "append_guidance",
+                    "project_id": "project-missing",
+                    "thread_id": "thread-missing",
+                    "text": "保留屋檐层次",
+                },
+            )
+        self.assertEqual(404, raised.exception.code)
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/threads/archive",
+                {"thread_id": "thread-fake", "archived": True},
+            )
+        self.assertEqual(404, raised.exception.code)
+
+    def test_project_guidance_action_returns_exact_acceptance_and_snapshot(self) -> None:
+        snapshot = {
+            "schema": "hia-project-team/1",
+            "revision": 9,
+            "state_status": "ready",
+            "settings": {"mode": "team", "writable": True},
+            "projects": [
+                {
+                    "project_id": "project-1",
+                    "status": "running",
+                    "threads": [],
+                }
+            ],
+        }
+        result = {
+            "guidance_accepted": True,
+            "guidance_id": "guidance-0123456789abcdef0123456789abcdef",
+            "workflow_delivery": {
+                "mode": "steered",
+                "project_id": "project-1",
+                "thread_id": "thread-supervisor",
+                "turn_id": "turn-supervisor",
+                "role": "supervisor",
+            },
+            "guidance_target": {
+                "project_id": "project-1",
+                "thread_id": "thread-supervisor",
+                "role": "supervisor",
+            },
+            "project_team": snapshot,
+        }
+        with mock.patch.object(
+            self.session,
+            "append_project_guidance",
+            return_value=result,
+        ) as append_guidance:
+            response = self.request(
+                "POST",
+                "/v1/project-team/actions",
+                {
+                    "action": "append_guidance",
+                    "project_id": "project-1",
+                    "thread_id": "thread-supervisor",
+                    "text": "preserve the user constraint",
+                    "model": "gpt-5.6-sol",
+                    "effort": "high",
+                    "service_tier": "priority",
+                    "local_image_paths": [
+                        "E:/project/.runtime/attachments/thread-supervisor/reference.png"
+                    ],
+                },
+            )
+
+        self.assertTrue(response["guidance_accepted"])
+        self.assertEqual(result["guidance_id"], response["guidance_id"])
+        self.assertEqual(result["workflow_delivery"], response["workflow_delivery"])
+        self.assertEqual(result["guidance_target"], response["guidance_target"])
+        self.assertEqual(snapshot, response["project_team"])
+        append_guidance.assert_called_once_with(
+            project_id="project-1",
+            thread_id="thread-supervisor",
+            text="preserve the user constraint",
+            model="gpt-5.6-sol",
+            effort="high",
+            service_tier="priority",
+            local_image_paths=[
+                "E:/project/.runtime/attachments/thread-supervisor/reference.png"
+            ],
+        )
+
+    def test_project_guidance_action_accepts_image_only_input(self) -> None:
+        snapshot = self.session.project_team_snapshot()
+        result = {
+            "guidance_accepted": True,
+            "guidance_id": "guidance-fedcba9876543210fedcba9876543210",
+            "workflow_delivery": {
+                "mode": "queued",
+                "project_id": "project-1",
+            },
+            "guidance_target": {
+                "project_id": "project-1",
+                "thread_id": "thread-visual-review",
+                "role": "visual_review",
+            },
+            "project_team": snapshot,
+        }
+        with mock.patch.object(
+            self.session,
+            "append_project_guidance",
+            return_value=result,
+        ) as append_guidance:
+            response = self.request(
+                "POST",
+                "/v1/project-team/actions",
+                {
+                    "action": "append_guidance",
+                    "project_id": "project-1",
+                    "thread_id": "thread-visual-review",
+                    "text": "",
+                    "local_image_paths": [
+                        "E:/project/.runtime/attachments/thread-visual-review/reference.webp"
+                    ],
+                },
+            )
+
+        self.assertTrue(response["guidance_accepted"])
+        self.assertEqual(result["workflow_delivery"], response["workflow_delivery"])
+        self.assertEqual(result["guidance_target"], response["guidance_target"])
+        self.assertEqual(snapshot, response["project_team"])
+        append_guidance.assert_called_once_with(
+            project_id="project-1",
+            thread_id="thread-visual-review",
+            text="",
+            model=None,
+            effort=None,
+            service_tier=None,
+            local_image_paths=[
+                "E:/project/.runtime/attachments/thread-visual-review/reference.webp"
+            ],
+        )
+
+    def test_active_supervisor_guidance_resolves_early_project_target(self) -> None:
+        snapshot = self.session.project_team_snapshot()
+        result = {
+            "guidance_accepted": True,
+            "guidance_id": "guidance-0123456789abcdef0123456789abcdef",
+            "workflow_delivery": {"mode": "queued", "project_id": "project-1"},
+            "guidance_target": {
+                "project_id": "project-1",
+                "thread_id": "thread-supervisor",
+                "role": "supervisor",
+            },
+            "project_team": snapshot,
+        }
+        with mock.patch.object(
+            self.session,
+            "append_active_supervisor_guidance",
+            return_value=result,
+        ) as append_guidance:
+            response = self.request(
+                "POST",
+                "/v1/project-team/actions",
+                {
+                    "action": "append_supervisor_guidance",
+                    "text": "preserve the new user constraint",
+                    "local_image_paths": [
+                        "E:/project/.runtime/attachments/thread-supervisor/reference.png"
+                    ],
+                },
+            )
+
+        self.assertEqual(result["guidance_target"], response["guidance_target"])
+        self.assertTrue(response["guidance_accepted"])
+        self.assertEqual(result["workflow_delivery"], response["workflow_delivery"])
+        self.assertEqual(snapshot, response["project_team"])
+        append_guidance.assert_called_once_with(
+            project_id=None,
+            text="preserve the new user constraint",
+            model=None,
+            effort=None,
+            service_tier=None,
+            local_image_paths=[
+                "E:/project/.runtime/attachments/thread-supervisor/reference.png"
+            ],
+        )
+
+    def test_turn_accepts_only_single_team_override_and_returns_actual_routing(self) -> None:
+        started = self.request(
+            "POST",
+            "/v1/session",
+            {"action": "start", "team_override": "single"},
+        )
+        self.assertEqual("thread-fake", started["thread_id"])
+        self.assertEqual("single", started["routing"])
+        turn = self.request(
+            "POST",
+            "/v1/turn",
+            {"text": "只读检查当前任务", "team_override": "single"},
+        )
+        self.assertEqual("single", turn["routing"])
+        self.assertNotIn("project_id", turn)
+        self.request("POST", "/v1/interrupt", {})
+
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/turn",
+                {"text": "无效覆盖", "team_override": "auto"},
+            )
+        self.assertEqual(400, raised.exception.code)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(
+            "INVALID_TEAM_OVERRIDE", payload["structured_error"]["code"]
+        )
+
+    def test_project_role_identity_and_plain_input_conflicts_cross_http_exactly(
+        self,
+    ) -> None:
+        started = self.request(
+            "POST",
+            "/v1/session",
+            {"action": "start", "team_override": "team"},
+        )
+        with mock.patch.object(
+            self.session._project_threads,
+            "_create_thread",
+            return_value=None,
+        ):
+            project = self.session._project_threads.prepare_project(
+                started["thread_id"],
+                "Build one managed project for HTTP routing verification",
+            )
+
+        with mock.patch.object(
+            self.session.client,
+            "request",
+            wraps=self.session.client.request,
+        ) as app_server_request:
+            selected = self.request("GET", "/v1/session")["session"]
+            self.assertEqual("supervisor", selected["permission_profile"])
+            self.assertEqual(project["project_id"], selected["project_id"])
+            self.assertEqual("supervisor", selected["project_role"])
+
+            for endpoint in ("/v1/steer", "/v1/turn"):
+                with self.subTest(endpoint=endpoint), self.assertRaises(
+                    HTTPError
+                ) as raised:
+                    self.request(
+                        "POST",
+                        endpoint,
+                        {
+                            "text": "Keep this text as managed project guidance",
+                            "local_image_paths": [
+                                "E:/references/project-guidance.png"
+                            ],
+                        },
+                    )
+                self.assertEqual(409, raised.exception.code)
+                payload = json.loads(
+                    raised.exception.read().decode("utf-8")
+                )["structured_error"]
+                self.assertEqual(
+                    "PROJECT_THREAD_GUIDANCE_REQUIRED", payload["code"]
+                )
+                self.assertEqual(
+                    project["project_id"], payload["details"]["project_id"]
+                )
+                self.assertEqual(
+                    "supervisor", payload["details"]["project_role"]
+                )
+                self.assertEqual(
+                    started["thread_id"], payload["details"]["thread_id"]
+                )
+
+            app_server_request.assert_not_called()
+
+    def test_session_start_validates_exact_routing_field(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/session",
+                {"action": "start", "team_override": "auto"},
+            )
+        self.assertEqual(400, raised.exception.code)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(
+            "INVALID_TEAM_OVERRIDE", payload["structured_error"]["code"]
+        )
+        self.assertEqual(
+            {"field": "team_override"},
+            payload["structured_error"]["details"],
+        )
+
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/session",
+                {"action": "start", "team_override": "single", "routing": "single"},
+            )
+        self.assertEqual(400, raised.exception.code)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual("INVALID_REQUEST", payload["structured_error"]["code"])
+        self.assertEqual(
+            ["action", "model", "service_tier", "team_override"],
+            payload["structured_error"]["details"]["allowed_fields"],
+        )
+
     def test_thread_history_list_rename_and_delete_routes(self) -> None:
         listed = self.request("GET", "/v1/threads")
 
@@ -738,6 +1089,40 @@ class BridgeHTTPTests(unittest.TestCase):
             {"threadId": "thread-fake"},
             deleted["result"]["receivedParams"],
         )
+
+    def test_thread_read_transport_preserves_more_than_120k_blueprint_characters(
+        self,
+    ) -> None:
+        blueprint = "完整木屋施工蓝图步骤" * 15_000
+        projected = {
+            "thread_id": "thread-fake",
+            "result": {
+                "thread": {
+                    "id": "thread-fake",
+                    "turns": [
+                        {
+                            "items": [
+                                {"type": "agentMessage", "text": blueprint}
+                            ]
+                        }
+                    ],
+                }
+            },
+        }
+        with mock.patch.object(
+            self.session,
+            "read_thread",
+            return_value=projected,
+        ):
+            response = self.request(
+                "POST",
+                "/v1/session",
+                {"action": "read", "thread_id": "thread-fake"},
+            )
+
+        received = response["result"]["thread"]["turns"][0]["items"][0]["text"]
+        self.assertGreater(len(received), 120_000)
+        self.assertEqual(blueprint, received)
 
     def test_native_goal_routes_use_the_selected_thread(self) -> None:
         self.request("POST", "/v1/session", {"action": "start"})

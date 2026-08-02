@@ -32,7 +32,7 @@ Apply explicit negative constraints to the observed result, not merely to node n
 
 For a Focused or Full change, translate only implementation-relevant knowledge into explicit expectations before authoring: the target path, group or attribute, ownership/type, mapping, relationship, range or tolerance, affected dependency, and representative control change. After the write, ask the current `hia_validate` semantic-expectation capability to test those claims through its live contract. Do not copy its payload schema into this reference. A clean cook or nonempty mesh is insufficient when the researched claim concerns a host relationship, stable material region, expected placement range, or dependency update.
 
-Treat an unproven semantic result as a real risk. State the missing observation once and choose a bounded additional check only when it can settle the claim; do not repeat the warning or launch a tool cascade. For a simulation/cache handoff, apply the evidence rule in the shared Build Brief reference rather than inferring freshness from a clean cook.
+Treat an unproven semantic result as a real risk. State the missing observation once and choose a bounded additional check only when it can settle the claim; do not repeat the warning or launch a tool cascade. For a simulation/cache handoff, apply the evidence rule in the shared risk-routing and review reference rather than inferring freshness from a clean cook.
 
 ## Check visual identity
 
@@ -61,7 +61,7 @@ When evidence reveals a high-impact issue:
 3. Recheck enough evidence to determine whether the intended improvement occurred.
 4. Stop when the requested completion standard is supported or when remaining uncertainty requires user input or unavailable visual evidence.
 
-Do not create a scoring system, fixed loop, or automatic review-fix cycle. Use `$houdini-artifact-review` for a read-only milestone or pre-delivery pass when that independent evidence is valuable; let the main task apply fixes.
+Do not create a scoring system, fixed-count ritual, or backend automatic review-fix engine. In a project-team Full Goal, route live technical claims through Technical Review and actual-image claims through Visual Review in parallel, using `$houdini-artifact-review` inside the applicable read-only Thread. Let Supervisor select the minimum coherent fix, let only Execution apply it, and repeat both reviews without a fixed iteration count until verified or genuinely blocked.
 
 ## State completion honestly
 

@@ -3629,11 +3629,20 @@ def _lexical_rank_key(
         else 3
     )
     lexical_score = float(row["lexical_score"])
-    rank_tiers = (
-        (lexical_score, version_tier)
-        if len(_fts_tokens(query)) >= 4
-        else (version_tier, lexical_score)
-    )
+    query_tokens = _fts_tokens(query)
+    if len(query_tokens) < 4:
+        # BM25 differences for very short queries are often only document-
+        # length noise.  Compare bounded, observable token evidence first;
+        # when that evidence is equal, prefer the current-version hint.  A
+        # genuinely stronger older workflow can therefore win without making
+        # version metadata a filter or teaching the same workflow per release.
+        rank_tiers = (
+            *_short_query_token_evidence(row, query_tokens),
+            version_tier,
+            lexical_score,
+        )
+    else:
+        rank_tiers = (lexical_score, version_tier)
     return (
         _exact_identity_tier(row, query),
         source_tier,
@@ -3641,6 +3650,28 @@ def _lexical_rank_key(
         0 if str(row["verification"]) == "verified" else 1,
         str(row["title"]).casefold(),
     )
+
+
+def _short_query_token_evidence(
+    row: Mapping[str, Any],
+    query_tokens: tuple[str, ...],
+) -> tuple[int, int]:
+    unique_query_tokens = tuple(
+        dict.fromkeys(token.casefold() for token in query_tokens)
+    )
+    document_tokens = tuple(
+        token.casefold()
+        for token in _fts_tokens(
+            f'{str(row["title"])} {str(row["body"])}'
+        )
+    )
+    counts = {
+        token: document_tokens.count(token)
+        for token in unique_query_tokens
+    }
+    coverage = sum(1 for count in counts.values() if count)
+    bounded_frequency = sum(min(count, 3) for count in counts.values())
+    return (-coverage, -bounded_frequency)
 
 
 def _exact_identity_tier(row: Mapping[str, Any], query: str) -> int:

@@ -12,11 +12,26 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .codex_stdio import CodexStdioClient, RequestId
 from .errors import BridgeError, CodexRPCError
 from .events import EventBuffer
+from .project_thread_contract import (
+    PROJECT_HIA_DISABLE_CONFIG,
+    PROJECT_HIA_ENABLE_CONFIG,
+    PROJECT_READ_ONLY_ROLES,
+    PROJECT_ROLE_ORDER,
+    project_role_config,
+    role_instructions,
+    supervisor_intake_prompt,
+)
+from .project_threads import (
+    PROJECT_TEAM_MODES,
+    ProjectTeamSettings,
+    ProjectThreadCoordinator,
+)
+from .thread_transfer import ThreadTransferManager
 
 
 MODEL_LIST_PAGE_SIZE = 100
@@ -435,11 +450,31 @@ class BridgeSession:
         *,
         mcp_backend: str = HIA_MCP_V2_BACKEND,
         focus_state_path: Path | None = None,
+        project_team_state_path: Path | None = None,
     ) -> None:
         if mcp_backend not in {HIA_MCP_V2_BACKEND, FXHOUDINI_MCP_BACKEND}:
             raise ValueError(f"Unsupported Houdini MCP backend: {mcp_backend}")
         self._project_root = project_root
         self._focus_state_path = focus_state_path
+        self._project_team_settings = ProjectTeamSettings(
+            project_team_state_path
+        )
+        project_threads_state_path = (
+            project_team_state_path.with_name("project-threads.json")
+            if project_team_state_path is not None
+            else None
+        )
+        thread_transfer_state_path = (
+            project_team_state_path.with_name("thread-transfer.json")
+            if project_team_state_path is not None
+            else None
+        )
+        self._project_threads = ProjectThreadCoordinator(
+            project_root,
+            client,
+            events,
+            state_path=project_threads_state_path,
+        )
         (
             self._focus_enabled_threads,
             self._focus_goal_bindings,
@@ -454,6 +489,7 @@ class BridgeSession:
         self._account_result: dict[str, Any] | None = None
         self._account_error: dict[str, Any] | None = None
         self._thread_id: str | None = None
+        self._thread_permission_profile: str | None = None
         self._turn_id: str | None = None
         self._turn_status: str | None = None
         self._turn_active = False
@@ -463,7 +499,21 @@ class BridgeSession:
         self._last_tool_name: str | None = None
         self._last_tool_status: str | None = None
         self._stop_recovery_thread: threading.Thread | None = None
+        self._thread_runtime: dict[str, dict[str, Any]] = {}
+        self._normal_transfers: set[str] = set()
         self._closed = False
+        self._thread_transfer = ThreadTransferManager(
+            client,
+            events,
+            descriptor=self._transfer_descriptor,
+            rehydrate_descriptor=self._rehydrate_transfer_descriptor,
+            begin=self._begin_thread_transfer,
+            commit=self._commit_thread_transfer,
+            rollback=self._rollback_thread_transfer,
+            finish=self._finish_thread_transfer,
+            state_path=thread_transfer_state_path,
+        )
+        self._project_threads.set_event_replay(self._on_client_event)
         self._client.set_event_sink(self._on_client_event)
 
     @property
@@ -478,6 +528,7 @@ class BridgeSession:
                 self._initialize_result = initialize_result
                 self._connected = True
                 self._thread_id = None
+                self._thread_permission_profile = None
                 self._write_focus_state_locked()
             try:
                 account = self._client.request(
@@ -491,6 +542,9 @@ class BridgeSession:
                 with self._lock:
                     self._account_result = None
                     self._account_error = exc.to_dict()["structured_error"]
+            self._project_threads.reconcile_restarted_goals()
+            self._thread_transfer.recover_pending_deletes()
+            self._thread_transfer.maybe_schedule_all()
             snapshot = self.snapshot()
             self._events.publish("session_state", session=snapshot)
             return snapshot
@@ -508,18 +562,52 @@ class BridgeSession:
             self._connected = False
 
     def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            account = copy.deepcopy(self._account_result)
-            account_error = copy.deepcopy(self._account_error)
-            connected = self._connected and self._client.is_running
-            return {
+        # Do not nest the Session lock with the project coordinator condition.
+        # Project event handling can inspect Session state while the coordinator
+        # is active, so identity is resolved between two short Session reads.
+        while True:
+            with self._lock:
+                thread_id = self._thread_id
+            project_identity = (
+                self._project_threads.project_identity_for_thread(thread_id)
+                if isinstance(thread_id, str)
+                else None
+            )
+            with self._lock:
+                if thread_id != self._thread_id:
+                    continue
+                account = copy.deepcopy(self._account_result)
+                account_error = copy.deepcopy(self._account_error)
+                connected = self._connected and self._client.is_running
+                permission_profile = (
+                    project_identity["project_role"]
+                    if project_identity is not None
+                    else (
+                        "single"
+                        if thread_id is not None
+                        and self._thread_permission_profile == "single"
+                        else None
+                    )
+                )
+                return {
                 "connected": connected,
                 "mcp_backend": self._mcp_backend,
                 "codex_pid": self._client.process_id,
                 "authentication": self._authentication_status(account, account_error),
                 "account": account,
                 "account_error": account_error,
-                "thread_id": self._thread_id,
+                "thread_id": thread_id,
+                "permission_profile": permission_profile,
+                "project_id": (
+                    project_identity["project_id"]
+                    if project_identity is not None
+                    else None
+                ),
+                "project_role": (
+                    project_identity["project_role"]
+                    if project_identity is not None
+                    else None
+                ),
                 "turn_id": self._turn_id,
                 "turn_status": self._turn_status,
                 "turn_active": self._turn_active,
@@ -664,7 +752,7 @@ class BridgeSession:
                 "随后 fresh cook、hia_scene_diff/hia_validate；"
                 "Goal 按与用户完成声明和风险相称的场景证据验收；简单操作可用目标值或连接回读，"
                 "plan/revision/tool completed 不算通过。"
-                "复杂资产把承诺、可识别特征和禁项写入简短 Brief，不得静默缩水；"
+                "Full蓝图列承诺、可识别特征和禁项，禁静默缩水；"
                 "用户负约束必须原样保留并进入验收；禁止用语义等价或换皮替代绕过（如禁 Box 也禁盒状代用品），"
                 "节点存在/tool success 不能证明几何要求通过。"
                 "小型多部件装配也要量端点、宿主、接触、净空和穿插；截图/AABB/clean cook 不算精确证明。"
@@ -699,8 +787,8 @@ class BridgeSession:
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
             "只有用户明确要求离线、独立 HIP、批处理或后台渲染时才用 PATH 中的 hython.exe。"
             "普通场景请求不先搜索项目源码/文档；仅诊断或修改 Panel、Bridge、MCP/项目代码时读取。"
-            "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，"
-            "不塞入主上下文，采纳结果由主任务公开说明。"
+            "Houdini Full 发布详细用户可见蓝图；Supervisor 只带硬约束、"
+            "完整当前阶段卡和最新证据，禁回塞全蓝图；按需查看子任务并公开采纳。"
             "上下文仅用 app-server 自动整理，不手动 compact，不创建本地摘要或记忆。"
             "实时代码禁止 hou.hipFile.clear/load/save，不替换当前场景；新资产放入唯一新根。"
             "不要调用 request_user_input；信息不足时采用合理默认值，无法执行才报告原因。"
@@ -719,7 +807,8 @@ class BridgeSession:
                 "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
                 "MCP 不可用就说明，不转离线 HIP；hython 仅用于用户明确的离线/独立 HIP/批处理/后台渲染。"
                 "普通场景不查项目源码。"
-                "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，不塞入主上下文。"
+                "Houdini Full 发布详细用户可见蓝图；Supervisor 只带硬约束、"
+                "完整当前阶段卡和最新证据，禁回塞全蓝图。"
                 "禁止 hou.hipFile.clear/load/save 和替换当前场景；新资产置于唯一新根。"
                 "不调用 request_user_input；信息不足合理默认，无法执行才报告。"
                 "安全已存 HIP 截图写同级 .hia/screenshots，否则用 HIA_CACHE_DIR/screenshots；"
@@ -728,6 +817,211 @@ class BridgeSession:
                 "否则用 HIA_RENDER_OUTPUT_DIR；始终报告最终路径。禁止屏幕接管。"
             )
         return backend_instructions + common_instructions
+
+    def _permission_profile(self, thread_id: str) -> str:
+        role = self._project_threads.role_for_thread(thread_id)
+        if role is not None:
+            return role
+        # The persistent mode chooses only the next newly-created entry.  An
+        # existing non-project Thread must never be converted into a project
+        # root merely because that default changed later.
+        return "single"
+
+    def _thread_profile_params(
+        self,
+        profile: str,
+        *,
+        service_tier: str | None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        read_only = profile in PROJECT_READ_ONLY_ROLES
+        params: dict[str, Any] = {
+            "cwd": str(self._project_root),
+            "approvalPolicy": "never" if read_only else "on-request",
+            "approvalsReviewer": "user",
+            "sandbox": "read-only" if read_only else "workspace-write",
+            "ephemeral": False,
+            "developerInstructions": (
+                self._developer_instructions()
+                if profile == "single"
+                else role_instructions(profile)
+            ),
+            "serviceTier": service_tier,
+        }
+        params["config"] = (
+            project_role_config(read_only=read_only)
+            if profile in PROJECT_ROLE_ORDER
+            else dict(PROJECT_HIA_ENABLE_CONFIG)
+        )
+        if thread_id is not None:
+            params["threadId"] = thread_id
+            params.pop("ephemeral", None)
+        return params
+
+    def _transfer_descriptor(self, thread_id: str) -> dict[str, Any] | None:
+        project = self._project_threads.transfer_descriptor(thread_id)
+        if project is not None:
+            with self._lock:
+                project.update(
+                    profile=project["role"],
+                    selected=self._thread_id == thread_id,
+                    focus_enabled=thread_id in self._focus_enabled_threads,
+                )
+                binding = self._focus_goal_bindings.get(thread_id)
+                if binding is not None:
+                    project["focus_binding"] = binding
+            return project
+        with self._lock:
+            runtime = copy.deepcopy(self._thread_runtime.get(thread_id))
+        if runtime is None:
+            return None
+        profile = runtime.get("profile", "single")
+        params = self._thread_profile_params(
+            profile,
+            service_tier=runtime.get("service_tier"),
+        )
+        return {
+            "thread_id": thread_id,
+            "title": runtime.get("title"),
+            "model": runtime.get("model"),
+            "effort": runtime.get("effort"),
+            "service_tier": runtime.get("service_tier"),
+            "cwd": params["cwd"],
+            "approval_policy": params["approvalPolicy"],
+            "approvals_reviewer": params["approvalsReviewer"],
+            "sandbox": params["sandbox"],
+            "developer_instructions": params["developerInstructions"],
+            "config": params.get("config"),
+            "thread_source": runtime.get("thread_source"),
+            "profile": profile,
+            "selected": self._thread_id == thread_id,
+            "focus_enabled": thread_id in self._focus_enabled_threads,
+            **(
+                {"focus_binding": self._focus_goal_bindings[thread_id]}
+                if thread_id in self._focus_goal_bindings
+                else {}
+            ),
+        }
+
+    def _rehydrate_transfer_descriptor(
+        self, persisted: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        descriptor = copy.deepcopy(dict(persisted))
+        profile = descriptor.get("profile")
+        if profile not in {*PROJECT_ROLE_ORDER, "single"}:
+            raise BridgeError(
+                "THREAD_TRANSFER_RECOVERY_INVALID",
+                "Persisted Thread profile is not supported",
+                http_status=502,
+            )
+        expected = self._thread_profile_params(
+            profile,
+            service_tier=descriptor.get("service_tier"),
+        )
+        for descriptor_key, param_key in (
+            ("cwd", "cwd"),
+            ("approval_policy", "approvalPolicy"),
+            ("approvals_reviewer", "approvalsReviewer"),
+            ("sandbox", "sandbox"),
+            ("config", "config"),
+        ):
+            if descriptor.get(descriptor_key) != expected.get(param_key):
+                raise BridgeError(
+                    "THREAD_TRANSFER_RECOVERY_INVALID",
+                    f"Persisted {descriptor_key} no longer matches its Thread profile",
+                    http_status=502,
+                )
+        descriptor["developer_instructions"] = expected["developerInstructions"]
+        return descriptor
+
+    def _begin_thread_transfer(self, thread_id: str) -> bool:
+        if self._project_threads.role_for_thread(thread_id) is not None:
+            return self._project_threads.begin_thread_transfer(thread_id)
+        with self._lock:
+            if thread_id not in self._thread_runtime or thread_id in self._normal_transfers:
+                return False
+            if self._thread_id == thread_id and self._turn_active:
+                return False
+            self._normal_transfers.add(thread_id)
+            return True
+
+    def _commit_thread_transfer(
+        self,
+        old_thread_id: str,
+        new_thread_id: str,
+        descriptor: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        project = self._project_threads.transfer_descriptor(old_thread_id)
+        new_project = self._project_threads.transfer_descriptor(new_thread_id)
+        project_metadata: dict[str, Any] = {}
+        if project is not None:
+            project_metadata = self._project_threads.replace_thread_id(
+                old_thread_id, new_thread_id
+            )
+        elif new_project is not None:
+            project_metadata = {
+                key: new_project[key]
+                for key in ("project_id", "role")
+                if isinstance(new_project.get(key), str)
+            }
+        with self._lock:
+            old_runtime = self._thread_runtime.pop(old_thread_id, None)
+            previous_selected = self._thread_id
+            old_focus = old_thread_id in self._focus_enabled_threads
+            old_binding = self._focus_goal_bindings.pop(old_thread_id, None)
+            previous_new_runtime = self._thread_runtime.get(new_thread_id)
+            restored_runtime = old_runtime or {
+                "profile": descriptor.get("profile", "single"),
+                "model": descriptor.get("model"),
+                "effort": descriptor.get("effort"),
+                "service_tier": descriptor.get("service_tier"),
+                "title": descriptor.get("title"),
+                "thread_source": descriptor.get("thread_source"),
+            }
+            self._thread_runtime[new_thread_id] = restored_runtime
+            if previous_selected == old_thread_id or descriptor.get("selected") is True:
+                self._thread_id = new_thread_id
+            restore_focus = old_focus or descriptor.get("focus_enabled") is True
+            if restore_focus:
+                self._focus_enabled_threads.discard(old_thread_id)
+                self._focus_enabled_threads.add(new_thread_id)
+            restored_binding = old_binding or descriptor.get("focus_binding")
+            if isinstance(restored_binding, str):
+                self._focus_goal_bindings[new_thread_id] = restored_binding
+            try:
+                self._write_focus_state_locked()
+            except Exception:
+                self._thread_runtime.pop(new_thread_id, None)
+                if previous_new_runtime is not None:
+                    self._thread_runtime[new_thread_id] = previous_new_runtime
+                if old_runtime is not None:
+                    self._thread_runtime[old_thread_id] = old_runtime
+                self._thread_id = previous_selected
+                self._focus_enabled_threads.discard(new_thread_id)
+                if old_focus:
+                    self._focus_enabled_threads.add(old_thread_id)
+                self._focus_goal_bindings.pop(new_thread_id, None)
+                if old_binding is not None:
+                    self._focus_goal_bindings[old_thread_id] = old_binding
+                if project is not None:
+                    self._project_threads.replace_thread_id(
+                        new_thread_id, old_thread_id
+                    )
+                raise
+        return project_metadata
+
+    def _rollback_thread_transfer(
+        self,
+        new_thread_id: str,
+        old_thread_id: str,
+        descriptor: Mapping[str, Any],
+    ) -> None:
+        self._commit_thread_transfer(new_thread_id, old_thread_id, descriptor)
+
+    def _finish_thread_transfer(self, *thread_ids: str) -> None:
+        self._project_threads.finish_thread_transfer(*thread_ids)
+        with self._lock:
+            self._normal_transfers.difference_update(thread_ids)
 
     @staticmethod
     def _sanitize_account_result(account_result: Any) -> dict[str, Any]:
@@ -764,6 +1058,7 @@ class BridgeSession:
         self,
         model: str | None = None,
         service_tier: str | None = None,
+        team_override: str | None = None,
     ) -> dict[str, Any]:
         model = self._validated_optional_selection(
             model,
@@ -775,28 +1070,46 @@ class BridgeSession:
             "service_tier",
             SERVICE_TIER_MAX_LENGTH,
         )
+        if team_override is not None and team_override not in PROJECT_TEAM_MODES:
+            raise BridgeError(
+                "INVALID_TEAM_OVERRIDE",
+                "team_override must be single or team",
+                details={"field": "team_override"},
+            )
         with self._lock:
             self._require_no_active_turn_locked()
-        params: dict[str, Any] = {
-            "cwd": str(self._project_root),
-            "approvalPolicy": "on-request",
-            "sandbox": "workspace-write",
-            "ephemeral": False,
-            "developerInstructions": self._developer_instructions(),
-            "serviceTier": service_tier,
-        }
+        routing = team_override or self._project_team_settings.mode()
+        profile = "supervisor" if routing == "team" else "single"
+        params = self._thread_profile_params(profile, service_tier=service_tier)
         if model is not None:
             params["model"] = model
         result = self._client.request("thread/start", params)
         thread_id = self._extract_thread_id(result)
         with self._lock:
             self._thread_id = thread_id
+            self._thread_permission_profile = profile
+            thread = result.get("thread") if isinstance(result, dict) else None
+            self._thread_runtime[thread_id] = {
+                "profile": profile,
+                "model": result.get("model", model) if isinstance(result, dict) else model,
+                "effort": result.get("reasoningEffort") if isinstance(result, dict) else None,
+                "service_tier": (
+                    result.get("serviceTier", service_tier)
+                    if isinstance(result, dict)
+                    else service_tier
+                ),
+                "title": thread.get("name") if isinstance(thread, dict) else None,
+                "thread_source": (
+                    thread.get("threadSource") if isinstance(thread, dict) else None
+                ),
+            }
             self._reset_turn_locked()
             self._write_focus_state_locked()
         self._events.publish("thread_selected", action="start", thread_id=thread_id)
         return {
             "thread_id": thread_id,
             "focus_mode": False,
+            "routing": routing,
             "result": result,
         }
 
@@ -812,29 +1125,100 @@ class BridgeSession:
             SERVICE_TIER_MAX_LENGTH,
         )
         with self._lock:
-            self._require_no_active_turn_locked()
+            selected_project_role = self._project_threads.role_for_thread(
+                self._thread_id
+            )
+            if not (self._turn_active and selected_project_role is not None):
+                self._require_no_active_turn_locked()
+            if thread_id in self._normal_transfers:
+                raise BridgeError(
+                    "THREAD_TRANSFER_ACTIVE",
+                    "This Thread is transferring after automatic compaction",
+                    http_status=409,
+                )
+        if self._project_threads.thread_transfer_in_progress(thread_id):
+            raise BridgeError(
+                "THREAD_TRANSFER_ACTIVE",
+                "This project role is transferring after automatic compaction",
+                http_status=409,
+            )
+        profile = self._permission_profile(thread_id)
         resumed = self._client.request(
             "thread/resume",
-            {
-                "threadId": thread_id,
-                "cwd": str(self._project_root),
-                "approvalPolicy": "on-request",
-                "sandbox": "workspace-write",
-                "developerInstructions": self._developer_instructions(),
-                "serviceTier": service_tier,
-            },
+            self._thread_profile_params(
+                profile,
+                service_tier=service_tier,
+                thread_id=thread_id,
+            ),
         )
         resolved_id = self._extract_thread_id(resumed)
         read_result = self._project_thread_messages(resumed, resolved_id)
+        project_turn = self._project_threads.turn_state_for_thread(resolved_id)
         with self._lock:
             self._thread_id = resolved_id
+            self._thread_permission_profile = profile
+            thread = resumed.get("thread") if isinstance(resumed, dict) else None
+            previous = self._thread_runtime.get(resolved_id, {})
+            self._thread_runtime[resolved_id] = {
+                "profile": profile,
+                "model": (
+                    resumed.get("model", previous.get("model"))
+                    if isinstance(resumed, dict)
+                    else previous.get("model")
+                ),
+                "effort": (
+                    resumed.get("reasoningEffort", previous.get("effort"))
+                    if isinstance(resumed, dict)
+                    else previous.get("effort")
+                ),
+                "service_tier": (
+                    resumed.get("serviceTier", service_tier or previous.get("service_tier"))
+                    if isinstance(resumed, dict)
+                    else service_tier or previous.get("service_tier")
+                ),
+                "title": (
+                    thread.get("name", previous.get("title"))
+                    if isinstance(thread, dict)
+                    else previous.get("title")
+                ),
+                "thread_source": (
+                    thread.get("threadSource", previous.get("thread_source"))
+                    if isinstance(thread, dict)
+                    else previous.get("thread_source")
+                ),
+            }
             self._reset_turn_locked()
+            if project_turn["turn_active"]:
+                self._turn_active = True
+                self._turn_id = project_turn["turn_id"]
+                self._turn_status = project_turn["turn_status"]
+                self._turn_created = project_turn["turn_id"] is not None
             self._write_focus_state_locked()
+        self._thread_transfer.maybe_schedule_all()
         self._events.publish("thread_selected", action="resume", thread_id=resolved_id)
+        project_identity = self._project_threads.project_identity_for_thread(
+            resolved_id
+        )
         return {
             "thread_id": resolved_id,
+            "permission_profile": (
+                project_identity["project_role"]
+                if project_identity is not None
+                else "single"
+            ),
+            "project_id": (
+                project_identity["project_id"]
+                if project_identity is not None
+                else None
+            ),
+            "project_role": (
+                project_identity["project_role"]
+                if project_identity is not None
+                else None
+            ),
             "focus_mode": self._focus_mode_locked(resolved_id),
             "read": read_result,
+            **project_turn,
         }
 
     def read_thread(self, thread_id: str | None = None) -> dict[str, Any]:
@@ -874,6 +1258,8 @@ class BridgeSession:
         for entry in result["data"][:THREAD_LIST_LIMIT]:
             if not isinstance(entry, dict):
                 raise self._invalid_thread_response("Thread entry must be an object")
+            if self._project_threads.owns_thread_record(entry):
+                continue
             thread_id = self._validated_thread_response_string(
                 entry.get("id"), "id", MODEL_IDENTIFIER_MAX_LENGTH, allow_empty=False
             )
@@ -926,8 +1312,133 @@ class BridgeSession:
             threads.append(record)
         return {"threads": threads}
 
+    def project_team_snapshot(self) -> dict[str, Any]:
+        """Return the single authoritative Panel project snapshot."""
+
+        settings = self._project_team_settings.snapshot()
+        return self._project_threads.snapshot(
+            mode=self._project_team_settings.mode(),
+            writable=True,
+            settings_state_status=settings["state_status"],
+        )
+
+    def update_project_team_mode(
+        self,
+        *,
+        mode: Any,
+    ) -> dict[str, Any]:
+        """Persist only the project routing preference."""
+
+        with self._lock:
+            result = self._project_team_settings.set_mode(mode)
+            self._project_threads.note_settings_change()
+        self._events.publish(
+            "project_team_updated",
+            mode=result["settings"]["mode"],
+            state_status=result["state_status"],
+        )
+        return self.project_team_snapshot()
+
+    def append_project_guidance(
+        self,
+        *,
+        project_id: Any,
+        thread_id: Any,
+        text: Any,
+        model: Any = None,
+        effort: Any = None,
+        service_tier: Any = None,
+        local_image_paths: Any = None,
+    ) -> dict[str, Any]:
+        if not isinstance(text, str):
+            raise BridgeError(
+                "EMPTY_INPUT",
+                "Natural-language input must not be empty",
+            )
+        if len(text) > 65_536:
+            raise BridgeError(
+                "INPUT_TOO_LARGE",
+                "Input exceeds the 65536 character limit",
+            )
+        thread_id = self._validated_identifier(thread_id, "thread_id")
+        image_paths = self._validated_local_image_paths(
+            local_image_paths,
+            thread_id,
+        )
+        if not text.strip() and not image_paths:
+            raise BridgeError(
+                "EMPTY_INPUT",
+                "Natural-language input or at least one image is required",
+            )
+        accepted = self._project_threads.append_guidance(
+            project_id,
+            thread_id,
+            text,
+            model=model,
+            effort=effort,
+            service_tier=service_tier,
+            local_image_paths=tuple(image_paths),
+        )
+        return {
+            **accepted,
+            "project_team": self.project_team_snapshot(),
+        }
+
+    def append_active_supervisor_guidance(
+        self,
+        *,
+        text: Any,
+        project_id: Any = None,
+        model: Any = None,
+        effort: Any = None,
+        service_tier: Any = None,
+        local_image_paths: Any = None,
+    ) -> dict[str, Any]:
+        """Append a user delta to the unique active project's Supervisor."""
+
+        target = self._project_threads.active_supervisor_target(project_id)
+        if not isinstance(text, str):
+            raise BridgeError("EMPTY_INPUT", "Natural-language input must not be empty")
+        if len(text) > 65_536:
+            raise BridgeError("INPUT_TOO_LARGE", "Input exceeds the 65536 character limit")
+        image_paths = self._validated_local_image_paths(
+            local_image_paths,
+            target["thread_id"],
+        )
+        if not text.strip() and not image_paths:
+            raise BridgeError(
+                "EMPTY_INPUT",
+                "Natural-language input or at least one image is required",
+            )
+        accepted = self._project_threads.accept_supervisor_guidance(
+            target["project_id"],
+            text,
+            model=model,
+            effort=effort,
+            service_tier=service_tier,
+            local_image_paths=tuple(image_paths),
+        )
+        return {
+            **accepted,
+            "guidance_target": target,
+            "project_team": self.project_team_snapshot(),
+        }
+
     def rename_thread(self, thread_id: str, name: str) -> dict[str, Any]:
         thread_id = self._validated_identifier(thread_id, "thread_id")
+        with self._lock:
+            if thread_id in self._normal_transfers:
+                raise BridgeError(
+                    "THREAD_TRANSFER_ACTIVE",
+                    "This Thread is transferring after automatic compaction",
+                    http_status=409,
+                )
+        if self._project_threads.thread_transfer_in_progress(thread_id):
+            raise BridgeError(
+                "THREAD_TRANSFER_ACTIVE",
+                "This project role is transferring after automatic compaction",
+                http_status=409,
+            )
         name = self._validated_optional_selection(
             name, "thread_name", THREAD_NAME_MAX_LENGTH
         )
@@ -936,6 +1447,10 @@ class BridgeSession:
         result = self._client.request(
             "thread/name/set", {"threadId": thread_id, "name": name}
         )
+        with self._lock:
+            runtime = self._thread_runtime.get(thread_id)
+            if runtime is not None:
+                runtime["title"] = name
         return {"thread_id": thread_id, "name": name, "result": result}
 
     def delete_thread(self, thread_id: str) -> dict[str, Any]:
@@ -957,6 +1472,18 @@ class BridgeSession:
                     },
                 )
             self._require_no_active_turn_locked()
+            if thread_id in self._normal_transfers:
+                raise BridgeError(
+                    "THREAD_TRANSFER_ACTIVE",
+                    "This Thread is transferring after automatic compaction",
+                    http_status=409,
+                )
+        if self._project_threads.thread_transfer_in_progress(thread_id):
+            raise BridgeError(
+                "THREAD_TRANSFER_ACTIVE",
+                "This project role is transferring after automatic compaction",
+                http_status=409,
+            )
 
         result = self._client.request(
             "thread/delete",
@@ -970,7 +1497,9 @@ class BridgeSession:
             self._focus_goal_bindings.pop(thread_id, None)
             if was_selected:
                 self._thread_id = None
+                self._thread_permission_profile = None
                 self._reset_turn_locked()
+            self._thread_runtime.pop(thread_id, None)
             try:
                 self._write_focus_state_locked()
             except BridgeError as exc:
@@ -1193,6 +1722,19 @@ class BridgeSession:
 
         raise AssertionError("unreachable model pagination state")
 
+    def _recover_project_root_start(
+        self, project_spec: Mapping[str, Any] | None
+    ) -> str | None:
+        if not isinstance(project_spec, Mapping):
+            return None
+        project_id = project_spec.get("project_id")
+        if not isinstance(project_id, str):
+            return None
+        try:
+            return self._project_threads.recover_root_turn_request(project_id)
+        except Exception:
+            return None
+
     def start_turn(
         self,
         text: str,
@@ -1200,31 +1742,78 @@ class BridgeSession:
         effort: str | None = None,
         local_image_paths: list[str] | None = None,
         service_tier: str | None = None,
+        team_override: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(text, str):
             raise BridgeError("EMPTY_INPUT", "Natural-language input must not be empty")
         if len(text) > 65536:
             raise BridgeError("INPUT_TOO_LARGE", "Input exceeds the 65536 character limit")
         model = self._validated_optional_selection(
-            model,
-            "model",
-            MODEL_IDENTIFIER_MAX_LENGTH,
+            model, "model", MODEL_IDENTIFIER_MAX_LENGTH
         )
         effort = self._validated_optional_selection(
-            effort,
-            "effort",
-            REASONING_EFFORT_MAX_LENGTH,
+            effort, "effort", REASONING_EFFORT_MAX_LENGTH
         )
         service_tier = self._validated_optional_selection(
-            service_tier,
-            "service_tier",
-            SERVICE_TIER_MAX_LENGTH,
+            service_tier, "service_tier", SERVICE_TIER_MAX_LENGTH
         )
+        if team_override is not None and team_override not in PROJECT_TEAM_MODES:
+            raise BridgeError(
+                "INVALID_TEAM_OVERRIDE",
+                "team_override must be single or team",
+                details={"field": "team_override"},
+            )
+
         with self._lock:
             thread_id = self._validated_identifier(self._thread_id, "thread_id")
+            if thread_id in self._normal_transfers:
+                raise BridgeError(
+                    "THREAD_TRANSFER_ACTIVE",
+                    "This Thread is transferring after automatic compaction",
+                    http_status=409,
+                )
+            project_identity = self._project_threads.project_identity_for_thread(
+                thread_id
+            )
+            if project_identity is not None:
+                raise BridgeError(
+                    "PROJECT_THREAD_GUIDANCE_REQUIRED",
+                    "Use append_guidance for a Thread that belongs to a project",
+                    http_status=409,
+                    details={
+                        "project_id": project_identity["project_id"],
+                        "project_role": project_identity["project_role"],
+                        "thread_id": thread_id,
+                        "turn_id": self._turn_id,
+                        "turn_active": self._turn_active,
+                        "turn_status": self._turn_status,
+                    },
+                )
+            if self._project_threads.workflow_active():
+                raise BridgeError(
+                    "PROJECT_THREAD_WORKFLOW_ACTIVE",
+                    "The project executor has exclusive scene-write ownership",
+                    http_status=409,
+                )
+            profile = self._thread_permission_profile or self._permission_profile(
+                thread_id
+            )
+            current_routing = "team" if profile == "supervisor" else "single"
+            requested_routing = team_override or current_routing
+            if requested_routing != current_routing:
+                raise BridgeError(
+                    "THREAD_ROUTING_MISMATCH",
+                    "This Thread was created for a different routing type; create a new entry instead",
+                    http_status=409,
+                    details={
+                        "field": "team_override",
+                        "current_routing": current_routing,
+                        "requested_routing": requested_routing,
+                    },
+                )
+            routing = current_routing
             image_paths = self._validated_local_image_paths(
-                local_image_paths,
-                thread_id,
+                local_image_paths, thread_id
             )
             if not text.strip() and not image_paths:
                 raise BridgeError(
@@ -1240,9 +1829,57 @@ class BridgeSession:
             self._turn_active = True
             self._turn_created = False
 
+        project_spec: dict[str, Any] | None = None
+        turn_model, turn_effort, turn_tier = model, effort, service_tier
+        if routing == "team":
+            task = (
+                text
+                if text.strip()
+                else "Complete the Houdini task described by the attached reference images."
+            )
+            with self._lock:
+                root_runtime = copy.deepcopy(self._thread_runtime.get(thread_id, {}))
+            project_model = model if model is not None else root_runtime.get("model")
+            project_effort = effort if effort is not None else root_runtime.get("effort")
+            project_tier = (
+                service_tier
+                if service_tier is not None
+                else root_runtime.get("service_tier")
+            )
+            turn_model, turn_effort, turn_tier = (
+                project_model,
+                project_effort,
+                project_tier,
+            )
+            try:
+                project_spec = self._project_threads.prepare_project(
+                    thread_id,
+                    task,
+                    model=project_model,
+                    effort=project_effort,
+                    service_tier=project_tier,
+                    local_image_paths=tuple(image_paths),
+                )
+            except Exception:
+                with self._lock:
+                    if generation == self._turn_generation and not self._turn_created:
+                        self._turn_active = False
+                        self._turn_id = None
+                        self._turn_status = None
+                        self._start_source_turn_id = None
+                raise
+
         try:
             turn_input: list[dict[str, Any]] = []
-            if text.strip():
+            if project_spec is not None:
+                turn_input.append(
+                    {
+                        "type": "text",
+                        "text": supervisor_intake_prompt(task),
+                        "text_elements": [],
+                    }
+                )
+            elif text.strip():
                 turn_input.append(
                     {
                         "type": "text",
@@ -1253,24 +1890,33 @@ class BridgeSession:
             turn_input.extend(
                 {"type": "localImage", "path": path} for path in image_paths
             )
+            read_only = routing == "team"
             params: dict[str, Any] = {
                 "threadId": thread_id,
                 "input": turn_input,
                 "cwd": str(self._project_root),
-                "approvalPolicy": "on-request",
-                "sandboxPolicy": {
-                    "type": "workspaceWrite",
-                    "networkAccess": False,
-                },
-                "serviceTier": service_tier,
+                "approvalPolicy": "never" if read_only else "on-request",
+                "sandboxPolicy": (
+                    {"type": "readOnly", "networkAccess": False}
+                    if read_only
+                    else {"type": "workspaceWrite", "networkAccess": False}
+                ),
+                "serviceTier": turn_tier,
             }
-            if model is not None:
-                params["model"] = model
-            if effort is not None:
-                params["effort"] = effort
+            if project_spec is not None:
+                params["outputSchema"] = project_spec["output_schema"]
+            if turn_model is not None:
+                params["model"] = turn_model
+            if turn_effort is not None:
+                params["effort"] = turn_effort
+            if project_spec is not None:
+                self._project_threads.begin_root_turn_request(
+                    project_spec["project_id"]
+                )
             result = self._client.request("turn/start", params)
             turn_id = self._extract_turn_id(result)
         except CodexRPCError as exc:
+            self._recover_project_root_start(project_spec)
             confirmed_not_created = False
             with self._lock:
                 if (
@@ -1283,6 +1929,10 @@ class BridgeSession:
                     self._turn_status = None
                     self._start_source_turn_id = None
                     confirmed_not_created = True
+            if project_spec is not None and confirmed_not_created:
+                self._project_threads.fail_project_start(
+                    project_spec["project_id"], exc
+                )
             if confirmed_not_created:
                 details = dict(exc.details or {})
                 details.update(
@@ -1295,21 +1945,43 @@ class BridgeSession:
                     }
                 )
                 raise BridgeError(
-                    exc.code,
-                    exc.message,
-                    exc.http_status,
-                    details,
+                    exc.code, exc.message, exc.http_status, details
                 ) from exc
             raise
-        except Exception:
+        except Exception as exc:
+            self._recover_project_root_start(project_spec)
             with self._lock:
+                observed_turn = bool(
+                    generation == self._turn_generation
+                    and self._turn_created
+                    and self._identifier_is_valid(self._turn_id)
+                )
                 if (
                     generation == self._turn_generation
                     and self._turn_active
                     and not self._turn_created
                 ):
                     self._turn_status = "startUnknown"
+            result_unknown = observed_turn or (
+                isinstance(exc, BridgeError)
+                and exc.code == "CODEX_REQUEST_TIMEOUT"
+            )
+            if project_spec is not None and not result_unknown:
+                self._project_threads.fail_project_start(
+                    project_spec["project_id"], exc
+                )
             raise
+
+        if project_spec is not None:
+            try:
+                self._project_threads.attach_root_turn(
+                    project_spec["project_id"], turn_id
+                )
+            except Exception as exc:
+                self._project_threads.fail_project_start(
+                    project_spec["project_id"], exc
+                )
+                raise
 
         publish_selection = False
         with self._lock:
@@ -1331,14 +2003,29 @@ class BridgeSession:
                 self._start_source_turn_id = None
                 if self._turn_active and self._turn_status == "starting":
                     self._turn_status = "inProgress"
+                runtime = self._thread_runtime.get(thread_id)
+                if runtime is not None:
+                    runtime["profile"] = profile
+                    if model is not None:
+                        runtime["model"] = model
+                    if effort is not None:
+                        runtime["effort"] = effort
+                    if service_tier is not None:
+                        runtime["service_tier"] = service_tier
                 publish_selection = True
         if publish_selection:
             self._events.publish(
-                "turn_selected",
-                thread_id=thread_id,
-                turn_id=turn_id,
+                "turn_selected", thread_id=thread_id, turn_id=turn_id
             )
-        return {"thread_id": thread_id, "turn_id": turn_id, "result": result}
+        response = {
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "result": result,
+            "routing": routing,
+        }
+        if project_spec is not None:
+            response["project_id"] = project_spec["project_id"]
+        return response
 
     def steer_turn(
         self,
@@ -1352,31 +2039,55 @@ class BridgeSession:
         if len(text) > 65536:
             raise BridgeError("INPUT_TOO_LARGE", "Input exceeds the 65536 character limit")
 
-        with self._lock:
-            thread_id = self._validated_identifier(self._thread_id, "thread_id")
-            turn_id = self._turn_id
-            if not self._turn_active or not self._identifier_is_valid(turn_id):
-                raise BridgeError(
-                    "NO_ACTIVE_TURN",
-                    "No steerable active Turn is available",
-                    http_status=409,
-                    details={
-                        "turn_active": self._turn_active,
-                        "thread_id": thread_id,
-                        "turn_id": turn_id,
-                        "turn_status": self._turn_status,
-                    },
+        while True:
+            with self._lock:
+                thread_id = self._validated_identifier(
+                    self._thread_id, "thread_id"
                 )
-            image_paths = self._validated_local_image_paths(
-                local_image_paths,
-                thread_id,
+            project_identity = self._project_threads.project_identity_for_thread(
+                thread_id
             )
-            if not text.strip() and not image_paths:
-                raise BridgeError(
-                    "EMPTY_INPUT",
-                    "Natural-language input or at least one image is required",
+            with self._lock:
+                if thread_id != self._thread_id:
+                    continue
+                turn_id = self._turn_id
+                if project_identity is not None:
+                    raise BridgeError(
+                        "PROJECT_THREAD_GUIDANCE_REQUIRED",
+                        "Project role input must use the project guidance endpoint",
+                        http_status=409,
+                        details={
+                            "project_id": project_identity["project_id"],
+                            "project_role": project_identity["project_role"],
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "turn_active": self._turn_active,
+                            "turn_status": self._turn_status,
+                        },
+                    )
+                if not self._turn_active or not self._identifier_is_valid(turn_id):
+                    raise BridgeError(
+                        "NO_ACTIVE_TURN",
+                        "No steerable active Turn is available",
+                        http_status=409,
+                        details={
+                            "turn_active": self._turn_active,
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "turn_status": self._turn_status,
+                        },
+                    )
+                image_paths = self._validated_local_image_paths(
+                    local_image_paths,
+                    thread_id,
                 )
-            generation = self._turn_generation
+                if not text.strip() and not image_paths:
+                    raise BridgeError(
+                        "EMPTY_INPUT",
+                        "Natural-language input or at least one image is required",
+                    )
+                generation = self._turn_generation
+                break
 
         turn_input: list[dict[str, Any]] = []
         if text.strip():
@@ -1563,11 +2274,33 @@ class BridgeSession:
     def interrupt_turn(self) -> dict[str, Any]:
         interrupt_deadline = time.monotonic() + STOP_INTERRUPT_GRACE_SECONDS
         with self._lock:
+            selected_thread_id = self._thread_id
+            selected_turn_id = self._turn_id
+            selected_active = self._turn_active and all(
+                self._identifier_is_valid(value)
+                for value in (selected_thread_id, selected_turn_id)
+            )
+        project_interrupt = self._project_threads.interrupt_project(
+            exclude_turn_id=selected_turn_id if selected_active else None
+        )
+        with self._lock:
             thread_id = self._thread_id
             turn_id = self._turn_id
             if not self._turn_active or not all(
                 self._identifier_is_valid(value) for value in (thread_id, turn_id)
             ):
+                if project_interrupt["interrupted"]:
+                    snapshot = self.snapshot()
+                    return {
+                        "thread_id": thread_id,
+                        "turn_id": None,
+                        "result": None,
+                        "project_interrupt": project_interrupt,
+                        "restarted_app_server": False,
+                        "recovery_pending": False,
+                        "houdini_may_still_be_finishing": False,
+                        "session": snapshot,
+                    }
                 raise self._no_active_turn_error_locked()
             if self._turn_status == "stopRequested":
                 snapshot = self.snapshot()
@@ -1575,6 +2308,7 @@ class BridgeSession:
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "result": None,
+                    "project_interrupt": project_interrupt,
                     "restarted_app_server": False,
                     "recovery_pending": False,
                     "houdini_may_still_be_finishing": self._tool_may_still_be_running_locked(),
@@ -1628,6 +2362,7 @@ class BridgeSession:
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "result": result,
+                    "project_interrupt": project_interrupt,
                     "restarted_app_server": False,
                     "recovery_pending": False,
                     "houdini_may_still_be_finishing": False,
@@ -1643,6 +2378,7 @@ class BridgeSession:
             "thread_id": thread_id,
             "turn_id": turn_id,
             "result": result,
+            "project_interrupt": project_interrupt,
             "restarted_app_server": False,
             "recovery_pending": snapshot.get("turn_status") == "stopRecovering",
             "houdini_may_still_be_finishing": houdini_may_still_be_finishing,
@@ -1790,16 +2526,14 @@ class BridgeSession:
                     )
                 self._clear_stop_recovery_worker()
                 return
+            profile = self._permission_profile(thread_id)
             resumed = request_with_timeout(
                 "thread/resume",
-                {
-                    "threadId": thread_id,
-                    "cwd": str(self._project_root),
-                    "approvalPolicy": "on-request",
-                    "sandbox": "workspace-write",
-                    "developerInstructions": self._developer_instructions(),
-                    "serviceTier": None,
-                },
+                self._thread_profile_params(
+                    profile,
+                    service_tier=None,
+                    thread_id=thread_id,
+                ),
                 timeout_seconds=remaining,
             )
             if self._extract_thread_id(resumed) != thread_id:
@@ -1840,6 +2574,11 @@ class BridgeSession:
                 return
             self._initialize_result = initialize_result
             self._connected = True
+            self._thread_permission_profile = (
+                profile
+                if self._permission_profile(thread_id) == profile
+                else None
+            )
             self._turn_generation += 1
             self._turn_id = None
             self._turn_status = "interrupted"
@@ -2541,6 +3280,31 @@ class BridgeSession:
         return identifiers[0], identifiers[1]
 
     def _on_client_event(self, event: dict[str, Any]) -> None:
+        # Observe native compaction before project routing can consume the event.
+        self._thread_transfer.observe(event)
+        with self._lock:
+            selected_thread_id = self._thread_id
+            normal_transfer_ids = set(self._normal_transfers)
+        event_params = event.get("params")
+        transfer_delete = bool(
+            event.get("type") == "codex_notification"
+            and event.get("method") == "thread/deleted"
+            and isinstance(event_params, dict)
+            and (
+                event_params.get("threadId") in normal_transfer_ids
+                or self._project_threads.thread_transfer_in_progress(
+                    event_params.get("threadId")
+                )
+            )
+        )
+        if self._project_threads.handle_client_event(
+            event, selected_thread_id=selected_thread_id
+        ):
+            self._thread_transfer.after_event(event)
+            return
+        if transfer_delete:
+            self._thread_transfer.after_event(event)
+            return
         event_type = event.get("type")
         if event_type == "server_request":
             method = event.get("method")
@@ -2557,6 +3321,7 @@ class BridgeSession:
                     # keep the original request visible so it is never lost.
                     pass
                 else:
+                    self._thread_transfer.after_event(event)
                     return
         elif event_type == "codex_notification":
             method = event.get("method")
@@ -2567,15 +3332,34 @@ class BridgeSession:
                     turn = params.get("turn")
                     thread_id = params.get("threadId")
                     turn_id = turn.get("id") if isinstance(turn, dict) else None
+                    selected_project_role = (
+                        thread_id == self._thread_id
+                        and self._project_threads.role_for_thread(thread_id)
+                        is not None
+                    )
+                    project_turn = (
+                        self._project_threads.turn_state_for_thread(thread_id)
+                        if selected_project_role and isinstance(thread_id, str)
+                        else {}
+                    )
+                    current_project_turn = (
+                        project_turn.get("turn_id") == turn_id
+                        if isinstance(project_turn, dict)
+                        else False
+                    )
                     if (
-                        self._turn_active
+                        (self._turn_active or selected_project_role)
                         and thread_id == self._thread_id
                         and self._identifier_is_valid(turn_id)
                         and turn_id != self._start_source_turn_id
-                        and self._turn_id in {None, turn_id}
+                        and (
+                            self._turn_id in {None, turn_id}
+                            or current_project_turn
+                        )
                     ):
                         self._turn_id = turn_id
                         self._turn_status = "inProgress"
+                        self._turn_active = True
                         self._turn_created = True
                         self._last_tool_name = None
                         self._last_tool_status = None
@@ -2583,13 +3367,22 @@ class BridgeSession:
                     turn = params.get("turn")
                     thread_id = params.get("threadId")
                     turn_id = turn.get("id") if isinstance(turn, dict) else None
+                    selected_project_role = (
+                        thread_id == self._thread_id
+                        and self._project_threads.role_for_thread(thread_id)
+                        is not None
+                    )
                     if (
                         isinstance(turn, dict)
                         and thread_id == self._thread_id
                         and self._identifier_is_valid(turn_id)
                         and turn_id != self._start_source_turn_id
-                        and turn_id == self._turn_id
+                        and (
+                            turn_id == self._turn_id
+                            or (selected_project_role and self._turn_id is None)
+                        )
                     ):
+                        self._turn_id = turn_id
                         status = turn.get("status")
                         self._turn_status = (
                             status
@@ -2701,10 +3494,12 @@ class BridgeSession:
                 elif method == "thread/deleted":
                     thread_id = params.get("threadId")
                     if isinstance(thread_id, str):
+                        self._thread_runtime.pop(thread_id, None)
                         self._focus_enabled_threads.discard(thread_id)
                         self._focus_goal_bindings.pop(thread_id, None)
                         if self._thread_id == thread_id:
                             self._thread_id = None
+                            self._thread_permission_profile = None
                             self._reset_turn_locked()
                         try:
                             self._write_focus_state_locked()
@@ -2714,5 +3509,6 @@ class BridgeSession:
             with self._turn_condition:
                 self._connected = False
                 self._turn_condition.notify_all()
+        self._thread_transfer.after_event(event)
         fields = {key: value for key, value in event.items() if key != "type"}
         self._events.publish(str(event_type), **fields)

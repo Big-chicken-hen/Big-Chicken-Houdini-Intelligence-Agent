@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import sys
+import tempfile
 import types
 import unittest
 from collections import deque
@@ -18,6 +20,12 @@ PANEL_LIB_ROOT = REPOSITORY_ROOT / "houdini_package" / "python_libs"
 sys.path.insert(0, str(PANEL_LIB_ROOT))
 
 from hia_panel.turn_state import PanelTurnState, TurnPhase, TurnStateToken  # noqa: E402
+from hia_panel.project_team import normalize_project_team  # noqa: E402
+from hia_panel.attachment_store import AttachmentStore  # noqa: E402
+from services.bridge.hia_bridge.project_thread_contract import (  # noqa: E402
+    PLANNING_SCHEMA,
+    SUPERVISOR_SCHEMA,
+)
 
 
 class _HeadlessQWidget:
@@ -80,7 +88,8 @@ def _load_real_panel_class() -> type:
     qt_core.Slot = _slot
     qt_core.QTimer = _HeadlessTimer
     qt_core.Qt = types.SimpleNamespace(
-        ItemDataRole=types.SimpleNamespace(ToolTipRole=object())
+        ItemDataRole=types.SimpleNamespace(ToolTipRole=object()),
+        FocusReason=types.SimpleNamespace(OtherFocusReason=object()),
     )
     qt_gui.QTextCursor = _HeadlessTextCursor
     qt_widgets.QWidget = _HeadlessQWidget
@@ -145,6 +154,7 @@ class _Widget:
         self._value = 0
         self._format = ""
         self.clear_focus_calls = 0
+        self.set_focus_calls = 0
         self.visible_set_calls = 0
 
     def setEnabled(self, enabled: bool) -> None:
@@ -226,6 +236,9 @@ class _Widget:
     def clearFocus(self) -> None:  # noqa: N802
         self.clear_focus_calls += 1
 
+    def setFocus(self, _reason: object = None) -> None:  # noqa: N802
+        self.set_focus_calls += 1
+
     def blockSignals(self, blocked: bool) -> bool:
         previous = self._signals_blocked
         self._signals_blocked = bool(blocked)
@@ -286,6 +299,13 @@ class _ConversationShim:
         self.stop_timer_calls = 0
         self.freeze_calls = 0
         self.clear_calls = 0
+        self._visible = True
+
+    def setVisible(self, visible: bool) -> None:
+        self._visible = bool(visible)
+
+    def isVisible(self) -> bool:
+        return self._visible
 
     def clear_messages(self) -> None:
         self.entries.clear()
@@ -359,6 +379,17 @@ class _ConversationShim:
                     self._tool_activity_index -= 1
         self._active_codex_index = None
         self._protocol_streak_key = None
+
+    def discard_pending_codex_message(self) -> bool:
+        if self._active_codex_index is None:
+            return False
+        entry = self.entries[self._active_codex_index]
+        if entry["text"]:
+            return False
+        self.entries.pop(self._active_codex_index)
+        self._active_codex_index = None
+        self._protocol_streak_key = None
+        return True
 
     def add_system_message(self, text: str) -> None:
         self._protocol_streak_key = None
@@ -488,6 +519,9 @@ class _AttachmentStripShim:
         self._paths.append(path)
         return True
 
+    def set_paths(self, paths: Any) -> None:
+        self._paths = list(paths)
+
     def remove(self, path: str) -> bool:
         if path not in self._paths:
             return False
@@ -512,9 +546,36 @@ class _BridgeClientShim:
         self.steer_requests: list[tuple[str, list[str], str]] = []
         self.thread_requests: list[str | None] = []
         self.thread_service_tiers: list[str | None] = []
+        self.thread_team_overrides: list[str | None] = []
         self.turn_service_tiers: list[str | None] = []
+        self.turn_team_overrides: list[str | None] = []
         self.resume_requests: list[tuple[str, str | None, str]] = []
         self.thread_list_requests = 0
+        self.project_team_get_requests = 0
+        self.project_team_mode_requests: list[str] = []
+        self.project_team_guidance_requests: list[
+            tuple[
+                str,
+                str,
+                str,
+                str | None,
+                str | None,
+                str | None,
+                list[str],
+                str,
+            ]
+        ] = []
+        self.project_team_supervisor_guidance_requests: list[
+            tuple[
+                str,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
+                list[str],
+                str,
+            ]
+        ] = []
         self.thread_read_requests: list[tuple[str, str]] = []
         self.thread_rename_requests: list[tuple[str, str, str]] = []
         self.thread_delete_requests: list[tuple[str, str]] = []
@@ -535,6 +596,7 @@ class _BridgeClientShim:
         self.scene_polls: list[int] = []
         self.scene_results: list[tuple[str, str, dict[str, Any]]] = []
         self.approval_decisions: list[tuple[Any, str]] = []
+        self.start_thread_result: str | None = "session-start-request"
         self.start_turn_result: str | None = "turn-request"
         self.steer_turn_result: str | None = "steer-request"
 
@@ -543,9 +605,12 @@ class _BridgeClientShim:
         *,
         model: str | None,
         service_tier: str | None,
-    ) -> None:
+        team_override: str | None,
+    ) -> str | None:
         self.thread_requests.append(model)
         self.thread_service_tiers.append(service_tier)
+        self.thread_team_overrides.append(team_override)
+        return self.start_thread_result
 
     def resume_thread(
         self,
@@ -563,6 +628,7 @@ class _BridgeClientShim:
         model: str | None,
         effort: str | None,
         service_tier: str | None,
+        team_override: str | None,
         local_image_paths: list[str],
         context: str,
     ) -> str | None:
@@ -570,6 +636,7 @@ class _BridgeClientShim:
             (text, model, effort, list(local_image_paths), context)
         )
         self.turn_service_tiers.append(service_tier)
+        self.turn_team_overrides.append(team_override)
         return self.start_turn_result
 
     def steer_turn(
@@ -587,6 +654,64 @@ class _BridgeClientShim:
 
     def get_threads(self) -> None:
         self.thread_list_requests += 1
+
+    def get_project_team(self) -> str:
+        self.project_team_get_requests += 1
+        return "project-team-get-request"
+
+    def set_project_team_mode(self, mode: str) -> str:
+        self.project_team_mode_requests.append(mode)
+        return "project-team-set-request"
+
+    def guide_project_thread(
+        self,
+        project_id: str,
+        thread_id: str,
+        text: str,
+        *,
+        model: str | None,
+        effort: str | None,
+        service_tier: str | None,
+        local_image_paths: list[str],
+        context: str,
+    ) -> str:
+        self.project_team_guidance_requests.append(
+            (
+                project_id,
+                thread_id,
+                text,
+                model,
+                effort,
+                service_tier,
+                list(local_image_paths),
+                context,
+            )
+        )
+        return "project-team-guidance-request"
+
+    def guide_project_supervisor(
+        self,
+        text: str,
+        *,
+        expected_project_id: str | None,
+        model: str | None,
+        effort: str | None,
+        service_tier: str | None,
+        local_image_paths: list[str],
+        context: str,
+    ) -> str:
+        self.project_team_supervisor_guidance_requests.append(
+            (
+                text,
+                expected_project_id,
+                model,
+                effort,
+                service_tier,
+                list(local_image_paths),
+                context,
+            )
+        )
+        return "project-team-supervisor-guidance-request"
 
     def read_thread(self, thread_id: str, *, context: str) -> None:
         self.thread_read_requests.append((thread_id, context))
@@ -793,6 +918,10 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._crash_recovery_thread_payload = None
     panel._crash_recovery_observation = None
     panel._session_action_pending = False
+    panel._session_start_route = None
+    panel._current_task_route = "single" if selected_thread_id else None
+    panel._project_goal_draft = None
+    panel._task_view_mode = "conversation" if selected_thread_id else "empty"
     panel._turn_start_request_pending = False
     panel._interrupt_pending = False
     panel._turn_state = PanelTurnState()
@@ -860,7 +989,20 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._stage_items = []
     panel._review_records = []
     panel._team_records = {}
+    panel._project_team_snapshot = normalize_project_team(None)
+    panel._project_team_pending = None
+    panel._project_team_refresh_deferred = False
+    panel._project_team_revision_authoritative = False
+    panel._selected_project_id = None
+    panel._project_team_model_thread_id = None
+    panel._pending_running_project_switch = None
+    panel._thread_transfer_notices = deque(maxlen=128)
     panel._runtime_settings_expanded = False
+    panel._last_left_sidebar_width = 210
+    panel._pending_project_guidance = {}
+    panel._known_project_threads = {}
+    panel._project_message_buffers = {}
+    panel._completed_project_messages = {}
     panel._turn_performance_token = None
     panel._turn_performance_marks = {}
     panel._reconnect_attempt = 0
@@ -985,6 +1127,7 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.task_sidebar_button = _Widget("任务")
     panel.task_sidebar_button.setChecked(True)
     panel.new_thread_button = _Widget()
+    panel.new_project_button = _Widget()
     panel.resume_thread_button = _Widget()
     panel.send_button = _Widget()
     panel.stop_button = _Widget()
@@ -994,7 +1137,13 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.model_label = _Widget("模型")
     panel.effort_label = _Widget("推理")
     panel.conversation = _ConversationShim()
+    panel.composer_panel = _Widget()
     panel.welcome_group = _Widget()
+    panel.project_context_group = _Widget()
+    panel.project_context_group.setVisible(False)
+    panel.project_context_title = _Widget()
+    panel.project_context_detail = _Widget()
+    panel.composer_context_label = _Widget("对话消息")
     panel.approval_group = _Widget()
     panel.approval_text = _Widget()
     panel.approval_details_button = _Widget("高级详情")
@@ -1010,6 +1159,10 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.allow_button = _Widget("允许一次")
     panel.deny_button = _Widget("拒绝")
     panel.input_edit = _Widget()
+    panel.turn_single_button = _Widget("单个 AI")
+    panel.turn_single_button.setChecked(True)
+    panel.turn_team_button = _Widget("项目团队")
+    panel.turn_team_button.setChecked(False)
     panel.add_image_button = _Widget()
     panel.report_issue_button = _Widget()
     panel.copy_report_path_button = _Widget()
@@ -1103,6 +1256,76 @@ def _capacity_notification(turn_id: str, *, sequence: int = 1) -> dict[str, Any]
                 )
             },
             "willRetry": False,
+        },
+    }
+
+
+def _managed_project_snapshot(
+    *,
+    status: str = "running",
+) -> dict[str, Any]:
+    return {
+        "schema": "hia-project-team/1",
+        "revision": "wiring-project-1",
+        "mode": "team",
+        "settings": {"mode": "team", "writable": True},
+        "projects": [
+            {
+                "project_id": "project-1",
+                "title": "受管项目",
+                "status": status,
+                "stage": "制定蓝图与阶段卡",
+                "progress": {"completed": 0, "total": 5, "label": "0 / 5"},
+                "actions": {
+                    "open_thread": True,
+                    "append_guidance": True,
+                },
+                "threads": [
+                    {
+                        "role": "supervisor",
+                        "thread_id": "thread-supervisor",
+                        "title": "受管项目｜监督 AI",
+                        "status": status,
+                    },
+                    {
+                        "role": "execution",
+                        "thread_id": "thread-execution",
+                        "title": "受管项目｜执行 AI",
+                        "status": status,
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def _project_guidance_ack(
+    project_id: str,
+    thread_id: str,
+    role: str,
+    *,
+    mode: str = "queued",
+    delivery_thread_id: str | None = None,
+    delivery_role: str | None = None,
+) -> dict[str, Any]:
+    delivery: dict[str, Any] = {
+        "mode": mode,
+        "project_id": project_id,
+    }
+    if mode == "steered":
+        delivery.update({
+            "thread_id": delivery_thread_id or thread_id,
+            "turn_id": "turn-guidance-ack",
+            "role": delivery_role or role,
+        })
+    return {
+        "guidance_accepted": True,
+        "guidance_id": "guidance-0123456789abcdef0123456789abcdef",
+        "workflow_delivery": delivery,
+        "guidance_target": {
+            "project_id": project_id,
+            "thread_id": thread_id,
+            "role": role,
         },
     }
 
@@ -1328,6 +1551,2573 @@ class PanelWiringTests(unittest.TestCase):
         self.assertTrue(panel.send_button.isEnabled())
         self.assertFalse(panel.stop_button.isEnabled())
 
+    def test_explicit_task_entries_freeze_creation_route(self) -> None:
+        panel = _make_panel()
+
+        panel._new_single_task()
+
+        self.assertEqual(["single"], panel._client.thread_team_overrides)
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual("thread_pending", panel._task_view_mode)
+        panel._on_action_completed(
+            "session_start",
+            {
+                "thread_id": "ordinary-new",
+                "focus_mode": False,
+                "routing": "single",
+            },
+        )
+        self.assertEqual("ordinary-new", panel._selected_thread_id)
+        self.assertEqual("single", panel._current_task_route)
+        self.assertEqual("conversation", panel._task_view_mode)
+        self.assertTrue(panel.conversation.isVisible())
+        self.assertIsNone(panel._project_goal_draft)
+
+        project = _make_panel()
+        project._begin_new_project()
+        self.assertEqual([], project._client.thread_requests)
+        self.assertEqual("project_draft", project._task_view_mode)
+        self.assertEqual("项目目标", project.composer_context_label.text())
+        self.assertEqual("创建项目并发送", project.send_button.text())
+        self.assertTrue(project.add_image_button.isEnabled())
+        self.assertTrue(project.attachment_strip.isEnabled())
+
+    def test_managed_project_composer_always_appends_guidance_active_or_idle(
+        self,
+    ) -> None:
+        for active in (False, True):
+            with self.subTest(active=active):
+                panel = _make_panel(selected_thread_id="thread-supervisor")
+                panel._apply_project_team_snapshot(_managed_project_snapshot())
+                if active:
+                    token = panel._turn_state.capture_token()
+                    self.assertTrue(
+                        panel._turn_state.reconcile_snapshot(
+                            token,
+                            "thread-supervisor",
+                            "project-turn-active",
+                            "inProgress",
+                            turn_active=True,
+                        )
+                    )
+                    panel._stream_thread_id = "thread-supervisor"
+                    panel._stream_turn_id = "project-turn-active"
+                else:
+                    self.assertTrue(
+                        panel._turn_state.begin_start("thread-supervisor")
+                    )
+                    self.assertTrue(
+                        panel._turn_state.mark_start_uncertain(
+                            "thread-supervisor"
+                        )
+                    )
+                    timeout_token = panel._turn_state.capture_token()
+                    self.assertTrue(panel._turn_state.reconcile_snapshot(
+                        timeout_token,
+                        "thread-supervisor",
+                        None,
+                        None,
+                        turn_active=False,
+                    ))
+                    self.assertEqual(TurnPhase.IDLE, panel._turn_state.phase)
+                panel.input_edit.setPlainText("把轮廓再收紧一些")
+
+                panel._send()
+
+                self.assertEqual([], panel._client.turn_requests)
+                self.assertEqual([], panel._client.steer_requests)
+                self.assertEqual(
+                    1,
+                    len(panel._client.project_team_guidance_requests),
+                )
+                request = panel._client.project_team_guidance_requests[0]
+                self.assertEqual(
+                    ("project-1", "thread-supervisor", "把轮廓再收紧一些"),
+                    request[:3],
+                )
+                self.assertEqual(
+                    "把轮廓再收紧一些",
+                    panel.input_edit.toPlainText(),
+                )
+
+                panel._on_action_completed(
+                    request[-1],
+                    {
+                        **_project_guidance_ack(
+                            "project-1",
+                            "thread-supervisor",
+                            "supervisor",
+                        ),
+                        "project_team": _managed_project_snapshot(),
+                    },
+                )
+
+                self.assertEqual("", panel.input_edit.toPlainText())
+                self.assertTrue(any(
+                    entry.get("role") == "user"
+                    and entry.get("text") == "把轮廓再收紧一些"
+                    for entry in panel.conversation.entries
+                ))
+
+    def test_late_project_snapshot_overrides_stale_creation_draft_for_guidance(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+        panel._project_goal_draft = {
+            "phase": "turn_outcome_unknown",
+            "thread_id": "thread-supervisor",
+            "text": "original project objective",
+            "attachment_paths": ("E:/references/original.png",),
+        }
+        token = panel._turn_state.capture_token()
+        self.assertTrue(panel._turn_state.reconcile_snapshot(
+            token,
+            "thread-supervisor",
+            "coordinator-turn-changed",
+            "inProgress",
+            turn_active=True,
+        ))
+        panel.input_edit.setPlainText("new guidance after the Turn changed")
+        panel.attachment_strip.add_path("E:/references/guidance.png")
+        panel._refresh_controls()
+
+        self.assertTrue(panel.send_button.isEnabled())
+        panel._send()
+
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        request = panel._client.project_team_guidance_requests[-1]
+        self.assertEqual(
+            (
+                "project-1",
+                "thread-supervisor",
+                "new guidance after the Turn changed",
+            ),
+            request[:3],
+        )
+        self.assertEqual(["E:/references/guidance.png"], request[-2])
+
+        panel._on_request_failed(
+            request[-1],
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_WORKFLOW_ACTIVE",
+                    "message": "legacy runtime rejected the project guidance",
+                    "details": {"transport": {"http_status": 409}},
+                }
+            },
+        )
+        self.assertEqual(
+            "new guidance after the Turn changed",
+            panel.input_edit.toPlainText(),
+        )
+        self.assertEqual(
+            ["E:/references/guidance.png"],
+            panel.attachment_strip.paths(),
+        )
+        self.assertEqual([], panel._client.turn_requests)
+
+    def test_authoritative_snapshot_resolves_unknown_project_creation_outcome(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._project_goal_draft = {
+            "phase": "turn_outcome_unknown",
+            "thread_id": "thread-supervisor",
+            "text": "original project objective",
+            "attachment_paths": ("E:/references/original.png",),
+        }
+        panel.input_edit.setPlainText("original project objective")
+        panel.attachment_strip.add_path("E:/references/original.png")
+
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+
+        self.assertIsNone(panel._project_goal_draft)
+        self.assertEqual("team", panel._current_task_route)
+        self.assertEqual("conversation", panel._task_view_mode)
+        self.assertEqual("", panel.input_edit.toPlainText())
+        self.assertEqual([], panel.attachment_strip.paths())
+
+    def test_managed_project_guidance_sends_images_and_preserves_on_failure(
+        self,
+    ) -> None:
+        with_image = _make_panel(selected_thread_id="thread-execution")
+        with_image._apply_project_team_snapshot(_managed_project_snapshot())
+        with_image.input_edit.setPlainText("")
+        with_image.attachment_strip.add_path("E:/references/keep.png")
+
+        with_image._send()
+
+        self.assertEqual(1, len(with_image._client.project_team_guidance_requests))
+        image_request = with_image._client.project_team_guidance_requests[-1]
+        self.assertEqual("", image_request[2])
+        self.assertEqual(["E:/references/keep.png"], image_request[-2])
+        self.assertEqual([], with_image._client.turn_requests)
+        self.assertEqual([], with_image._client.steer_requests)
+        self.assertEqual("", with_image.input_edit.toPlainText())
+        self.assertEqual(
+            ["E:/references/keep.png"],
+            with_image.attachment_strip.paths(),
+        )
+        with_image._on_action_completed(
+            image_request[-1],
+            {
+                **_project_guidance_ack(
+                    "project-1",
+                    "thread-execution",
+                    "execution",
+                ),
+                "project_team": _managed_project_snapshot(),
+            },
+        )
+        self.assertEqual([], with_image.attachment_strip.paths())
+        self.assertTrue(any(
+            entry.get("role") == "user"
+            and entry.get("text") == "（仅图片）"
+            and entry.get("attachments") == ("keep.png",)
+            for entry in with_image.conversation.entries
+        ))
+
+        failed = _make_panel(selected_thread_id="thread-supervisor")
+        failed._apply_project_team_snapshot(_managed_project_snapshot())
+        failed.input_edit.setPlainText("失败后必须保留")
+        failed.attachment_strip.add_path("E:/references/failure.png")
+        failed._send()
+        request = failed._client.project_team_guidance_requests[-1]
+
+        failed._on_request_failed(
+            request[-1],
+            {
+                "structured_error": {
+                    "code": "NETWORK_TIMEOUT",
+                    "message": "timed out",
+                }
+            },
+        )
+
+        self.assertEqual("失败后必须保留", failed.input_edit.toPlainText())
+        self.assertEqual(
+            ["E:/references/failure.png"],
+            failed.attachment_strip.paths(),
+        )
+        self.assertIn("未自动重试", failed.conversation.toPlainText())
+
+    def test_guidance_ack_accepts_verified_same_role_transfer_in_snapshot(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-execution")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+        submitted_text = "迁移期间提交的执行指导"
+        submitted_image = "E:/references/before-transfer.png"
+        panel.input_edit.setPlainText(submitted_text)
+        panel.attachment_strip.add_path(submitted_image)
+        panel._send()
+        request = panel._client.project_team_guidance_requests[-1]
+        transferred = _managed_project_snapshot()
+        transferred["revision"] = "wiring-project-2"
+        for thread in transferred["projects"][0]["threads"]:
+            if thread["role"] == "execution":
+                thread["thread_id"] = "thread-execution-forked"
+
+        panel._on_action_completed(
+            request[-1],
+            {
+                **_project_guidance_ack(
+                    "project-1",
+                    "thread-execution",
+                    "execution",
+                ),
+                "project_team": transferred,
+            },
+        )
+
+        self.assertEqual("thread-execution-forked", panel._selected_thread_id)
+        self.assertEqual("", panel.input_edit.toPlainText())
+        self.assertEqual([], panel.attachment_strip.paths())
+        submitted = [
+            entry
+            for entry in panel.conversation.entries
+            if entry.get("role") == "user"
+            and entry.get("text") == submitted_text
+        ]
+        self.assertEqual(1, len(submitted))
+        self.assertEqual(("before-transfer.png",), submitted[0]["attachments"])
+        panel._on_action_completed(
+            request[-1],
+            {
+                **_project_guidance_ack(
+                    "project-1",
+                    "thread-execution",
+                    "execution",
+                ),
+                "project_team": transferred,
+            },
+        )
+        self.assertEqual(
+            1,
+            sum(
+                entry.get("role") == "user"
+                and entry.get("text") == submitted_text
+                for entry in panel.conversation.entries
+            ),
+        )
+        self.assertEqual(
+            1,
+            panel.conversation.toPlainText().count(
+                "后续进展会同步到项目状态。"
+            ),
+        )
+
+    def test_guidance_ack_records_submitted_snapshot_and_preserves_new_edit(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "text changed",
+                "已提交版本 + 尚未提交补充",
+                ("E:/references/submitted.png",),
+            ),
+            (
+                "attachments changed",
+                "已提交版本",
+                ("E:/references/current-edit.png",),
+            ),
+        )
+        for label, current_text, current_attachments in cases:
+            with self.subTest(case=label):
+                panel = _make_panel(selected_thread_id="thread-supervisor")
+                panel._apply_project_team_snapshot(_managed_project_snapshot())
+                submitted_text = "已提交版本"
+                submitted_attachment = "E:/references/submitted.png"
+                panel.input_edit.setPlainText(submitted_text)
+                panel.attachment_strip.add_path(submitted_attachment)
+                panel._send()
+                request = panel._client.project_team_guidance_requests[-1]
+                panel.input_edit.setPlainText(current_text)
+                panel.attachment_strip.set_paths(list(current_attachments))
+                response = {
+                    **_project_guidance_ack(
+                        "project-1",
+                        "thread-supervisor",
+                        "supervisor",
+                    ),
+                    "project_team": _managed_project_snapshot(),
+                }
+
+                panel._on_action_completed(request[-1], response)
+
+                self.assertEqual(current_text, panel.input_edit.toPlainText())
+                self.assertEqual(
+                    list(current_attachments),
+                    panel.attachment_strip.paths(),
+                )
+                submitted = [
+                    entry
+                    for entry in panel.conversation.entries
+                    if entry.get("role") == "user"
+                    and entry.get("text") == submitted_text
+                ]
+                self.assertEqual(1, len(submitted))
+                self.assertEqual(
+                    ("submitted.png",),
+                    submitted[0]["attachments"],
+                )
+                self.assertEqual(
+                    1,
+                    panel.conversation.toPlainText().count(
+                        "先前版本已进入项目；当前编辑保留。"
+                    ),
+                )
+
+                panel._on_action_completed(request[-1], response)
+                submitted_after_duplicate = [
+                    entry
+                    for entry in panel.conversation.entries
+                    if entry.get("role") == "user"
+                    and entry.get("text") == submitted_text
+                ]
+                self.assertEqual(1, len(submitted_after_duplicate))
+                self.assertEqual(
+                    1,
+                    panel.conversation.toPlainText().count(
+                        "先前版本已进入项目；当前编辑保留。"
+                    ),
+                )
+
+    def test_stale_project_creation_marker_routes_guidance_action_with_image(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+        panel._project_goal_draft = {
+            "phase": "starting_turn",
+            "thread_id": "thread-supervisor",
+            "text": "旧的项目创建草稿",
+        }
+        token = panel._turn_state.capture_token()
+        self.assertTrue(panel._turn_state.reconcile_snapshot(
+            token,
+            "thread-supervisor",
+            "project-turn-before-generation-change",
+            "inProgress",
+            turn_active=True,
+        ))
+        panel.input_edit.setPlainText("当前 Turn 变化后仍是项目指导")
+        panel.attachment_strip.add_path("E:/references/generation-change.png")
+
+        panel._send()
+
+        self.assertIsNone(panel._project_goal_draft)
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        request = panel._client.project_team_guidance_requests[-1]
+        self.assertEqual(
+            (
+                "project-1",
+                "thread-supervisor",
+                "当前 Turn 变化后仍是项目指导",
+            ),
+            request[:3],
+        )
+        self.assertEqual(
+            ["E:/references/generation-change.png"],
+            request[-2],
+        )
+
+    def test_project_steer_reconciliation_reroutes_to_action_never_turn(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        token = panel._turn_state.capture_token()
+        self.assertTrue(panel._turn_state.reconcile_snapshot(
+            token,
+            "thread-supervisor",
+            "old-project-turn",
+            "inProgress",
+            turn_active=True,
+        ))
+        panel.input_edit.setPlainText("状态变化后继续保留这条项目指导")
+        panel.attachment_strip.add_path("E:/references/reconciled.png")
+        panel._steer_active_turn(
+            panel.input_edit.toPlainText(),
+            tuple(panel.attachment_strip.paths()),
+            "thread-supervisor",
+        )
+        steer_context = panel._client.steer_requests[-1][-1]
+        panel._on_request_failed(
+            steer_context,
+            {
+                "structured_error": {
+                    "code": "STALE_ACTIVE_TURN",
+                    "message": "the active Turn changed",
+                    "details": {
+                        "thread_id": "thread-supervisor",
+                        "expected_turn_id": "old-project-turn",
+                        "active_turn_id": "new-project-turn",
+                        "turn_active": True,
+                    },
+                }
+            },
+        )
+        pending = panel._pending_steer_drafts[steer_context]
+        reconciliation_context = pending["reconciliation_context"]
+        panel._on_action_completed(
+            reconciliation_context,
+            {
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "thread-supervisor",
+                    "turn_id": None,
+                    "turn_status": "completed",
+                    "turn_active": False,
+                    "permission_profile": "supervisor",
+                    "project_id": "project-1",
+                    "project_role": "supervisor",
+                }
+            },
+        )
+
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual(1, len(panel._client.steer_requests))
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        request = panel._client.project_team_guidance_requests[-1]
+        self.assertEqual(
+            "状态变化后继续保留这条项目指导",
+            request[2],
+        )
+        self.assertEqual(["E:/references/reconciled.png"], request[-2])
+
+    def test_cold_start_project_identity_survives_snapshot_failure_for_guidance(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="cold-technical-review")
+        panel._project_team_snapshot = normalize_project_team(None)
+        panel._known_project_threads = {}
+        panel._current_task_route = "single"
+        panel._on_health({
+            "houdini_mcp": {"backend": "hia_v2", "available": True},
+            "session": {
+                "connected": True,
+                "authentication": "authenticated",
+                "thread_id": "cold-technical-review",
+                "turn_id": "cold-running-turn",
+                "turn_status": "inProgress",
+                "turn_active": True,
+                "permission_profile": "technical_review",
+                "project_id": "cold-project-1",
+                "project_role": "technical_review",
+            }
+        })
+        panel._project_team_pending = "project-team-get-request"
+        panel._on_request_failed(
+            "project_team:get",
+            {
+                "structured_error": {
+                    "code": "NETWORK_TIMEOUT",
+                    "message": "project snapshot timed out",
+                }
+            },
+        )
+        panel.input_edit.setPlainText("快照失败后仍必须进入项目指导")
+        panel.attachment_strip.add_path("E:/references/cold-start.png")
+        panel._refresh_controls()
+
+        self.assertEqual("team", panel._current_task_route)
+        self.assertTrue(panel.send_button.isEnabled())
+        panel._send()
+
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        request = panel._client.project_team_guidance_requests[-1]
+        self.assertEqual(
+            (
+                "cold-project-1",
+                "cold-technical-review",
+                "快照失败后仍必须进入项目指导",
+            ),
+            request[:3],
+        )
+        self.assertEqual(["E:/references/cold-start.png"], request[-2])
+
+    def test_bridge_project_guidance_required_reroutes_steer_to_action(self) -> None:
+        panel = _make_panel(selected_thread_id="cold-execution")
+        token = panel._turn_state.capture_token()
+        self.assertTrue(panel._turn_state.reconcile_snapshot(
+            token,
+            "cold-execution",
+            "cold-execution-turn",
+            "inProgress",
+            turn_active=True,
+        ))
+        panel.input_edit.setPlainText("Bridge 识别身份后改走项目 action")
+        panel.attachment_strip.add_path("E:/references/bridge-guard.png")
+        panel._steer_active_turn(
+            panel.input_edit.toPlainText(),
+            tuple(panel.attachment_strip.paths()),
+            "cold-execution",
+        )
+        steer_context = panel._client.steer_requests[-1][-1]
+
+        panel._on_request_failed(
+            steer_context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_GUIDANCE_REQUIRED",
+                    "message": "project role uses project guidance",
+                    "details": {
+                        "project_id": "cold-project-2",
+                        "project_role": "execution",
+                        "thread_id": "cold-execution",
+                        "turn_id": "cold-execution-turn",
+                        "turn_active": True,
+                        "turn_status": "inProgress",
+                    },
+                }
+            },
+        )
+
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual(1, len(panel._client.steer_requests))
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        request = panel._client.project_team_guidance_requests[-1]
+        self.assertEqual(
+            ("cold-project-2", "cold-execution", "Bridge 识别身份后改走项目 action"),
+            request[:3],
+        )
+        self.assertEqual(["E:/references/bridge-guard.png"], request[-2])
+
+    def test_bridge_project_guidance_required_reroutes_turn_start_to_action(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="cold-execution")
+        text = "追加结构要求必须进入项目工作流"
+        attachment = "E:/references/start-guard.png"
+        panel.input_edit.setPlainText(text)
+        panel.attachment_strip.add_path(attachment)
+
+        self.assertTrue(panel._start_new_turn(
+            text,
+            (attachment,),
+            "cold-execution",
+        ))
+        start_context = panel._client.turn_requests[-1][-1]
+        self.assertEqual(1, sum(
+            entry.get("role") == "user" and entry.get("text") == text
+            for entry in panel.conversation.entries
+        ))
+
+        panel._on_request_failed(
+            start_context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_GUIDANCE_REQUIRED",
+                    "message": "project role uses project guidance",
+                    "details": {
+                        "project_id": "project-1",
+                        "project_role": "execution",
+                        "thread_id": "cold-execution",
+                        "turn_id": None,
+                        "turn_active": False,
+                        "turn_status": "completed",
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        request = panel._client.project_team_guidance_requests[-1]
+        self.assertEqual(("project-1", "cold-execution", text), request[:3])
+        self.assertEqual([attachment], request[-2])
+        self.assertEqual(text, panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+
+        snapshot = _managed_project_snapshot()
+        snapshot["projects"][0]["threads"] = [
+            {
+                "role": "execution",
+                "thread_id": "cold-execution",
+                "title": "执行 AI",
+                "status": "running",
+            }
+        ]
+        panel._on_action_completed(
+            request[-1],
+            {
+                **_project_guidance_ack(
+                    "project-1",
+                    "cold-execution",
+                    "execution",
+                    mode="queued",
+                ),
+                "project_team": snapshot,
+            },
+        )
+
+        self.assertEqual("", panel.input_edit.toPlainText())
+        self.assertEqual([], panel.attachment_strip.paths())
+        self.assertEqual(1, sum(
+            entry.get("role") == "user" and entry.get("text") == text
+            for entry in panel.conversation.entries
+        ))
+
+    def test_legacy_workflow_active_turn_start_uses_known_project_action(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="legacy-execution")
+        text = "旧 Bridge 的 409 也不能重试普通 Turn"
+        attachment = "E:/references/legacy-workflow.png"
+        panel.input_edit.setPlainText(text)
+        panel.attachment_strip.add_path(attachment)
+        self.assertTrue(panel._start_new_turn(
+            text,
+            (attachment,),
+            "legacy-execution",
+        ))
+        start_context = panel._client.turn_requests[-1][-1]
+        panel._remember_project_thread(
+            "legacy-execution",
+            project_id="legacy-project",
+            role_key="execution",
+            project_status="running",
+        )
+
+        panel._on_request_failed(
+            start_context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_WORKFLOW_ACTIVE",
+                    "message": "the project executor owns scene writes",
+                    "details": {},
+                }
+            },
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        request = panel._client.project_team_guidance_requests[-1]
+        self.assertEqual(
+            ("legacy-project", "legacy-execution", text),
+            request[:3],
+        )
+        self.assertEqual([attachment], request[-2])
+        self.assertEqual(text, panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+
+    def test_legacy_workflow_active_without_identity_uses_supervisor_action(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._current_task_route = "team"
+        text = "用户原始追加指令"
+        attachment = "E:/references/original-legacy-409.png"
+        panel.input_edit.setPlainText(text)
+        panel.attachment_strip.add_path(attachment)
+        self.assertTrue(panel._start_new_turn(
+            text,
+            (attachment,),
+            "thread-supervisor",
+        ))
+        turn_context = panel._client.turn_requests[-1][-1]
+
+        panel._on_request_failed(
+            turn_context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_WORKFLOW_ACTIVE",
+                    "message": (
+                        "The project executor has exclusive scene-write ownership"
+                    ),
+                    "details": {},
+                }
+            },
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual([], panel._client.project_team_guidance_requests)
+        self.assertEqual(
+            1,
+            len(panel._client.project_team_supervisor_guidance_requests),
+        )
+        supervisor_request = (
+            panel._client.project_team_supervisor_guidance_requests[-1]
+        )
+        self.assertEqual(text, supervisor_request[0])
+        self.assertIsNone(supervisor_request[1])
+        self.assertEqual([attachment], supervisor_request[-2])
+        self.assertEqual(text, panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+
+        response = {
+            **_project_guidance_ack(
+                "project-1",
+                "thread-supervisor",
+                "supervisor",
+            ),
+            "project_team": _managed_project_snapshot(),
+        }
+        panel._on_action_completed(supervisor_request[-1], response)
+
+        self.assertEqual("", panel.input_edit.toPlainText())
+        self.assertEqual([], panel.attachment_strip.paths())
+        self.assertEqual(
+            1,
+            sum(
+                entry.get("role") == "user"
+                and entry.get("text") == text
+                and entry.get("attachments")
+                == ("original-legacy-409.png",)
+                for entry in panel.conversation.entries
+            ),
+        )
+        self.assertEqual(
+            1,
+            panel.conversation.toPlainText().count(
+                "后续进展会同步到项目状态。"
+            ),
+        )
+
+        panel._on_action_completed(supervisor_request[-1], response)
+        self.assertEqual(
+            1,
+            sum(
+                entry.get("role") == "user"
+                and entry.get("text") == text
+                for entry in panel.conversation.entries
+            ),
+        )
+        self.assertEqual(
+            1,
+            panel.conversation.toPlainText().count(
+                "后续进展会同步到项目状态。"
+            ),
+        )
+
+    def test_legacy_workflow_active_on_ordinary_task_never_joins_project(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="ordinary-single")
+        self.assertEqual("single", panel._current_task_route)
+        text = "这是另一个普通任务，不能改投正在运行的项目"
+        attachment = "E:/references/ordinary-task-preserved.png"
+        panel.input_edit.setPlainText(text)
+        panel.attachment_strip.add_path(attachment)
+        self.assertTrue(panel._start_new_turn(
+            text,
+            (attachment,),
+            "ordinary-single",
+        ))
+        turn_context = panel._client.turn_requests[-1][-1]
+
+        panel._on_request_failed(
+            turn_context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_WORKFLOW_ACTIVE",
+                    "message": (
+                        "The project executor has exclusive scene-write ownership"
+                    ),
+                    "details": {},
+                }
+            },
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual([], panel._client.project_team_guidance_requests)
+        self.assertEqual(
+            [],
+            panel._client.project_team_supervisor_guidance_requests,
+        )
+        self.assertEqual(text, panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+        transcript = panel.conversation.toPlainText()
+        self.assertIn("场景写入正由项目执行 AI 占用", transcript)
+        self.assertIn("没有改投现有项目", transcript)
+
+    def test_legacy_workflow_active_after_thread_switch_never_reroutes(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._current_task_route = "team"
+        panel.input_edit.setPlainText("旧任务原始输入")
+        panel.attachment_strip.add_path("E:/references/old-task.png")
+        self.assertTrue(panel._start_new_turn(
+            "旧任务原始输入",
+            ("E:/references/old-task.png",),
+            "thread-supervisor",
+        ))
+        turn_context = panel._client.turn_requests[-1][-1]
+        panel._selected_thread_id = "ordinary-other"
+        panel.input_edit.setPlainText("新任务仍在编辑")
+        panel.attachment_strip.set_paths(["E:/references/new-task.png"])
+
+        panel._on_request_failed(
+            turn_context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_WORKFLOW_ACTIVE",
+                    "message": "legacy 409 arrived late",
+                    "details": {},
+                }
+            },
+        )
+
+        self.assertEqual([], panel._client.project_team_guidance_requests)
+        self.assertEqual(
+            [],
+            panel._client.project_team_supervisor_guidance_requests,
+        )
+        self.assertEqual("新任务仍在编辑", panel.input_edit.toPlainText())
+        self.assertEqual(
+            ["E:/references/new-task.png"],
+            panel.attachment_strip.paths(),
+        )
+
+    def test_legacy_supervisor_fallback_ambiguous_keeps_full_draft(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._current_task_route = "team"
+        text = "多项目时不能猜测投递目标"
+        attachment = "E:/references/ambiguous-projects.png"
+        panel.input_edit.setPlainText(text)
+        panel.attachment_strip.add_path(attachment)
+        self.assertTrue(panel._start_new_turn(
+            text,
+            (attachment,),
+            "thread-supervisor",
+        ))
+        turn_context = panel._client.turn_requests[-1][-1]
+        panel._on_request_failed(
+            turn_context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_WORKFLOW_ACTIVE",
+                    "message": "legacy 409 without identity",
+                    "details": {},
+                }
+            },
+        )
+        supervisor_request = (
+            panel._client.project_team_supervisor_guidance_requests[-1]
+        )
+
+        panel._on_request_failed(
+            supervisor_request[-1],
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_TARGET_AMBIGUOUS",
+                    "message": "exactly one running project is required",
+                }
+            },
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual([], panel._client.project_team_guidance_requests)
+        self.assertEqual(
+            1,
+            len(panel._client.project_team_supervisor_guidance_requests),
+        )
+        self.assertEqual(text, panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+        self.assertIn("未自动重试", panel.conversation.toPlainText())
+
+    def test_project_turn_start_guard_rejects_mismatched_error_identity(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="selected-execution")
+        text = "错配身份绝不能发送到另一个项目角色"
+        panel.input_edit.setPlainText(text)
+        self.assertTrue(panel._start_new_turn(
+            text,
+            (),
+            "selected-execution",
+        ))
+        start_context = panel._client.turn_requests[-1][-1]
+
+        panel._on_request_failed(
+            start_context,
+            {
+                "structured_error": {
+                    "code": "PROJECT_THREAD_GUIDANCE_REQUIRED",
+                    "message": "mismatched project identity",
+                    "details": {
+                        "project_id": "project-other",
+                        "project_role": "execution",
+                        "thread_id": "other-execution",
+                        "turn_id": None,
+                        "turn_active": False,
+                        "turn_status": "completed",
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(1, len(panel._client.turn_requests))
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual([], panel._client.project_team_guidance_requests)
+        self.assertEqual([], panel._client.project_team_supervisor_guidance_requests)
+        self.assertEqual(text, panel.input_edit.toPlainText())
+        self.assertNotIn("other-execution", panel._known_project_threads)
+
+    def test_project_goal_continue_uses_guidance_action_not_turn(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+        panel._current_goal = {
+            "objective": "完成项目并通过双重审查",
+            "status": "active",
+        }
+        panel._focus_mode = True
+        panel._goal_continuation_paused = False
+        panel._goal_continuation_boundary = (
+            "thread-supervisor",
+            "completed-project-turn",
+        )
+
+        self.assertTrue(
+            panel._maybe_start_goal_continuation(explicit_source="panel_continue")
+        )
+
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        request = panel._client.project_team_guidance_requests[-1]
+        self.assertIn("继续推进当前 Goal", request[2])
+        self.assertEqual("当前跟进：已交给项目工作流继续处理", panel.goal_activity_label.text())
+
+    def test_every_managed_role_requires_an_exact_guidance_ack(self) -> None:
+        roles = (
+            "supervisor",
+            "planning",
+            "execution",
+            "visual_review",
+            "technical_review",
+        )
+        snapshot = _managed_project_snapshot()
+        snapshot["projects"][0]["threads"] = [
+            {
+                "role": role,
+                "thread_id": f"thread-{role}",
+                "title": f"受管项目｜{role}",
+                "status": "running",
+            }
+            for role in roles
+        ]
+
+        for role in roles:
+            with self.subTest(role=role):
+                thread_id = f"thread-{role}"
+                text = f"{role} 的权威项目指导"
+                attachment = f"E:/references/{role}.png"
+                panel = _make_panel(selected_thread_id=thread_id)
+                panel._apply_project_team_snapshot(snapshot)
+                panel.input_edit.setPlainText(text)
+                panel.attachment_strip.add_path(attachment)
+
+                panel._send()
+
+                self.assertEqual([], panel._client.turn_requests)
+                self.assertEqual([], panel._client.steer_requests)
+                request = panel._client.project_team_guidance_requests[-1]
+                panel._on_action_completed(
+                    request[-1],
+                    {"project_team": snapshot},
+                )
+                self.assertEqual(text, panel.input_edit.toPlainText())
+                self.assertEqual(
+                    [attachment],
+                    panel.attachment_strip.paths(),
+                )
+                self.assertFalse(any(
+                    entry.get("role") == "user"
+                    and entry.get("text") == text
+                    for entry in panel.conversation.entries
+                ))
+
+                panel._send()
+                request = panel._client.project_team_guidance_requests[-1]
+                ack = _project_guidance_ack(
+                    "project-1",
+                    thread_id,
+                    role,
+                    mode="steered" if role == "supervisor" else "queued",
+                    delivery_thread_id="thread-execution",
+                    delivery_role="execution",
+                )
+                panel._on_action_completed(
+                    request[-1],
+                    {**ack, "project_team": snapshot},
+                )
+
+                self.assertEqual("", panel.input_edit.toPlainText())
+                self.assertEqual([], panel.attachment_strip.paths())
+                self.assertIn(
+                    "下一次安全处理时生效",
+                    panel.conversation.toPlainText(),
+                )
+
+    def test_targeted_role_guidance_rejects_mismatched_ack_fields(self) -> None:
+        valid = _project_guidance_ack(
+            "project-1",
+            "thread-execution",
+            "execution",
+            mode="steered",
+        )
+        cases: tuple[tuple[str, dict[str, Any]], ...] = (
+            (
+                "wrong target project",
+                {
+                    **valid,
+                    "guidance_target": {
+                        "project_id": "project-other",
+                        "thread_id": "thread-execution",
+                        "role": "execution",
+                    },
+                },
+            ),
+            (
+                "wrong target role",
+                {
+                    **valid,
+                    "guidance_target": {
+                        "project_id": "project-1",
+                        "thread_id": "thread-execution",
+                        "role": "planning",
+                    },
+                },
+            ),
+            (
+                "wrong target thread",
+                {
+                    **valid,
+                    "guidance_target": {
+                        "project_id": "project-1",
+                        "thread_id": "thread-supervisor",
+                        "role": "execution",
+                    },
+                },
+            ),
+            (
+                "wrong steered role",
+                {
+                    **valid,
+                    "workflow_delivery": {
+                        "mode": "steered",
+                        "project_id": "project-1",
+                        "thread_id": "thread-supervisor",
+                        "turn_id": "turn-guidance-ack",
+                        "role": "supervisor",
+                    },
+                },
+            ),
+            (
+                "wrong delivery project",
+                {
+                    **valid,
+                    "workflow_delivery": {
+                        **valid["workflow_delivery"],
+                        "project_id": "project-other",
+                    },
+                },
+            ),
+        )
+        for label, ack in cases:
+            with self.subTest(label=label):
+                panel = _make_panel(selected_thread_id="thread-execution")
+                panel._apply_project_team_snapshot(_managed_project_snapshot())
+                panel.input_edit.setPlainText("错配回执不能清稿")
+                panel.attachment_strip.add_path("E:/references/mismatch.png")
+                panel._send()
+                request = panel._client.project_team_guidance_requests[-1]
+
+                panel._on_action_completed(
+                    request[-1],
+                    {**ack, "project_team": _managed_project_snapshot()},
+                )
+
+                self.assertEqual(
+                    "错配回执不能清稿",
+                    panel.input_edit.toPlainText(),
+                )
+                self.assertEqual(
+                    ["E:/references/mismatch.png"],
+                    panel.attachment_strip.paths(),
+                )
+                self.assertIn(
+                    "没有匹配原项目、角色与投递结果",
+                    panel.conversation.toPlainText(),
+                )
+
+    def test_project_guidance_legacy_conflict_and_timeout_preserve_composer(
+        self,
+    ) -> None:
+        for code in ("PROJECT_THREAD_TRANSFER_ACTIVE", "NETWORK_TIMEOUT"):
+            with self.subTest(code=code):
+                panel = _make_panel(selected_thread_id="thread-supervisor")
+                panel._apply_project_team_snapshot(_managed_project_snapshot())
+                text = f"{code} 后保留这段文字"
+                attachment = f"E:/references/{code.lower()}.png"
+                panel.input_edit.setPlainText(text)
+                panel.attachment_strip.add_path(attachment)
+                panel._send()
+                request = panel._client.project_team_guidance_requests[-1]
+
+                panel._on_request_failed(
+                    request[-1],
+                    {
+                        "structured_error": {
+                            "code": code,
+                            "message": "legacy Bridge rejected this request",
+                            "details": {
+                                "transport": {
+                                    "http_status": (
+                                        409 if code != "NETWORK_TIMEOUT" else 504
+                                    )
+                                }
+                            },
+                        }
+                    },
+                )
+
+                self.assertEqual(text, panel.input_edit.toPlainText())
+                self.assertEqual([attachment], panel.attachment_strip.paths())
+                self.assertIn("未自动重试", panel.conversation.toPlainText())
+
+    def test_early_supervisor_guidance_never_falls_through_to_turn(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._project_team_snapshot = normalize_project_team(None)
+        panel._current_task_route = "team"
+        panel._selected_project_id = "project-1"
+        panel._remember_project_thread(
+            "thread-supervisor",
+            project_id="project-1",
+            role_key="supervisor",
+            project_status="running",
+        )
+        attachment = "E:/references/early-supervisor.png"
+        panel.input_edit.setPlainText("执行期间补充门洞宽度")
+        panel.attachment_strip.add_path(attachment)
+
+        panel._send()
+
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual([], panel._client.project_team_guidance_requests)
+        self.assertEqual(
+            1,
+            len(panel._client.project_team_supervisor_guidance_requests),
+        )
+        request = panel._client.project_team_supervisor_guidance_requests[0]
+        self.assertEqual("执行期间补充门洞宽度", request[0])
+        self.assertEqual("project-1", request[1])
+        self.assertEqual([attachment], request[-2])
+        self.assertEqual("执行期间补充门洞宽度", panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+        self.assertFalse(panel.send_button.isEnabled())
+        self.assertEqual("发送指导中…", panel.send_button.text())
+
+        panel._on_action_completed(
+            request[-1],
+            {
+                "guidance_accepted": True,
+                "guidance_id": "guidance-panel-1",
+                "workflow_delivery": {
+                    "mode": "steered",
+                    "project_id": "project-1",
+                    "thread_id": "thread-execution",
+                    "turn_id": "execution-active-turn",
+                    "role": "execution",
+                },
+                "guidance_target": {
+                    "project_id": "project-1",
+                    "thread_id": "thread-supervisor",
+                    "role": "supervisor",
+                },
+                "project_team": _managed_project_snapshot(),
+            },
+        )
+
+        self.assertEqual("", panel.input_edit.toPlainText())
+        self.assertEqual([], panel.attachment_strip.paths())
+        self.assertEqual(
+            1,
+            sum(
+                entry.get("role") == "user"
+                and entry.get("text") == "执行期间补充门洞宽度"
+                for entry in panel.conversation.entries
+            ),
+        )
+
+    def test_supervisor_guidance_requires_authoritative_exact_ack_to_clear(
+        self,
+    ) -> None:
+        cases = (
+            ({}, "missing acceptance"),
+            (
+                {
+                    "guidance_accepted": True,
+                    "guidance_id": "guidance-panel-mismatch",
+                    "workflow_delivery": {
+                        "mode": "queued",
+                        "project_id": "project-other",
+                    },
+                    "guidance_target": {
+                        "project_id": "project-other",
+                        "thread_id": "thread-supervisor",
+                        "role": "supervisor",
+                    },
+                },
+                "mismatched project",
+            ),
+        )
+        for extra, label in cases:
+            with self.subTest(label=label):
+                panel = _make_panel(selected_thread_id="thread-supervisor")
+                panel._project_team_snapshot = normalize_project_team(None)
+                panel._current_task_route = "team"
+                panel._remember_project_thread(
+                    "thread-supervisor",
+                    project_id="project-1",
+                    role_key="supervisor",
+                    project_status="running",
+                )
+                attachment = "E:/references/keep-authoritative.png"
+                panel.input_edit.setPlainText("必须进入权威项目流程")
+                panel.attachment_strip.add_path(attachment)
+                panel._send()
+                request = panel._client.project_team_supervisor_guidance_requests[-1]
+                payload = {"project_team": _managed_project_snapshot(), **extra}
+
+                panel._on_action_completed(request[-1], payload)
+
+                self.assertEqual(
+                    "必须进入权威项目流程", panel.input_edit.toPlainText()
+                )
+                self.assertEqual([attachment], panel.attachment_strip.paths())
+                self.assertIn("仍保留", panel.conversation.toPlainText())
+
+    def test_unsynced_team_role_fails_closed_instead_of_starting_scene_turn(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="unknown-team-role")
+        panel._project_team_snapshot = normalize_project_team(None)
+        panel._known_project_threads = {}
+        panel._current_task_route = "team"
+        panel.input_edit.setPlainText("项目身份未同步时不能误发普通 Turn")
+
+        panel._send()
+
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual(
+            [], panel._client.project_team_supervisor_guidance_requests
+        )
+        self.assertEqual(
+            "项目身份未同步时不能误发普通 Turn",
+            panel.input_edit.toPlainText(),
+        )
+        self.assertIn("未发送普通 Turn", panel.conversation.toPlainText())
+
+    def test_supervisor_guidance_conflict_and_timeout_keep_text_and_image(
+        self,
+    ) -> None:
+        for code in ("PROJECT_THREAD_PROJECT_MISMATCH", "NETWORK_TIMEOUT"):
+            with self.subTest(code=code):
+                panel = _make_panel(selected_thread_id="thread-supervisor")
+                panel._project_team_snapshot = normalize_project_team(None)
+                panel._current_task_route = "team"
+                panel._remember_project_thread(
+                    "thread-supervisor",
+                    project_id="project-1",
+                    role_key="supervisor",
+                    project_status="running",
+                )
+                attachment = f"E:/references/{code.lower()}-supervisor.png"
+                panel.input_edit.setPlainText("冲突或超时后保留")
+                panel.attachment_strip.add_path(attachment)
+                panel._send()
+                request = panel._client.project_team_supervisor_guidance_requests[-1]
+
+                panel._on_request_failed(
+                    request[-1],
+                    {
+                        "structured_error": {
+                            "code": code,
+                            "message": "request was not authoritatively accepted",
+                        }
+                    },
+                )
+
+                self.assertEqual("冲突或超时后保留", panel.input_edit.toPlainText())
+                self.assertEqual([attachment], panel.attachment_strip.paths())
+                self.assertEqual([], panel._client.turn_requests)
+                self.assertIn("未自动重试", panel.conversation.toPlainText())
+
+    def test_managed_project_guidance_rejects_images_for_text_only_model(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-execution")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+        panel.model_combo.clear()
+        panel.model_combo.addItem(
+            "text-only",
+            {"model": "text-only", "inputModalities": ["text"]},
+        )
+        panel.input_edit.setPlainText("参考这张图")
+        panel.attachment_strip.add_path("E:/references/keep.png")
+
+        panel._send()
+
+        self.assertEqual([], panel._client.project_team_guidance_requests)
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual("参考这张图", panel.input_edit.toPlainText())
+        self.assertEqual(
+            ["E:/references/keep.png"],
+            panel.attachment_strip.paths(),
+        )
+        self.assertIn("不支持图片输入", panel.conversation.toPlainText())
+
+    def test_project_guidance_ack_and_failure_stay_bound_to_original_composer(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+        panel.input_edit.setPlainText("相同文字也不能清错任务")
+        panel.attachment_strip.add_path("E:/references/same.png")
+        panel._send()
+        request = panel._client.project_team_guidance_requests[-1]
+        entries_before = list(panel.conversation.entries)
+
+        panel._selected_thread_id = "thread-execution"
+        panel._current_task_route = "team"
+        panel.input_edit.setPlainText("相同文字也不能清错任务")
+        panel.attachment_strip.set_paths(["E:/references/same.png"])
+        panel._on_action_completed(
+            request[-1],
+            {
+                **_project_guidance_ack(
+                    "project-1",
+                    "thread-supervisor",
+                    "supervisor",
+                ),
+                "project_team": _managed_project_snapshot(),
+            },
+        )
+
+        self.assertEqual("相同文字也不能清错任务", panel.input_edit.toPlainText())
+        self.assertEqual(
+            ["E:/references/same.png"],
+            panel.attachment_strip.paths(),
+        )
+        self.assertEqual(entries_before, panel.conversation.entries)
+
+        panel._selected_thread_id = "thread-supervisor"
+        panel.input_edit.setPlainText("失败后切换也不能污染")
+        panel.attachment_strip.set_paths(["E:/references/fail-switch.png"])
+        panel._send()
+        failed_request = panel._client.project_team_guidance_requests[-1]
+        panel._selected_thread_id = "thread-execution"
+        panel.input_edit.setPlainText("新任务输入")
+        panel.attachment_strip.set_paths(["E:/references/new.png"])
+        entries_before_failure = list(panel.conversation.entries)
+
+        panel._on_request_failed(
+            failed_request[-1],
+            {
+                "structured_error": {
+                    "code": "NETWORK_TIMEOUT",
+                    "message": "timed out",
+                }
+            },
+        )
+
+        self.assertEqual("新任务输入", panel.input_edit.toPlainText())
+        self.assertEqual(
+            ["E:/references/new.png"],
+            panel.attachment_strip.paths(),
+        )
+        self.assertEqual(entries_before_failure, panel.conversation.entries)
+
+    def test_known_managed_role_uses_action_when_project_snapshot_is_missing(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="thread-execution")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+        self.assertIn("thread-execution", panel._known_project_threads)
+        panel._project_team_snapshot = normalize_project_team(None)
+        panel._current_task_route = "team"
+        panel.input_edit.setPlainText("快照空窗期不能发普通 Turn")
+
+        panel._send()
+
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.steer_requests)
+        self.assertEqual(1, len(panel._client.project_team_guidance_requests))
+        self.assertEqual(
+            ("project-1", "thread-execution", "快照空窗期不能发普通 Turn"),
+            panel._client.project_team_guidance_requests[-1][:3],
+        )
+        self.assertEqual(
+            "快照空窗期不能发普通 Turn",
+            panel.input_edit.toPlainText(),
+        )
+
+        history_only = _make_panel(selected_thread_id="history-role")
+        history_only._project_team_snapshot = normalize_project_team(None)
+        history_only._known_project_threads = {}
+        history_only.history_combo.clear()
+        history_only.history_combo.addItem(
+            "历史角色",
+            {
+                "kind": "thread",
+                "thread_id": "history-role",
+                "project_id": "history-project",
+                "role_key": "execution",
+                "managed_project_thread": True,
+            },
+        )
+        history_only._current_task_route = "team"
+        history_only.input_edit.setPlainText("历史归属也必须 fail closed")
+
+        history_only._send()
+
+        self.assertEqual([], history_only._client.turn_requests)
+        self.assertEqual([], history_only._client.steer_requests)
+        self.assertEqual(
+            1,
+            len(history_only._client.project_team_guidance_requests),
+        )
+        self.assertEqual(
+            "历史归属也必须 fail closed",
+            history_only.input_edit.toPlainText(),
+        )
+
+    def test_first_project_ack_gap_buffers_one_natural_supervisor_message(
+        self,
+    ) -> None:
+        panel = _make_panel(selected_thread_id="fresh-supervisor")
+        panel._current_task_route = "team"
+        panel._project_goal_draft = {
+            "phase": "draft_on_thread",
+            "thread_id": "fresh-supervisor",
+            "text": "创建项目",
+            "attachment_paths": (),
+        }
+        panel.input_edit.setPlainText("创建项目")
+        self.assertTrue(panel._start_new_turn(
+            "创建项目",
+            (),
+            "fresh-supervisor",
+            forced_team_override="team",
+            project_creation=True,
+        ))
+        context = panel._client.turn_requests[-1][-1]
+        self.assertFalse(any(
+            entry.get("role") == "codex"
+            for entry in panel.conversation.entries
+        ))
+
+        panel._on_action_completed(
+            context,
+            {
+                "thread_id": "fresh-supervisor",
+                "turn_id": "first-project-turn",
+                "turn_active": True,
+                "routing": "team",
+                "project_id": "fresh-project",
+            },
+        )
+        self.assertIsNone(panel._project_goal_draft)
+        panel._project_team_snapshot = normalize_project_team(None)
+        panel._begin_codex_message()
+        self.assertFalse(any(
+            entry.get("role") == "codex"
+            for entry in panel.conversation.entries
+        ))
+
+        structured = (
+            '{"status":"in_progress",'
+            '"summary":"监督 AI 已建立五个角色任务。"}'
+        )
+        panel._render_event({
+            "type": "codex_notification",
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "fresh-supervisor",
+                "turnId": "first-project-turn",
+                "itemId": "first-project-status",
+                "delta": structured,
+            },
+        })
+        self.assertFalse(any(
+            entry.get("role") == "codex"
+            for entry in panel.conversation.entries
+        ))
+        panel._render_event({
+            "type": "codex_notification",
+            "method": "item/completed",
+            "params": {
+                "threadId": "fresh-supervisor",
+                "turnId": "first-project-turn",
+                "item": {
+                    "id": "first-project-status",
+                    "type": "agentMessage",
+                    "text": structured,
+                },
+            },
+        })
+
+        codex_entries = [
+            entry
+            for entry in panel.conversation.entries
+            if entry.get("role") == "codex"
+        ]
+        self.assertEqual(1, len(codex_entries))
+        rendered = panel.conversation.toPlainText()
+        self.assertEqual(1, rendered.count("项目状态："))
+        self.assertIn("监督 AI 已建立五个角色任务", rendered)
+        self.assertNotIn('{"status"', rendered)
+
+        panel._render_event({
+            "type": "codex_notification",
+            "method": "item/completed",
+            "params": {
+                "threadId": "fresh-supervisor",
+                "turnId": "first-project-turn",
+                "item": {
+                    "id": "first-project-status",
+                    "type": "agentMessage",
+                    "text": structured,
+                },
+            },
+        })
+        repeated = panel.conversation.toPlainText()
+        self.assertEqual(1, repeated.count("项目状态："))
+        self.assertEqual(1, len([
+            entry
+            for entry in panel.conversation.entries
+            if entry.get("role") == "codex"
+        ]))
+
+    def test_project_message_buffers_are_discarded_on_read_switch_and_disconnect(
+        self,
+    ) -> None:
+        structured = '{"status":"in_progress","summary":"迟到状态"}'
+
+        switched = _make_panel(selected_thread_id="thread-supervisor")
+        switched._apply_project_team_snapshot(_managed_project_snapshot())
+        switch_params = {
+            "threadId": "thread-supervisor",
+            "turnId": "switch-turn",
+            "itemId": "switch-item",
+        }
+        self.assertTrue(switched._buffer_project_agent_delta(
+            switch_params,
+            structured,
+        ))
+        switched._on_action_completed(
+            "session_resume",
+            {"thread_id": "thread-execution"},
+        )
+        switch_key = ("thread-supervisor", "switch-turn", "switch-item")
+        self.assertNotIn(switch_key, switched._project_message_buffers)
+        self.assertIn(switch_key, switched._completed_project_messages)
+        self.assertTrue(switched._complete_project_agent_message(
+            switch_params,
+            {
+                "id": "switch-item",
+                "type": "agentMessage",
+                "text": structured,
+            },
+        ))
+        self.assertNotIn("迟到状态", switched.conversation.toPlainText())
+
+        restored = _make_panel(selected_thread_id="thread-supervisor")
+        restored._apply_project_team_snapshot(_managed_project_snapshot())
+        read_params = {
+            "threadId": "thread-supervisor",
+            "turnId": "read-turn",
+            "itemId": "read-item",
+        }
+        self.assertTrue(restored._buffer_project_agent_delta(
+            read_params,
+            structured,
+        ))
+        self.assertTrue(restored._render_thread_read({
+            "read": {
+                "thread": {
+                    "id": "thread-supervisor",
+                    "turns": [],
+                }
+            }
+        }))
+        read_key = ("thread-supervisor", "read-turn", "read-item")
+        self.assertNotIn(read_key, restored._project_message_buffers)
+        self.assertIn(read_key, restored._completed_project_messages)
+        restored._render_event({
+            "type": "codex_notification",
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-supervisor",
+                "turnId": "untracked-late-turn",
+                "item": {
+                    "id": "untracked-late-item",
+                    "type": "agentMessage",
+                    "text": (
+                        '{"status":"in_progress",'
+                        '"summary":"没有缓冲的迟到状态"}'
+                    ),
+                },
+            },
+        })
+        self.assertNotIn(
+            "没有缓冲的迟到状态",
+            restored.conversation.toPlainText(),
+        )
+
+        disconnected = _make_panel(selected_thread_id="thread-supervisor")
+        disconnected._apply_project_team_snapshot(_managed_project_snapshot())
+        disconnect_params = {
+            "threadId": "thread-supervisor",
+            "turnId": "disconnect-turn",
+            "itemId": "disconnect-item",
+        }
+        self.assertTrue(disconnected._buffer_project_agent_delta(
+            disconnect_params,
+            structured,
+        ))
+        disconnected._apply_session(
+            {
+                "connected": False,
+                "authentication": "unavailable",
+                "thread_id": "thread-supervisor",
+                "turn_active": False,
+            },
+            token=disconnected._turn_state.capture_token(),
+            allow_followup=False,
+        )
+        disconnect_key = (
+            "thread-supervisor",
+            "disconnect-turn",
+            "disconnect-item",
+        )
+        self.assertNotIn(disconnect_key, disconnected._project_message_buffers)
+        self.assertIn(
+            disconnect_key,
+            disconnected._completed_project_messages,
+        )
+
+    def test_managed_supervisor_structured_output_is_natural_live_and_history(
+        self,
+    ) -> None:
+        structured = (
+            '{"status":"in_progress","summary":"正在检查项目启动链路。"} '
+            '{"status":"incomplete","goal":"验证项目模式",'
+            '"result":"尚未完成验证。","evidence":["只读检查受阻"],'
+            '"next_action":"继续核对项目与五个角色任务。"}'
+        )
+        live = _make_panel(selected_thread_id="thread-supervisor")
+        live._apply_project_team_snapshot(_managed_project_snapshot())
+        token = live._turn_state.capture_token()
+        self.assertTrue(live._turn_state.reconcile_snapshot(
+            token,
+            "thread-supervisor",
+            "structured-turn",
+            "inProgress",
+            turn_active=True,
+        ))
+        live._stream_thread_id = "thread-supervisor"
+        live._stream_turn_id = "structured-turn"
+        live._begin_codex_message()
+        self.assertEqual([], live.conversation.entries)
+
+        live._render_event({
+            "type": "codex_notification",
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-supervisor",
+                "turnId": "structured-turn",
+                "itemId": "structured-message",
+                "delta": structured,
+            },
+        })
+        self.assertEqual([], live.conversation.entries)
+        live._render_event({
+            "type": "codex_notification",
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-supervisor",
+                "turnId": "structured-turn",
+                "item": {
+                    "id": "structured-message",
+                    "type": "agentMessage",
+                    "text": structured,
+                },
+            },
+        })
+        rendered = live.conversation.toPlainText()
+        self.assertIn("项目状态：尚未完成验证", rendered)
+        self.assertIn("当前阶段：制定蓝图与阶段卡", rendered)
+        self.assertIn("下一步：继续核对项目与五个角色任务", rendered)
+        self.assertNotIn('{"status"', rendered)
+        self.assertNotIn("当前尚无文字输出", rendered)
+
+        restored = _make_panel(selected_thread_id="thread-supervisor")
+        restored._apply_project_team_snapshot(_managed_project_snapshot())
+        self.assertTrue(restored._render_thread_read({
+            "read": {
+                "thread": {
+                    "id": "thread-supervisor",
+                    "turns": [
+                        {"items": [{"type": "agentMessage", "text": structured}]}
+                    ],
+                }
+            }
+        }))
+        history_text = restored.conversation.toPlainText()
+        self.assertIn("项目状态：尚未完成验证", history_text)
+        self.assertNotIn('{"status"', history_text)
+
+    def test_every_project_role_schema_is_natural_live_and_history(self) -> None:
+        facts = {
+            "user_facts": ["用户要求完整木屋"],
+            "reference_observations": ["参考图屋檐清晰"],
+            "codex_assumptions": [],
+            "verified_scene_facts": ["场景单位为米"],
+            "hard_constraints": ["保持可编辑"],
+            "acceptance": ["双审查通过"],
+        }
+        stage = {
+            "title": "主体结构",
+            "objective": "完成墙体与屋顶",
+            "prerequisites": ["蓝图已授权"],
+            "inputs": ["参考图"],
+            "ordered_construction_steps": [{
+                "responsibility": "建立墙体",
+                "path_or_network_region": "/obj/cabin",
+                "native_operation_family": "SOP",
+                "inputs_and_connections": "box -> transform",
+                "key_parameters": "scale",
+                "expected_result": "墙体闭合",
+                "next_step_evidence": "检查连接",
+                "failure_minimum_repair": "只修墙体分支",
+            }],
+            "native_node_strategy": ["优先原生节点"],
+            "authoring_batches": ["墙体批次"],
+            "parameter_dependencies": ["屋顶依赖墙顶"],
+            "outputs": ["OUT_CABIN"],
+            "visible_characteristics": ["屋檐清晰"],
+            "structural_relationships": ["屋顶受墙体支撑"],
+            "prohibitions": ["不得悬空"],
+            "technical_evidence": ["节点连接"],
+            "visual_evidence": ["透视截图"],
+            "reviewers": ["视觉审查", "技术审查"],
+            "failure_minimum_repair": ["仅修失败区域"],
+            "downstream_contract": ["交给执行 AI"],
+            "evidence_disposition": {
+                "technical": "pending",
+                "visual": "pending",
+                "stage": "not started",
+            },
+        }
+        intake = {
+            "scene_task_eligibility": {
+                "decision": "eligible",
+                "reason": "用户明确要求在当前 Houdini 场景中建造完整木屋。",
+            },
+            "summary": "该请求适合进入场景项目工作流。",
+            "task_depth": "full",
+            "collaboration_mode": "used-with-real-events",
+            **facts,
+        }
+        plan = {
+            "project_title": "木屋项目",
+            "summary": "完整蓝图已经形成。",
+            "task_depth": "full",
+            "collaboration_mode": "used-with-real-events",
+            **facts,
+            "stages": [stage],
+        }
+        self.assertEqual(set(SUPERVISOR_SCHEMA["required"]), set(intake))
+        self.assertEqual(set(PLANNING_SCHEMA["required"]), set(plan))
+        execution = {
+            "outcome": "completed",
+            "summary": "主体阶段已经完成。",
+            "technical_evidence": [{
+                "id": "evidence-1",
+                "tool_item_id": "tool-1",
+                "claim": "墙体闭合",
+                "scope_or_path": "/obj/cabin/OUT_CABIN",
+                "frame_or_time": "frame 1",
+                "observation_or_measurement": "四面墙连续",
+                "source": "hia_inspect",
+                "result": "verified",
+            }],
+            "remaining": [],
+            "review_images": [{
+                "id": "image-1",
+                "capture_tool_item_id": "capture-1",
+                "path": "E:/evidence/cabin.png",
+                "frame_or_time": "frame 1",
+            }],
+            "collaboration_mode": "serial-fallback",
+        }
+        review = {
+            "decision": "pass",
+            "claims": [{
+                "stage_claim": "屋顶受墙体支撑",
+                "disposition": "verified",
+                "evidence_refs": ["evidence-1"],
+                "actual_evidence": ["接触关系已测量"],
+                "deviation": "",
+                "minimum_repair": "",
+                "not_applicable_reason": "",
+            }],
+            "largest_consequential_deviation": "",
+            "missing_evidence": [],
+            "repair": [],
+            "collaboration_mode": "used-with-real-events",
+        }
+        decision = {
+            "decision": "repair",
+            "summary": "屋檐还需一次最小修复。",
+            "repair_card": "只调整屋檐挑出距离。",
+            "collaboration_mode": "used-with-real-events",
+            "external_dependency": {
+                "proven": False,
+                "required_external_change": "",
+                "observed_blocker": "",
+                "why_codex_cannot_resolve": "",
+                "evidence_refs": [],
+            },
+        }
+        cases = (
+            (
+                "supervisor",
+                intake,
+                "监督进展：该请求适合进入场景项目工作流",
+            ),
+            ("supervisor", plan, "项目方案：完整蓝图已经形成"),
+            ("supervisor", decision, "监督结论：需要修复"),
+            ("planning", plan, "项目方案：完整蓝图已经形成"),
+            ("execution", execution, "执行结果：已完成"),
+            (
+                "visual_review",
+                review,
+                "视觉审查 AI 结论：通过 · 未发现需要修复的重要偏差",
+            ),
+            (
+                "technical_review",
+                review,
+                "技术审查 AI 结论：通过 · 未发现需要修复的重要偏差",
+            ),
+        )
+        snapshot = _managed_project_snapshot()
+        project = snapshot["projects"][0]
+        existing_roles = {item["role"] for item in project["threads"]}
+        for role in ("planning", "visual_review", "technical_review"):
+            if role not in existing_roles:
+                project["threads"].append({
+                    "role": role,
+                    "thread_id": f"thread-{role}",
+                    "title": f"受管项目｜{role}",
+                    "status": "running",
+                })
+
+        for index, (role, value, expected) in enumerate(cases):
+            with self.subTest(role=role, expected=expected):
+                thread_id = f"thread-{role}"
+                structured = json.dumps(value, ensure_ascii=False)
+                live = _make_panel(selected_thread_id=thread_id)
+                live._apply_project_team_snapshot(snapshot)
+                token = live._turn_state.capture_token()
+                self.assertTrue(live._turn_state.reconcile_snapshot(
+                    token,
+                    thread_id,
+                    f"schema-turn-{index}",
+                    "inProgress",
+                    turn_active=True,
+                ))
+                live._stream_thread_id = thread_id
+                live._stream_turn_id = f"schema-turn-{index}"
+                live._begin_codex_message()
+                live._render_event({
+                    "type": "codex_notification",
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": f"schema-turn-{index}",
+                        "itemId": f"schema-item-{index}",
+                        "delta": structured,
+                    },
+                })
+                self.assertNotIn(structured, live.conversation.toPlainText())
+                live._render_event({
+                    "type": "codex_notification",
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": f"schema-turn-{index}",
+                        "item": {
+                            "id": f"schema-item-{index}",
+                            "type": "agentMessage",
+                            "text": structured,
+                        },
+                    },
+                })
+                live_text = live.conversation.toPlainText()
+                self.assertIn(expected, live_text)
+                self.assertNotIn('"collaboration_mode"', live_text)
+                self.assertNotIn("{\"", live_text)
+                if value is intake:
+                    self.assertIn("任务深度：完整制作", live_text)
+                    self.assertIn(
+                        "场景任务判定：适合进入 Houdini 场景工作流 · "
+                        "用户明确要求在当前 Houdini 场景中建造完整木屋",
+                        live_text,
+                    )
+                    self.assertNotIn("scene_task_eligibility", live_text)
+
+                restored = _make_panel(selected_thread_id=thread_id)
+                restored._apply_project_team_snapshot(snapshot)
+                self.assertTrue(restored._render_thread_read({
+                    "read": {
+                        "thread": {
+                            "id": thread_id,
+                            "turns": [{
+                                "items": [{
+                                    "type": "agentMessage",
+                                    "text": structured,
+                                }]
+                            }],
+                        }
+                    }
+                }))
+                history_text = restored.conversation.toPlainText()
+                self.assertIn(expected, history_text)
+                self.assertNotIn('"collaboration_mode"', history_text)
+                if value is intake:
+                    self.assertIn("任务深度：完整制作", history_text)
+                    self.assertIn("场景任务判定：适合进入", history_text)
+
+    def test_bridge_intake_depth_and_eligibility_are_compact_natural_text(
+        self,
+    ) -> None:
+        facts = {
+            "user_facts": ["用户提交了任务"],
+            "reference_observations": [],
+            "codex_assumptions": [],
+            "verified_scene_facts": [],
+            "hard_constraints": [],
+            "acceptance": ["按任务深度完成"],
+        }
+        cases = (
+            (
+                "direct",
+                "直接执行",
+                "eligible",
+                "适合进入 Houdini 场景工作流",
+            ),
+            (
+                "focused",
+                "重点处理",
+                "unclear",
+                "是否属于场景任务尚不明确",
+            ),
+            (
+                "full",
+                "完整制作",
+                "not_applicable",
+                "不属于 Houdini 场景任务",
+            ),
+        )
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+        for depth, depth_label, eligibility, eligibility_label in cases:
+            with self.subTest(depth=depth, eligibility=eligibility):
+                payload = {
+                    "scene_task_eligibility": {
+                        "decision": eligibility,
+                        "reason": "依据用户任务本身进行判定。",
+                    },
+                    "summary": "监督已完成任务分类。",
+                    "task_depth": depth,
+                    "collaboration_mode": "serial-fallback",
+                    **facts,
+                }
+                self.assertEqual(
+                    set(SUPERVISOR_SCHEMA["required"]),
+                    set(payload),
+                )
+                structured = json.dumps(payload, ensure_ascii=False)
+
+                presentation = panel._project_status_presentation(
+                    "thread-supervisor",
+                    structured,
+                )
+
+                self.assertIsInstance(presentation, str)
+                self.assertIn(f"任务深度：{depth_label}", presentation)
+                self.assertIn(
+                    f"场景任务判定：{eligibility_label} · "
+                    "依据用户任务本身进行判定",
+                    presentation,
+                )
+                self.assertNotIn(structured, presentation)
+                self.assertNotIn("scene_task_eligibility", presentation)
+                self.assertNotIn("{\"", presentation)
+
+    def test_structured_filter_preserves_ordinary_json_and_naturalizes_managed_unknown(
+        self,
+    ) -> None:
+        raw_json = '{"status":"in_progress","summary":"show this JSON"}'
+        ordinary = _make_panel(selected_thread_id="ordinary-thread")
+        self.assertTrue(ordinary._render_thread_read({
+            "read": {
+                "thread": {
+                    "id": "ordinary-thread",
+                    "turns": [
+                        {"items": [{"type": "agentMessage", "text": raw_json}]}
+                    ],
+                }
+            }
+        }))
+        self.assertIn(raw_json, ordinary.conversation.toPlainText())
+
+        managed = _make_panel(selected_thread_id="thread-supervisor")
+        managed._apply_project_team_snapshot(_managed_project_snapshot())
+        code = "```json\n" + raw_json + "\n```"
+        self.assertIsNone(
+            managed._project_status_presentation("thread-supervisor", code)
+        )
+        extended = (
+            '{"status":"in_progress","summary":"x","extra":'
+            '{"future_section":[{"nested_flag":true,'
+            '"matrix":[[1,2],[3,4]]}]}}'
+        )
+        presentation = managed._project_status_presentation(
+            "thread-supervisor",
+            extended,
+        )
+        self.assertIsInstance(presentation, str)
+        self.assertIn("监督 AI 结构化消息", presentation)
+        self.assertIn("状态：进行中", presentation)
+        self.assertIn("摘要：x", presentation)
+        self.assertIn("extra：", presentation)
+        self.assertIn("future_section：", presentation)
+        self.assertIn("nested_flag：是", presentation)
+        self.assertIn("matrix：", presentation)
+        self.assertNotIn(extended, presentation)
+        self.assertNotIn('{"', presentation)
+
+        token = managed._turn_state.capture_token()
+        self.assertTrue(managed._turn_state.reconcile_snapshot(
+            token,
+            "thread-supervisor",
+            "unknown-json-turn",
+            "inProgress",
+            turn_active=True,
+        ))
+        managed._stream_thread_id = "thread-supervisor"
+        managed._stream_turn_id = "unknown-json-turn"
+        managed._begin_codex_message()
+        managed._render_event({
+            "type": "codex_notification",
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-supervisor",
+                "turnId": "unknown-json-turn",
+                "itemId": "unknown-json-item",
+                "delta": extended,
+            },
+        })
+        self.assertNotIn(extended, managed.conversation.toPlainText())
+        managed._render_event({
+            "type": "codex_notification",
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-supervisor",
+                "turnId": "unknown-json-turn",
+                "item": {
+                    "id": "unknown-json-item",
+                    "type": "agentMessage",
+                    "text": extended,
+                },
+            },
+        })
+        rendered = managed.conversation.toPlainText()
+        self.assertIn("nested_flag：是", rendered)
+        self.assertNotIn(extended, rendered)
+        self.assertNotIn('{"', rendered)
+
+    def test_managed_unknown_json_keeps_complete_long_blueprint_text(self) -> None:
+        long_blueprint = (
+            "阶段卡｜结构、验收与证据\n"
+            + ("完整蓝图正文。" * 20_000)
+            + "\nBLUEPRINT-END-MARKER"
+        )
+        structured = json.dumps(
+            {
+                "status": "planning",
+                "summary": "正在形成完整蓝图。",
+                "blueprint_extension": {
+                    "full_text": long_blueprint,
+                    "future_metadata": {
+                        "semantic_complete": True,
+                        "tail_marker": "BLUEPRINT-END-MARKER",
+                    },
+                },
+            },
+            ensure_ascii=False,
+        )
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+
+        self.assertTrue(panel._render_thread_read({
+            "read": {
+                "thread": {
+                    "id": "thread-supervisor",
+                    "turns": [{
+                        "items": [{
+                            "type": "agentMessage",
+                            "text": structured,
+                        }]
+                    }],
+                }
+            }
+        }))
+
+        rendered = panel.conversation.toPlainText()
+        self.assertIn(long_blueprint, rendered)
+        self.assertIn("semantic_complete：是", rendered)
+        self.assertIn("tail_marker：BLUEPRINT-END-MARKER", rendered)
+        self.assertNotIn(structured, rendered)
+        self.assertNotIn('{"', rendered)
+
+    def test_running_project_snapshot_discards_empty_pending_codex_card(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-supervisor")
+        panel.conversation.begin_codex_message()
+        self.assertIn("当前尚无文字输出", panel.conversation.toPlainText())
+
+        panel._apply_project_team_snapshot(_managed_project_snapshot())
+
+        self.assertEqual([], panel.conversation.entries)
+        panel._stream_thread_id = "thread-supervisor"
+        panel._stream_turn_id = "still-running"
+        panel._begin_codex_message()
+        self.assertEqual([], panel.conversation.entries)
+
+    def test_project_goal_copies_draft_images_to_supervisor_before_first_turn(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            source = root / "reference.png"
+            source.write_bytes(b"draft-reference")
+            panel._attachment_store = AttachmentStore(root)
+            panel._begin_new_project()
+            panel._accept_chosen_images([str(source)])
+            draft_path = Path(panel.attachment_strip.paths()[0])
+            self.assertTrue(draft_path.is_file())
+            self.assertTrue(draft_path.parent.name.startswith("project-draft-"))
+            panel.input_edit.setPlainText("创建完整的程序化小鸡项目")
+
+            panel._send()
+
+            self.assertEqual(["team"], panel._client.thread_team_overrides)
+            self.assertEqual([], panel._client.turn_requests)
+            self.assertEqual(
+                "创建完整的程序化小鸡项目",
+                panel.input_edit.toPlainText(),
+            )
+            panel._on_action_completed(
+                "session_start",
+                {
+                    "thread_id": "supervisor-root",
+                    "focus_mode": False,
+                    "routing": "team",
+                },
+            )
+
+            self.assertEqual(1, len(panel._client.turn_requests))
+            self.assertEqual(["team"], panel._client.turn_team_overrides)
+            turn_images = panel._client.turn_requests[0][3]
+            self.assertEqual(1, len(turn_images))
+            rebound_path = Path(turn_images[0])
+            self.assertTrue(rebound_path.is_file())
+            self.assertEqual("supervisor-root", rebound_path.parent.name)
+            self.assertNotEqual(draft_path, rebound_path)
+            self.assertTrue(draft_path.is_file())
+            self.assertTrue(source.is_file())
+            self.assertEqual(turn_images, panel.attachment_strip.paths())
+            self.assertEqual("team", panel._current_task_route)
+            self.assertEqual("supervisor-root", panel._selected_thread_id)
+            self.assertTrue(panel.conversation.isVisible())
+
+            context = panel._client.turn_requests[0][-1]
+            panel._on_action_completed(
+                context,
+                {
+                    "thread_id": "supervisor-root",
+                    "turn_id": "project-turn",
+                    "turn_active": True,
+                    "routing": "team",
+                    "project_id": "project-created",
+                },
+            )
+            self.assertIsNone(panel._project_goal_draft)
+            self.assertEqual("", panel.input_edit.toPlainText())
+            self.assertEqual([], panel.attachment_strip.paths())
+            self.assertFalse(panel.project_context_group.isVisible())
+
+    def test_project_attachment_bind_failure_retries_with_current_strip_only(
+        self,
+    ) -> None:
+        class FailFirstSupervisorCopy:
+            def __init__(self, root: Path) -> None:
+                self.delegate = AttachmentStore(root)
+                self.failed = False
+
+            def copy_file(self, thread_id: str, source: str) -> str:
+                if thread_id == "supervisor-retry" and not self.failed:
+                    self.failed = True
+                    raise OSError("simulated bind failure")
+                return self.delegate.copy_file(thread_id, source)
+
+            def clipboard_path(self, thread_id: str) -> str:
+                return self.delegate.clipboard_path(thread_id)
+
+        panel = _make_panel()
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            first = root / "first.png"
+            second = root / "second.png"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            panel._attachment_store = FailFirstSupervisorCopy(root)
+            panel._begin_new_project()
+            panel._accept_chosen_images([str(first)])
+            old_draft_path = panel.attachment_strip.paths()[0]
+            panel.input_edit.setPlainText("项目目标保留")
+            panel._send()
+            panel._on_action_completed(
+                "session_start",
+                {
+                    "thread_id": "supervisor-retry",
+                    "focus_mode": False,
+                    "routing": "team",
+                },
+            )
+
+            self.assertEqual([], panel._client.turn_requests)
+            self.assertIn("未能绑定", panel.project_context_detail.text())
+            self.assertTrue(panel.project_context_group.isVisible())
+            self.assertEqual("项目目标保留", panel.input_edit.toPlainText())
+            self.assertEqual([old_draft_path], panel.attachment_strip.paths())
+
+            panel.attachment_strip.remove(old_draft_path)
+            panel._accept_chosen_images([str(second)])
+            current_before_retry = panel.attachment_strip.paths()
+            self.assertEqual(1, len(current_before_retry))
+            panel._send()
+
+            self.assertEqual(1, len(panel._client.turn_requests))
+            sent_paths = panel._client.turn_requests[0][3]
+            self.assertEqual(1, len(sent_paths))
+            self.assertNotIn(old_draft_path, sent_paths)
+            self.assertEqual("supervisor-retry", Path(sent_paths[0]).parent.name)
+            self.assertEqual(["team"], panel._client.turn_team_overrides)
+
+    def test_project_start_failures_keep_visible_draft_and_never_hide_only_error(
+        self,
+    ) -> None:
+        immediate = _make_panel()
+        immediate._begin_new_project()
+        immediate.input_edit.setPlainText("保留的项目目标")
+        immediate.attachment_strip.add_path("E:/project-draft/reference.png")
+        immediate._client.start_thread_result = None
+        immediate._send()
+        self.assertEqual("project_draft", immediate._task_view_mode)
+        self.assertTrue(immediate.project_context_group.isVisible())
+        self.assertIn("未能发送", immediate.project_context_detail.text())
+        self.assertEqual("保留的项目目标", immediate.input_edit.toPlainText())
+        self.assertEqual(
+            ["E:/project-draft/reference.png"],
+            immediate.attachment_strip.paths(),
+        )
+
+        asynchronous = _make_panel()
+        asynchronous._begin_new_project()
+        asynchronous.input_edit.setPlainText("异步失败仍保留")
+        asynchronous._send()
+        asynchronous._on_request_failed(
+            "session_start",
+            {
+                "structured_error": {
+                    "code": "CODEX_REQUEST_TIMEOUT",
+                    "message": "timed out",
+                }
+            },
+        )
+        self.assertEqual("project_draft", asynchronous._task_view_mode)
+        self.assertTrue(asynchronous.project_context_group.isVisible())
+        self.assertIn("项目创建失败", asynchronous.project_context_detail.text())
+        self.assertEqual("异步失败仍保留", asynchronous.input_edit.toPlainText())
+
+    def test_confirmed_project_turn_failure_restarts_with_new_supervisor(self) -> None:
+        panel = _make_panel()
+        panel._begin_new_project()
+        panel.input_edit.setPlainText("失败后仍保留的目标")
+        panel._send()
+        panel._on_action_completed(
+            "session_start",
+            {
+                "thread_id": "failed-supervisor",
+                "focus_mode": False,
+                "routing": "team",
+            },
+        )
+        failed_context = panel._client.turn_requests[0][-1]
+        panel._on_request_failed(
+            failed_context,
+            {
+                "structured_error": {
+                    "code": "TURN_START_FAILED",
+                    "message": "turn did not start",
+                    "details": {
+                        "thread_id": "failed-supervisor",
+                        "turn_active": False,
+                        "turn_created": False,
+                    },
+                }
+            },
+        )
+
+        self.assertIsNone(panel._selected_thread_id)
+        self.assertIsNone(panel._current_task_route)
+        self.assertEqual("project_draft", panel._task_view_mode)
+        self.assertIn("旧失败项目", panel.project_context_detail.text())
+        self.assertEqual("失败后仍保留的目标", panel.input_edit.toPlainText())
+        old_turn_count = len(panel._client.turn_requests)
+        old_start_count = len(panel._client.thread_requests)
+
+        panel._send()
+
+        self.assertEqual(old_turn_count, len(panel._client.turn_requests))
+        self.assertEqual(old_start_count + 1, len(panel._client.thread_requests))
+        self.assertEqual("team", panel._client.thread_team_overrides[-1])
+
+    def test_unknown_project_turn_outcome_waits_for_idle_or_active_snapshot(
+        self,
+    ) -> None:
+        def make_uncertain() -> tuple[Any, str]:
+            panel = _make_panel()
+            panel._begin_new_project()
+            panel.input_edit.setPlainText("未知结果的项目目标")
+            panel._send()
+            panel._on_action_completed(
+                "session_start",
+                {
+                    "thread_id": "uncertain-supervisor",
+                    "focus_mode": False,
+                    "routing": "team",
+                },
+            )
+            turn_context = panel._client.turn_requests[0][-1]
+            panel._on_request_failed(
+                turn_context,
+                {
+                    "structured_error": {
+                        "code": "TURN_START_FAILED",
+                        "message": "outcome unknown",
+                    }
+                },
+            )
+            self.assertEqual(
+                "turn_outcome_unknown",
+                panel._project_goal_draft["phase"],
+            )
+            self.assertFalse(panel.send_button.isEnabled())
+            self.assertIn("不要重复提交", panel.project_context_detail.text())
+            return panel, panel._client.session_contexts[-1]
+
+        idle, idle_context = make_uncertain()
+        idle._on_action_completed(
+            idle_context,
+            {
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "uncertain-supervisor",
+                    "turn_active": False,
+                    "turn_status": "failed",
+                }
+            },
+        )
+        self.assertEqual("project_draft", idle._task_view_mode)
+        self.assertIsNone(idle._selected_thread_id)
+        self.assertEqual("draft", idle._project_goal_draft["phase"])
+        self.assertIn("旧失败项目", idle.project_context_detail.text())
+        previous_turns = len(idle._client.turn_requests)
+        previous_threads = len(idle._client.thread_requests)
+        idle._send()
+        self.assertEqual(previous_turns, len(idle._client.turn_requests))
+        self.assertEqual(previous_threads + 1, len(idle._client.thread_requests))
+
+        active, active_context = make_uncertain()
+        active._on_action_completed(
+            active_context,
+            {
+                "session": {
+                    "connected": True,
+                    "authentication": "authenticated",
+                    "thread_id": "uncertain-supervisor",
+                    "turn_id": "confirmed-active-turn",
+                    "turn_active": True,
+                    "turn_status": "inProgress",
+                }
+            },
+        )
+        self.assertIsNone(active._project_goal_draft)
+        self.assertEqual("uncertain-supervisor", active._selected_thread_id)
+        self.assertEqual("team", active._current_task_route)
+        self.assertEqual("conversation", active._task_view_mode)
+        self.assertEqual("", active.input_edit.toPlainText())
+        self.assertEqual(1, len(active._client.turn_requests))
+
+    def test_project_container_blocks_composer_and_session_readoption(self) -> None:
+        panel = _make_panel(selected_thread_id="role-before-container")
+        panel.history_combo.addItem(
+            "项目容器",
+            {
+                "kind": "project",
+                "project_id": "project-safe",
+                "name": "安全项目",
+            },
+        )
+        index = panel.history_combo.count() - 1
+        panel.history_combo.setCurrentIndex(index)
+        panel._on_history_index_changed(index)
+
+        self.assertIsNone(panel._selected_thread_id)
+        self.assertEqual("project_container", panel._task_view_mode)
+        self.assertFalse(panel.conversation.isVisible())
+        self.assertFalse(panel.input_edit.isEnabled())
+        self.assertFalse(panel.add_image_button.isEnabled())
+        self.assertFalse(panel.attachment_strip.isEnabled())
+        self.assertFalse(panel.send_button.isEnabled())
+        self.assertIn("项目本身不对话", panel.project_context_detail.text())
+
+        for active in (True, False):
+            panel._on_session(
+                {
+                    "session": {
+                        "connected": True,
+                        "authentication": "authenticated",
+                        "thread_id": "role-before-container",
+                        "turn_id": "old-turn" if active else None,
+                        "turn_status": "inProgress" if active else "completed",
+                        "turn_active": active,
+                    }
+                }
+            )
+            self.assertIsNone(panel._selected_thread_id)
+            self.assertEqual("project_container", panel._task_view_mode)
+            self.assertFalse(panel.send_button.isEnabled())
+        panel.input_edit.setPlainText("绝不能发给旧角色")
+        panel._send()
+        self.assertEqual([], panel._client.turn_requests)
+        self.assertEqual([], panel._client.steer_requests)
+
+    def test_frozen_team_route_survives_pre_registry_session_snapshot(self) -> None:
+        panel = _make_panel(selected_thread_id="fresh-supervisor")
+        panel._current_task_route = "team"
+        panel._project_goal_draft = {
+            "phase": "draft_on_thread",
+            "thread_id": "fresh-supervisor",
+            "text": "项目目标",
+            "attachment_paths": (),
+        }
+        panel._project_team_snapshot = normalize_project_team(None)
+        panel._apply_session(
+            {
+                "connected": True,
+                "authentication": "authenticated",
+                "thread_id": "fresh-supervisor",
+                "turn_active": False,
+            },
+            token=panel._turn_state.capture_token(),
+            allow_followup=True,
+        )
+        self.assertEqual("team", panel._current_task_route)
+        panel.input_edit.setPlainText("项目目标")
+        panel._send()
+        self.assertEqual("team", panel._client.turn_team_overrides[-1])
+
     def test_mcp_backend_initialization_defaults_to_hia_and_rejects_unknown(self) -> None:
         cases = (
             (None, "hia_v2"),
@@ -1534,14 +4324,21 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("self.main_splitter.setCollapsible(1, False)", panel_source)
         self.assertIn("self.main_splitter.setCollapsible(2, False)", panel_source)
         self.assertIn("self.main_splitter.setStretchFactor(1, 4)", panel_source)
-        self.assertEqual(5, panel_source.count("self.task_tabs.addTab("))
-        for label in ("任务蓝图", "阶段进度", "审阅", "团队", "知识与记忆"):
+        self.assertEqual(6, panel_source.count("self.task_tabs.addTab("))
+        for label in (
+            "任务蓝图",
+            "阶段进度",
+            "审阅",
+            "内部子代理",
+            "知识与记忆",
+            "项目团队",
+        ):
             self.assertIn(f'"{label}"', panel_source)
         self.assertEqual(
-            4,
+            3,
             panel_source.count("AdjustToMinimumContentsLengthWithIcon"),
         )
-        self.assertEqual(4, panel_source.count("setMinimumContentsLength(0)"))
+        self.assertEqual(3, panel_source.count("setMinimumContentsLength(0)"))
         self.assertIn("project_memory_content.setMinimumWidth(0)", panel_source)
         self.assertIn("self.knowledge_group.setMinimumWidth(0)", panel_source)
         self.assertIn(
@@ -1568,7 +4365,8 @@ class PanelWiringTests(unittest.TestCase):
         )
         self.assertNotIn("QMessageBox", panel_source)
         self.assertIn(
-            "for label in (self.thread_status_label, self.turn_status_label):",
+            "self.auth_label,\n            self.thread_status_label,\n"
+            "            self.turn_status_label,",
             panel_source,
         )
         self.assertIn("QtWidgets.QSizePolicy.Policy.Ignored", panel_source)
@@ -1593,7 +4391,8 @@ class PanelWiringTests(unittest.TestCase):
             "            QtWidgets.QSizePolicy.Policy.Expanding,",
             panel_source,
         )
-        self.assertIn("center_layout.addWidget(self.input_edit)", panel_source)
+        self.assertIn("composer_layout.addWidget(self.input_edit)", panel_source)
+        self.assertIn("center_layout.addWidget(self.composer_panel)", panel_source)
         self.assertNotIn("self.input_edit.setFixedHeight", panel_source)
         self.assertNotIn(
             "self.goal_objective_edit = QtWidgets.QPlainTextEdit()",
@@ -2962,6 +5761,35 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIsNone(panel._diagnostic_turn_key)
         self.assertEqual({}, panel._diagnostic_snapshot)
 
+    def test_disconnected_legacy_running_snapshot_is_interrupted_and_unlocks(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        _context, turn_id = _start_active_turn(panel, 1)
+        attachment = "E:/references/retry-after-old-bridge.png"
+        panel.input_edit.setPlainText("旧 Bridge 退出后保留草稿")
+        panel.attachment_strip.add_path(attachment)
+
+        panel._apply_session(
+            {
+                "connected": False,
+                "authentication": "unavailable",
+                "thread_id": "thread-1",
+                "turn_id": turn_id,
+                "turn_status": "inProgress",
+                "turn_active": True,
+            },
+            token=panel._turn_state.capture_token(),
+            allow_followup=False,
+        )
+
+        self.assertEqual(TurnPhase.IDLE, panel._turn_state.phase)
+        self.assertEqual("Turn：已停止", panel.turn_status_label.text())
+        self.assertEqual("旧 Bridge 退出后保留草稿", panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+        self.assertTrue(panel.input_edit.isEnabled())
+        self.assertFalse(panel.stop_button.isEnabled())
+
     def test_consecutive_protocol_warnings_collapse_into_one_status_entry(self) -> None:
         panel = _make_panel()
         warning = {
@@ -3148,6 +5976,117 @@ class PanelWiringTests(unittest.TestCase):
             "TURN_START_FAILED",
             records[0]["occurrence"]["error_code"],
         )
+
+    def test_fresh_thread_missing_rollout_keeps_identity_and_draft(self) -> None:
+        panel = _make_panel(selected_thread_id="fresh-thread")
+        attachment = (
+            r"E:\houdini-intelligence-agent\.runtime\attachments\fresh-thread\reference.png"
+        )
+        panel.input_edit.setPlainText("用单个 AI 处理这个新任务")
+        panel.attachment_strip.add_path(attachment)
+
+        panel._send()
+        context = panel._client.turn_requests[-1][-1]
+        panel._on_request_failed(
+            context,
+            {
+                "structured_error": {
+                    "code": "CODEX_RPC_ERROR",
+                    "message": "no rollout found for thread id fresh-thread",
+                    "details": {
+                        "method": "thread/resume",
+                        "rpc_error": {
+                            "code": -32600,
+                            "message": "no rollout found for thread id fresh-thread",
+                        },
+                    },
+                }
+            },
+        )
+
+        self.assertEqual("fresh-thread", panel._selected_thread_id)
+        self.assertEqual([], panel._client.thread_requests)
+        self.assertEqual([], panel._client.session_contexts)
+        self.assertEqual("用单个 AI 处理这个新任务", panel.input_edit.toPlainText())
+        self.assertEqual([attachment], panel.attachment_strip.paths())
+        self.assertNotIn(context, panel._pending_turn_drafts)
+        self.assertFalse(panel._turn_state.busy)
+        self.assertEqual("Turn：未创建", panel.turn_status_label.text())
+        transcript = panel.conversation.toPlainText()
+        self.assertIn("当前任务仍然有效", transcript)
+        self.assertIn("不要反复新建任务", transcript)
+        self.assertEqual(
+            "fresh-thread-rollout-missing",
+            panel._diagnostic_writer.records[-1]["slug"],
+        )
+
+    def test_project_missing_rollout_unlocks_and_returns_to_new_project_draft(
+        self,
+    ) -> None:
+        panel = _make_panel()
+        panel._begin_new_project()
+        panel.input_edit.setPlainText("旧 Bridge 下仍要保留的项目目标")
+        panel._send()
+        panel._on_action_completed(
+            "session_start",
+            {
+                "thread_id": "legacy-supervisor",
+                "focus_mode": False,
+                "routing": "team",
+            },
+        )
+        context = panel._client.turn_requests[-1][-1]
+
+        panel._on_request_failed(
+            context,
+            {
+                "structured_error": {
+                    "code": "CODEX_RPC_ERROR",
+                    "message": "no rollout found for thread id legacy-supervisor",
+                    "details": {
+                        "method": "thread/resume",
+                        "rpc_error": {
+                            "code": -32600,
+                            "message": (
+                                "no rollout found for thread id legacy-supervisor"
+                            ),
+                        },
+                    },
+                }
+            },
+        )
+
+        self.assertFalse(panel._turn_state.busy)
+        self.assertEqual("project_draft", panel._task_view_mode)
+        self.assertIsNone(panel._selected_thread_id)
+        self.assertTrue(panel.send_button.isEnabled())
+        self.assertIn("旧失败项目", panel.project_context_detail.text())
+        previous_turns = len(panel._client.turn_requests)
+        previous_threads = len(panel._client.thread_requests)
+        panel._send()
+        self.assertEqual(previous_turns, len(panel._client.turn_requests))
+        self.assertEqual(previous_threads + 1, len(panel._client.thread_requests))
+
+    def test_missing_rollout_recovery_requires_pre_turn_thread_resume(self) -> None:
+        for error_code, method, message in (
+            ("CODEX_RPC_ERROR", "turn/start", "no rollout found"),
+            ("CODEX_RPC_ERROR", "thread/resume", "different failure"),
+            ("NOT_FOUND", "thread/resume", "no rollout found"),
+        ):
+            with self.subTest(
+                error_code=error_code,
+                method=method,
+                message=message,
+            ):
+                self.assertFalse(
+                    HoudiniIntelligencePanel._is_missing_fresh_thread_rollout(
+                        error_code,
+                        {
+                            "method": method,
+                            "rpc_error": {"message": message},
+                        },
+                    )
+                )
 
     def test_failed_turn_writes_one_final_runtime_report(self) -> None:
         panel = _make_panel()
@@ -4735,7 +7674,7 @@ class PanelWiringTests(unittest.TestCase):
         panel._apply_threads(threads)
 
         self.assertEqual(3, panel.history_combo.count())
-        self.assertEqual("未选择历史会话", panel.history_combo.itemText(0))
+        self.assertEqual("未选择项目或会话", panel.history_combo.itemText(0))
         self.assertIn("售货机材质", panel.history_combo.itemText(1))
         self.assertNotIn("019f-history-one", panel.history_combo.itemText(1))
         self.assertEqual([], panel._client.resume_requests)
@@ -5812,7 +8751,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIsNone(panel._crash_recovery_observation)
         self.assertIsNone(panel._thread_delete_pending)
         self.assertEqual("Thread：未选择", panel.thread_status_label.text())
-        self.assertEqual("暂无历史会话", panel.history_combo.itemText(0))
+        self.assertEqual("暂无项目或会话", panel.history_combo.itemText(0))
         deleted_notification = {
             "type": "codex_notification",
             "method": "thread/deleted",

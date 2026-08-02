@@ -22,6 +22,15 @@ from .attachment_store import AttachmentStore
 from .bridge_client import BridgeClient
 from .houdini_read_adapter import HoudiniReadAdapter, HoudiniReadAdapterError
 from .network_response import format_bridge_error
+from .project_team import (
+    PROJECT_TEAM_ROLE_ORDER,
+    PROJECT_TEAM_TURN_OVERRIDES,
+    normalize_project_team,
+    project_for_thread,
+    project_thread_id_transfers,
+    replace_project_thread_id,
+    top_level_history_records,
+)
 from .runtime_diagnostics import RuntimeDiagnosticWriter
 from .task_insights import (
     bounded_public_text,
@@ -55,6 +64,192 @@ _THREAD_DELETE_CONTEXT_PREFIX = "thread_delete:"
 _THREAD_DELETE_CONFIRM_MIN_SECONDS = 0.75
 _PROJECT_MEMORY_CONTEXT_PREFIX = "project_memory:"
 _PROJECT_MEMORY_CONFIRM_MIN_SECONDS = 0.75
+_PROJECT_TEAM_CONTEXT_PREFIX = "project_team"
+_PROJECT_SUPERVISOR_FACT_FIELDS = (
+    "user_facts",
+    "reference_observations",
+    "codex_assumptions",
+    "verified_scene_facts",
+    "hard_constraints",
+    "acceptance",
+)
+_PROJECT_SUPERVISOR_OUTPUT_KEYS = frozenset(
+    {
+        "scene_task_eligibility",
+        "summary",
+        "task_depth",
+        "collaboration_mode",
+        *_PROJECT_SUPERVISOR_FACT_FIELDS,
+    }
+)
+_PROJECT_PLAN_OUTPUT_KEYS = frozenset(
+    {
+        "project_title",
+        "summary",
+        "task_depth",
+        "collaboration_mode",
+        *_PROJECT_SUPERVISOR_FACT_FIELDS,
+        "stages",
+    }
+)
+_PROJECT_EXECUTION_OUTPUT_KEYS = frozenset(
+    {
+        "outcome",
+        "summary",
+        "technical_evidence",
+        "remaining",
+        "review_images",
+        "collaboration_mode",
+    }
+)
+_PROJECT_REVIEW_OUTPUT_KEYS = frozenset(
+    {
+        "decision",
+        "claims",
+        "largest_consequential_deviation",
+        "missing_evidence",
+        "repair",
+        "collaboration_mode",
+    }
+)
+_PROJECT_DECISION_OUTPUT_KEYS = frozenset(
+    {"decision", "summary", "repair_card", "collaboration_mode"}
+)
+_PROJECT_PROGRESS_OUTPUT_KEYS = frozenset({"status", "summary"})
+_PROJECT_RESULT_OUTPUT_KEYS = frozenset(
+    {"status", "goal", "result", "evidence", "next_action"}
+)
+_PROJECT_PROGRESS_STATUSES = frozenset(
+    {"in_progress", "running", "planning", "working"}
+)
+_PROJECT_RESULT_STATUSES = frozenset(
+    {
+        "complete",
+        "completed",
+        "incomplete",
+        "blocked",
+        "failed",
+        "cancelled",
+    }
+)
+_PROJECT_COLLABORATION_MODES = frozenset(
+    {"used-with-real-events", "serial-fallback"}
+)
+_PROJECT_FIELD_LABELS = {
+    "status": "状态",
+    "project_title": "项目名称",
+    "summary": "摘要",
+    "scene_task_eligibility": "场景任务判定",
+    "task_depth": "任务深度",
+    "collaboration_mode": "协作方式",
+    "user_facts": "用户明确事实",
+    "reference_observations": "参考观察",
+    "codex_assumptions": "可修订假设",
+    "verified_scene_facts": "已核实场景事实",
+    "hard_constraints": "硬约束",
+    "acceptance": "验收标准",
+    "stages": "阶段卡",
+    "title": "标题",
+    "objective": "目标",
+    "prerequisites": "前置条件",
+    "inputs": "输入",
+    "ordered_construction_steps": "顺序施工步骤",
+    "responsibility": "职责",
+    "path_or_network_region": "路径或网络区域",
+    "native_operation_family": "原生操作族",
+    "inputs_and_connections": "输入与连接",
+    "key_parameters": "关键参数",
+    "expected_result": "预期结果",
+    "next_step_evidence": "下一步证据",
+    "failure_minimum_repair": "失败时最小修复",
+    "native_node_strategy": "原生节点策略",
+    "authoring_batches": "创作批次",
+    "parameter_dependencies": "参数依赖",
+    "outputs": "输出",
+    "visible_characteristics": "可见特征",
+    "structural_relationships": "结构关系",
+    "prohibitions": "禁止事项",
+    "technical_evidence": "技术证据",
+    "visual_evidence": "视觉证据",
+    "reviewers": "审查角色",
+    "downstream_contract": "下游契约",
+    "evidence_disposition": "证据结论",
+    "technical": "技术",
+    "visual": "视觉",
+    "stage": "阶段",
+    "outcome": "执行结果",
+    "remaining": "尚未完成",
+    "review_images": "审查图片",
+    "id": "证据 ID",
+    "tool_item_id": "工具项 ID",
+    "claim": "主张",
+    "scope_or_path": "范围或路径",
+    "frame_or_time": "帧或时间",
+    "observation_or_measurement": "观察或测量",
+    "source": "来源",
+    "result": "结果",
+    "capture_tool_item_id": "截图工具项 ID",
+    "path": "路径",
+    "decision": "结论",
+    "claims": "审查项",
+    "stage_claim": "阶段主张",
+    "disposition": "判定",
+    "evidence_refs": "证据引用",
+    "actual_evidence": "实际证据",
+    "deviation": "偏差",
+    "minimum_repair": "最小修复",
+    "not_applicable_reason": "不适用原因",
+    "largest_consequential_deviation": "最大关键偏差",
+    "missing_evidence": "缺失证据",
+    "repair": "修复要求",
+    "repair_card": "最小修复卡",
+    "external_dependency": "外部依赖",
+    "proven": "已证实",
+    "required_external_change": "所需外部变更",
+    "observed_blocker": "已观察阻碍",
+    "why_codex_cannot_resolve": "Codex 无法解决的原因",
+    "reason": "原因",
+    "goal": "目标",
+    "evidence": "证据",
+    "next_action": "下一步",
+}
+_PROJECT_VALUE_LABELS = {
+    "used-with-real-events": "已使用真实协作事件",
+    "serial-fallback": "串行完成",
+    "completed": "已完成",
+    "blocked": "受阻",
+    "pass": "通过",
+    "repair": "需要修复",
+    "verified": "已验证",
+    "unverified": "未验证",
+    "failed": "失败",
+    "not_applicable": "不适用",
+    "pending": "待验证",
+    "not started": "未开始",
+    "active": "进行中",
+    "in_progress": "进行中",
+    "running": "进行中",
+    "planning": "制定方案",
+    "working": "处理中",
+    "needs repair": "需要修复",
+    "passed": "已通过",
+    "not applicable": "不适用",
+    "direct": "直接执行",
+    "focused": "重点处理",
+    "full": "完整制作",
+}
+_PROJECT_SCENE_ELIGIBILITY_LABELS = {
+    "eligible": "适合进入 Houdini 场景工作流",
+    "not_applicable": "不属于 Houdini 场景任务",
+    "unclear": "是否属于场景任务尚不明确",
+}
+_PROJECT_ROLE_LABELS = {
+    "supervisor": "监督 AI",
+    "planning": "方案 AI",
+    "execution": "执行 AI",
+    "visual_review": "视觉审查 AI",
+    "technical_review": "技术审查 AI",
+}
 _KNOWLEDGE_CONTEXT_PREFIX = "knowledge:"
 _KNOWLEDGE_SOURCE_CONFIRM_MIN_SECONDS = 0.75
 _KNOWLEDGE_SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}\Z")
@@ -188,6 +383,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._crash_recovery_thread_payload: dict[str, Any] | None = None
         self._crash_recovery_observation: dict[str, Any] | None = None
         self._session_action_pending = False
+        self._session_start_route: str | None = None
+        self._current_task_route: str | None = None
+        self._project_goal_draft: dict[str, Any] | None = None
+        self._task_view_mode = "empty"
         self._turn_start_request_pending = False
         self._interrupt_pending = False
         self._turn_state = PanelTurnState()
@@ -244,7 +443,26 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._stage_items: list[dict[str, str]] = []
         self._review_records: list[dict[str, str]] = []
         self._team_records: dict[str, dict[str, Any]] = {}
+        self._project_team_snapshot = normalize_project_team(None)
+        self._project_team_pending: str | None = None
+        self._project_team_refresh_deferred = False
+        self._project_team_revision_authoritative = False
+        self._selected_project_id: str | None = None
+        self._project_team_model_thread_id: str | None = None
+        self._pending_running_project_switch: dict[str, str] | None = None
+        self._thread_transfer_notices: deque[tuple[str, str, str]] = deque(
+            maxlen=128
+        )
         self._runtime_settings_expanded = False
+        self._last_left_sidebar_width = 210
+        self._pending_project_guidance: dict[str, dict[str, Any]] = {}
+        self._known_project_threads: dict[str, dict[str, Any]] = {}
+        self._project_message_buffers: dict[
+            tuple[str, str, str], dict[str, Any]
+        ] = {}
+        self._completed_project_messages: dict[
+            tuple[str, str, str], None
+        ] = {}
         self._turn_performance_token: TurnStateToken | None = None
         self._turn_performance_marks: dict[str, float] = {}
         self._reconnect_attempt = 0
@@ -349,9 +567,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _build_ui(self) -> None:
         from .composer import AttachmentStrip, ExpandableTextEdit
         from .conversation_view import ConversationView
+        from .project_team_view import (
+            ProjectHistoryTree,
+            ProjectTeamPage,
+            ResponsiveModeButtonPair,
+            _configure_text_tool_button,
+        )
 
         self.setObjectName("houdiniIntelligencePanel")
         root = QtWidgets.QVBoxLayout(self)
+        root.setSizeConstraint(
+            QtWidgets.QLayout.SizeConstraint.SetNoConstraint
+        )
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
@@ -381,6 +608,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "场景版本是当前 Houdini 会话内检测到的场景变化计数。\n"
             "未保存表示当前 HIP 是否有尚未保存的修改。"
         )
+        for label in (
+            self.connection_label,
+            self.houdini_connection_label,
+            self.houdini_mcp_label,
+            self.native_hython_label,
+            self.houdini_scene_label,
+        ):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Ignored,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
         status_row.addWidget(self.connection_label)
         status_row.addWidget(self.houdini_connection_label)
         status_row.addWidget(self.houdini_mcp_label)
@@ -396,7 +635,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.turn_status_label = QtWidgets.QLabel("Turn：空闲")
         self.thread_status_label.setToolTip("当前未选择 Codex Thread")
         self.turn_status_label.setToolTip("当前 Codex Turn 状态")
-        for label in (self.thread_status_label, self.turn_status_label):
+        for label in (
+            self.auth_label,
+            self.thread_status_label,
+            self.turn_status_label,
+        ):
             label.setMinimumWidth(0)
             label.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Ignored,
@@ -406,17 +649,27 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         session_row.addWidget(self.thread_status_label)
         session_row.addWidget(self.turn_status_label)
         self.history_sidebar_button = QtWidgets.QToolButton()
-        self.history_sidebar_button.setText("历史")
+        self.history_sidebar_button.setText("收起任务栏")
         self.history_sidebar_button.setCheckable(True)
         self.history_sidebar_button.setChecked(True)
-        self.history_sidebar_button.setToolTip("显示或收起历史任务栏")
+        self.history_sidebar_button.setToolTip(
+            "收起或展开左侧项目、角色任务与普通任务；再次展开会恢复原宽度"
+        )
         session_row.addWidget(self.history_sidebar_button)
         self.task_sidebar_button = QtWidgets.QToolButton()
         self.task_sidebar_button.setText("任务")
         self.task_sidebar_button.setCheckable(True)
         self.task_sidebar_button.setChecked(True)
-        self.task_sidebar_button.setToolTip("显示或收起任务蓝图、阶段、审阅和团队")
+        self.task_sidebar_button.setToolTip(
+            "显示或收起任务蓝图、阶段、审阅、内部子代理和项目团队"
+        )
         session_row.addWidget(self.task_sidebar_button)
+        self.project_team_sidebar_button = QtWidgets.QToolButton()
+        self.project_team_sidebar_button.setText("项目团队")
+        self.project_team_sidebar_button.setToolTip(
+            "查看项目容器、角色 Thread、状态、模型和进度"
+        )
+        session_row.addWidget(self.project_team_sidebar_button)
         session_row.addStretch(1)
         root.addLayout(session_row)
 
@@ -483,6 +736,34 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         self.service_tier_label.setVisible(False)
         self.service_tier_combo.setVisible(False)
+
+        self.turn_routing_label = QtWidgets.QLabel("默认新建")
+        self.turn_routing_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.turn_team_override_group = QtWidgets.QButtonGroup(self)
+        self.turn_team_override_group.setExclusive(True)
+        self.turn_single_button = QtWidgets.QToolButton()
+        self.turn_single_button.setText("普通任务")
+        self.turn_single_button.setCheckable(True)
+        self.turn_single_button.setProperty("teamMode", "single")
+        self.turn_team_button = QtWidgets.QToolButton()
+        self.turn_team_button.setText("项目")
+        self.turn_team_button.setCheckable(True)
+        self.turn_team_button.setProperty("teamMode", "team")
+        for button in (self.turn_single_button, self.turn_team_button):
+            _configure_text_tool_button(button)
+            button.setToolTip(
+                "仅保存下次新建的默认类型；左侧两个新建按钮始终直接决定本次类型。"
+            )
+            self.turn_team_override_group.addButton(button)
+        self.turn_single_button.setChecked(True)
+        self.turn_mode_buttons = ResponsiveModeButtonPair(
+            self.turn_single_button,
+            self.turn_team_button,
+        )
+        runtime_settings_layout.addRow(
+            self.turn_routing_label,
+            self.turn_mode_buttons,
+        )
         root.addWidget(self.runtime_settings_group)
         self._toggle_runtime_settings(False)
 
@@ -501,27 +782,52 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         left_layout = QtWidgets.QVBoxLayout(self.left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(QtWidgets.QLabel("历史任务"))
-        self.history_combo = QtWidgets.QComboBox()
-        self.history_combo.addItem("暂无历史会话", None)
-        self.history_combo.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self.history_combo.setMinimumContentsLength(0)
+        history_heading_label = QtWidgets.QLabel("项目与普通任务")
+        history_heading_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        left_layout.addWidget(history_heading_label)
+        history_tree_actions = QtWidgets.QHBoxLayout()
+        history_tree_actions.setSpacing(4)
+        self.expand_history_button = QtWidgets.QPushButton("全部展开")
+        self.collapse_history_button = QtWidgets.QPushButton("全部折叠")
+        self.expand_history_button.setToolTip("展开项目、角色任务和普通任务")
+        self.collapse_history_button.setToolTip("折叠项目、角色任务和普通任务")
+        history_tree_actions.addWidget(self.expand_history_button)
+        history_tree_actions.addWidget(self.collapse_history_button)
+        left_layout.addLayout(history_tree_actions)
+
+        self.history_combo = ProjectHistoryTree(self.left_column)
+        self.history_combo.addItem("正在读取项目与普通任务…", None)
         self.history_combo.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
-            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Expanding,
         )
-        self.history_combo.setToolTip("当前项目最近 20 条未归档 Codex 会话")
-        left_layout.addWidget(self.history_combo)
+        self.history_combo.setMinimumHeight(180)
+        self.history_combo.setToolTip(
+            "展开项目可直接打开角色任务；普通任务单独列在下方"
+        )
+        left_layout.addWidget(self.history_combo, 1)
+        creation_action_layout = QtWidgets.QVBoxLayout()
+        creation_action_layout.setSpacing(4)
+        self.new_thread_button = QtWidgets.QPushButton("新建普通任务")
+        self.new_project_button = QtWidgets.QPushButton("新建项目")
+        self.new_thread_button.setToolTip(
+            "立即创建一个普通 Thread，并进入单个 AI 对话。"
+        )
+        self.new_project_button.setToolTip(
+            "先填写项目目标；提交后创建项目与五个角色 Thread。"
+        )
+        creation_action_layout.addWidget(self.new_thread_button)
+        creation_action_layout.addWidget(self.new_project_button)
+        left_layout.addLayout(creation_action_layout)
         history_action_row = QtWidgets.QHBoxLayout()
         self.refresh_threads_button = QtWidgets.QPushButton("刷新")
-        self.new_thread_button = QtWidgets.QPushButton("新建")
-        self.resume_thread_button = QtWidgets.QPushButton("打开")
         history_action_row.addWidget(self.refresh_threads_button)
-        history_action_row.addWidget(self.new_thread_button)
-        history_action_row.addWidget(self.resume_thread_button)
         left_layout.addLayout(history_action_row)
+        self.resume_thread_button = QtWidgets.QPushButton("打开所选角色 / 任务")
+        self.resume_thread_button.setToolTip(
+            "打开左侧明确选中的角色 Thread 或普通任务；也可双击角色任务。"
+        )
+        left_layout.addWidget(self.resume_thread_button)
         self.thread_name_edit = QtWidgets.QLineEdit()
         self.thread_name_edit.setPlaceholderText("会话名称")
         left_layout.addWidget(self.thread_name_edit)
@@ -537,7 +843,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.thread_id_edit = QtWidgets.QLineEdit()
         self.thread_id_edit.setVisible(False)
         left_layout.addWidget(self.thread_id_edit)
-        left_layout.addStretch(1)
 
         self.center_column = QtWidgets.QWidget(self.main_splitter)
         self.center_column.setMinimumWidth(360)
@@ -593,6 +898,43 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         welcome_layout.addLayout(prompt_grid)
         center_layout.addWidget(self.welcome_group)
 
+        self.project_context_group = QtWidgets.QFrame()
+        self.project_context_group.setObjectName("projectContextCard")
+        self.project_context_group.setStyleSheet(
+            "QFrame#projectContextCard { "
+            "background-color: palette(alternate-base); "
+            "border: 1px solid palette(mid); border-radius: 8px; }"
+        )
+        self.project_context_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Maximum,
+        )
+        project_context_layout = QtWidgets.QVBoxLayout(
+            self.project_context_group
+        )
+        project_context_layout.setSizeConstraint(
+            QtWidgets.QLayout.SizeConstraint.SetMinimumSize
+        )
+        self.project_context_title = QtWidgets.QLabel("项目")
+        self.project_context_title.setTextFormat(
+            QtCore.Qt.TextFormat.PlainText
+        )
+        self.project_context_title.setStyleSheet(
+            "color: palette(text); font-size: 15px; font-weight: 600;"
+        )
+        project_context_layout.addWidget(self.project_context_title)
+        self.project_context_detail = QtWidgets.QLabel()
+        self.project_context_detail.setTextFormat(
+            QtCore.Qt.TextFormat.PlainText
+        )
+        self.project_context_detail.setWordWrap(True)
+        self.project_context_detail.setStyleSheet(
+            "color: palette(text); font-size: 11px;"
+        )
+        project_context_layout.addWidget(self.project_context_detail)
+        self.project_context_group.setVisible(False)
+        center_layout.addWidget(self.project_context_group)
+
         self.goal_stage_summary_group = QtWidgets.QGroupBox("当前任务")
         self.goal_stage_summary_group.setMinimumWidth(0)
         self.goal_stage_summary_group.setSizePolicy(
@@ -637,8 +979,17 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         if hasattr(self.conversation, "newThreadRequested"):
-            self.conversation.newThreadRequested.connect(self._new_thread)
+            self.conversation.newThreadRequested.connect(
+                self._new_task_from_selected_route
+            )
         center_layout.addWidget(self.conversation, 1)
+        self.non_conversation_spacer = QtWidgets.QWidget(self.center_column)
+        self.non_conversation_spacer.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        self.non_conversation_spacer.setVisible(False)
+        center_layout.addWidget(self.non_conversation_spacer, 1)
 
         self.approval_group = QtWidgets.QGroupBox("审批请求")
         approval_layout = QtWidgets.QVBoxLayout(self.approval_group)
@@ -676,6 +1027,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.approval_group.setVisible(False)
         center_layout.addWidget(self.approval_group)
 
+        self.composer_panel = QtWidgets.QWidget(self.center_column)
+        composer_layout = QtWidgets.QVBoxLayout(self.composer_panel)
+        composer_layout.setContentsMargins(0, 0, 0, 0)
+        composer_layout.setSpacing(6)
+
         selection_row = QtWidgets.QHBoxLayout()
         self.selection_label = QtWidgets.QLabel("当前选择：无")
         self.selection_label.setToolTip("从 Houdini 主线程只读获取的当前节点选择")
@@ -683,16 +1039,27 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.include_selection_checkbox.setChecked(False)
         selection_row.addWidget(self.selection_label, 1)
         selection_row.addWidget(self.include_selection_checkbox)
-        center_layout.addLayout(selection_row)
+        composer_layout.addLayout(selection_row)
 
         self.attachment_strip = AttachmentStrip(self)
-        center_layout.addWidget(self.attachment_strip)
+        composer_layout.addWidget(self.attachment_strip)
+
+        self.composer_context_label = QtWidgets.QLabel("对话消息")
+        self.composer_context_label.setTextFormat(
+            QtCore.Qt.TextFormat.PlainText
+        )
+        self.composer_context_label.setStyleSheet("font-weight: 600;")
+        self.composer_context_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Maximum,
+        )
+        composer_layout.addWidget(self.composer_context_label)
 
         self.input_edit = ExpandableTextEdit(self)
         self.input_edit.setPlaceholderText(
             "输入自然语言请求；Enter 换行，Ctrl+Enter 发送。"
         )
-        center_layout.addWidget(self.input_edit)
+        composer_layout.addWidget(self.input_edit)
 
         action_row = QtWidgets.QHBoxLayout()
         self.add_image_button = QtWidgets.QPushButton("添加图片")
@@ -712,7 +1079,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         action_row.addWidget(self.goal_continue_button)
         action_row.addWidget(self.send_button)
         action_row.addWidget(self.stop_button)
-        center_layout.addLayout(action_row)
+        composer_layout.addLayout(action_row)
         self.secondary_actions_panel = QtWidgets.QWidget()
         secondary_actions_layout = QtWidgets.QHBoxLayout(
             self.secondary_actions_panel
@@ -722,7 +1089,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         secondary_actions_layout.addWidget(self.copy_report_path_button)
         secondary_actions_layout.addStretch(1)
         self.secondary_actions_panel.setVisible(False)
-        center_layout.addWidget(self.secondary_actions_panel)
+        composer_layout.addWidget(self.secondary_actions_panel)
+        center_layout.addWidget(self.composer_panel)
 
         self.task_tabs = QtWidgets.QTabWidget()
         self.task_tabs.setObjectName("hiaTaskInspectorTabs")
@@ -870,7 +1238,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         team_page_layout.setContentsMargins(4, 4, 4, 4)
         team_page_layout.setSpacing(6)
 
-        self.team_group = QtWidgets.QGroupBox("团队活动")
+        self.team_group = QtWidgets.QGroupBox("Sol Ultra 内部子代理")
         team_layout = QtWidgets.QVBoxLayout(self.team_group)
         self.team_combo = QtWidgets.QComboBox()
         self.team_combo.addItem("暂无子任务", None)
@@ -882,7 +1250,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.team_combo.setToolTip("仅显示原生子任务的可观察事件")
+        self.team_combo.setToolTip(
+            "仅显示当前 Thread 内 /root/... 子代理的可观察事件；不是项目 Threads"
+        )
         team_layout.addWidget(self.team_combo)
         self.team_details_text = QtWidgets.QPlainTextEdit()
         self.team_details_text.setReadOnly(True)
@@ -900,7 +1270,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.performance_label.setWordWrap(True)
         performance_layout.addWidget(self.performance_label)
         team_page_layout.addWidget(self.performance_group)
-        self.task_tabs.addTab(team_page, "团队")
+        self.task_tabs.addTab(team_page, "内部子代理")
 
         self.project_memory_page = QtWidgets.QScrollArea()
         self.project_memory_page.setWidgetResizable(True)
@@ -1314,6 +1684,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         project_memory_layout.addWidget(self.knowledge_memory_tabs)
         self.project_memory_page.setWidget(project_memory_content)
         self.task_tabs.addTab(self.project_memory_page, "知识与记忆")
+
+        self.project_team_page = ProjectTeamPage(self.task_tabs)
+        self.project_team_page.setObjectName("projectTeamPage")
+        self.project_team_page.set_snapshot(self._project_team_snapshot)
+        self.task_tabs.addTab(self.project_team_page, "项目团队")
         right_layout.addWidget(self.task_tabs, 1)
 
         self.main_splitter.addWidget(self.left_column)
@@ -1328,7 +1703,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.main_splitter.setSizes([210, 720, 300])
         root.addWidget(self.main_splitter, 1)
 
-        self.new_thread_button.clicked.connect(self._new_thread)
+        self.new_thread_button.clicked.connect(self._new_single_task)
+        self.new_project_button.clicked.connect(self._begin_new_project)
         self.resume_thread_button.clicked.connect(self._resume_thread)
         self.add_image_button.clicked.connect(self._choose_images)
         self.report_issue_button.clicked.connect(self._record_manual_issue)
@@ -1357,12 +1733,17 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.history_combo.currentIndexChanged.connect(
             self._on_history_index_changed
         )
+        self.history_combo.threadOpenRequested.connect(
+            self._open_history_thread
+        )
         self.goal_refresh_button.clicked.connect(self._request_goal)
         self.goal_save_button.clicked.connect(self._save_goal)
         self.goal_clear_button.clicked.connect(self._clear_goal)
         self.goal_focus_checkbox.toggled.connect(self._set_focus_mode)
         self.team_combo.currentIndexChanged.connect(self._on_team_selected)
         self.refresh_threads_button.clicked.connect(self._refresh_threads)
+        self.expand_history_button.clicked.connect(self.history_combo.expandAll)
+        self.collapse_history_button.clicked.connect(self.history_combo.collapseAll)
         self.rename_thread_button.clicked.connect(self._rename_thread)
         self.copy_thread_id_button.clicked.connect(self._copy_thread_id)
         self.delete_thread_button.clicked.connect(self._delete_thread)
@@ -1424,6 +1805,24 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._toggle_history_sidebar
         )
         self.task_sidebar_button.toggled.connect(self._toggle_task_sidebar)
+        self.project_team_sidebar_button.clicked.connect(
+            self._open_project_team_page
+        )
+        self.project_team_page.refreshRequested.connect(
+            self._refresh_project_team
+        )
+        self.project_team_page.threadOpenRequested.connect(
+            self._open_project_thread
+        )
+        self.project_team_page.modelChooserRequested.connect(
+            self._choose_project_thread_model
+        )
+        self.turn_single_button.clicked.connect(
+            lambda: self._save_project_team_mode("single")
+        )
+        self.turn_team_button.clicked.connect(
+            lambda: self._save_project_team_mode("team")
+        )
         self._refresh_controls()
 
     def _set_sidebar_visible(
@@ -1431,17 +1830,67 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         side: str,
         visible: bool,
     ) -> None:
+        splitter = getattr(self, "main_splitter", None)
         if side == "left":
             column = getattr(self, "left_column", None)
             button = getattr(self, "history_sidebar_button", None)
         else:
             column = getattr(self, "right_column", None)
             button = getattr(self, "task_sidebar_button", None)
-        if column is not None:
+        if side == "left" and splitter is not None and column is not None:
+            sizes = splitter.sizes()
+            if not visible and sizes and sizes[0] > 0:
+                center = getattr(self, "center_column", None)
+                right = getattr(self, "right_column", None)
+                center_minimum = (
+                    center.minimumWidth() if center is not None else 0
+                )
+                right_minimum = right.minimumWidth() if right is not None else 0
+                handle_width = getattr(splitter, "handleWidth", lambda: 0)()
+                preferred_total = (
+                    int(self._last_left_sidebar_width)
+                    + center_minimum
+                    + right_minimum
+                    + max(0, splitter.count() - 1) * handle_width
+                )
+                if splitter.width() >= preferred_total:
+                    self._last_left_sidebar_width = sizes[0]
+            column.setVisible(bool(visible))
+            if visible:
+                sizes = splitter.sizes()
+                if len(sizes) >= 3:
+                    preferred = max(160, int(self._last_left_sidebar_width))
+                    center_minimum = getattr(
+                        getattr(self, "center_column", None),
+                        "minimumWidth",
+                        lambda: 0,
+                    )()
+                    right_minimum = getattr(
+                        getattr(self, "right_column", None),
+                        "minimumWidth",
+                        lambda: 0,
+                    )()
+                    available = sum(sizes)
+                    target = max(
+                        160,
+                        min(
+                            preferred,
+                            available - center_minimum - right_minimum,
+                        ),
+                    )
+                    right_target = max(
+                        right_minimum,
+                        min(sizes[2], available - target - center_minimum),
+                    )
+                    center_target = available - target - right_target
+                    splitter.setSizes([target, center_target, right_target])
+        elif column is not None:
             column.setVisible(bool(visible))
         if button is not None:
             button.blockSignals(True)
             button.setChecked(bool(visible))
+            if side == "left":
+                button.setText("收起任务栏" if visible else "展开任务栏")
             button.blockSignals(False)
 
     def _toggle_history_sidebar(self, visible: bool) -> None:
@@ -1450,9 +1899,2000 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _toggle_task_sidebar(self, visible: bool) -> None:
         self._set_sidebar_visible("right", visible)
 
+    def _open_project_team_page(self, project_id: Any = None) -> None:
+        tabs = getattr(self, "task_tabs", None)
+        page = getattr(self, "project_team_page", None)
+        if tabs is None or page is None:
+            return
+        self._set_sidebar_visible("right", True)
+        index = tabs.indexOf(page)
+        if index >= 0:
+            tabs.setCurrentIndex(index)
+        if isinstance(project_id, str):
+            self._selected_project_id = project_id
+            page.select_project(project_id)
+
+    def _apply_project_team_snapshot(self, value: Any) -> None:
+        previous_snapshot = self._project_team_snapshot
+        incoming_snapshot = normalize_project_team(value)
+        previous_revision = previous_snapshot.get("revision")
+        incoming_revision = incoming_snapshot.get("revision")
+        if (
+            getattr(self, "_project_team_revision_authoritative", False)
+            and isinstance(previous_revision, int)
+            and not isinstance(previous_revision, bool)
+            and isinstance(incoming_revision, int)
+            and not isinstance(incoming_revision, bool)
+            and incoming_revision <= previous_revision
+        ):
+            return
+        previous_mode = previous_snapshot.get("mode")
+        self._project_team_snapshot = incoming_snapshot
+        self._project_team_revision_authoritative = bool(
+            incoming_snapshot.get("available") is True
+        )
+        if self._project_team_snapshot.get("mode") != previous_mode:
+            self._reset_team_override()
+        setter = getattr(
+            getattr(self, "_client", None),
+            "set_project_team_mode",
+            None,
+        )
+        self._project_team_snapshot["settings_writable"] = bool(
+            self._project_team_snapshot.get("available")
+            and self._project_team_snapshot.get("settings_writable") is True
+            and callable(setter)
+            and self._connected
+        )
+        for transfer in project_thread_id_transfers(
+            previous_snapshot,
+            self._project_team_snapshot,
+        ):
+            self._apply_thread_identity_transfer(
+                transfer["old_thread_id"],
+                transfer["new_thread_id"],
+                project_id=transfer["project_id"],
+                role=transfer["role"],
+                update_project_snapshot=False,
+                refresh=False,
+                deletion_confirmed=False,
+            )
+        self._remember_project_snapshot_threads(self._project_team_snapshot)
+        selected_project = project_for_thread(
+            self._project_team_snapshot,
+            self._selected_thread_id,
+        )
+        if selected_project is not None:
+            self._selected_project_id = selected_project["project_id"]
+            self._current_task_route = "team"
+            project_draft = self._project_goal_draft
+            if (
+                isinstance(project_draft, dict)
+                and project_draft.get("phase") == "turn_outcome_unknown"
+                and project_draft.get("thread_id") == self._selected_thread_id
+            ):
+                # A timed-out project-creation ACK may arrive after the
+                # authoritative project snapshot.  Once that exact root Thread
+                # is present, it is a managed Supervisor conversation, not a
+                # still-pending project draft.  Preserve any user-edited delta,
+                # but clear an unchanged original draft and route every future
+                # send through project guidance.
+                original_text = project_draft.get("text")
+                original_paths = tuple(
+                    project_draft.get("attachment_paths") or ()
+                )
+                if (
+                    isinstance(original_text, str)
+                    and self.input_edit.toPlainText() == original_text
+                    and self._attachment_paths() == original_paths
+                ):
+                    self.input_edit.clear()
+                    self.attachment_strip.clear()
+                self._project_goal_draft = None
+                self._set_task_view("conversation")
+        elif (
+            isinstance(self._selected_thread_id, str)
+            and not isinstance(self._project_goal_draft, dict)
+        ):
+            self._current_task_route = (
+                "team"
+                if self._known_project_thread(self._selected_thread_id) is not None
+                else "single"
+            )
+        if (
+            isinstance(self._selected_thread_id, str)
+            or isinstance(self._project_goal_draft, dict)
+        ):
+            self._reset_team_override()
+        managed_role_context = self._managed_project_role_context(
+            self._selected_thread_id
+        )
+        if (
+            managed_role_context is not None
+            and str(managed_role_context[0].get("status") or "").lower()
+            in {"running", "in_progress", "planning", "waiting"}
+        ):
+            discard_pending = getattr(
+                getattr(self, "conversation", None),
+                "discard_pending_codex_message",
+                None,
+            )
+            if callable(discard_pending):
+                discard_pending()
+        page = getattr(self, "project_team_page", None)
+        if page is not None:
+            page.set_snapshot(self._project_team_snapshot)
+            if isinstance(self._selected_project_id, str):
+                page.select_project(self._selected_project_id)
+            if isinstance(self._selected_thread_id, str):
+                page.select_thread(self._selected_thread_id)
+        if getattr(self, "history_combo", None) is not None:
+            self._apply_threads(self._thread_history)
+
+    @staticmethod
+    def _thread_transfer_id(value: Any) -> str | None:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 512
+            or any(ord(character) < 32 for character in value)
+        ):
+            return None
+        return value
+
+    def _apply_thread_identity_transfer(
+        self,
+        old_thread_id: str,
+        new_thread_id: str,
+        *,
+        project_id: str | None = None,
+        role: str | None = None,
+        update_project_snapshot: bool = True,
+        refresh: bool = True,
+        deletion_confirmed: bool = False,
+    ) -> None:
+        was_selected = self._selected_thread_id == old_thread_id
+        current_target = was_selected
+        if not current_target and self._selected_thread_id == new_thread_id:
+            selected_membership = self._snapshot_project_thread(new_thread_id)
+            if selected_membership is not None:
+                selected_project, selected_thread = selected_membership
+                current_target = bool(
+                    isinstance(project_id, str)
+                    and selected_project.get("project_id") == project_id
+                    and role in PROJECT_TEAM_ROLE_ORDER
+                    and (
+                        selected_thread.get("role_key")
+                        or selected_thread.get("role")
+                    )
+                    == role
+                )
+        self._discard_project_message_buffers(old_thread_id)
+        if was_selected and not (
+            self._turn_state.rebind_transferred_thread(
+                old_thread_id,
+                new_thread_id,
+            )
+            or self._turn_state.rebind_idle_thread(new_thread_id)
+        ):
+            self._append_system(
+                "上下文迁移状态暂未同步；当前 Turn 结束后请刷新任务。"
+            )
+            return
+        if update_project_snapshot:
+            updated_snapshot, snapshot_changed = replace_project_thread_id(
+                self._project_team_snapshot,
+                old_thread_id,
+                new_thread_id,
+                project_id=project_id,
+                role=role,
+            )
+            if snapshot_changed:
+                self._project_team_snapshot = updated_snapshot
+
+        known = getattr(self, "_known_project_threads", None)
+        if isinstance(known, dict):
+            previous_known = known.pop(old_thread_id, None)
+            current_known = known.get(new_thread_id)
+            if isinstance(previous_known, dict):
+                merged = dict(previous_known)
+                if isinstance(current_known, dict):
+                    merged.update(current_known)
+                if isinstance(project_id, str):
+                    merged["project_id"] = project_id
+                if role in PROJECT_TEAM_ROLE_ORDER:
+                    merged["role_key"] = role
+                known[new_thread_id] = merged
+
+        pending_guidance = getattr(self, "_pending_project_guidance", None)
+        if (
+            isinstance(pending_guidance, dict)
+            and isinstance(project_id, str)
+            and role in PROJECT_TEAM_ROLE_ORDER
+        ):
+            for guidance in pending_guidance.values():
+                if (
+                    isinstance(guidance, dict)
+                    and guidance.get("thread_id") == old_thread_id
+                    and guidance.get("project_id") == project_id
+                    and guidance.get("role") == role
+                ):
+                    guidance.setdefault("submitted_thread_id", old_thread_id)
+                    guidance["thread_id"] = new_thread_id
+
+        updated_history: list[dict[str, Any]] = []
+        seen_history_ids: set[str] = set()
+        for value in self._thread_history:
+            if not isinstance(value, dict):
+                continue
+            record = dict(value)
+            if record.get("thread_id") == old_thread_id:
+                record["thread_id"] = new_thread_id
+            thread_id = record.get("thread_id")
+            if isinstance(thread_id, str):
+                if thread_id in seen_history_ids:
+                    continue
+                seen_history_ids.add(thread_id)
+            updated_history.append(record)
+        self._thread_history = updated_history
+
+        for name in (
+            "_stream_thread_id",
+            "_build_brief_thread_id",
+            "_goal_continue_after_open_thread_id",
+            "_project_team_model_thread_id",
+        ):
+            if getattr(self, name, None) == old_thread_id:
+                setattr(self, name, new_thread_id)
+        if (
+            isinstance(self._goal_continuation_boundary, tuple)
+            and len(self._goal_continuation_boundary) == 2
+            and self._goal_continuation_boundary[0] == old_thread_id
+        ):
+            self._goal_continuation_boundary = (
+                new_thread_id,
+                self._goal_continuation_boundary[1],
+            )
+        if (
+            isinstance(self._stopped_source_turn, tuple)
+            and len(self._stopped_source_turn) == 2
+            and self._stopped_source_turn[0] == old_thread_id
+        ):
+            self._stopped_source_turn = (
+                new_thread_id,
+                self._stopped_source_turn[1],
+            )
+        for name in (
+            "_goal_auto_turn_token",
+            "_turn_performance_token",
+            "_houdini_status_turn_token",
+            "_stopping_turn_token",
+        ):
+            token = getattr(self, name, None)
+            if getattr(token, "thread_id", None) == old_thread_id:
+                setattr(self, name, None)
+        current_goal = getattr(self, "_current_goal", None)
+        if isinstance(current_goal, dict):
+            for key in ("thread_id", "threadId"):
+                if current_goal.get(key) == old_thread_id:
+                    current_goal[key] = new_thread_id
+        goal_stage = getattr(self, "_goal_stage_snapshot", None)
+        if isinstance(goal_stage, dict) and goal_stage.get("thread_id") == old_thread_id:
+            goal_stage["thread_id"] = new_thread_id
+        for record in self._goal_houdini_inflight.values():
+            if isinstance(record, dict) and record.get("thread_id") == old_thread_id:
+                record["thread_id"] = new_thread_id
+        diagnostic = getattr(self, "_diagnostic_snapshot", None)
+        if isinstance(diagnostic, dict) and diagnostic.get("thread_id") == old_thread_id:
+            diagnostic["thread_id"] = new_thread_id
+        for name in ("_diagnostic_turn_key", "_diagnostic_draft_key"):
+            key = getattr(self, name, None)
+            if isinstance(key, str) and (
+                key == old_thread_id or key.startswith(f"{old_thread_id}:")
+            ):
+                setattr(self, name, new_thread_id + key[len(old_thread_id) :])
+        for record in self._team_records.values():
+            if (
+                isinstance(record, dict)
+                and record.get("root_thread_id") == old_thread_id
+            ):
+                record["root_thread_id"] = new_thread_id
+
+        if was_selected:
+            self._selected_thread_id = new_thread_id
+            if getattr(self, "thread_id_edit", None) is not None:
+                self.thread_id_edit.setText(new_thread_id)
+        selected_project = project_for_thread(
+            self._project_team_snapshot,
+            new_thread_id,
+        )
+        selected_project_id = (
+            project_id
+            if isinstance(project_id, str)
+            else (
+                selected_project.get("project_id")
+                if isinstance(selected_project, dict)
+                else None
+            )
+        )
+        if was_selected and isinstance(selected_project_id, str):
+            self._selected_project_id = selected_project_id
+        history_combo = getattr(self, "history_combo", None)
+        if history_combo is not None:
+            for index in range(history_combo.count()):
+                record = history_combo.itemData(index)
+                if (
+                    isinstance(record, dict)
+                    and record.get("thread_id") == old_thread_id
+                ):
+                    updated_record = dict(record)
+                    updated_record["thread_id"] = new_thread_id
+                    history_combo.setItemData(index, updated_record)
+            self._apply_threads(self._thread_history)
+        page = getattr(self, "project_team_page", None)
+        if page is not None:
+            page.set_snapshot(self._project_team_snapshot)
+            if isinstance(selected_project_id, str):
+                page.select_project(selected_project_id)
+            if was_selected:
+                page.select_thread(new_thread_id)
+        if was_selected and getattr(self, "thread_status_label", None) is not None:
+            self.thread_status_label.setText(
+                f"Thread：{self._history_title(new_thread_id)}"
+            )
+            self.thread_status_label.setToolTip(
+                f"{self._history_title(new_thread_id, full=True)}\n"
+                f"Codex Thread ID：{new_thread_id}"
+            )
+
+        notice_kind = "deleted" if deletion_confirmed else "cleanup_pending"
+        transfer_key = (old_thread_id, new_thread_id, notice_kind)
+        if current_target and transfer_key not in self._thread_transfer_notices:
+            self._thread_transfer_notices.append(transfer_key)
+            message = (
+                "上下文已迁移到新任务，旧任务已删除。"
+                if deletion_confirmed
+                else "上下文已迁移到新任务，清理状态待同步。"
+            )
+            self._append_system(message)
+            if (
+                page is not None
+                and isinstance(selected_project_id, str)
+                and self._selected_project_id == selected_project_id
+            ):
+                page.set_action_status(message)
+        if current_target:
+            self._request_goal()
+        if refresh and self._connected:
+            if isinstance(project_id, str):
+                self._refresh_project_team()
+            elif self._client is not None:
+                self._client.get_threads()
+        self._refresh_controls()
+
+    def _apply_thread_transfer_event(self, event: dict[str, Any]) -> None:
+        old_thread_id = self._thread_transfer_id(event.get("old_thread_id"))
+        new_thread_id = self._thread_transfer_id(event.get("new_thread_id"))
+        project_id = self._thread_transfer_id(event.get("project_id"))
+        role = self._thread_transfer_id(event.get("role"))
+        if old_thread_id is None:
+            return
+        if new_thread_id is None:
+            raw_error = event.get("error")
+            error = RuntimeDiagnosticWriter._sanitize_text(
+                raw_error if isinstance(raw_error, str) else "",
+                600,
+            ).strip()
+            error = error.replace("<", "＜").replace(">", "＞")
+            message = "上下文迁移失败，已保留原任务。"
+            if error:
+                message += f" {error}"
+            is_selected = old_thread_id == self._selected_thread_id
+            if is_selected:
+                self._append_system(message)
+            page = getattr(self, "project_team_page", None)
+            if (
+                page is not None
+                and isinstance(project_id, str)
+                and self._selected_project_id == project_id
+            ):
+                page.set_action_status(message)
+            return
+        self._apply_thread_identity_transfer(
+            old_thread_id,
+            new_thread_id,
+            project_id=project_id,
+            role=role,
+            deletion_confirmed=True,
+        )
+
+    def _refresh_project_team(self) -> None:
+        page = getattr(self, "project_team_page", None)
+        client = self._client
+        getter = getattr(client, "get_project_team", None)
+        if self._project_team_pending is not None:
+            self._project_team_refresh_deferred = True
+            return
+        if not self._connected or not callable(getter):
+            if page is not None:
+                page.set_status("当前无法读取项目快照。")
+            return
+        request_id = getter()
+        if isinstance(request_id, str) and request_id:
+            self._project_team_pending = request_id
+            if page is not None:
+                page.set_busy(True)
+                page.set_status("正在同步项目与角色状态…")
+        elif page is not None:
+            page.set_status("项目快照请求未能发送，请稍后重试。")
+
+    def _run_deferred_project_team_refresh(self) -> None:
+        if not getattr(self, "_project_team_refresh_deferred", False):
+            return
+        self._project_team_refresh_deferred = False
+        self._refresh_project_team()
+
+    def _save_project_team_mode(self, mode: str) -> None:
+        page = getattr(self, "project_team_page", None)
+        client = self._client
+        setter = getattr(client, "set_project_team_mode", None)
+        if (
+            mode not in PROJECT_TEAM_TURN_OVERRIDES
+            or not callable(setter)
+            or self._project_team_snapshot.get("settings_writable") is not True
+            or not self._connected
+        ):
+            if page is not None:
+                page.set_status("当前处理方式不可修改；未保存。")
+            return
+        if self._project_team_pending is not None:
+            return
+        request_id = setter(mode)
+        if isinstance(request_id, str) and request_id:
+            self._project_team_pending = request_id
+            if page is not None:
+                page.set_busy(True)
+                page.set_status("正在保存新任务的处理方式…")
+        elif page is not None:
+            page.set_status("处理方式请求未能发送；未保存。")
+
+    def _remember_project_thread(
+        self,
+        thread_id: Any,
+        *,
+        project_id: Any = None,
+        role_key: Any = None,
+        project: dict[str, Any] | None = None,
+        thread: dict[str, Any] | None = None,
+        project_status: Any = None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(thread_id, str) or not thread_id:
+            return None
+        known = getattr(self, "_known_project_threads", None)
+        if not isinstance(known, dict):
+            known = {}
+            self._known_project_threads = known
+        record = dict(known.get(thread_id) or {})
+        if isinstance(project_id, str) and project_id:
+            record["project_id"] = project_id
+        if role_key in PROJECT_TEAM_ROLE_ORDER:
+            record["role_key"] = role_key
+        if isinstance(project, dict):
+            value = project.get("project_id")
+            if isinstance(value, str) and value:
+                record["project_id"] = value
+            value = project.get("status")
+            if isinstance(value, str) and value:
+                record["project_status"] = value
+            value = project.get("stage")
+            if isinstance(value, str) and value:
+                record["stage"] = value
+            value = project.get("progress")
+            if isinstance(value, dict):
+                record["progress"] = dict(value)
+        if isinstance(project_status, str) and project_status:
+            record["project_status"] = project_status
+        if isinstance(thread, dict):
+            value = thread.get("role_key") or thread.get("role")
+            if value in PROJECT_TEAM_ROLE_ORDER:
+                record["role_key"] = value
+            value = thread.get("status")
+            if isinstance(value, str) and value:
+                record["thread_status"] = value
+            if isinstance(thread.get("can_guide"), bool):
+                record["can_guide"] = thread["can_guide"]
+        record["managed_project_thread"] = True
+        known[thread_id] = record
+        return record
+
+    def _remember_project_snapshot_threads(
+        self,
+        snapshot: dict[str, Any],
+    ) -> None:
+        projects = snapshot.get("projects")
+        for project in projects if isinstance(projects, list) else ():
+            if not isinstance(project, dict):
+                continue
+            threads = project.get("threads")
+            for thread in threads if isinstance(threads, list) else ():
+                if not isinstance(thread, dict):
+                    continue
+                self._remember_project_thread(
+                    thread.get("thread_id"),
+                    project=project,
+                    thread=thread,
+                )
+
+    def _snapshot_project_thread(
+        self,
+        thread_id: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        if not isinstance(thread_id, str):
+            return None
+        snapshot = getattr(self, "_project_team_snapshot", None)
+        project = project_for_thread(
+            snapshot if isinstance(snapshot, dict) else {},
+            thread_id,
+        )
+        if not isinstance(project, dict):
+            return None
+        threads = project.get("threads")
+        for thread in threads if isinstance(threads, list) else ():
+            if isinstance(thread, dict) and thread.get("thread_id") == thread_id:
+                return project, thread
+        return None
+
+    def _known_project_thread(self, thread_id: Any) -> dict[str, Any] | None:
+        if not isinstance(thread_id, str) or not thread_id:
+            return None
+        membership = self._snapshot_project_thread(thread_id)
+        if membership is not None:
+            project, thread = membership
+            return self._remember_project_thread(
+                thread_id,
+                project=project,
+                thread=thread,
+            )
+        known = getattr(self, "_known_project_threads", None)
+        if isinstance(known, dict) and isinstance(known.get(thread_id), dict):
+            return known[thread_id]
+        history_record = self._selected_history_record()
+        if (
+            isinstance(history_record, dict)
+            and history_record.get("thread_id") == thread_id
+            and history_record.get("managed_project_thread") is True
+        ):
+            return self._remember_project_thread(
+                thread_id,
+                project_id=history_record.get("project_id"),
+                role_key=history_record.get("role_key")
+                or history_record.get("role"),
+                thread=history_record,
+            )
+        pending = getattr(self, "_pending_project_guidance", None)
+        for guidance in pending.values() if isinstance(pending, dict) else ():
+            if (
+                isinstance(guidance, dict)
+                and guidance.get("thread_id") == thread_id
+            ):
+                return self._remember_project_thread(
+                    thread_id,
+                    project_id=guidance.get("project_id"),
+                )
+        draft = getattr(self, "_project_goal_draft", None)
+        if isinstance(draft, dict) and draft.get("thread_id") == thread_id:
+            return self._remember_project_thread(
+                thread_id,
+                project_id=draft.get("project_id"),
+                role_key="supervisor",
+                project_status="running",
+            )
+        return None
+
+    def _project_thread_record(
+        self,
+        project_id: str,
+        thread_id: str,
+    ) -> dict[str, Any] | None:
+        projects = self._project_team_snapshot.get("projects")
+        for project in projects if isinstance(projects, list) else []:
+            if (
+                not isinstance(project, dict)
+                or project.get("project_id") != project_id
+            ):
+                continue
+            threads = project.get("threads")
+            for thread in threads if isinstance(threads, list) else []:
+                if (
+                    isinstance(thread, dict)
+                    and thread.get("thread_id") == thread_id
+                ):
+                    return thread
+        return None
+
+    def _managed_project_role_context(
+        self,
+        thread_id: Any,
+    ) -> tuple[dict[str, Any], str, str] | None:
+        membership = self._snapshot_project_thread(thread_id)
+        if membership is not None:
+            project, thread = membership
+            role_key = thread.get("role_key")
+            if role_key not in PROJECT_TEAM_ROLE_ORDER:
+                return None
+            self._remember_project_thread(
+                thread_id,
+                project=project,
+                thread=thread,
+            )
+            role_title = thread.get("role_title")
+            return (
+                project,
+                role_key,
+                role_title
+                if isinstance(role_title, str) and role_title.strip()
+                else _PROJECT_ROLE_LABELS[role_key],
+            )
+        known = self._known_project_thread(thread_id)
+        role_key = known.get("role_key") if isinstance(known, dict) else None
+        if not isinstance(known, dict) or role_key not in PROJECT_TEAM_ROLE_ORDER:
+            return None
+        project = {
+            "project_id": known.get("project_id"),
+            "status": known.get("project_status")
+            or known.get("thread_status")
+            or "running",
+            "stage": known.get("stage"),
+            "progress": known.get("progress"),
+        }
+        role_title = known.get("role_title")
+        return (
+            project,
+            role_key,
+            role_title
+            if isinstance(role_title, str) and role_title.strip()
+            else _PROJECT_ROLE_LABELS[role_key],
+        )
+
+    def _managed_supervisor_project(
+        self,
+        thread_id: Any,
+    ) -> dict[str, Any] | None:
+        context = self._managed_project_role_context(thread_id)
+        if context is None or context[1] != "supervisor":
+            return None
+        return context[0]
+
+    @staticmethod
+    def _decode_project_json_objects(text: str) -> list[dict[str, Any]] | None:
+        if not isinstance(text, str) or not text.strip():
+            return None
+        stripped = text.lstrip()
+        if stripped.startswith("```") or stripped[:1] not in {"{", "["}:
+            return None
+        decoder = json.JSONDecoder()
+        values: list[dict[str, Any]] = []
+        index = 0
+        length = len(text)
+        while index < length:
+            while index < length and text[index].isspace():
+                index += 1
+            if index >= length:
+                break
+            try:
+                value, index = decoder.raw_decode(text, index)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+            if not isinstance(value, dict):
+                return None
+            values.append(value)
+        return values or None
+
+    @staticmethod
+    def _project_text_list(value: Any) -> bool:
+        return isinstance(value, list) and all(
+            isinstance(item, str) for item in value
+        )
+
+    @classmethod
+    def _project_output_kind(
+        cls,
+        value: dict[str, Any],
+        role_key: str,
+    ) -> str | None:
+        keys = frozenset(value)
+        if keys == _PROJECT_PROGRESS_OUTPUT_KEYS:
+            return "progress" if (
+                value.get("status") in _PROJECT_PROGRESS_STATUSES
+                and isinstance(value.get("summary"), str)
+                and value["summary"].strip()
+                and role_key == "supervisor"
+            ) else None
+        if keys == _PROJECT_RESULT_OUTPUT_KEYS:
+            return "result" if (
+                value.get("status") in _PROJECT_RESULT_STATUSES
+                and all(
+                    isinstance(value.get(name), str)
+                    and value[name].strip()
+                    for name in ("goal", "result", "next_action")
+                )
+                and isinstance(value.get("evidence"), list)
+                and all(isinstance(item, str) for item in value["evidence"])
+                and role_key == "supervisor"
+            ) else None
+        collaboration_valid = (
+            value.get("collaboration_mode")
+            in _PROJECT_COLLABORATION_MODES
+        )
+        summary_valid = bool(
+            isinstance(value.get("summary"), str)
+            and value["summary"].strip()
+        )
+        fact_fields_valid = all(
+            cls._project_text_list(value.get(name))
+            for name in _PROJECT_SUPERVISOR_FACT_FIELDS
+        )
+        task_depth_valid = value.get("task_depth") in {
+            "direct",
+            "focused",
+            "full",
+        }
+        eligibility = value.get("scene_task_eligibility")
+        eligibility_valid = bool(
+            isinstance(eligibility, dict)
+            and frozenset(eligibility) == {"decision", "reason"}
+            and eligibility.get("decision")
+            in _PROJECT_SCENE_ELIGIBILITY_LABELS
+            and isinstance(eligibility.get("reason"), str)
+            and eligibility["reason"].strip()
+        )
+        if keys == _PROJECT_SUPERVISOR_OUTPUT_KEYS:
+            return "supervisor" if (
+                role_key == "supervisor"
+                and summary_valid
+                and collaboration_valid
+                and fact_fields_valid
+                and task_depth_valid
+                and eligibility_valid
+            ) else None
+        if keys == _PROJECT_PLAN_OUTPUT_KEYS:
+            return "plan" if (
+                role_key in {"supervisor", "planning"}
+                and summary_valid
+                and collaboration_valid
+                and fact_fields_valid
+                and task_depth_valid
+                and isinstance(value.get("project_title"), str)
+                and value["project_title"].strip()
+                and isinstance(value.get("stages"), list)
+                and bool(value["stages"])
+                and all(isinstance(item, dict) for item in value["stages"])
+            ) else None
+        if keys == _PROJECT_EXECUTION_OUTPUT_KEYS:
+            return "execution" if (
+                role_key == "execution"
+                and value.get("outcome") in {"completed", "blocked"}
+                and summary_valid
+                and collaboration_valid
+                and isinstance(value.get("technical_evidence"), list)
+                and bool(value["technical_evidence"])
+                and all(
+                    isinstance(item, dict)
+                    for item in value["technical_evidence"]
+                )
+                and cls._project_text_list(value.get("remaining"))
+                and isinstance(value.get("review_images"), list)
+                and all(
+                    isinstance(item, dict)
+                    for item in value["review_images"]
+                )
+            ) else None
+        if keys == _PROJECT_REVIEW_OUTPUT_KEYS:
+            return "review" if (
+                role_key in {"visual_review", "technical_review"}
+                and value.get("decision") in {"pass", "repair", "blocked"}
+                and collaboration_valid
+                and isinstance(value.get("claims"), list)
+                and bool(value["claims"])
+                and all(isinstance(item, dict) for item in value["claims"])
+                and isinstance(
+                    value.get("largest_consequential_deviation"), str
+                )
+                and cls._project_text_list(value.get("missing_evidence"))
+                and cls._project_text_list(value.get("repair"))
+            ) else None
+        decision_keys = keys - {"external_dependency"}
+        if decision_keys == _PROJECT_DECISION_OUTPUT_KEYS and keys <= (
+            _PROJECT_DECISION_OUTPUT_KEYS | {"external_dependency"}
+        ):
+            return "decision" if (
+                role_key == "supervisor"
+                and value.get("decision") in {"pass", "repair", "blocked"}
+                and summary_valid
+                and collaboration_valid
+                and isinstance(value.get("repair_card"), str)
+                and (
+                    "external_dependency" not in value
+                    or isinstance(value.get("external_dependency"), dict)
+                )
+            ) else None
+        return None
+
+    @classmethod
+    def _is_project_status_object(cls, value: dict[str, Any]) -> bool:
+        return cls._project_output_kind(value, "supervisor") is not None
+
+    @classmethod
+    def _project_value_lines(
+        cls,
+        field: str,
+        value: Any,
+        *,
+        indent: int = 0,
+    ) -> list[str]:
+        label = _PROJECT_FIELD_LABELS.get(field, field)
+        prefix = "  " * indent
+        if field == "scene_task_eligibility" and isinstance(value, dict):
+            decision = _PROJECT_SCENE_ELIGIBILITY_LABELS.get(
+                value.get("decision"),
+                "场景任务属性未知",
+            )
+            reason = value.get("reason")
+            reason_text = (
+                cls._bounded_goal_summary(reason, 360)
+                if isinstance(reason, str) and reason.strip()
+                else "未提供判定依据"
+            )
+            return [f"{prefix}{label}：{decision} · {reason_text}"]
+        if isinstance(value, dict):
+            lines = [f"{prefix}{label}："]
+            if not value:
+                lines.append(f"{prefix}  （空对象）")
+            for child_field, child_value in value.items():
+                lines.extend(
+                    cls._project_value_lines(
+                        str(child_field),
+                        child_value,
+                        indent=indent + 1,
+                    )
+                )
+            return lines
+        if isinstance(value, list):
+            if not value:
+                return [f"{prefix}{label}：无"]
+            lines = [f"{prefix}{label}："]
+            for item in value:
+                if isinstance(item, dict):
+                    lines.append(f"{prefix}  -")
+                    if not item:
+                        lines.append(f"{prefix}    （空对象）")
+                    for child_field, child_value in item.items():
+                        lines.extend(
+                            cls._project_value_lines(
+                                str(child_field),
+                                child_value,
+                                indent=indent + 2,
+                            )
+                        )
+                elif isinstance(item, list):
+                    lines.append(f"{prefix}  -")
+                    lines.extend(
+                        cls._project_value_lines(
+                            "items",
+                            item,
+                            indent=indent + 2,
+                        )
+                    )
+                else:
+                    rendered = _PROJECT_VALUE_LABELS.get(
+                        item,
+                        str(item),
+                    )
+                    lines.append(f"{prefix}  - {rendered}")
+            return lines
+        if isinstance(value, bool):
+            rendered_value = "是" if value else "否"
+        else:
+            rendered_value = _PROJECT_VALUE_LABELS.get(value, str(value))
+        return [f"{prefix}{label}：{rendered_value}"]
+
+    def _project_status_presentation(
+        self,
+        thread_id: Any,
+        text: Any,
+    ) -> str | None:
+        context = self._managed_project_role_context(thread_id)
+        if context is None or not isinstance(text, str):
+            return None
+        project, role_key, role_title = context
+        values = self._decode_project_json_objects(text)
+        if not values:
+            return None
+        kinds = [
+            self._project_output_kind(value, role_key)
+            for value in values
+        ]
+        if not all(isinstance(kind, str) for kind in kinds):
+            lines: list[str] = []
+            total = len(values)
+            for index, value in enumerate(values, 1):
+                if lines:
+                    lines.append("")
+                suffix = f" {index}/{total}" if total > 1 else ""
+                lines.append(f"{role_title} 结构化消息{suffix}：")
+                if not value:
+                    lines.append("  （空对象）")
+                    continue
+                for field, field_value in value.items():
+                    lines.extend(
+                        self._project_value_lines(
+                            str(field),
+                            field_value,
+                            indent=1,
+                        )
+                    )
+            return "\n".join(lines)
+        final = values[-1]
+        kind = kinds[-1]
+        summary = final.get("summary") or final.get("result")
+        if not isinstance(summary, str) or not summary.strip():
+            if kind == "review":
+                summary = final.get("largest_consequential_deviation")
+                if not isinstance(summary, str) or not summary.strip():
+                    summary = {
+                        "pass": "未发现需要修复的重要偏差。",
+                        "repair": "审查发现需要修复的问题。",
+                        "blocked": "当前证据不足，审查受阻。",
+                    }.get(final.get("decision"))
+            if not isinstance(summary, str) or not summary.strip():
+                return None
+        decision = final.get("decision") or final.get("outcome")
+        decision_label = _PROJECT_VALUE_LABELS.get(decision, decision)
+        heading = {
+            "progress": "项目状态",
+            "result": "项目状态",
+            "supervisor": "监督进展",
+            "plan": "项目方案",
+            "execution": "执行结果",
+            "review": f"{role_title} 结论",
+            "decision": "监督结论",
+        }.get(kind, f"{role_title}进展")
+        headline = self._bounded_goal_summary(summary, 600)
+        if isinstance(decision_label, str) and decision_label:
+            headline = f"{decision_label} · {headline}"
+        lines = [f"{heading}：{headline}"]
+        stage = project.get("stage")
+        progress = project.get("progress")
+        progress_label = (
+            progress.get("label") if isinstance(progress, dict) else None
+        )
+        if isinstance(stage, str) and stage.strip():
+            lines.append(
+                "当前阶段："
+                + self._bounded_goal_summary(stage, 160)
+                + (
+                    " · " + self._bounded_goal_summary(progress_label, 120)
+                    if isinstance(progress_label, str)
+                    and progress_label.strip()
+                    else ""
+                )
+            )
+        next_action = final.get("next_action")
+        if isinstance(next_action, str) and next_action.strip():
+            lines.append(
+                "下一步：" + self._bounded_goal_summary(next_action, 280)
+            )
+        skip_fields = {
+            "status",
+            "summary",
+            "result",
+            "next_action",
+            "decision",
+            "outcome",
+        }
+        detail_lines: list[str] = []
+        for field, value in final.items():
+            if field in skip_fields:
+                continue
+            detail_lines.extend(self._project_value_lines(field, value))
+        if detail_lines:
+            lines.append("")
+            lines.extend(detail_lines)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _project_message_key(
+        params: dict[str, Any],
+        item: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str] | None:
+        thread_id = params.get("threadId")
+        turn_id = params.get("turnId")
+        item_id = (
+            item.get("id")
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+            else params.get("itemId")
+        )
+        if not all(isinstance(value, str) and value for value in (
+            thread_id,
+            turn_id,
+            item_id,
+        )):
+            return None
+        return thread_id, turn_id, item_id
+
+    def _remember_completed_project_message(
+        self,
+        key: tuple[str, str, str],
+    ) -> None:
+        completed = getattr(self, "_completed_project_messages", None)
+        if not isinstance(completed, dict):
+            completed = {}
+            self._completed_project_messages = completed
+        completed.pop(key, None)
+        completed[key] = None
+        while len(completed) > 256:
+            completed.pop(next(iter(completed)))
+
+    def _discard_project_message_buffers(
+        self,
+        thread_id: str | None = None,
+    ) -> None:
+        buffers = getattr(self, "_project_message_buffers", None)
+        if not isinstance(buffers, dict):
+            return
+        keys = [
+            key
+            for key in buffers
+            if thread_id is None or key[0] == thread_id
+        ]
+        for key in keys:
+            buffers.pop(key, None)
+            self._remember_completed_project_message(key)
+
+    def _project_message_is_tracked(
+        self,
+        params: dict[str, Any],
+        item: dict[str, Any],
+    ) -> bool:
+        key = self._project_message_key(params, item)
+        if key is None:
+            return False
+        buffers = getattr(self, "_project_message_buffers", None)
+        completed = getattr(self, "_completed_project_messages", None)
+        return bool(
+            (isinstance(buffers, dict) and key in buffers)
+            or (isinstance(completed, dict) and key in completed)
+        )
+
+    def _buffer_project_agent_delta(
+        self,
+        params: dict[str, Any],
+        delta: str,
+    ) -> bool:
+        key = self._project_message_key(params)
+        thread_id = params.get("threadId")
+        if (
+            self._managed_project_role_context(thread_id) is None
+            or key is None
+        ):
+            return False
+        completed = getattr(self, "_completed_project_messages", None)
+        if isinstance(completed, dict) and key in completed:
+            return True
+        buffers = getattr(self, "_project_message_buffers", None)
+        if not isinstance(buffers, dict):
+            buffers = {}
+            self._project_message_buffers = buffers
+        if key not in buffers and delta.lstrip()[:1] not in {"{", "["}:
+            return False
+        record = buffers.setdefault(key, {"text": ""})
+        record["text"] = str(record.get("text") or "") + delta
+        return True
+
+    def _complete_project_agent_message(
+        self,
+        params: dict[str, Any],
+        item: dict[str, Any],
+    ) -> bool:
+        key = self._project_message_key(params, item)
+        thread_id = params.get("threadId")
+        if (
+            self._managed_project_role_context(thread_id) is None
+            or key is None
+        ):
+            return False
+        completed = getattr(self, "_completed_project_messages", None)
+        if isinstance(completed, dict) and key in completed:
+            buffers = getattr(self, "_project_message_buffers", None)
+            if isinstance(buffers, dict):
+                buffers.pop(key, None)
+            return True
+        buffers = getattr(self, "_project_message_buffers", None)
+        buffered = (
+            buffers.pop(key, None)
+            if isinstance(buffers, dict)
+            else None
+        )
+        text = item.get("text")
+        if not isinstance(text, str):
+            text = buffered.get("text") if isinstance(buffered, dict) else None
+        if not isinstance(text, str) or not text:
+            self._remember_completed_project_message(key)
+            return True
+        presentation = self._project_status_presentation(thread_id, text)
+        if presentation is None and not isinstance(buffered, dict):
+            return False
+        self._append_codex_delta(presentation if presentation is not None else text)
+        self._remember_completed_project_message(key)
+        if presentation is not None:
+            self._refresh_project_team()
+        return True
+
+    def _flush_project_agent_buffers(
+        self,
+        thread_id: Any,
+        turn_id: Any,
+    ) -> None:
+        buffers = getattr(self, "_project_message_buffers", None)
+        if not isinstance(buffers, dict):
+            return
+        keys = [
+            key
+            for key in buffers
+            if key[0] == thread_id and key[1] == turn_id
+        ]
+        refreshed = False
+        for key in keys:
+            record = buffers.pop(key, None)
+            self._remember_completed_project_message(key)
+            text = record.get("text") if isinstance(record, dict) else None
+            if not isinstance(text, str) or not text:
+                continue
+            presentation = self._project_status_presentation(thread_id, text)
+            self._append_codex_delta(
+                presentation if presentation is not None else text
+            )
+            refreshed = refreshed or presentation is not None
+        if refreshed:
+            self._refresh_project_team()
+
+    def _should_defer_codex_message(self) -> bool:
+        thread_id = getattr(self, "_stream_thread_id", None) or getattr(
+            self, "_selected_thread_id", None
+        )
+        role_context = self._managed_project_role_context(thread_id)
+        if role_context is not None:
+            project = role_context[0]
+            return str(project.get("status") or "").lower() in {
+                "running",
+                "in_progress",
+                "planning",
+                "waiting",
+            }
+        return bool(
+            getattr(self, "_current_task_route", None) == "team"
+            and isinstance(getattr(self, "_project_goal_draft", None), dict)
+            and thread_id == getattr(self, "_selected_thread_id", None)
+        )
+
+    def _select_project_history(
+        self,
+        project_id: str,
+        *,
+        thread_id: str | None = None,
+    ) -> None:
+        combo = getattr(self, "history_combo", None)
+        if combo is None:
+            return
+        project_index: int | None = None
+        for index in range(combo.count()):
+            record = combo.itemData(index)
+            if not isinstance(record, dict):
+                continue
+            if (
+                isinstance(thread_id, str)
+                and record.get("project_id") == project_id
+                and record.get("thread_id") == thread_id
+            ):
+                self._set_history_index(index)
+                return
+            if (
+                record.get("kind") == "project"
+                and record.get("project_id") == project_id
+            ):
+                project_index = index
+        if project_index is not None:
+            self._set_history_index(project_index)
+
+    def _running_project_switch_source(
+        self,
+        target_thread_id: str,
+    ) -> str | None:
+        """Return the running managed role that may be left in background."""
+
+        source_thread_id = self._turn_state.thread_id
+        if (
+            self._turn_state.phase is not TurnPhase.IN_PROGRESS
+            or not isinstance(source_thread_id, str)
+            or source_thread_id == target_thread_id
+            or self._known_project_thread(source_thread_id) is None
+            or project_for_thread(
+                self._project_team_snapshot,
+                target_thread_id,
+            )
+            is None
+            or self._session_action_pending
+            or self._turn_start_request_pending
+            or self._turn_steer_request_pending
+            or self._interrupt_pending
+            or self._is_stopping_turn()
+            or bool(self._reconciliation_tokens)
+            or self._goal_action_context is not None
+            or self._goal_houdini_busy()
+            or self._goal_auto_turn_is_current(source_thread_id)
+        ):
+            return None
+        return source_thread_id
+
+    def _request_running_project_switch(
+        self,
+        target_thread_id: str,
+    ) -> bool:
+        """Open another managed role while the selected role keeps running."""
+
+        source_thread_id = self._running_project_switch_source(
+            target_thread_id
+        )
+        client = getattr(self, "_client", None)
+        resume = getattr(client, "resume_thread", None)
+        if source_thread_id is None or not callable(resume):
+            return False
+        self._pending_running_project_switch = {
+            "source_thread_id": source_thread_id,
+            "target_thread_id": target_thread_id,
+        }
+        self._session_action_pending = True
+        self._refresh_controls()
+        resume(
+            target_thread_id,
+            service_tier=self._selected_service_tier(),
+            context="session_resume",
+        )
+        return True
+
+    def _restore_running_project_switch(self) -> None:
+        """Restore the still-running source role after resume fails."""
+
+        pending = getattr(self, "_pending_running_project_switch", None)
+        self._pending_running_project_switch = None
+        if not isinstance(pending, dict):
+            return
+        source_thread_id = pending.get("source_thread_id")
+        if not isinstance(source_thread_id, str):
+            return
+        source = self._known_project_thread(source_thread_id)
+        project_id = source.get("project_id") if isinstance(source, dict) else None
+        self._selected_thread_id = source_thread_id
+        self._current_task_route = "team"
+        self._set_route_buttons("team")
+        self._set_task_view("conversation")
+        if isinstance(project_id, str):
+            self._selected_project_id = project_id
+            self._select_project_history(
+                project_id,
+                thread_id=source_thread_id,
+            )
+        page = getattr(self, "project_team_page", None)
+        if page is not None:
+            page.select_thread(source_thread_id)
+            page.set_action_status(
+                "角色切换失败；原角色仍在运行，输入和图片均已保留。"
+            )
+
+    def _accept_running_project_switch(
+        self,
+        thread_id: Any,
+    ) -> bool:
+        """Commit a running-role switch only for its exact resume ACK."""
+
+        pending = getattr(self, "_pending_running_project_switch", None)
+        if not isinstance(pending, dict):
+            return True
+        target_thread_id = pending.get("target_thread_id")
+        source_thread_id = pending.get("source_thread_id")
+        if thread_id != target_thread_id:
+            self._restore_running_project_switch()
+            self._append_system(
+                "角色切换返回了不匹配的任务；原角色仍在运行，未切换。"
+            )
+            self._refresh_controls()
+            return False
+        self._pending_running_project_switch = None
+        if isinstance(source_thread_id, str):
+            self._discard_project_message_buffers(source_thread_id)
+        self._freeze_codex_message()
+        self._stream_thread_id = None
+        self._stream_turn_id = None
+        self._stopping_turn_token = None
+        for name in (
+            "_goal_auto_turn_token",
+            "_turn_performance_token",
+            "_houdini_status_turn_token",
+        ):
+            token = getattr(self, name, None)
+            if getattr(token, "thread_id", None) == source_thread_id:
+                setattr(self, name, None)
+        return self._turn_state.switch_selected_thread(target_thread_id)
+
+    def _open_project_thread(self, thread_id: str) -> None:
+        project = project_for_thread(self._project_team_snapshot, thread_id)
+        page = getattr(self, "project_team_page", None)
+        if project is None:
+            if page is not None:
+                page.set_action_status("项目快照中没有这个 Thread；请先刷新。")
+            return
+        project_id = project["project_id"]
+        self._selected_project_id = project_id
+        selected_history = self._selected_history_record()
+        selected_role_is_current = bool(
+            selected_history is not None
+            and selected_history.get("kind") == "thread"
+            and selected_history.get("thread_id") == thread_id
+        )
+        if not selected_role_is_current:
+            self._select_project_history(project_id, thread_id=thread_id)
+        self._open_project_team_page(project_id)
+        if page is not None:
+            page.select_thread(thread_id)
+        if thread_id == self._selected_thread_id:
+            if page is not None:
+                page.set_action_status(
+                    "所选 Thread 已打开；消息仍显示在中央对话区。"
+                )
+            return
+        if self._turn_state.busy:
+            if self._request_running_project_switch(thread_id):
+                if page is not None:
+                    page.set_action_status(
+                        "正在打开所选角色；当前角色会继续在后台运行。"
+                    )
+                return
+            if page is not None:
+                page.set_action_status(
+                    "当前回复正在建立、停止或同步，暂不能切换角色。"
+                )
+            return
+        if self._goal_houdini_busy():
+            if page is not None:
+                page.set_action_status("Houdini 操作结束后才能切换角色。")
+            return
+        before = self._session_action_pending
+        self._request_thread_resume(thread_id, context="session_resume")
+        if page is not None:
+            page.set_action_status(
+                "正在打开所选 Thread…"
+                if not before and self._session_action_pending
+                else "当前暂不能切换 Thread，请稍后重试。"
+            )
+
+    def _show_project_model_chooser(self, thread_id: str) -> None:
+        group = getattr(self, "runtime_settings_group", None)
+        combo = getattr(self, "model_combo", None)
+        if group is not None:
+            group.setChecked(True)
+        if combo is not None:
+            combo.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        page = getattr(self, "project_team_page", None)
+        if page is not None:
+            page.select_thread(thread_id)
+            page.set_action_status(
+                "已展开 Panel 原有模型选择器；选择会随本页发给此 Thread 的下一条指导生效。"
+            )
+
+    def _choose_project_thread_model(self, thread_id: str) -> None:
+        project = project_for_thread(self._project_team_snapshot, thread_id)
+        page = getattr(self, "project_team_page", None)
+        if project is None:
+            if page is not None:
+                page.set_action_status("项目快照中没有这个 Thread；请先刷新。")
+            return
+        if thread_id == self._selected_thread_id:
+            self._show_project_model_chooser(thread_id)
+            return
+        self._project_team_model_thread_id = thread_id
+        self._open_project_thread(thread_id)
+        if not self._session_action_pending:
+            self._project_team_model_thread_id = None
+
+    def _send_project_thread_guidance(
+        self,
+        project_id: str,
+        thread_id: str,
+        text: str,
+        *,
+        source: str = "page",
+        attachment_paths: tuple[str, ...] = (),
+    ) -> bool:
+        attachment_paths = tuple(attachment_paths)
+        page = getattr(self, "project_team_page", None)
+        thread = self._project_thread_record(project_id, thread_id)
+        durable_identity = self._managed_project_guidance_identity(thread_id)
+        identity_allows_action = bool(
+            durable_identity is not None
+            and durable_identity[0] == project_id
+            and durable_identity[1] in PROJECT_TEAM_ROLE_ORDER
+        )
+        sender = getattr(
+            getattr(self, "_client", None),
+            "guide_project_thread",
+            None,
+        )
+        if (
+            not (
+                isinstance(thread, dict)
+                and thread.get("can_guide") is True
+                or identity_allows_action
+            )
+            or not callable(sender)
+            or not self._connected
+        ):
+            if page is not None:
+                page.set_action_status("当前项目快照未允许向这个 Thread 追加指导。")
+            if source == "composer":
+                self._append_system(
+                    "当前项目快照未允许向这个角色任务追加指导；输入仍保留。"
+                )
+            return False
+        role_key = (
+            thread.get("role_key")
+            if isinstance(thread, dict)
+            else durable_identity[1]
+            if durable_identity is not None
+            else None
+        )
+        if role_key not in PROJECT_TEAM_ROLE_ORDER:
+            notice = (
+                "当前项目快照没有可核验的角色身份；输入仍保留，"
+                "未发送指导。"
+            )
+            if page is not None:
+                page.set_action_status(notice)
+            if source == "composer":
+                self._append_system(notice)
+            return False
+        if attachment_paths and not self._selected_model_supports_images():
+            notice = "当前模型不支持图片输入；文字和图片均已保留，未发送指导。"
+            if page is not None:
+                page.set_action_status(notice)
+            if source == "composer":
+                self._append_system(notice)
+            return False
+        if not text.strip() and not attachment_paths:
+            notice = "项目角色指导需要文字或图片；当前内容仍保留。"
+            if page is not None:
+                page.set_action_status(notice)
+            if source == "composer":
+                self._append_system(notice)
+            return False
+        if self._project_team_pending is not None:
+            return False
+        context = f"project_team:guide:{uuid.uuid4().hex}"
+        request_id = sender(
+            project_id,
+            thread_id,
+            text,
+            model=self._selected_model_id(),
+            effort=self._selected_effort(),
+            service_tier=self._selected_service_tier(),
+            local_image_paths=list(attachment_paths),
+            context=context,
+        )
+        if isinstance(request_id, str) and request_id:
+            self._project_team_pending = request_id
+            pending_guidance = getattr(
+                self, "_pending_project_guidance", None
+            )
+            if not isinstance(pending_guidance, dict):
+                pending_guidance = {}
+                self._pending_project_guidance = pending_guidance
+            pending_guidance[context] = {
+                "source": source,
+                "route": "role",
+                "project_id": project_id,
+                "thread_id": thread_id,
+                "role": role_key,
+                "text": text,
+                "attachment_paths": attachment_paths,
+            }
+            if page is not None:
+                page.set_busy(True)
+                page.set_action_status("正在把指导发送给所选 Thread…")
+            self._refresh_controls()
+            return True
+        elif page is not None:
+            page.set_action_status("追加指导请求未能发送；内容仍保留在输入框中。")
+        if source == "composer":
+            self._append_system("指导请求未能发送；文字和图片仍保留，未自动重试。")
+        return False
+
+    def _send_project_supervisor_guidance(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        expected_project_id: str | None = None,
+        attachment_paths: tuple[str, ...] = (),
+        source: str = "composer",
+    ) -> bool:
+        """Guide an early/unsynced Supervisor without falling through to /turn."""
+
+        attachment_paths = tuple(attachment_paths)
+        page = getattr(self, "project_team_page", None)
+        sender = getattr(
+            getattr(self, "_client", None),
+            "guide_project_supervisor",
+            None,
+        )
+        if not callable(sender) or not self._connected:
+            self._append_system(
+                "当前 Bridge 尚不支持项目监督指导；文字和图片仍保留，"
+                "未发送普通 Turn。"
+            )
+            return False
+        if attachment_paths and not self._selected_model_supports_images():
+            notice = "当前模型不支持图片输入；文字和图片均已保留，未发送指导。"
+            if page is not None:
+                page.set_action_status(notice)
+            self._append_system(notice)
+            return False
+        if not text.strip() and not attachment_paths:
+            return False
+        if self._project_team_pending is not None:
+            return False
+        context = f"project_team:guide:supervisor:{uuid.uuid4().hex}"
+        request_id = sender(
+            text,
+            expected_project_id=expected_project_id,
+            model=self._selected_model_id(),
+            effort=self._selected_effort(),
+            service_tier=self._selected_service_tier(),
+            local_image_paths=list(attachment_paths),
+            context=context,
+        )
+        if isinstance(request_id, str) and request_id:
+            self._project_team_pending = request_id
+            self._pending_project_guidance[context] = {
+                "source": source,
+                "route": "supervisor",
+                "project_id": expected_project_id,
+                "thread_id": thread_id,
+                "role": "supervisor",
+                "text": text,
+                "attachment_paths": attachment_paths,
+            }
+            if page is not None:
+                page.set_busy(True)
+                page.set_action_status("正在把指导发送给项目监督 AI…")
+            self._refresh_controls()
+            return True
+        self._append_system(
+            "监督指导请求未能发送；文字和图片仍保留，未自动重试。"
+        )
+        return False
+
+    def _remember_session_project_identity(
+        self,
+        value: dict[str, Any],
+        *,
+        fallback_thread_id: Any = None,
+        turn_active: Any = None,
+    ) -> dict[str, Any] | None:
+        """Consume Bridge-owned role identity before project snapshots arrive."""
+
+        if not isinstance(value, dict):
+            return None
+        session_thread_id = value.get("thread_id") or fallback_thread_id
+        if not isinstance(session_thread_id, str) or not session_thread_id:
+            return None
+        permission_profile = value.get("permission_profile")
+        project_id = self._thread_transfer_id(value.get("project_id"))
+        role_key = value.get("project_role")
+        identity_valid = bool(
+            isinstance(project_id, str)
+            and role_key in PROJECT_TEAM_ROLE_ORDER
+            and permission_profile == role_key
+        )
+        if not identity_valid:
+            return None
+        status = value.get("project_status")
+        record = self._remember_project_thread(
+            session_thread_id,
+            project_id=project_id,
+            role_key=role_key,
+            project_status=(
+                status
+                if isinstance(status, str) and status
+                else "running"
+                if turn_active is True
+                else None
+            ),
+        )
+        if isinstance(record, dict):
+            # Unlike a snapshot/history hint, this tuple is emitted by Bridge
+            # only after the coordinator has confirmed exact project ownership.
+            # Keep that provenance so an unsynced Supervisor can use the exact
+            # role action instead of the project-creation fallback endpoint.
+            record["bridge_identity_authoritative"] = True
+        return record
+
+    def _remember_project_guidance_error_identity(
+        self,
+        details: dict[str, Any],
+        thread_id: Any,
+    ) -> dict[str, Any] | None:
+        if not isinstance(details, dict):
+            return None
+        return self._remember_session_project_identity(
+            {
+                "thread_id": details.get("thread_id") or thread_id,
+                "permission_profile": details.get("project_role"),
+                "project_id": details.get("project_id"),
+                "project_role": details.get("project_role"),
+                "project_status": details.get("project_status"),
+            },
+            fallback_thread_id=thread_id,
+            turn_active=details.get("turn_active"),
+        )
+
+    def _managed_project_guidance_identity(
+        self,
+        thread_id: Any,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None] | None:
+        """Return durable project membership without trusting Turn generation."""
+
+        if not isinstance(thread_id, str) or not thread_id:
+            return None
+        membership = self._snapshot_project_thread(thread_id)
+        project = membership[0] if membership is not None else None
+        thread = membership[1] if membership is not None else None
+        known = self._known_project_thread(thread_id)
+        history = self._selected_history_record()
+        history_managed = bool(
+            isinstance(history, dict)
+            and history.get("thread_id") == thread_id
+            and history.get("managed_project_thread") is True
+        )
+        draft = getattr(self, "_project_goal_draft", None)
+        active_creation_draft = bool(
+            isinstance(draft, dict)
+            and draft.get("phase")
+            in {
+                "starting_thread",
+                "starting_turn",
+                "draft_on_thread",
+                "turn_outcome_unknown",
+            }
+            and draft.get("thread_id") in {None, thread_id}
+        )
+        known_project_id = (
+            known.get("project_id") if isinstance(known, dict) else None
+        )
+        provisional_supervisor = bool(
+            isinstance(self._selected_project_id, str)
+            and isinstance(known, dict)
+            and known.get("role_key") == "supervisor"
+        )
+        known_managed = bool(
+            isinstance(known, dict)
+            and (
+                not active_creation_draft
+                or isinstance(known_project_id, str)
+                or provisional_supervisor
+            )
+        )
+        if (
+            membership is None
+            and not known_managed
+            and not history_managed
+        ):
+            return None
+        project_id = (
+            project.get("project_id")
+            if isinstance(project, dict)
+            else (
+                known.get("project_id")
+                if known_managed
+                else history.get("project_id")
+                if history_managed
+                else self._selected_project_id
+            )
+        )
+        role_key = (
+            thread.get("role_key") or thread.get("role")
+            if isinstance(thread, dict)
+            else (
+                known.get("role_key")
+                if known_managed
+                else history.get("role_key") or history.get("role")
+                if history_managed
+                else None
+            )
+        )
+        return (
+            project_id if isinstance(project_id, str) and project_id else None,
+            role_key if role_key in PROJECT_TEAM_ROLE_ORDER else None,
+            thread if isinstance(thread, dict) else None,
+        )
+
+    def _send_managed_project_guidance(
+        self,
+        thread_id: str,
+        text: str,
+        attachment_paths: tuple[str, ...],
+        *,
+        source: str,
+    ) -> bool | None:
+        """Route project input only through the authoritative project action API."""
+
+        identity = self._managed_project_guidance_identity(thread_id)
+        if identity is None:
+            draft = getattr(self, "_project_goal_draft", None)
+            active_creation_draft = bool(
+                isinstance(draft, dict)
+                and draft.get("phase")
+                in {
+                    "starting_thread",
+                    "starting_turn",
+                    "draft_on_thread",
+                    "turn_outcome_unknown",
+                }
+                and draft.get("thread_id") in {None, thread_id}
+            )
+            possible_unsynced_project = bool(
+                not active_creation_draft
+                and thread_id == self._selected_thread_id
+                and getattr(self, "_task_view_mode", None) == "conversation"
+                and (
+                    self._current_task_route == "team"
+                    or isinstance(self._selected_project_id, str)
+                )
+            )
+            if possible_unsynced_project:
+                notice = (
+                    "项目角色归属尚未同步；输入仍保留，图片也已保留，"
+                    "未发送普通 Turn。"
+                )
+                page = getattr(self, "project_team_page", None)
+                if page is not None:
+                    page.set_action_status(notice)
+                if source == "composer":
+                    self._append_system(notice)
+                if self._project_team_pending is None:
+                    self._refresh_project_team()
+                return False
+            return None
+        project_id, role_key, project_thread = identity
+        known_identity = self._known_project_thread(thread_id)
+        exact_bridge_identity = bool(
+            isinstance(known_identity, dict)
+            and known_identity.get("bridge_identity_authoritative") is True
+            and known_identity.get("project_id") == project_id
+            and known_identity.get("role_key") == role_key
+        )
+        if (
+            role_key == "supervisor"
+            and project_thread is None
+            and not exact_bridge_identity
+        ):
+            return self._send_project_supervisor_guidance(
+                thread_id,
+                text,
+                expected_project_id=project_id,
+                attachment_paths=attachment_paths,
+                source=source,
+            )
+        if (
+            isinstance(project_id, str)
+            and role_key in PROJECT_TEAM_ROLE_ORDER
+            and (
+                project_thread is None
+                or project_thread.get("can_guide") is True
+            )
+        ):
+            return self._send_project_thread_guidance(
+                project_id,
+                thread_id,
+                text,
+                source=source,
+                attachment_paths=attachment_paths,
+            )
+        if role_key == "supervisor":
+            return self._send_project_supervisor_guidance(
+                thread_id,
+                text,
+                expected_project_id=project_id,
+                attachment_paths=attachment_paths,
+                source=source,
+            )
+        notice = (
+            "项目角色归属尚未同步；输入仍保留，图片也已保留，"
+            "未发送普通 Turn。"
+        )
+        page = getattr(self, "project_team_page", None)
+        if page is not None:
+            page.set_action_status(notice)
+        if source == "composer":
+            self._append_system(notice)
+        if self._project_team_pending is None:
+            self._refresh_project_team()
+        return False
+
+    def _bind_project_guidance_ack(
+        self,
+        guidance: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> bool:
+        target = payload.get("guidance_target")
+        project_id = target.get("project_id") if isinstance(target, dict) else None
+        thread_id = target.get("thread_id") if isinstance(target, dict) else None
+        role = target.get("role") if isinstance(target, dict) else None
+        expected_project_id = guidance.get("project_id")
+        expected_thread_id = guidance.get("thread_id")
+        submitted_thread_id = guidance.get("submitted_thread_id")
+        expected_role = guidance.get("role")
+        expected_thread_ids = {
+            value
+            for value in (expected_thread_id, submitted_thread_id)
+            if isinstance(value, str)
+        }
+        guidance_id = payload.get("guidance_id")
+        delivery = payload.get("workflow_delivery")
+        delivery_mode = (
+            delivery.get("mode") if isinstance(delivery, dict) else None
+        )
+        delivery_project_id = (
+            delivery.get("project_id") if isinstance(delivery, dict) else None
+        )
+        delivery_thread_id = (
+            delivery.get("thread_id") if isinstance(delivery, dict) else None
+        )
+        delivery_role = (
+            delivery.get("role") if isinstance(delivery, dict) else None
+        )
+        steered_turn_id = (
+            delivery.get("turn_id") if isinstance(delivery, dict) else None
+        )
+        delivery_identity_valid = bool(
+            isinstance(delivery_thread_id, str)
+            and 0 < len(delivery_thread_id) <= 160
+            and delivery_thread_id == delivery_thread_id.strip()
+            and not any(
+                ord(character) < 32 for character in delivery_thread_id
+            )
+            and delivery_role in PROJECT_TEAM_ROLE_ORDER
+        )
+        supervisor_delivery_valid = False
+        if expected_role == "supervisor" and delivery_identity_valid:
+            returned_snapshot = normalize_project_team(
+                payload.get("project_team")
+            )
+            delivery_project = project_for_thread(
+                returned_snapshot,
+                delivery_thread_id,
+            )
+            if (
+                isinstance(delivery_project, dict)
+                and delivery_project.get("project_id") == project_id
+            ):
+                supervisor_delivery_valid = any(
+                    isinstance(item, dict)
+                    and item.get("thread_id") == delivery_thread_id
+                    and item.get("role_key") == delivery_role
+                    for item in delivery_project.get("threads", ())
+                )
+            elif guidance.get("route") == "supervisor":
+                # The early unique-project route may not have received its first
+                # complete snapshot yet. The authoritative action has already
+                # resolved the exact Supervisor target; retain strict bounded
+                # delivery identity validation until the snapshot catches up.
+                supervisor_delivery_valid = True
+        delivery_valid = bool(
+            delivery_project_id == project_id
+            and (
+                delivery_mode == "queued"
+                or (
+                    delivery_mode == "steered"
+                    and delivery_identity_valid
+                    and (
+                        (
+                            delivery_thread_id in expected_thread_ids
+                            and delivery_role == role
+                        )
+                        or supervisor_delivery_valid
+                    )
+                    and isinstance(steered_turn_id, str)
+                    and 0 < len(steered_turn_id) <= 160
+                    and steered_turn_id == steered_turn_id.strip()
+                    and not any(
+                        ord(character) < 32 for character in steered_turn_id
+                    )
+                )
+            )
+        )
+        valid = bool(
+            payload.get("guidance_accepted") is True
+            and isinstance(guidance_id, str)
+            and 0 < len(guidance_id) <= 160
+            and guidance_id == guidance_id.strip()
+            and not any(ord(character) < 32 for character in guidance_id)
+            and delivery_valid
+            and isinstance(project_id, str)
+            and 0 < len(project_id) <= 160
+            and project_id == project_id.strip()
+            and not any(ord(character) < 32 for character in project_id)
+            and isinstance(thread_id, str)
+            and 0 < len(thread_id) <= 160
+            and thread_id == thread_id.strip()
+            and not any(ord(character) < 32 for character in thread_id)
+            and expected_role in PROJECT_TEAM_ROLE_ORDER
+            and role == expected_role
+            and (
+                not isinstance(expected_project_id, str)
+                or expected_project_id == project_id
+            )
+            and (
+                not isinstance(expected_thread_id, str)
+                or thread_id in expected_thread_ids
+            )
+        )
+        if not valid:
+            return False
+        guidance["project_id"] = project_id
+        guidance["ack_thread_id"] = thread_id
+        guidance["thread_id"] = (
+            expected_thread_id
+            if isinstance(expected_thread_id, str)
+            else thread_id
+        )
+        guidance["guidance_id"] = guidance_id
+        self._remember_project_thread(
+            guidance["thread_id"],
+            project_id=project_id,
+            role_key=role,
+            project_status="running",
+        )
+        return True
+
+    def _project_guidance_target_is_selected(
+        self,
+        guidance: dict[str, Any],
+    ) -> bool:
+        thread_id = guidance.get("thread_id")
+        project_id = guidance.get("project_id")
+        if (
+            not isinstance(thread_id, str)
+            or not isinstance(project_id, str)
+            or self._selected_thread_id != thread_id
+            or getattr(self, "_task_view_mode", None) != "conversation"
+        ):
+            return False
+        known = self._known_project_thread(thread_id)
+        return bool(
+            isinstance(known, dict)
+            and known.get("project_id") == project_id
+            and known.get("role_key") == guidance.get("role")
+        )
+
     def _toggle_runtime_settings(self, expanded: bool) -> None:
         self._runtime_settings_expanded = bool(expanded)
-        for name in ("model_label", "model_combo", "effort_label", "effort_combo"):
+        for name in (
+            "model_label",
+            "model_combo",
+            "effort_label",
+            "effort_combo",
+            "turn_routing_label",
+            "turn_mode_buttons",
+        ):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.setVisible(bool(expanded))
@@ -1466,6 +3906,142 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             if widget is not None:
                 widget.setVisible(tiers_available)
 
+    def _task_route_for_thread(self, thread_id: Any) -> str:
+        if isinstance(thread_id, str) and project_for_thread(
+            self._project_team_snapshot,
+            thread_id,
+        ) is not None:
+            return "team"
+        return "single"
+
+    def _set_route_buttons(self, route: str) -> None:
+        if route not in PROJECT_TEAM_TURN_OVERRIDES:
+            return
+        for name, checked in (
+            ("turn_single_button", route == "single"),
+            ("turn_team_button", route == "team"),
+        ):
+            button = getattr(self, name, None)
+            if button is None:
+                continue
+            button.blockSignals(True)
+            button.setChecked(checked)
+            button.blockSignals(False)
+
+    def _set_task_view(
+        self,
+        mode: str,
+        *,
+        title: str = "",
+        detail: str = "",
+    ) -> None:
+        if mode not in {
+            "empty",
+            "conversation",
+            "project_draft",
+            "project_container",
+            "thread_pending",
+            "history_selection",
+        }:
+            return
+        self._task_view_mode = mode
+        conversation = getattr(self, "conversation", None)
+        if conversation is not None:
+            conversation.setVisible(mode == "conversation")
+        spacer = getattr(self, "non_conversation_spacer", None)
+        if spacer is not None:
+            spacer.setVisible(mode != "conversation")
+        welcome = getattr(self, "welcome_group", None)
+        if welcome is not None:
+            welcome.setVisible(mode == "empty")
+        context_group = getattr(self, "project_context_group", None)
+        if context_group is not None:
+            context_group.setVisible(
+                mode in {
+                    "project_draft",
+                    "project_container",
+                    "thread_pending",
+                    "history_selection",
+                }
+            )
+        context_title = getattr(self, "project_context_title", None)
+        if context_title is not None:
+            context_title.setText(title)
+        context_detail = getattr(self, "project_context_detail", None)
+        if context_detail is not None:
+            context_detail.setText(detail)
+        goal_summary = getattr(self, "goal_stage_summary_group", None)
+        if goal_summary is not None:
+            goal_summary.setVisible(mode == "conversation")
+        composer_panel = getattr(self, "composer_panel", None)
+        if composer_panel is not None:
+            composer_panel.setVisible(
+                mode in {"conversation", "project_draft"}
+            )
+        input_edit = getattr(self, "input_edit", None)
+        composer_label = getattr(self, "composer_context_label", None)
+        if composer_label is not None:
+            composer_label.setText(
+                {
+                    "project_draft": "项目目标",
+                    "project_container": "项目容器（不可输入）",
+                    "thread_pending": "任务尚未打开",
+                    "history_selection": "请选择具体任务",
+                }.get(mode, "对话消息")
+            )
+        placeholder_setter = getattr(input_edit, "setPlaceholderText", None)
+        if callable(placeholder_setter):
+            placeholder_setter(
+                "写下完整项目目标；Ctrl+Enter 创建项目并交给监督 AI。"
+                if mode == "project_draft"
+                else "输入自然语言请求；Enter 换行，Ctrl+Enter 发送。"
+            )
+
+    def _show_project_creation_status(self, detail: str) -> None:
+        group = getattr(self, "project_context_group", None)
+        title = getattr(self, "project_context_title", None)
+        detail_label = getattr(self, "project_context_detail", None)
+        if group is not None:
+            group.setVisible(True)
+        if title is not None:
+            title.setText("项目目标草稿")
+        if detail_label is not None:
+            detail_label.setText(detail)
+
+    def _selected_team_override(self) -> str:
+        if isinstance(self._selected_thread_id, str):
+            if self._current_task_route in PROJECT_TEAM_TURN_OVERRIDES:
+                return self._current_task_route
+            return self._task_route_for_thread(self._selected_thread_id)
+        if isinstance(self._project_goal_draft, dict):
+            return "team"
+        team_button = getattr(self, "turn_team_button", None)
+        if team_button is not None and team_button.isChecked():
+            return "team"
+        single_button = getattr(self, "turn_single_button", None)
+        if single_button is not None and single_button.isChecked():
+            return "single"
+        saved = self._project_team_snapshot.get("mode")
+        return saved if saved in PROJECT_TEAM_TURN_OVERRIDES else "single"
+
+    def _reset_team_override(self) -> None:
+        single_button = getattr(self, "turn_single_button", None)
+        team_button = getattr(self, "turn_team_button", None)
+        if single_button is None or team_button is None:
+            return
+        if isinstance(self._selected_thread_id, str):
+            value = (
+                self._current_task_route
+                if self._current_task_route in PROJECT_TEAM_TURN_OVERRIDES
+                else self._task_route_for_thread(self._selected_thread_id)
+            )
+        elif isinstance(self._project_goal_draft, dict):
+            value = "team"
+        else:
+            saved = self._project_team_snapshot.get("mode")
+            value = saved if saved in PROJECT_TEAM_TURN_OVERRIDES else "single"
+        self._set_route_buttons(value)
+
     def _toggle_secondary_actions(self, expanded: bool) -> None:
         panel = getattr(self, "secondary_actions_panel", None)
         button = getattr(self, "secondary_actions_button", None)
@@ -1476,6 +4052,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _on_task_tab_changed(self, index: int) -> None:
         tabs = getattr(self, "task_tabs", None)
+        project_team_page = getattr(self, "project_team_page", None)
+        if (
+            tabs is not None
+            and project_team_page is not None
+            and tabs.widget(index) is project_team_page
+        ):
+            if not self._project_team_snapshot.get("available"):
+                self._refresh_project_team()
+            return
         page = getattr(self, "project_memory_page", None)
         if (
             tabs is None
@@ -2427,6 +5012,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _apply_responsive_layout(self, _width: int) -> None:
         """Keep user-selected sidebar visibility unchanged while resizing."""
 
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
+        """Allow a Houdini dock to stay narrow despite the three-column view."""
+
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(360, hint.height())
+
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
         size = event.size() if event is not None else None
@@ -2930,31 +5521,158 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         stopping = self._is_stopping_turn()
         steer_available = controls.stop and not stopping
         history_record = self._selected_history_record()
-        history_available = history_record is not None
+        history_thread_available = bool(
+            history_record is not None
+            and history_record.get("kind") in {None, "thread"}
+            and isinstance(history_record.get("thread_id"), str)
+        )
+        history_thread_editable = bool(
+            history_thread_available
+            and history_record.get("managed_project_thread") is not True
+        )
+        active_project_navigation = bool(
+            self._turn_state.phase is TurnPhase.IN_PROGRESS
+            and isinstance(self._turn_state.thread_id, str)
+            and self._known_project_thread(self._turn_state.thread_id)
+            is not None
+            and not self._session_action_pending
+            and not self._turn_start_request_pending
+            and not self._turn_steer_request_pending
+            and not self._interrupt_pending
+            and not self._is_stopping_turn()
+            and not self._reconciliation_tokens
+            and self._goal_action_context is None
+            and not self._goal_houdini_busy()
+            and not self._goal_auto_turn_is_current(
+                self._turn_state.thread_id
+            )
+        )
+        running_project_switch_available = bool(
+            active_project_navigation
+            and history_thread_available
+            and history_record.get("managed_project_thread") is True
+            and history_record.get("thread_id")
+            != self._turn_state.thread_id
+        )
+        task_view_mode = getattr(self, "_task_view_mode", "conversation")
+        conversation_target_active = bool(
+            task_view_mode == "conversation"
+            and isinstance(self._selected_thread_id, str)
+            and self._selected_thread_id
+        )
+        project_draft_active = bool(
+            task_view_mode == "project_draft"
+            and isinstance(self._project_goal_draft, dict)
+        )
+        project_outcome_unknown = bool(
+            isinstance(self._project_goal_draft, dict)
+            and self._project_goal_draft.get("phase")
+            == "turn_outcome_unknown"
+        )
+        managed_project = (
+            project_for_thread(
+                self._project_team_snapshot,
+                self._selected_thread_id,
+            )
+            if conversation_target_active
+            else None
+        )
+        managed_project_id = (
+            managed_project.get("project_id")
+            if isinstance(managed_project, dict)
+            else None
+        )
+        managed_thread = (
+            self._project_thread_record(
+                managed_project_id,
+                self._selected_thread_id,
+            )
+            if isinstance(managed_project_id, str)
+            and isinstance(self._selected_thread_id, str)
+            else None
+        )
+        durable_guidance_identity = (
+            self._managed_project_guidance_identity(self._selected_thread_id)
+            if conversation_target_active
+            else None
+        )
+        known_managed_target = bool(
+            durable_guidance_identity is not None
+        )
+        early_supervisor_target = bool(
+            known_managed_target
+            and durable_guidance_identity[1] == "supervisor"
+            and callable(
+                getattr(
+                    getattr(self, "_client", None),
+                    "guide_project_supervisor",
+                    None,
+                )
+            )
+        )
+        durable_action_target = bool(
+            durable_guidance_identity is not None
+            and isinstance(durable_guidance_identity[0], str)
+            and durable_guidance_identity[1] in PROJECT_TEAM_ROLE_ORDER
+            and callable(
+                getattr(
+                    getattr(self, "_client", None),
+                    "guide_project_thread",
+                    None,
+                )
+            )
+        )
+        managed_guidance_target = bool(
+            isinstance(managed_thread, dict)
+            and managed_thread.get("can_guide") is True
+            or known_managed_target
+        )
+        managed_guidance_ready = bool(
+            (
+                isinstance(managed_thread, dict)
+                and managed_thread.get("can_guide") is True
+                or durable_action_target
+                or early_supervisor_target
+            )
+            and self._connected
+            and self._authenticated
+            and self._project_team_pending is None
+        )
         self.new_thread_button.setEnabled(
             controls.new_thread and thread_switch_enabled
         )
+        new_project_button = getattr(self, "new_project_button", None)
+        if new_project_button is not None:
+            new_project_button.setEnabled(
+                controls.new_thread and thread_switch_enabled
+            )
         self.resume_thread_button.setEnabled(
-            controls.resume_thread and thread_switch_enabled and history_available
+            (controls.resume_thread or running_project_switch_available)
+            and thread_switch_enabled
+            and history_thread_available
         )
         self.history_combo.setEnabled(
             self._connected
-            and not self._turn_state.busy
+            and (not self._turn_state.busy or active_project_navigation)
             and thread_switch_enabled
         )
         self.refresh_threads_button.setEnabled(
             self._connected and not self._session_action_pending
         )
         self.thread_name_edit.setEnabled(
-            history_available and not self._turn_state.busy and session_enabled
+            history_thread_editable
+            and not self._turn_state.busy
+            and session_enabled
         )
         self.rename_thread_button.setEnabled(
-            history_available and not self._turn_state.busy and session_enabled
+            history_thread_editable
+            and not self._turn_state.busy
+            and session_enabled
         )
-        self.copy_thread_id_button.setEnabled(history_available)
+        self.copy_thread_id_button.setEnabled(history_thread_available)
         self.delete_thread_button.setEnabled(
             self._connected
-            and history_available
+            and history_thread_editable
             and not self._session_action_pending
         )
         project_memory_ready = (
@@ -3030,25 +5748,61 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.knowledge_delete_button.setEnabled(
             knowledge_idle and selected_source is not None
         )
+        project_draft_send_ready = bool(
+            project_draft_active
+            and controls.new_thread
+            and self._connected
+            and self._authenticated
+        )
         self.send_button.setEnabled(
-            (controls.send or steer_available) and request_submission_ready
+            (
+                managed_guidance_ready
+                if managed_guidance_target
+                else (
+                    (
+                        (controls.send and conversation_target_active)
+                        or (steer_available and conversation_target_active)
+                        or project_draft_send_ready
+                    )
+                    and request_submission_ready
+                )
+            )
+            and not (project_outcome_unknown and not managed_guidance_target)
         )
         self.stop_button.setEnabled(
             controls.stop and not stopping and not self._interrupt_pending
         )
         self.send_button.setText(
-            "发送中…"
-            if self._turn_start_request_pending
+            "等待项目状态…"
+            if project_outcome_unknown
+            else "发送指导中…"
+            if managed_guidance_target and self._project_team_pending is not None
+            else "发送指导"
+            if managed_guidance_target
+            else "创建项目中…"
+            if project_draft_active and self._session_action_pending
             else (
-                "追加中…"
-                if self._turn_steer_request_pending
+                "发送中…"
+                if self._turn_start_request_pending
                 else (
-                    "追加指令"
-                    if steer_available
+                    "追加中…"
+                    if self._turn_steer_request_pending
                     else (
-                        "已停止"
-                        if stopping
-                        else ("Codex 回复中…" if self._turn_state.busy else "发送")
+                        "追加指令"
+                        if steer_available
+                        else (
+                            "已停止"
+                            if stopping
+                            else (
+                                "Codex 回复中…"
+                                if self._turn_state.busy
+                                else (
+                                    "创建项目并发送"
+                                    if project_draft_active
+                                    else "发送"
+                                )
+                            )
+                        )
                     )
                 )
             )
@@ -3065,13 +5819,46 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.service_tier_combo.setEnabled(
             selection_enabled and self.service_tier_combo.count() > 1
         )
-        composer_enabled = stopping or (
+        composer_enabled = managed_guidance_ready or stopping or (
             (not self._turn_state.busy or steer_available) and request_ready
         )
-        editor_enabled = composer_enabled or bool(
-            self._turn_start_request_pending
-            or self._turn_steer_request_pending
-            or self._reconciliation_tokens
+        if (
+            isinstance(self._selected_thread_id, str)
+            or isinstance(self._project_goal_draft, dict)
+        ):
+            self._reset_team_override()
+        routing_choice_enabled = bool(
+            task_view_mode == "empty"
+            and self._selected_thread_id is None
+            and not isinstance(self._project_goal_draft, dict)
+            and not (
+                self._turn_state.busy
+                or self._turn_start_request_pending
+                or self._turn_steer_request_pending
+                or self._interrupt_pending
+                or stopping
+                or self._session_action_pending
+                or bool(self._reconciliation_tokens)
+                or self._goal_houdini_busy()
+            )
+        )
+        for name in ("turn_single_button", "turn_team_button"):
+            turn_team_override_button = getattr(self, name, None)
+            if turn_team_override_button is None:
+                continue
+            turn_team_override_button.setEnabled(routing_choice_enabled)
+        context_allows_composer = bool(
+            conversation_target_active or project_draft_active
+        )
+        editor_enabled = context_allows_composer and (
+            composer_enabled
+            or managed_guidance_target
+            or bool(
+                self._session_action_pending
+                or self._turn_start_request_pending
+                or self._turn_steer_request_pending
+                or self._reconciliation_tokens
+            )
         )
         input_edit = getattr(self, "input_edit", None)
         if input_edit is not None:
@@ -3079,16 +5866,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         add_image_button = getattr(self, "add_image_button", None)
         if add_image_button is not None:
             add_image_button.setEnabled(
-                composer_enabled
-                and isinstance(self._selected_thread_id, str)
+                (composer_enabled or managed_guidance_target)
+                and context_allows_composer
                 and self._selected_model_supports_images()
             )
         include_selection = getattr(self, "include_selection_checkbox", None)
         if include_selection is not None:
-            include_selection.setEnabled(composer_enabled)
+            include_selection.setEnabled(
+                (composer_enabled or managed_guidance_target)
+                and context_allows_composer
+            )
         attachment_strip = getattr(self, "attachment_strip", None)
         if attachment_strip is not None:
-            attachment_strip.setEnabled(composer_enabled)
+            attachment_strip.setEnabled(
+                (composer_enabled or managed_guidance_target)
+                and context_allows_composer
+            )
         goal_editor_enabled = (
             self._connected
             and isinstance(self._selected_thread_id, str)
@@ -3135,11 +5928,20 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 and not self._turn_steer_request_pending
                 and not self._reconciliation_tokens
             )
+        project_team_page = getattr(self, "project_team_page", None)
+        if project_team_page is not None:
+            project_team_page.set_busy(
+                not self._connected
+                or getattr(self, "_project_team_pending", None) is not None
+            )
         self._refresh_goal_stage_summary()
 
     @QtCore.Slot(dict)
     def _on_health(self, payload: dict[str, Any]) -> None:
         was_reconnecting = self._reconnecting or self._reconnect_attempt > 0
+        connection_generation_changed = was_reconnecting or not self._connected
+        if connection_generation_changed:
+            self._project_team_revision_authoritative = False
         self._reconnect_timer.stop()
         self._reconnecting = False
         self._reconnect_attempt = 0
@@ -3193,6 +5995,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if not self._threads_requested and self._client is not None:
             self._threads_requested = True
             self._client.get_threads()
+        if connection_generation_changed or not self._project_team_snapshot.get(
+            "available"
+        ):
+            self._refresh_project_team()
         if was_reconnecting and self._client is not None:
             if isinstance(self._selected_thread_id, str):
                 self._append_system(
@@ -3238,6 +6044,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         turn_status = session.get("turn_status")
         turn_active = session.get("turn_active")
         if (
+            session.get("connected") is False
+            and turn_active is True
+            and turn_status in {None, "starting", "inProgress", "running"}
+        ):
+            # Older Bridge snapshots could retain the last running flag after
+            # their app-server process had already ended.  A disconnected
+            # process cannot own a live Turn, so present that orphaned state as
+            # interrupted instead of leaving the composer permanently busy.
+            turn_active = False
+            turn_status = "interrupted"
+        session_project_identity = self._remember_session_project_identity(
+            session,
+            fallback_thread_id=thread_id,
+            turn_active=turn_active,
+        )
+        if (
             turn_active is False
             and self._goal_continuation_boundary == (thread_id, turn_id)
             and isinstance(self._goal_auto_turn_token, TurnStateToken)
@@ -3258,8 +6080,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._stop_recovery_state = "recovering"
         elif session.get("connected") is True:
             self._stop_recovery_state = None
+        task_view_blocks_session_adoption = bool(
+            self._task_view_mode
+            in {
+                "project_container",
+                "project_draft",
+                "thread_pending",
+                "history_selection",
+            }
+        )
         adopting_active_session = (
             self._selected_thread_id is None
+            and not task_view_blocks_session_adoption
             and turn_active is True
             and isinstance(thread_id, str)
             and bool(thread_id)
@@ -3279,7 +6111,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and turn_status in {"stopping", "stopRequested"}
         )
         if isinstance(turn_active, bool) and not suppress_active_stop_snapshot:
-            if (
+            if self._selected_thread_id is None and task_view_blocks_session_adoption:
+                state_applied = True
+            elif (
                 isinstance(thread_id, str)
                 and thread_id
                 and (session_is_selected or self._selected_thread_id is None)
@@ -3331,6 +6165,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._connected = bool(session.get("connected")) and (
             self._stop_recovery_state is None
         )
+        if not self._connected:
+            if isinstance(
+                getattr(self, "_pending_running_project_switch", None),
+                dict,
+            ):
+                self._session_action_pending = False
+                self._restore_running_project_switch()
+            self._discard_project_message_buffers()
         connection_state = (
             "恢复中"
             if self._stop_recovery_state == "recovering"
@@ -3376,6 +6218,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._stream_turn_id = None
                 self._clear_diagnostic_context()
             if previous_thread_id != thread_id:
+                if isinstance(previous_thread_id, str):
+                    self._discard_project_message_buffers(previous_thread_id)
                 selected_thread_changed = True
                 self._stopped_source_turn = None
                 self._goal_action_context = None
@@ -3385,6 +6229,27 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._clear_task_insights()
                 self._clear_turn_performance()
             self._selected_thread_id = thread_id
+            reported_route = session.get("routing")
+            self._current_task_route = (
+                "team"
+                if isinstance(session_project_identity, dict)
+                else (
+                    reported_route
+                    if reported_route in PROJECT_TEAM_TURN_OVERRIDES
+                    else (
+                        self._current_task_route
+                        if self._current_task_route in PROJECT_TEAM_TURN_OVERRIDES
+                        else (
+                            "team"
+                            if isinstance(self._project_goal_draft, dict)
+                            else self._task_route_for_thread(thread_id)
+                        )
+                    )
+                )
+            )
+            if adopting_active_session:
+                self._set_route_buttons(self._current_task_route)
+                self._set_task_view("conversation")
             self._apply_focus_mode(thread_id, session.get("focus_mode", False))
             self.thread_id_edit.setText(thread_id)
             self.thread_status_label.setText(
@@ -3570,10 +6435,72 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if strip is not None and hasattr(strip, "add_path"):
             strip.add_path(path)
 
-    def _choose_images(self) -> None:
+    def _attachment_scope_id(self) -> str | None:
         thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
-            self._append_system("请先新建或恢复 Thread，再添加图片。")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+        draft = self._project_goal_draft
+        if (
+            self._task_view_mode == "project_draft"
+            and isinstance(draft, dict)
+        ):
+            scope = draft.get("attachment_scope")
+            if isinstance(scope, str) and scope:
+                return scope
+        return None
+
+    def _bind_project_draft_attachments(
+        self,
+        thread_id: str,
+        draft: dict[str, Any],
+    ) -> tuple[str, ...] | None:
+        original_paths = tuple(draft.get("attachment_paths") or ())
+        origin_map = draft.get("attachment_origins")
+        origin_map = origin_map if isinstance(origin_map, dict) else {}
+        if draft.get("attachments_bound_thread_id") == thread_id:
+            draft["original_attachment_paths"] = tuple(
+                origin_map.get(path, path) for path in original_paths
+            )
+            return original_paths
+        draft["original_attachment_paths"] = tuple(
+            origin_map.get(path, path) for path in original_paths
+        )
+        rebound_paths: list[str] = []
+        rebound_origins: dict[str, str] = {}
+        try:
+            for source in original_paths:
+                rebound = self._attachment_store.copy_file(thread_id, source)
+                rebound_paths.append(rebound)
+                rebound_origins[rebound] = str(origin_map.get(source, source))
+        except (OSError, TypeError, ValueError) as exc:
+            draft["attachment_bind_error"] = str(exc)
+            self._show_project_creation_status(
+                "参考图未能绑定到监督 AI："
+                f"{exc}。原项目目标和参考图仍保留，尚未发送首轮。"
+            )
+            self._append_system(
+                "项目参考图准备失败；未发送任何部分引用，原草稿仍保留。"
+            )
+            return None
+        rebound = tuple(rebound_paths)
+        draft["attachment_paths"] = rebound
+        draft["attachment_origins"] = rebound_origins
+        draft["attachments_bound_thread_id"] = thread_id
+        draft.pop("attachment_bind_error", None)
+        strip = getattr(self, "attachment_strip", None)
+        setter = getattr(strip, "set_paths", None)
+        if callable(setter):
+            setter(rebound)
+        elif strip is not None:
+            strip.clear()
+            for path in rebound:
+                strip.add_path(path)
+        return rebound
+
+    def _choose_images(self) -> None:
+        attachment_scope = self._attachment_scope_id()
+        if not isinstance(attachment_scope, str):
+            self._append_system("请先新建普通任务或进入项目目标草稿，再添加图片。")
             return
         if not self._selected_model_supports_images():
             self._append_system("当前模型不支持图片输入，请先选择支持图片的模型。")
@@ -3601,8 +6528,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(list)
     def _accept_chosen_images(self, paths: list[str]) -> None:
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
+        attachment_scope = self._attachment_scope_id()
+        if not isinstance(attachment_scope, str):
             return
         remaining = max(0, _MAX_TURN_IMAGES - len(self._attachment_paths()))
         if len(paths) > remaining:
@@ -3611,7 +6538,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
         for source in paths[:remaining]:
             try:
-                stored = self._attachment_store.copy_file(thread_id, source)
+                stored = self._attachment_store.copy_file(
+                    attachment_scope,
+                    source,
+                )
             except (OSError, TypeError, ValueError) as exc:
                 self._append_system(f"图片添加失败：{exc}")
                 self._record_pre_turn_issue(
@@ -3637,9 +6567,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(object)
     def _add_clipboard_image(self, image: Any) -> None:
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
-            self._append_system("请先新建或恢复 Thread，再粘贴图片。")
+        attachment_scope = self._attachment_scope_id()
+        if not isinstance(attachment_scope, str):
+            self._append_system("请先新建普通任务或进入项目目标草稿，再粘贴图片。")
             return
         if not self._selected_model_supports_images():
             self._append_system("当前模型不支持图片输入，请先选择支持图片的模型。")
@@ -3648,7 +6578,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._append_system(f"每轮最多添加 {_MAX_TURN_IMAGES} 张图片。")
             return
         try:
-            path = self._attachment_store.clipboard_path(thread_id)
+            path = self._attachment_store.clipboard_path(attachment_scope)
             if hasattr(image, "toImage"):
                 image = image.toImage()
             if not hasattr(image, "save") or image.save(path, "PNG") is not True:
@@ -3695,6 +6625,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self.conversation.insertPlainText(f"\nYou: {text or '（仅图片）'}\n")
 
     def _begin_codex_message(self) -> None:
+        if self._should_defer_codex_message():
+            return
         if hasattr(self.conversation, "begin_codex_message"):
             self.conversation.begin_codex_message()
         else:
@@ -3825,6 +6757,127 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if paths and paths == self._attachment_paths():
             self.attachment_strip.clear()
         return draft
+
+    def _apply_turn_routing(
+        self,
+        payload: dict[str, Any],
+        draft: dict[str, Any] | None,
+    ) -> None:
+        routing = payload.get("routing")
+        if routing not in PROJECT_TEAM_TURN_OVERRIDES:
+            return
+        self._current_task_route = routing
+        if routing == "team":
+            self._remember_project_thread(
+                payload.get("thread_id"),
+                project_id=payload.get("project_id"),
+                role_key="supervisor",
+                project_status="running",
+            )
+        if (
+            isinstance(draft, dict)
+            and draft.get("project_creation") is True
+            and routing == "team"
+        ):
+            self._project_goal_draft = None
+            self._set_task_view("conversation")
+        self._reset_team_override()
+        if routing != "team":
+            return
+        project_id = payload.get("project_id")
+        if isinstance(project_id, str) and project_id:
+            self._selected_project_id = project_id
+        if self._project_team_pending is None:
+            self._refresh_project_team()
+
+    def _restore_project_goal_after_turn_failure(
+        self,
+        draft: Any,
+        detail: str,
+    ) -> None:
+        if not isinstance(draft, dict) or draft.get("project_creation") is not True:
+            return
+        project_draft = self._project_goal_draft
+        if not isinstance(project_draft, dict):
+            project_draft = {
+                "attachment_scope": f"project-draft-{uuid.uuid4().hex}",
+            }
+            self._project_goal_draft = project_draft
+        project_draft.update(
+            {
+                "phase": "draft_on_thread",
+                "thread_id": self._selected_thread_id,
+                "text": draft.get("text"),
+                "attachment_paths": tuple(
+                    draft.get("attachment_paths") or ()
+                ),
+            }
+        )
+        self._current_task_route = "team"
+        self._set_route_buttons("team")
+        self._show_project_creation_status(detail)
+
+    def _reset_failed_project_to_new_draft(
+        self,
+        draft: Any,
+        detail: str,
+    ) -> None:
+        if not isinstance(draft, dict) or draft.get("project_creation") is not True:
+            return
+        project_draft = self._project_goal_draft
+        if not isinstance(project_draft, dict):
+            project_draft = {
+                "attachment_scope": f"project-draft-{uuid.uuid4().hex}",
+            }
+            self._project_goal_draft = project_draft
+        original_paths = tuple(
+            project_draft.get("original_attachment_paths")
+            or draft.get("original_attachment_paths")
+            or draft.get("attachment_paths")
+            or ()
+        )
+        project_draft.update(
+            {
+                "phase": "draft",
+                "text": draft.get("text"),
+                "attachment_paths": original_paths,
+            }
+        )
+        for key in (
+            "thread_id",
+            "request_text",
+            "attachments_bound_thread_id",
+            "attachment_bind_error",
+            "attachment_origins",
+            "original_attachment_paths",
+        ):
+            project_draft.pop(key, None)
+        strip = getattr(self, "attachment_strip", None)
+        setter = getattr(strip, "set_paths", None)
+        if callable(setter):
+            setter(original_paths)
+        elif strip is not None:
+            strip.clear()
+            for path in original_paths:
+                strip.add_path(path)
+        self._selected_thread_id = None
+        self._selected_project_id = None
+        self._current_task_route = None
+        self._session_start_route = None
+        self._stream_thread_id = None
+        self._stream_turn_id = None
+        self._set_history_index(-1)
+        self._set_route_buttons("team")
+        self._set_task_view(
+            "project_draft",
+            title="新项目目标草稿",
+            detail=detail,
+        )
+        self.thread_id_edit.setText("")
+        self.thread_status_label.setText("项目：目标草稿")
+        self.thread_status_label.setToolTip(
+            "旧失败项目记录保留；再次提交会创建新的监督 AI 与项目。"
+        )
 
     def _accept_steered_draft(self, context: str) -> None:
         draft = self._pending_steer_drafts.pop(context, None)
@@ -4415,6 +7468,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         record = combo.currentData() if combo is not None else None
         return record if isinstance(record, dict) else None
 
+    def _set_history_index(self, index: int) -> None:
+        history = getattr(self, "history_combo", None)
+        if history is None:
+            return
+        tree_setter = getattr(history, "setCurrentHistoryIndex", None)
+        if callable(tree_setter):
+            tree_setter(index)
+        else:
+            history.setCurrentIndex(index)
+
     def _history_title(self, thread_id: str, *, full: bool = False) -> str:
         for record in self._thread_history:
             if record.get("thread_id") != thread_id:
@@ -4426,14 +7489,27 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     if full:
                         return title
                     return title if len(title) <= 24 else title[:23] + "…"
-        return (
-            f"{thread_id[:4]}…{thread_id[-4:]}"
-            if len(thread_id) > 9
-            else thread_id
-        )
+        project = project_for_thread(self._project_team_snapshot, thread_id)
+        if isinstance(project, dict):
+            threads = project.get("threads")
+            for thread in threads if isinstance(threads, list) else []:
+                if (
+                    isinstance(thread, dict)
+                    and thread.get("thread_id") == thread_id
+                ):
+                    title = str(
+                        thread.get("title")
+                        or thread.get("role_title")
+                        or "项目角色任务"
+                    )
+                    if full:
+                        return title
+                    return title if len(title) <= 24 else title[:23] + "…"
+        return "未命名任务"
 
     @staticmethod
     def _history_label(record: dict[str, Any]) -> str:
+        kind = record.get("kind")
         thread_id = str(record.get("thread_id") or "")
         title = ""
         for field in ("name", "preview"):
@@ -4442,11 +7518,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 title = " ".join(value.split())[:72]
                 break
         if not title:
-            title = (
-                f"{thread_id[:4]}…{thread_id[-4:]}"
-                if len(thread_id) > 9
-                else thread_id or "未命名会话"
-            )
+            title = "未命名任务"
         updated = record.get("updated_at")
         try:
             updated_text = datetime.fromtimestamp(int(updated)).strftime(
@@ -4454,19 +7526,34 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
         except (OSError, OverflowError, TypeError, ValueError):
             updated_text = "时间未知"
-        return f"{title}  ·  {updated_text}"
+        if kind == "project":
+            status = str(record.get("status_label") or "状态待同步")
+            progress = record.get("progress")
+            progress_label = (
+                progress.get("label")
+                if isinstance(progress, dict)
+                else None
+            )
+            suffix = f" · {progress_label}" if progress_label else ""
+            return f"项目｜{title} · {status}{suffix} · {updated_text}"
+        return f"会话｜{title} · {updated_text}"
 
     def _apply_threads(self, raw_threads: Any) -> None:
         previous_record = self._selected_history_record()
-        previous_choice = (
-            previous_record.get("thread_id")
+        previous_kind = (
+            previous_record.get("kind")
             if previous_record is not None
-            else self._selected_thread_id
+            else None
         )
+        previous_choice = None
+        if previous_kind == "project":
+            previous_choice = previous_record.get("project_id")
+        elif previous_record is not None:
+            previous_choice = previous_record.get("thread_id")
         threads = raw_threads if isinstance(raw_threads, list) else []
         records: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for raw_record in threads[:20]:
+        for raw_record in threads[:100]:
             if not isinstance(raw_record, dict):
                 continue
             thread_id = raw_record.get("thread_id")
@@ -4475,38 +7562,219 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             seen.add(thread_id)
             records.append(dict(raw_record))
         self._thread_history = records
+        if (
+            self._project_team_snapshot.get("available") is not True
+            and self._project_team_pending is not None
+        ):
+            self.history_combo.blockSignals(True)
+            self.history_combo.clear()
+            self.history_combo.addItem("正在同步项目与普通任务…", None)
+            self._set_history_index(0)
+            self.history_combo.blockSignals(False)
+            self._refresh_controls()
+            return
+        display_records = top_level_history_records(
+            self._project_team_snapshot,
+            records,
+            limit=20,
+        )
+        tree_renderer = getattr(
+            self.history_combo,
+            "set_history_records",
+            None,
+        )
+        if callable(tree_renderer):
+            selected_thread_choice = (
+                previous_choice
+                if previous_kind == "thread" and isinstance(previous_choice, str)
+                else (
+                    None
+                    if previous_kind == "project"
+                    else self._selected_thread_id
+                )
+            )
+            selected_project_choice = (
+                previous_choice
+                if previous_kind == "project" and isinstance(previous_choice, str)
+                else self._selected_project_id
+            )
+            self.history_combo.blockSignals(True)
+            selected_index = tree_renderer(
+                display_records,
+                selected_thread_id=selected_thread_choice,
+                selected_project_id=selected_project_choice,
+            )
+            self.history_combo.blockSignals(False)
+            self._on_history_index_changed(selected_index)
+            return
+        selected_thread_choice = (
+            previous_choice
+            if previous_kind != "project" and isinstance(previous_choice, str)
+            else self._selected_thread_id
+        )
+        projected_worker_thread_id: str | None = None
+        if isinstance(selected_thread_choice, str):
+            selected_project = project_for_thread(
+                self._project_team_snapshot,
+                selected_thread_choice,
+            )
+            if selected_project is not None:
+                projected_worker_thread_id = selected_thread_choice
+                previous_kind = "project"
+                previous_choice = selected_project.get("project_id")
+            elif previous_choice is None:
+                previous_kind = "thread"
+                previous_choice = selected_thread_choice
 
         self.history_combo.blockSignals(True)
         self.history_combo.clear()
         selected_index = 0
         self.history_combo.addItem(
-            "未选择历史会话" if records else "暂无历史会话",
+            "未选择项目或会话" if display_records else "暂无项目或会话",
             None,
         )
-        if records:
-            for record in records:
+        if display_records:
+            for record in display_records:
                 self.history_combo.addItem(self._history_label(record), record)
                 index = self.history_combo.count() - 1
-                thread_id = record["thread_id"]
-                self.history_combo.setItemData(
-                    index,
-                    f"{self._history_title(thread_id, full=True)}\n"
-                    f"Codex Thread ID：{thread_id}",
-                    QtCore.Qt.ItemDataRole.ToolTipRole,
-                )
-                if thread_id == previous_choice:
-                    selected_index = index
-        self.history_combo.setCurrentIndex(selected_index)
+                if record.get("kind") == "project":
+                    project_id = record.get("project_id")
+                    members = record.get("member_thread_ids")
+                    member_count = len(members) if isinstance(members, tuple) else 0
+                    self.history_combo.setItemData(
+                        index,
+                        f"项目：{record.get('name') or '未命名项目'}\n"
+                        f"状态：{record.get('status_label') or '状态待同步'}\n"
+                        f"角色 Thread：{member_count} 个",
+                        QtCore.Qt.ItemDataRole.ToolTipRole,
+                    )
+                    if previous_kind == "project" and project_id == previous_choice:
+                        selected_index = index
+                else:
+                    thread_id = record["thread_id"]
+                    self.history_combo.setItemData(
+                        index,
+                        f"{self._history_title(thread_id, full=True)}\n"
+                        f"Codex Thread ID：{thread_id}",
+                        QtCore.Qt.ItemDataRole.ToolTipRole,
+                    )
+                    if previous_kind != "project" and thread_id == previous_choice:
+                        selected_index = index
+        self._set_history_index(selected_index)
         self.history_combo.blockSignals(False)
         self._on_history_index_changed(selected_index)
+        if isinstance(projected_worker_thread_id, str):
+            self._selected_thread_id = projected_worker_thread_id
+            self._current_task_route = "team"
+            self._set_route_buttons("team")
+            self._set_task_view("conversation")
+            self._refresh_controls()
 
     def _on_history_index_changed(self, _index: int = -1) -> None:
+        previous_thread_id = self._selected_thread_id
         self._reset_thread_delete_confirmation()
         record = self._selected_history_record()
-        thread_id = record.get("thread_id") if record is not None else None
-        name = record.get("name") if record is not None else None
+        kind = record.get("kind") if record is not None else None
+        is_project = bool(
+            record is not None and record.get("kind") == "project"
+        )
+        is_thread = bool(
+            record is not None
+            and kind in {None, "thread"}
+            and isinstance(record.get("thread_id"), str)
+        )
+        thread_id = (
+            record.get("thread_id")
+            if is_thread
+            else None
+        )
+        name = (
+            record.get("name")
+            if is_thread
+            else None
+        )
+        project_id = record.get("project_id") if record is not None else None
+        if isinstance(project_id, str):
+            self._selected_project_id = project_id
+        elif is_thread:
+            self._selected_project_id = None
+        if is_project:
+            project_name = str(record.get("name") or "未命名项目")
+            self._project_goal_draft = None
+            self._selected_thread_id = None
+            self._current_task_route = None
+            self._set_task_view(
+                "project_container",
+                title=f"项目｜{project_name}",
+                detail=(
+                    "项目本身不对话，请选择角色任务：监督、方案、执行、"
+                    "视觉审查或技术审查。中央区域只显示所选角色的对话。"
+                ),
+            )
+            self._open_project_team_page(project_id)
+            self.thread_status_label.setText(f"项目：{project_name}")
+            self.thread_status_label.setToolTip(
+                "项目容器不承载 Codex 对话；请选择一个角色 Thread。"
+            )
+        elif is_thread:
+            active_project_draft = self._project_goal_draft
+            keep_project_draft = bool(
+                isinstance(active_project_draft, dict)
+                and active_project_draft.get("thread_id") == thread_id
+                and active_project_draft.get("phase")
+                in {"starting_turn", "draft_on_thread"}
+            )
+            if not keep_project_draft:
+                self._project_goal_draft = None
+            if thread_id == self._selected_thread_id:
+                self._current_task_route = (
+                    self._current_task_route
+                    if self._current_task_route in PROJECT_TEAM_TURN_OVERRIDES
+                    else (
+                        "team"
+                        if keep_project_draft
+                        else self._task_route_for_thread(thread_id)
+                    )
+                )
+                self._set_task_view("conversation")
+            else:
+                self._selected_thread_id = None
+                self._current_task_route = None
+                self._set_task_view(
+                    "thread_pending",
+                    title="打开任务",
+                    detail="点击“打开任务”后，中央区域才会切换到这条对话。",
+                )
+        elif not isinstance(self._project_goal_draft, dict):
+            self._selected_thread_id = None
+            self._current_task_route = None
+            self._selected_project_id = None
+            if record is None:
+                self._set_task_view("empty")
+            else:
+                self._set_task_view(
+                    "history_selection",
+                    title="请选择具体任务",
+                    detail="项目分组和普通任务分组不承载对话。",
+                )
+        self.resume_thread_button.setText("打开任务" if is_thread else "打开")
         self.thread_id_edit.setText(thread_id if isinstance(thread_id, str) else "")
         self.thread_name_edit.setText(name if isinstance(name, str) else "")
+        page = getattr(self, "project_team_page", None)
+        if page is not None and isinstance(self._selected_project_id, str):
+            if is_project:
+                page.select_project(self._selected_project_id)
+            elif (
+                is_thread
+                and record.get("managed_project_thread") is True
+                and isinstance(thread_id, str)
+            ):
+                page.select_thread(thread_id)
+        if (
+            isinstance(previous_thread_id, str)
+            and previous_thread_id != self._selected_thread_id
+        ):
+            self._discard_project_message_buffers(previous_thread_id)
         self._refresh_controls()
 
     def _refresh_threads(self) -> None:
@@ -4531,6 +7799,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 service_tier=self._selected_service_tier(),
                 context=context,
             )
+
+    def _open_history_thread(self, thread_id: str) -> None:
+        """Open exactly the clicked project role or ordinary Thread."""
+
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        if project_for_thread(self._project_team_snapshot, thread_id) is not None:
+            self._open_project_thread(thread_id)
+            return
+        if thread_id == self._selected_thread_id:
+            return
+        self._request_thread_resume(thread_id, context="session_resume")
 
     def _rename_thread(self) -> None:
         record = self._selected_history_record()
@@ -4625,6 +7905,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     ) -> bool:
         if not isinstance(thread_id, str):
             return False
+        self._discard_project_message_buffers(thread_id)
+        known = getattr(self, "_known_project_threads", None)
+        if isinstance(known, dict):
+            known.pop(thread_id, None)
         was_listed = any(
             record.get("thread_id") == thread_id
             for record in self._thread_history
@@ -4816,7 +8100,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         for index in range(self.history_combo.count()):
             record = self.history_combo.itemData(index)
             if isinstance(record, dict) and record.get("thread_id") == thread_id:
-                self.history_combo.setCurrentIndex(index)
+                self._set_history_index(index)
                 self._on_history_index_changed(index)
                 break
         self.thread_status_label.setText(
@@ -5009,11 +8293,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
         )
         if label := getattr(self, "goal_mode_label", None):
-            label.setText(
-                "模式：Goal · 多阶段执行与反复验收"
-                if goal is not None
-                else "模式：普通对话 · 适合明确的小任务"
+            managed_role = self._managed_project_role_context(
+                self._selected_thread_id
             )
+            if goal is not None:
+                mode_text = "模式：Goal · 多阶段执行与反复验收"
+            elif isinstance(self._project_goal_draft, dict):
+                mode_text = "模式：新建项目 · 监督、方案、执行与双审查协作"
+            elif managed_role is not None:
+                mode_text = f"模式：项目角色 · {managed_role[2]}"
+            else:
+                mode_text = "模式：普通对话 · 适合明确的小任务"
+            label.setText(mode_text)
         if label := getattr(self, "goal_task_label", None):
             label.setText("当前任务：" + task)
 
@@ -6012,6 +9303,19 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         ):
             return False
         instruction = self._goal_continuation_instruction()
+        project_guidance = self._send_managed_project_guidance(
+            boundary[0],
+            instruction,
+            (),
+            source="goal",
+        )
+        if project_guidance is not None:
+            if project_guidance:
+                self._goal_continuation_boundary = None
+                self.goal_activity_label.setText(
+                    "当前跟进：已交给项目工作流继续处理"
+                )
+            return project_guidance
         if not self._start_new_turn(
             instruction,
             (),
@@ -6859,10 +10163,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         turns = thread.get("turns")
         if not isinstance(turns, list):
             return False
+        self._discard_project_message_buffers(thread_id)
         self._restore_goal_stage_from_thread(turns)
 
         restored: list[tuple[str, Any]] = []
+        restored_project_status = False
         for turn in turns:
+            turn_id = turn.get("id") if isinstance(turn, dict) else None
             items = turn.get("items") if isinstance(turn, dict) else None
             if not isinstance(items, list):
                 continue
@@ -6901,7 +10208,30 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 elif item_type == "agentMessage" and isinstance(
                     item.get("text"), str
                 ):
-                    restored.append(("agent", item["text"]))
+                    history_key = self._project_message_key(
+                        {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                        },
+                        item,
+                    )
+                    if history_key is not None:
+                        self._remember_completed_project_message(history_key)
+                    presentation = self._project_status_presentation(
+                        thread_id,
+                        item["text"],
+                    )
+                    restored.append(
+                        (
+                            "agent",
+                            presentation
+                            if presentation is not None
+                            else item["text"],
+                        )
+                    )
+                    restored_project_status = bool(
+                        restored_project_status or presentation is not None
+                    )
         if hasattr(self.conversation, "clear_messages"):
             self.conversation.clear_messages()
         if self._build_brief_thread_id != thread_id:
@@ -6924,10 +10254,43 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             rendered = True
         if rendered:
             self.welcome_group.setVisible(False)
+        if restored_project_status:
+            self._refresh_project_team()
         return True
 
-    def _new_thread(self) -> None:
-        if (
+    def _bind_resumed_active_turn(
+        self,
+        payload: dict[str, Any],
+        thread_id: str,
+    ) -> None:
+        """Bind the existing selected-Thread stream reported by session resume."""
+
+        if payload.get("turn_active") is not True:
+            return
+        turn_id = payload.get("turn_id")
+        turn_id = turn_id if isinstance(turn_id, str) and turn_id else None
+        turn_status = payload.get("turn_status")
+        turn_status = turn_status if isinstance(turn_status, str) else None
+        token = self._turn_state.capture_token()
+        if not self._turn_state.reconcile_snapshot(
+            token,
+            thread_id,
+            turn_id,
+            turn_status,
+            turn_active=True,
+        ):
+            return
+        self._stream_thread_id = thread_id
+        self._stream_turn_id = turn_id
+        self._begin_codex_message()
+        self.turn_status_label.setText(
+            self._turn_status_text(turn_status, active=True)
+        )
+        if turn_id is not None:
+            self.turn_status_label.setToolTip(f"Codex Turn ID：{turn_id}")
+
+    def _can_start_task_session(self) -> bool:
+        return bool(
             self._client is not None
             and not self._turn_state.busy
             and not self._goal_houdini_busy()
@@ -6935,13 +10298,80 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and not self._session_action_pending
             and not self._turn_start_request_pending
             and not self._reconciliation_tokens
-        ):
-            self._session_action_pending = True
+        )
+
+    def _new_single_task(self) -> None:
+        self._new_thread("single")
+
+    def _new_task_from_selected_route(self) -> None:
+        if self._selected_team_override() == "team":
+            self._begin_new_project()
+            return
+        self._new_thread("single")
+
+    def _new_thread(self, route: str = "single") -> None:
+        if route not in PROJECT_TEAM_TURN_OVERRIDES or not self._can_start_task_session():
+            return
+        self._project_goal_draft = None
+        self._session_start_route = route
+        self._selected_thread_id = None
+        self._selected_project_id = None
+        self._current_task_route = None
+        self._set_history_index(-1)
+        self._set_route_buttons(route)
+        self._set_task_view(
+            "thread_pending",
+            title="正在新建普通任务",
+            detail="创建完成后将在中央区域进入单个 AI 对话。",
+        )
+        self.thread_status_label.setText("普通任务：正在创建")
+        self.thread_status_label.setToolTip("正在创建新的普通 Codex Thread")
+        self._session_action_pending = True
+        self._refresh_controls()
+        request_id = self._client.start_thread(
+            model=self._selected_model_id(),
+            service_tier=self._selected_service_tier(),
+            team_override=route,
+        )
+        if not isinstance(request_id, str) or not request_id:
+            self._session_action_pending = False
+            self._session_start_route = None
+            self._set_task_view("empty")
+            self._append_system("普通任务创建请求未能发送；输入和图片仍保留。")
             self._refresh_controls()
-            self._client.start_thread(
-                model=self._selected_model_id(),
-                service_tier=self._selected_service_tier(),
-            )
+
+    def _begin_new_project(self) -> None:
+        if not self._can_start_task_session():
+            return
+        draft = self._project_goal_draft
+        if not isinstance(draft, dict):
+            draft = {
+                "phase": "draft",
+                "attachment_scope": f"project-draft-{uuid.uuid4().hex}",
+            }
+            self._project_goal_draft = draft
+        else:
+            draft["phase"] = "draft"
+        self._session_start_route = None
+        self._selected_thread_id = None
+        self._selected_project_id = None
+        self._current_task_route = None
+        self._set_history_index(-1)
+        self._set_route_buttons("team")
+        self._set_task_view(
+            "project_draft",
+            title="项目目标草稿",
+            detail=(
+                "先写完整目标并添加参考图。提交后会创建一个项目，以及监督、"
+                "方案、执行、视觉审查、技术审查五个角色任务；项目容器本身没有对话。"
+            ),
+        )
+        self.thread_status_label.setText("项目：目标草稿")
+        self.thread_status_label.setToolTip(
+            "尚未创建普通 Thread；提交后首条消息归属监督 AI。"
+        )
+        self._refresh_controls()
+        self.input_edit.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
 
     def _resume_thread(self) -> None:
         if self._goal_houdini_busy():
@@ -6950,33 +10380,115 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
             return
         record = self._selected_history_record()
+        if (
+            record is None
+            or record.get("kind") not in {None, "thread"}
+            or not isinstance(record.get("thread_id"), str)
+        ):
+            return
         thread_id = record.get("thread_id") if record is not None else None
         if not isinstance(thread_id, str) or not thread_id:
-            self._append_system("请先选择历史会话。")
             return
-        self._request_thread_resume(thread_id, context="session_resume")
+        if record.get("managed_project_thread") is True:
+            self._open_project_thread(thread_id)
+        else:
+            self._request_thread_resume(thread_id, context="session_resume")
 
     def _send(self) -> None:
         text = self.input_edit.toPlainText()
         attachment_paths = self._attachment_paths()
         if not text.strip() and not attachment_paths:
             return
+        if not self._connected or not self._authenticated:
+            return
+        if (
+            self._task_view_mode == "project_draft"
+            and isinstance(self._project_goal_draft, dict)
+        ):
+            if self._goal_houdini_busy():
+                self._append_system(
+                    "Houdini 操作仍在执行；当前 Goal 暂不能继续提交修改。"
+                )
+                self._refresh_controls()
+                return
+            if self._is_stopping_turn():
+                return
+            if attachment_paths and not self._selected_model_supports_images():
+                self._append_system(
+                    "当前模型不支持图片输入，请选择其他模型后再发送。"
+                )
+                return
+            if (
+                self._session_action_pending
+                or self._turn_start_request_pending
+                or self._turn_steer_request_pending
+                or self._reconciliation_tokens
+                or self._client is None
+            ):
+                return
+            draft = self._project_goal_draft
+            draft.update(
+                {
+                    "phase": "starting_thread",
+                    "text": text,
+                    "attachment_paths": attachment_paths,
+                    "request_text": self._request_text_with_selection(text),
+                }
+            )
+            self._session_start_route = "team"
+            self._session_action_pending = True
+            self._refresh_controls()
+            request_id = self._client.start_thread(
+                model=self._selected_model_id(),
+                service_tier=self._selected_service_tier(),
+                team_override="team",
+            )
+            if not isinstance(request_id, str) or not request_id:
+                draft["phase"] = "draft"
+                self._session_start_route = None
+                self._session_action_pending = False
+                self._show_project_creation_status(
+                    "项目创建请求未能发送；项目目标和参考图仍保留，可直接重试。"
+                )
+                self._append_system(
+                    "项目创建请求未能发送；项目目标和参考图仍保留。"
+                )
+                self._refresh_controls()
+            return
+        thread_id = self._selected_thread_id
+        if not isinstance(thread_id, str) or not thread_id:
+            self._append_system("请先新建普通任务、创建项目或打开一个角色任务。")
+            return
+        if self._task_view_mode != "conversation":
+            self._append_system("当前没有可发送的角色或普通任务。")
+            return
+        guidance_identity = self._managed_project_guidance_identity(thread_id)
+        project_scope = guidance_identity is not None
+        if project_scope:
+            if isinstance(self._project_goal_draft, dict):
+                # A routing/snapshot ACK can arrive after the local Turn
+                # generation changed. Durable membership wins over the stale
+                # creation marker so later guidance cannot reach /v1/turn.
+                self._project_goal_draft = None
+        project_guidance = self._send_managed_project_guidance(
+            thread_id,
+            text,
+            attachment_paths,
+            source="composer",
+        )
+        if project_guidance is not None:
+            return
+        project_creation = isinstance(self._project_goal_draft, dict)
         if self._goal_houdini_busy():
             self._append_system(
                 "Houdini 操作仍在执行；当前 Goal 暂不能继续提交修改。"
             )
             self._refresh_controls()
             return
-        if not self._connected or not self._authenticated:
-            return
         if self._is_stopping_turn():
             return
         if attachment_paths and not self._selected_model_supports_images():
             self._append_system("当前模型不支持图片输入，请选择其他模型后再发送。")
-            return
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
-            self._append_system("请先新建或恢复 Thread。")
             return
         if (
             self._session_action_pending
@@ -6997,7 +10509,32 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 return
             self._steer_active_turn(text, attachment_paths, thread_id)
             return
-        if not self._start_new_turn(text, attachment_paths, thread_id):
+        if project_creation:
+            project_draft = self._project_goal_draft
+            if project_draft.get("phase") == "turn_outcome_unknown":
+                self._show_project_creation_status(
+                    "项目创建结果仍待确认；请等待状态同步，不要重复提交。"
+                )
+                self._refresh_controls()
+                return
+            project_draft["text"] = text
+            project_draft["attachment_paths"] = attachment_paths
+            bound_paths = self._bind_project_draft_attachments(
+                thread_id,
+                project_draft,
+            )
+            if bound_paths is None:
+                project_draft["phase"] = "draft_on_thread"
+                self._refresh_controls()
+                return
+            attachment_paths = bound_paths
+        if not self._start_new_turn(
+            text,
+            attachment_paths,
+            thread_id,
+            forced_team_override="team" if project_creation else None,
+            project_creation=project_creation,
+        ):
             self._append_system("当前 Turn 暂不能发送。")
             self._refresh_controls()
         elif self._goal_continuation_paused:
@@ -7016,14 +10553,37 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         steer_source_thread_id: str | None = None,
         steer_source_turn_id: str | None = None,
         goal_auto_continue: bool = False,
+        forced_team_override: str | None = None,
+        project_creation: bool = False,
     ) -> bool:
+        if forced_team_override not in {None, "single", "team"}:
+            return False
+        if (
+            not project_creation
+            and self._managed_project_guidance_identity(thread_id) is not None
+        ):
+            # Project-role input is owned by /v1/project-team/actions. Keep a
+            # final guard here so Goal/steer recovery cannot leak to /v1/turn.
+            return False
         if (
             self._client is None
             or self._goal_houdini_busy()
             or not self._turn_state.begin_start(thread_id)
         ):
             return False
+        if project_creation:
+            self._remember_project_thread(
+                thread_id,
+                role_key="supervisor",
+                project_status="running",
+            )
         runtime_settings = self._capture_turn_runtime_settings()
+        consume_team_override = not goal_auto_continue and not steer_fallback
+        team_override = (
+            forced_team_override or self._selected_team_override()
+            if consume_team_override
+            else None
+        )
         submitted_text = (
             request_text
             if isinstance(request_text, str)
@@ -7053,7 +10613,24 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "steer_source_turn_id": steer_source_turn_id,
             "goal_auto_continue": goal_auto_continue,
             "runtime_settings": runtime_settings,
+            "team_override": team_override,
+            "project_creation": bool(project_creation),
+            "original_attachment_paths": (
+                tuple(
+                    self._project_goal_draft.get(
+                        "original_attachment_paths",
+                        attachment_paths,
+                    )
+                )
+                if project_creation
+                and isinstance(self._project_goal_draft, dict)
+                else attachment_paths
+            ),
         }
+        if project_creation:
+            self._show_project_creation_status(
+                "监督 AI 正在根据保留的项目目标创建项目与角色任务。"
+            )
         if goal_auto_continue:
             self._goal_auto_turn_token = token
             self._goal_auto_turn_has_progress = False
@@ -7070,14 +10647,37 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._active_turn_start_context = context
         self._turn_start_request_pending = True
         self._refresh_controls()
-        self._client.start_turn(
+        request_id = self._client.start_turn(
             submitted_text,
             model=runtime_settings["model"],
             effort=runtime_settings["effort"],
             service_tier=runtime_settings["service_tier"],
+            team_override=team_override,
             local_image_paths=list(attachment_paths),
             context=context,
         )
+        if not isinstance(request_id, str) or not request_id:
+            self._turn_start_tokens.pop(context, None)
+            self._pending_turn_drafts.pop(context, None)
+            if context == self._active_turn_start_context:
+                self._active_turn_start_context = None
+            self._turn_start_request_pending = False
+            self._stream_thread_id = None
+            self._stream_turn_id = None
+            self._freeze_codex_message()
+            self._turn_state.confirm_start_not_created(
+                thread_id,
+                no_active_turn=True,
+            )
+            self._clear_diagnostic_context()
+            if project_creation and isinstance(self._project_goal_draft, dict):
+                self._project_goal_draft["phase"] = "draft_on_thread"
+                self._show_project_creation_status(
+                    "项目首轮请求未能发出；监督 AI 仍可用，"
+                    "项目目标和参考图已保留，可直接重试。"
+                )
+            self._refresh_controls()
+            return False
         return True
 
     def _steer_active_turn(
@@ -7086,6 +10686,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         attachment_paths: tuple[str, ...],
         thread_id: str,
     ) -> None:
+        project_guidance = self._send_managed_project_guidance(
+            thread_id,
+            text,
+            attachment_paths,
+            source="composer",
+        )
+        if project_guidance is not None:
+            return
         token = self._turn_state.capture_token()
         if token.thread_id != thread_id or not isinstance(token.turn_id, str):
             self._append_system("当前活动 Turn 不明确，暂不能追加指令。")
@@ -7162,6 +10770,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         text = draft.get("text")
         attachment_paths = tuple(draft.get("attachment_paths") or ())
         if not isinstance(text, str) or not isinstance(token.thread_id, str):
+            self._pending_steer_drafts.pop(context, None)
+            return True
+        project_guidance = self._send_managed_project_guidance(
+            token.thread_id,
+            text,
+            attachment_paths,
+            source="composer",
+        )
+        if project_guidance is not None:
             self._pending_steer_drafts.pop(context, None)
             return True
         started = self._start_new_turn(
@@ -7274,6 +10891,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         thread_id = session.get("thread_id")
         turn_id = session.get("turn_id")
         turn_active = session.get("turn_active") is True
+        self._remember_session_project_identity(
+            session,
+            fallback_thread_id=thread_id,
+            turn_active=turn_active,
+        )
+        draft_text = draft.get("text")
+        if isinstance(thread_id, str) and isinstance(draft_text, str):
+            project_guidance = self._send_managed_project_guidance(
+                thread_id,
+                draft_text,
+                tuple(draft.get("attachment_paths") or ()),
+                source="composer",
+            )
+            if project_guidance is not None:
+                self._pending_steer_drafts.pop(steer_context, None)
+                return True
         if turn_active and turn_id == self._goal_turn_id:
             reconciled = self._turn_state.reconcile_steer_snapshot(
                 token,
@@ -7368,6 +11001,201 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 "turn_status": session.get("turn_status") or "completed",
             },
         )
+        return True
+
+    def _reroute_project_turn_start_failure(
+        self,
+        context: str,
+        error_code: Any,
+        details: dict[str, Any],
+    ) -> bool:
+        """Convert a rejected project-role turn/start into one project action.
+
+        Older Bridge builds returned only PROJECT_THREAD_WORKFLOW_ACTIVE while
+        current builds return exact project identity.  Both cases must remain
+        fail-closed: use an already durable local identity for the legacy code,
+        or consume the exact current identity, and never retry /v1/turn.
+        """
+
+        if (
+            not context.startswith(_TURN_START_CONTEXT_PREFIX)
+            or error_code
+            not in {
+                "PROJECT_THREAD_GUIDANCE_REQUIRED",
+                "PROJECT_THREAD_WORKFLOW_ACTIVE",
+            }
+        ):
+            return False
+
+        token = self._turn_start_tokens.pop(context, None)
+        draft = self._pending_turn_drafts.pop(context, None)
+        if context == self._active_turn_start_context:
+            self._active_turn_start_context = None
+            self._turn_start_request_pending = False
+
+        token_thread_id = (
+            token.thread_id if isinstance(token, TurnStateToken) else None
+        )
+        token_still_selected = bool(
+            isinstance(token, TurnStateToken)
+            and isinstance(token_thread_id, str)
+            and token_thread_id == self._selected_thread_id
+            and self._turn_state.token_is_current(token)
+        )
+        details_thread_id = details.get("thread_id")
+        identity_thread_matches = bool(
+            not isinstance(details_thread_id, str)
+            or not isinstance(token_thread_id, str)
+            or details_thread_id == token_thread_id
+        )
+        thread_id = (
+            token_thread_id
+            if isinstance(token_thread_id, str)
+            else details_thread_id
+            if isinstance(details_thread_id, str)
+            else None
+        )
+
+        identity: Any = None
+        if (
+            error_code == "PROJECT_THREAD_GUIDANCE_REQUIRED"
+            and identity_thread_matches
+        ):
+            identity = self._remember_project_guidance_error_identity(
+                details,
+                thread_id,
+            )
+        elif isinstance(thread_id, str):
+            identity = self._managed_project_guidance_identity(thread_id)
+
+        turn_active = details.get("turn_active") is True
+        turn_id = details.get("turn_id")
+        state_reconciled = False
+        if token_still_selected and isinstance(thread_id, str):
+            if turn_active and isinstance(turn_id, str) and turn_id:
+                state_reconciled = self._turn_state.reconcile_snapshot(
+                    token,
+                    thread_id,
+                    turn_id,
+                    details.get("turn_status")
+                    if isinstance(details.get("turn_status"), str)
+                    else None,
+                    turn_active=True,
+                )
+            elif not turn_active:
+                # Bridge rejected the call before app-server turn/start.  A
+                # false turn_active value therefore authoritatively proves that
+                # this attempted Turn was not created, even if the snapshot
+                # still names an older terminal Turn.
+                state_reconciled = self._turn_state.confirm_start_not_created(
+                    thread_id,
+                    no_active_turn=True,
+                )
+
+        if state_reconciled and turn_active and isinstance(turn_id, str):
+            self._stream_thread_id = thread_id
+            self._stream_turn_id = turn_id
+        elif state_reconciled:
+            self._stream_thread_id = None
+            self._stream_turn_id = None
+            self.turn_status_label.setText("Turn：未创建")
+        elif token_still_selected:
+            if isinstance(thread_id, str):
+                self._turn_state.mark_start_uncertain(thread_id)
+            self._request_session_reconciliation("project_guidance_reroute")
+
+        if token_still_selected:
+            self._finish_codex_message()
+            self._clear_diagnostic_context()
+        if (
+            token_still_selected
+            and isinstance(draft, dict)
+            and draft.get("goal_auto_continue") is True
+        ):
+            self._pause_goal_continuation("", notify=False)
+
+        text = draft.get("text") if isinstance(draft, dict) else None
+        attachment_paths = tuple(
+            draft.get("attachment_paths") or ()
+            if isinstance(draft, dict)
+            else ()
+        )
+        legacy_team_root_evidence = bool(
+            self._current_task_route == "team"
+            or (
+                isinstance(draft, dict)
+                and draft.get("project_creation") is True
+                and isinstance(thread_id, str)
+                and thread_id == token_thread_id
+            )
+        )
+        legacy_single_project_occupied = bool(
+            token_still_selected
+            and error_code == "PROJECT_THREAD_WORKFLOW_ACTIVE"
+            and identity is None
+            and identity_thread_matches
+            and self._current_task_route == "single"
+            and not legacy_team_root_evidence
+        )
+        rerouted: bool | None = None
+        if (
+            token_still_selected
+            and identity is not None
+            and isinstance(thread_id, str)
+            and isinstance(text, str)
+        ):
+            rerouted = self._send_managed_project_guidance(
+                thread_id,
+                text,
+                attachment_paths,
+                source="turn_recovery",
+            )
+        elif (
+            token_still_selected
+            and error_code == "PROJECT_THREAD_WORKFLOW_ACTIVE"
+            and identity is None
+            and identity_thread_matches
+            and legacy_team_root_evidence
+            and not any(
+                isinstance(details.get(field), str)
+                and bool(details[field].strip())
+                for field in ("project_id", "project_role")
+            )
+            and isinstance(thread_id, str)
+            and isinstance(text, str)
+        ):
+            rerouted = self._send_project_supervisor_guidance(
+                thread_id,
+                text,
+                expected_project_id=None,
+                attachment_paths=attachment_paths,
+                source="turn_recovery",
+            )
+
+        if rerouted is True:
+            self._append_system(
+                "已识别为项目内追加指令；文字和图片已改送项目工作流，"
+                "没有重试普通 Turn。"
+            )
+        elif token_still_selected:
+            self._restore_steer_draft_to_composer(draft)
+            if legacy_single_project_occupied:
+                self._append_system(
+                    "当前请求属于普通任务，场景写入正由项目执行 AI 占用；"
+                    "文字和图片仍保留，没有改投现有项目，也没有自动重试。"
+                )
+            else:
+                self._append_system(
+                    "项目内追加指令未能绑定到权威项目身份；文字和图片仍保留，"
+                    "没有重试普通 Turn。请刷新项目后重试。"
+                )
+            if self._project_team_pending is None:
+                self._refresh_project_team()
+
+        self.allow_button.setEnabled(True)
+        self.deny_button.setEnabled(True)
+        self.persistent_allow_button.setEnabled(True)
+        self._refresh_controls()
         return True
 
     def _stop(self) -> None:
@@ -7484,6 +11312,113 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._threads_requested = True
             self._apply_threads(payload.get("threads"))
             self._refresh_controls()
+            return
+        if context.startswith(_PROJECT_TEAM_CONTEXT_PREFIX):
+            self._project_team_pending = None
+            page = getattr(self, "project_team_page", None)
+            pending_guidance = getattr(
+                self, "_pending_project_guidance", None
+            )
+            guidance = (
+                pending_guidance.get(context)
+                if isinstance(pending_guidance, dict)
+                else None
+            )
+            project_team = payload.get("project_team")
+            if isinstance(project_team, dict):
+                self._apply_project_team_snapshot(project_team)
+            if isinstance(pending_guidance, dict):
+                pending_guidance.pop(context, None)
+            guidance_context = context.startswith("project_team:guide:")
+            guidance_ack_valid = bool(
+                self._bind_project_guidance_ack(guidance, payload)
+                if isinstance(guidance, dict)
+                else not guidance_context
+            )
+            if isinstance(project_team, dict):
+                if page is not None:
+                    if guidance_context and guidance_ack_valid:
+                        page.set_action_status(
+                            "指导已进入项目工作流；将在所选角色的下一次安全处理时生效。"
+                        )
+                    page.set_status("项目快照已同步。")
+            else:
+                self._apply_threads(self._thread_history)
+                if page is not None:
+                    page.set_status("响应未包含项目快照；已显示普通任务。")
+            if page is not None:
+                page.set_busy(False)
+            if isinstance(guidance, dict) and not guidance_ack_valid:
+                if (
+                    guidance.get("source") in {"composer", "turn_recovery"}
+                    and guidance.get("thread_id") == self._selected_thread_id
+                ):
+                    self._append_system(
+                        "项目指导响应没有匹配原项目、角色与投递结果；文字和图片仍保留，"
+                        "未自动重试。"
+                    )
+                if page is not None:
+                    page.set_action_status(
+                        "项目指导响应未通过权威校验；输入仍保留。"
+                    )
+            elif guidance_context and not guidance_ack_valid and page is not None:
+                page.set_action_status(
+                    "项目指导响应无法绑定到原请求；输入仍保留。"
+                )
+            if isinstance(guidance, dict) and guidance_ack_valid:
+                source = guidance.get("source")
+                project_id = guidance.get("project_id")
+                thread_id = guidance.get("thread_id")
+                text = guidance.get("text")
+                attachment_paths = tuple(
+                    guidance.get("attachment_paths") or ()
+                )
+                if (
+                    source == "page"
+                    and isinstance(project_id, str)
+                    and isinstance(thread_id, str)
+                    and isinstance(text, str)
+                ):
+                    if page is not None:
+                        submitted = getattr(page, "guidance_submitted", None)
+                        if callable(submitted):
+                            submitted(project_id, thread_id, text)
+                elif (
+                    source in {"composer", "turn_recovery"}
+                    and isinstance(text, str)
+                    and self._project_guidance_target_is_selected(guidance)
+                ):
+                    editor = getattr(self, "input_edit", None)
+                    current_text = (
+                        editor.toPlainText()
+                        if editor is not None
+                        and hasattr(editor, "toPlainText")
+                        else None
+                    )
+                    content_unchanged = bool(
+                        current_text == text
+                        and self._attachment_paths() == attachment_paths
+                    )
+                    if source == "composer":
+                        self._add_user_message(
+                            text,
+                            attachment_paths,
+                            same_turn=True,
+                        )
+                    if content_unchanged and editor is not None:
+                        editor.clear()
+                        self.attachment_strip.clear()
+                        self._append_system(
+                            "指导已进入项目工作流；将在所选角色的下一次安全处理时生效，"
+                            "后续进展会同步到项目状态。"
+                        )
+                    else:
+                        notice = "先前版本已进入项目；当前编辑保留。"
+                        self._append_system(notice)
+                        if page is not None:
+                            page.set_action_status(notice)
+            self._refresh_controls()
+            self._run_deferred_project_team_refresh()
             return
         if context.startswith(_KNOWLEDGE_CONTEXT_PREFIX):
             pending = self._knowledge_pending
@@ -7740,6 +11675,46 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     token=token,
                     allow_followup=False,
                 )
+                uncertain_project = self._project_goal_draft
+                if (
+                    applied
+                    and isinstance(uncertain_project, dict)
+                    and uncertain_project.get("phase")
+                    == "turn_outcome_unknown"
+                ):
+                    uncertain_context = uncertain_project.get(
+                        "uncertain_turn_context"
+                    )
+                    pending_project_draft = (
+                        self._pending_turn_drafts.get(uncertain_context)
+                        if isinstance(uncertain_context, str)
+                        else None
+                    )
+                    if session.get("turn_active") is True:
+                        if isinstance(uncertain_context, str):
+                            self._accept_sent_draft(uncertain_context)
+                        self._project_goal_draft = None
+                        self._current_task_route = "team"
+                        self._set_route_buttons("team")
+                        self._set_task_view("conversation")
+                        self._append_system(
+                            "状态同步确认项目首轮正在运行；未重复发送。"
+                        )
+                        if self._project_team_pending is None:
+                            self._refresh_project_team()
+                    elif session.get("turn_active") is False:
+                        if isinstance(uncertain_context, str):
+                            pending_project_draft = (
+                                self._pending_turn_drafts.pop(
+                                    uncertain_context,
+                                    pending_project_draft,
+                                )
+                            )
+                        self._reset_failed_project_to_new_draft(
+                            pending_project_draft,
+                            "状态同步确认项目首轮未在运行。旧失败项目与角色任务"
+                            "记录会保留；目标和参考图已退回新项目草稿。",
+                        )
                 if (
                     applied
                     and session.get("turn_active") is False
@@ -7778,9 +11753,43 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
         if context in {"session_start", "session_resume"}:
             self._session_action_pending = False
+            pending_start_route = self._session_start_route
+            if context == "session_start":
+                self._session_start_route = None
+            payload_route = payload.get("routing")
+            session_route = (
+                payload_route
+                if payload_route in PROJECT_TEAM_TURN_OVERRIDES
+                else (
+                    pending_start_route
+                    if pending_start_route in PROJECT_TEAM_TURN_OVERRIDES
+                    else None
+                )
+            )
             thread_id = payload.get("thread_id")
+            running_switch = getattr(
+                self, "_pending_running_project_switch", None
+            )
+            running_switch_source = (
+                running_switch.get("source_thread_id")
+                if isinstance(running_switch, dict)
+                else None
+            )
+            if (
+                context == "session_resume"
+                and not self._accept_running_project_switch(thread_id)
+            ):
+                return
             if isinstance(thread_id, str):
-                previous_thread_id = self._selected_thread_id
+                previous_thread_id = (
+                    self._selected_thread_id
+                    if isinstance(self._selected_thread_id, str)
+                    else (
+                        running_switch_source
+                        if isinstance(running_switch_source, str)
+                        else self._turn_state.thread_id
+                    )
+                )
                 if (
                     isinstance(self._selected_thread_id, str)
                     and self._selected_thread_id != thread_id
@@ -7788,6 +11797,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self.attachment_strip.clear()
                     self._clear_diagnostic_context()
                 if previous_thread_id != thread_id:
+                    if isinstance(previous_thread_id, str):
+                        self._discard_project_message_buffers(previous_thread_id)
                     self._goal_action_context = None
                     self._clear_goal_display()
                     self._team_records.clear()
@@ -7795,6 +11806,20 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self._clear_task_insights()
                     self._clear_turn_performance()
                 self._selected_thread_id = thread_id
+                self._current_task_route = (
+                    session_route
+                    if session_route in PROJECT_TEAM_TURN_OVERRIDES
+                    else self._task_route_for_thread(thread_id)
+                )
+                resumed_project_identity = self._remember_session_project_identity(
+                    payload,
+                    fallback_thread_id=thread_id,
+                    turn_active=payload.get("turn_active"),
+                )
+                if isinstance(resumed_project_identity, dict):
+                    self._current_task_route = "team"
+                self._set_route_buttons(self._current_task_route)
+                self._set_task_view("conversation")
                 self._apply_focus_mode(
                     thread_id,
                     payload.get("focus_mode", False),
@@ -7806,7 +11831,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         isinstance(record, dict)
                         and record.get("thread_id") == thread_id
                     ):
-                        self.history_combo.setCurrentIndex(index)
+                        self._set_history_index(index)
                         self._on_history_index_changed(index)
                         break
                 self.thread_status_label.setText(
@@ -7819,14 +11844,75 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 if context == "session_start":
                     if hasattr(self.conversation, "clear_messages"):
                         self.conversation.clear_messages()
-                    self._append_system("已新建会话。")
+                    project_draft = self._project_goal_draft
+                    creating_project = bool(
+                        self._current_task_route == "team"
+                        and isinstance(project_draft, dict)
+                        and project_draft.get("phase") == "starting_thread"
+                    )
+                    if creating_project:
+                        self.thread_status_label.setText(
+                            "项目监督 AI：正在创建项目"
+                        )
+                        self.thread_status_label.setToolTip(
+                            f"监督角色 Codex Thread ID：{thread_id}"
+                        )
+                        self._append_system(
+                            "监督 AI 已创建；正在用这条项目目标建立项目与角色任务。"
+                        )
+                        self._show_project_creation_status(
+                            "监督 AI 已接收项目目标，正在创建项目与其余四个角色任务。"
+                        )
+                        project_draft["phase"] = "starting_turn"
+                        project_draft["thread_id"] = thread_id
+                        bound_paths = self._bind_project_draft_attachments(
+                            thread_id,
+                            project_draft,
+                        )
+                        started = bool(
+                            bound_paths is not None
+                            and self._start_new_turn(
+                                str(project_draft.get("text") or ""),
+                                bound_paths,
+                                thread_id,
+                                request_text=(
+                                    project_draft.get("request_text")
+                                    if isinstance(
+                                        project_draft.get("request_text"),
+                                        str,
+                                    )
+                                    else None
+                                ),
+                                forced_team_override="team",
+                                project_creation=True,
+                            )
+                        )
+                        if not started:
+                            project_draft["phase"] = "draft_on_thread"
+                            self._append_system(
+                                "监督 AI 已创建，但项目首轮暂未发送；"
+                                "项目目标和参考图仍保留，可直接重试。"
+                            )
+                    else:
+                        self._project_goal_draft = None
+                        self._append_system("已新建普通任务。")
                     if self._client is not None:
                         self._client.get_threads()
                 else:
                     self._render_thread_read(payload)
+                    self._bind_resumed_active_turn(payload, thread_id)
                     self._append_system("已恢复会话。")
                     self._goal_continue_after_open_thread_id = thread_id
-                self._request_goal()
+                if not (
+                    context == "session_start"
+                    and isinstance(self._project_goal_draft, dict)
+                    and self._project_goal_draft.get("phase")
+                    in {"starting_turn", "draft_on_thread"}
+                ):
+                    self._request_goal()
+                if thread_id == self._project_team_model_thread_id:
+                    self._project_team_model_thread_id = None
+                    self._show_project_model_chooser(thread_id)
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
             token = self._turn_start_tokens.pop(context, None)
             if context == self._active_turn_start_context:
@@ -7838,6 +11924,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 and self._turn_state.token_generation_is_current(token)
                 else None
             )
+            self._apply_turn_routing(payload, accepted_draft)
             auto_start = (
                 isinstance(accepted_draft, dict)
                 and accepted_draft.get("goal_auto_continue") is True
@@ -8168,6 +12255,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _render_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+        if event_type == "thread_transferred":
+            self._apply_thread_transfer_event(event)
+            return
+        if event_type == "project_team_updated":
+            self._refresh_project_team()
+            return
         if event_type == "session_state":
             session = event.get("session")
             if isinstance(session, dict):
@@ -8263,7 +12356,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         self._record_turn_performance("first_delta")
                         if delta.strip():
                             self._mark_goal_auto_turn_progress()
-                    self._append_codex_delta(delta)
+                    if not self._buffer_project_agent_delta(params, delta):
+                        self._append_codex_delta(delta)
                     if goal_stream:
                         self._goal_turn_has_text = True
                         if self.goal_activity_label.text() == _GOAL_RUNNING_NO_TEXT:
@@ -8314,6 +12408,18 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             elif method in {"item/started", "item/completed"}:
                 item = params.get("item")
                 active_stream = self._event_matches_active_stream(params)
+                if (
+                    method == "item/completed"
+                    and isinstance(item, dict)
+                    and item.get("type") == "agentMessage"
+                    and (
+                        active_stream
+                        or self._event_matches_goal_stream(params)
+                        or self._project_message_is_tracked(params, item)
+                    )
+                    and self._complete_project_agent_message(params, item)
+                ):
+                    return
                 if (
                     active_stream
                     and isinstance(item, dict)
@@ -8429,6 +12535,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 if isinstance(thread_id, str) and isinstance(turn_id, str):
                     if self._event_is_stale_source_turn(thread_id, turn_id):
                         return
+                    self._flush_project_agent_buffers(thread_id, turn_id)
                     if self._goal_turn_matches(thread_id, turn_id):
                         turn_status = (
                             turn.get("status")
@@ -8698,6 +12805,55 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         error_code = error.get("code") if isinstance(error, dict) else None
         formatted_error = format_bridge_error(payload)
 
+        if self._reroute_project_turn_start_failure(
+            context,
+            error_code,
+            details,
+        ):
+            return
+
+        if context.startswith(_PROJECT_TEAM_CONTEXT_PREFIX):
+            self._project_team_pending = None
+            pending_guidance = getattr(
+                self, "_pending_project_guidance", None
+            )
+            guidance = (
+                pending_guidance.pop(context, None)
+                if isinstance(pending_guidance, dict)
+                else None
+            )
+            self._apply_threads(self._thread_history)
+            page = getattr(self, "project_team_page", None)
+            if page is not None:
+                page.set_busy(False)
+                if context.startswith("project_team:guide:"):
+                    page.set_action_status(
+                        f"追加指导失败：{formatted_error[:400]}"
+                    )
+                else:
+                    page.set_status(f"项目操作失败：{formatted_error[:400]}")
+            if (
+                isinstance(guidance, dict)
+                and guidance.get("source") in {"composer", "turn_recovery"}
+                and (
+                    self._project_guidance_target_is_selected(guidance)
+                    or (
+                        guidance.get("route") == "supervisor"
+                        and guidance.get("project_id") is None
+                        and guidance.get("thread_id")
+                        == self._selected_thread_id
+                        and getattr(self, "_task_view_mode", None)
+                        == "conversation"
+                    )
+                )
+            ):
+                self._append_system(
+                    "项目指导发送失败；文字和图片仍保留，未自动重试。"
+                )
+            self._refresh_controls()
+            self._run_deferred_project_team_refresh()
+            return
+
         if context.startswith(_KNOWLEDGE_CONTEXT_PREFIX):
             pending = self._knowledge_pending
             if (
@@ -8908,6 +13064,39 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._pending_steer_drafts.pop(context, None)
                 self._refresh_controls()
                 return
+            if error_code == "PROJECT_THREAD_GUIDANCE_REQUIRED":
+                identity = self._remember_project_guidance_error_identity(
+                    details,
+                    token.thread_id,
+                )
+                text = (
+                    pending_draft.get("text")
+                    if isinstance(pending_draft, dict)
+                    else None
+                )
+                rerouted = (
+                    self._send_managed_project_guidance(
+                        token.thread_id,
+                        text,
+                        tuple(pending_draft.get("attachment_paths") or ()),
+                        source="composer",
+                    )
+                    if isinstance(identity, dict)
+                    and isinstance(text, str)
+                    and isinstance(token.thread_id, str)
+                    else None
+                )
+                self._pending_steer_drafts.pop(context, None)
+                if rerouted is None:
+                    self._restore_steer_draft_to_composer(pending_draft)
+                    self._append_system(
+                        "Bridge 已识别项目角色，但权威项目身份未能绑定；"
+                        "文字和图片已保留，未发送普通 Turn。"
+                    )
+                self.allow_button.setEnabled(True)
+                self.deny_button.setEnabled(True)
+                self._refresh_controls()
+                return
             if (
                 isinstance(pending_draft, dict)
                 and pending_draft.get("retry_attempted") is True
@@ -9015,14 +13204,110 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._refresh_controls()
             return
         if (
+            context == "session_start"
+            and self._session_start_route == "team"
+            and isinstance(self._project_goal_draft, dict)
+        ):
+            self._session_action_pending = False
+            self._session_start_route = None
+            self._project_goal_draft["phase"] = "draft"
+            self._selected_thread_id = None
+            self._current_task_route = None
+            self._set_route_buttons("team")
+            self._set_task_view(
+                "project_draft",
+                title="项目目标草稿",
+                detail=(
+                    f"项目创建失败：{formatted_error}。"
+                    "项目目标和参考图仍保留，可直接重试。"
+                ),
+            )
+            self._append_system(
+                "项目创建失败；项目目标和参考图仍保留，可直接重试。"
+            )
+            self._refresh_controls()
+            return
+        if (
             context in {"session_start", "session_resume"}
             and error_code in _SESSION_WAIT_TIMEOUT_CODES
         ):
             self._session_action_pending = False
+            if context == "session_resume":
+                self._restore_running_project_switch()
+                self._project_team_model_thread_id = None
+            else:
+                self._session_start_route = None
+                self._current_task_route = None
+                self._set_task_view("empty")
             action_label = "会话启动" if context == "session_start" else "会话恢复"
             self._append_system(
                 f"{action_label}超时（{error_code}）：会话服务暂未完成；可稍后重试。"
             )
+            self._refresh_controls()
+            return
+
+        if (
+            context.startswith(_TURN_START_CONTEXT_PREFIX)
+            and self._is_missing_fresh_thread_rollout(error_code, details)
+        ):
+            token = self._turn_start_tokens.pop(context, None)
+            failed_draft = self._pending_turn_drafts.pop(context, None)
+            if (
+                isinstance(failed_draft, dict)
+                and failed_draft.get("goal_auto_continue") is True
+            ):
+                self._pause_goal_continuation("", notify=False)
+            if context == self._active_turn_start_context:
+                self._active_turn_start_context = None
+                self._turn_start_request_pending = False
+            self._stream_thread_id = None
+            self._stream_turn_id = None
+            self._finish_codex_message()
+            state_reconciled = False
+            if (
+                isinstance(token, TurnStateToken)
+                and self._turn_state.token_generation_is_current(token)
+                and token.thread_id == self._selected_thread_id
+            ):
+                state_reconciled = self._turn_state.reconcile_snapshot(
+                    token,
+                    token.thread_id,
+                    None,
+                    None,
+                    turn_active=False,
+                )
+            if state_reconciled:
+                self.turn_status_label.setText("Turn：未创建")
+            self._reset_failed_project_to_new_draft(
+                failed_draft,
+                "项目首轮失败。旧失败项目与角色任务记录会保留；"
+                "目标和参考图已退回新项目草稿，再次提交将新建项目重试。",
+            )
+            self._append_system(
+                (
+                    "项目首轮未开始；旧失败项目记录保留，目标和图片已退回"
+                    "新项目草稿。"
+                    if isinstance(failed_draft, dict)
+                    and failed_draft.get("project_creation") is True
+                    else (
+                        "新任务尚未形成首轮历史，切换本次处理方式时未能开始；"
+                        "输入和图片已保留。当前任务仍然有效，请等待 Bridge 修复，"
+                        "不要反复新建任务。"
+                    )
+                )
+            )
+            self._record_final_runtime_failure(
+                "Turn 建立前的处理方式切换",
+                "FRESH_THREAD_ROLLOUT_MISSING",
+                formatted_error,
+                slug="fresh-thread-rollout-missing",
+                recovery="Bridge 已确认 turn/start 尚未发送",
+                impact="本次请求未开始，输入和附件已保留",
+                next_step="保留当前任务并修复 Bridge 的 fresh Thread profile 切换",
+            )
+            self.allow_button.setEnabled(True)
+            self.deny_button.setEnabled(True)
+            self.persistent_allow_button.setEnabled(True)
             self._refresh_controls()
             return
 
@@ -9038,6 +13323,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._schedule_poll(1500)
         elif context in {"session_start", "session_resume"}:
             self._session_action_pending = False
+            if context == "session_resume":
+                self._restore_running_project_switch()
+                self._project_team_model_thread_id = None
+            else:
+                self._session_start_route = None
+                self._current_task_route = None
+                self._set_task_view("empty")
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
             token = self._turn_start_tokens.pop(context, None)
             failed_draft = self._pending_turn_drafts.get(context)
@@ -9122,12 +13414,49 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 ):
                     if self._turn_state.mark_start_uncertain(thread_id):
                         self.turn_status_label.setText("Turn：状态待确认")
+            if turn_not_created:
+                self._reset_failed_project_to_new_draft(
+                    failed_draft,
+                    "项目首轮明确未运行。旧失败项目与角色任务记录会保留；"
+                    "目标和参考图已退回新项目草稿，再次提交将新建项目重试。",
+                )
+            elif not active_turn:
+                self._restore_project_goal_after_turn_failure(
+                    failed_draft,
+                    "项目创建结果仍待确认；项目目标和参考图已保留。"
+                    "请等待状态同步，不要重复提交。",
+                )
+                if (
+                    isinstance(failed_draft, dict)
+                    and failed_draft.get("project_creation") is True
+                    and isinstance(self._project_goal_draft, dict)
+                ):
+                    self._project_goal_draft["phase"] = (
+                        "turn_outcome_unknown"
+                    )
+                    self._project_goal_draft["uncertain_turn_context"] = context
             if not state_reconciled:
                 self._request_session_reconciliation("turn_start_failure")
         self.allow_button.setEnabled(True)
         self.deny_button.setEnabled(True)
         self.persistent_allow_button.setEnabled(True)
         self._refresh_controls()
+
+    @staticmethod
+    def _is_missing_fresh_thread_rollout(
+        error_code: Any,
+        details: dict[str, Any],
+    ) -> bool:
+        """Recognize only the pre-turn profile-resume failure for a fresh Thread."""
+
+        if error_code != "CODEX_RPC_ERROR" or details.get("method") != "thread/resume":
+            return False
+        rpc_error = details.get("rpc_error")
+        message = rpc_error.get("message") if isinstance(rpc_error, dict) else None
+        return (
+            isinstance(message, str)
+            and "no rollout found" in " ".join(message.casefold().split())
+        )
 
     def _request_session_reconciliation(self, reason: str) -> str | None:
         """Issue at most one correlated session GET for the current generation."""

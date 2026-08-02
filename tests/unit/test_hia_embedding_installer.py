@@ -122,7 +122,12 @@ class EmbeddingInstallerTransactionTests(unittest.TestCase):
         }
 
     def tearDown(self) -> None:
-        shutil.rmtree(self.sandbox)
+        target = (
+            "\\\\?\\" + str(self.sandbox.resolve())
+            if os.name == "nt"
+            else str(self.sandbox)
+        )
+        shutil.rmtree(target)
 
     def _hub_module(self, download: mock.Mock) -> types.ModuleType:
         module = types.ModuleType("huggingface_hub")
@@ -749,6 +754,18 @@ Get-HiaKnowledgeTransactionPaths `
             "prior",
             encoding="utf-8",
         )
+        long_backup = backup / "Lib" / "site-packages" / "torch.dist-info"
+        while len(str(long_backup)) < 285:
+            long_backup /= "third_party_component_with_long_license_name"
+        extended_long_backup = "\\\\?\\" + str(long_backup)
+        os.makedirs(extended_long_backup)
+        long_relative = long_backup.relative_to(backup) / "prior-long.txt"
+        with open(
+            os.path.join(extended_long_backup, "prior-long.txt"),
+            "w",
+            encoding="utf-8",
+        ) as stream:
+            stream.write("prior-long\n")
         outside = self.sandbox / "outside.txt"
         outside.write_text("outside", encoding="utf-8")
 
@@ -767,9 +784,10 @@ $wanted = @(
     'Test-HiaEmbeddingOrdinaryFile',
     'Assert-HiaKnowledgeProjectDirectory',
     'Get-HiaKnowledgeManagedVenvMarker',
+    'ConvertTo-HiaKnowledgeExtendedPath',
+    'ConvertFrom-HiaKnowledgeExtendedPath',
     'Assert-HiaKnowledgeManagedVenvTree',
     'Get-HiaKnowledgeTransactionPaths',
-    'Copy-HiaKnowledgeManagedVenvTree',
     'Undo-HiaKnowledgeManagedVenvPublication'
 )
 foreach ($name in $wanted) {{
@@ -797,9 +815,14 @@ $rollback = Undo-HiaKnowledgeManagedVenvPublication `
     restored = Test-Path -LiteralPath (
         Join-Path {_ps_literal(canonical)} 'prior-working.txt'
     ) -PathType Leaf
-    backup_preserved = Test-Path -LiteralPath (
+    long_restored = [System.IO.File]::Exists(
+        (ConvertTo-HiaKnowledgeExtendedPath -Path (
+            Join-Path {_ps_literal(canonical)} {_ps_literal(long_relative)}
+        ))
+    )
+    backup_consumed = -not (Test-Path -LiteralPath (
         Join-Path {_ps_literal(backup)} 'prior-working.txt'
-    ) -PathType Leaf
+    ) -PathType Leaf)
     isolated = Test-Path -LiteralPath (
         Join-Path ([string]$rollback.isolated_failed_venv) 'failed-new.txt'
     ) -PathType Leaf
@@ -825,7 +848,8 @@ $rollback = Undo-HiaKnowledgeManagedVenvPublication `
         self.assertEqual(0, completed.returncode, completed.stderr)
         result = json.loads(completed.stdout)
         self.assertTrue(result["restored"], result)
-        self.assertTrue(result["backup_preserved"], result)
+        self.assertTrue(result["long_restored"], result)
+        self.assertTrue(result["backup_consumed"], result)
         self.assertTrue(result["isolated"], result)
         self.assertTrue(result["outside_unchanged"], result)
 
@@ -881,6 +905,8 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($errors.Count -gt 0) {{ throw 'installer AST failed' }}
 $wanted = @(
     'Assert-HiaKnowledgeProjectDirectory',
+    'ConvertTo-HiaKnowledgeExtendedPath',
+    'ConvertFrom-HiaKnowledgeExtendedPath',
     'Assert-HiaKnowledgeManagedVenvTree',
     'Get-HiaKnowledgeTransactionPaths',
     'Assert-HiaKnowledgeCleanupTarget',
@@ -1047,6 +1073,103 @@ $validated = Assert-HiaKnowledgeManagedVenvTree `
             os.path.normcase(str(venv_root.resolve())),
             os.path.normcase(result["validated"]),
         )
+
+    def test_managed_venv_tree_and_cleanup_support_windows_long_paths(
+        self,
+    ) -> None:
+        project_root = self.sandbox / "long-tree-project"
+        install_id = uuid.uuid4().hex
+        venv_root = _venv_transaction_path(
+            project_root,
+            install_id,
+            "staging",
+        )
+        nested = venv_root / "Lib" / "site-packages" / "torch.dist-info"
+        while len(str(nested)) < 285:
+            nested /= "third_party_component_with_long_license_name"
+        extended_nested = "\\\\?\\" + str(nested)
+        os.makedirs(extended_nested)
+        with open(
+            os.path.join(extended_nested, "LICENSE.txt"),
+            "w",
+            encoding="utf-8",
+        ) as stream:
+            stream.write("license\n")
+        self.assertGreater(len(str(nested)), 260)
+
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(POWERSHELL_INSTALLER_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+foreach ($name in @(
+    'Assert-HiaKnowledgeProjectDirectory',
+    'ConvertTo-HiaKnowledgeExtendedPath',
+    'ConvertFrom-HiaKnowledgeExtendedPath',
+    'Assert-HiaKnowledgeManagedVenvTree',
+    'Get-HiaKnowledgeTransactionPaths',
+    'Assert-HiaKnowledgeCleanupTarget',
+    'Remove-HiaKnowledgeInstallerOwnedDirectory'
+)) {{
+    $definition = $ast.Find(
+        {{
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $name
+        }},
+        $true
+    )
+    Invoke-Expression $definition.Extent.Text
+}}
+$validated = Assert-HiaKnowledgeManagedVenvTree `
+    -ProjectRoot {_ps_literal(project_root)} `
+    -Path {_ps_literal(venv_root)}
+$removed = Remove-HiaKnowledgeInstallerOwnedDirectory `
+    -ProjectRoot {_ps_literal(project_root)} `
+    -Path {_ps_literal(venv_root)} `
+    -Kind 'staging' `
+    -InstallId {_ps_literal(install_id)}
+$extended = ConvertTo-HiaKnowledgeExtendedPath -Path {_ps_literal(venv_root)}
+[pscustomobject]@{{
+    validated = $validated
+    removed = [bool]$removed
+    still_exists = [System.IO.Directory]::Exists($extended)
+}} | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            completed.stdout + completed.stderr,
+        )
+        result = json.loads(completed.stdout.strip())
+        self.assertEqual(
+            os.path.normcase(str(venv_root.resolve())),
+            os.path.normcase(result["validated"]),
+        )
+        self.assertTrue(result["removed"], result)
+        self.assertFalse(result["still_exists"], result)
 
     def test_cleanup_rejects_reparse_ancestor_without_writes(self) -> None:
         project_root = self.sandbox / "reparse-cleanup-project"
@@ -1304,7 +1427,10 @@ function Test-HiaKnowledgeManagedVenv {
         [switch]$RequireWorker
     )
     if (
-        $script:HiaFlowFailureStage -eq 'partial-root' -and
+        $script:HiaFlowFailureStage -in @(
+            'partial-root',
+            'partial-publish-validation'
+        ) -and
         [System.StringComparer]::OrdinalIgnoreCase.Equals(
             [System.IO.Path]::GetFullPath($VenvRoot).TrimEnd('\'),
             [System.IO.Path]::GetFullPath(
@@ -1334,7 +1460,10 @@ function Test-HiaKnowledgeManagedVenv {
         }
         Add-HiaFlowCall -Name $runtimeVerifyName
         if (
-            $script:HiaFlowFailureStage -eq 'publish-validation' -and
+            $script:HiaFlowFailureStage -in @(
+                'publish-validation',
+                'partial-publish-validation'
+            ) -and
             $VenvRoot -notmatch '\\v\\[a-f0-9]{16}\\s$'
         ) {
             return $false
@@ -1446,6 +1575,13 @@ function Invoke-HiaEmbeddingChildProcess {
             (Join-Path $target 'new-install.txt'),
             $script:HiaFlowFailureStage
         )
+        if ($script:HiaFlowFailureStage -eq 'venv-create') {
+            return [pscustomobject]@{
+                exit_code = 1
+                stdout = ''
+                stderr = 'injected uv venv creation failure'
+            }
+        }
         return [pscustomobject]@{
             exit_code = 0
             stdout = ''
@@ -1567,7 +1703,7 @@ function Invoke-HiaEmbeddingChildProcess {
 
     def setUp(self) -> None:
         self.sandbox = (
-            REPOSITORY_ROOT
+            RUNTIME_TEST_ROOT
             / f".hia-installer-flow-test-{uuid.uuid4().hex}"
         )
         self.sandbox.mkdir()
@@ -1602,10 +1738,24 @@ function Invoke-HiaEmbeddingChildProcess {
         legacy: str = "missing",
         parser_only: bool = False,
         repair: bool = False,
+        historical_transaction: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], Path, Path, list[str]]:
         project_root = self.sandbox / name
         project_root.mkdir(parents=True)
         canonical_root = project_root / ".venv"
+        if historical_transaction:
+            historical = (
+                project_root
+                / ".runtime"
+                / "v"
+                / ("f" * 16)
+                / "f"
+            )
+            historical.mkdir(parents=True)
+            (historical / "preserve.txt").write_text(
+                "historical diagnostic",
+                encoding="utf-8",
+            )
         toolchain = (
             project_root / ".runtime" / "toolchains" / "hia-embedding"
         )
@@ -1858,10 +2008,10 @@ function Invoke-HiaEmbeddingChildProcess {
         self.assertNotIn("staging-venv-create", calls)
         self.assertEqual([], list(toolchain.glob(".venv-*")))
 
-    def test_unmarked_and_partial_root_venv_fail_closed(self) -> None:
+    def test_unmarked_reparse_and_nonrepair_partial_root_fail_closed(self) -> None:
         cases = (
             ("unmarked", "unmarked", "success", "refusing", True),
-            ("partial", "partial", "partial-root", "refusing", False),
+            ("partial", "partial", "partial-root", "environment-repair", False),
             ("reparse", "reparse", "success", "reparse", False),
         )
         for name, canonical, stage, diagnostic, repair in cases:
@@ -1883,7 +2033,78 @@ function Invoke-HiaEmbeddingChildProcess {
                     _venv_transaction_paths(root_venv.parent, "staging"),
                 )
 
-    def test_post_publish_validation_failure_restores_and_preserves_backup(
+    def test_explicit_repair_replaces_marker_owned_partial_root(self) -> None:
+        completed, canonical, _toolchain, calls = self._run_instrumented_flow(
+            name="partial-explicit-repair",
+            stage="partial-root",
+            canonical="partial",
+            repair=True,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertFalse((canonical / "old-environment.txt").exists())
+        self.assertTrue((canonical / "new-install.txt").is_file())
+        self.assertIn("staging-venv-create", calls)
+        self.assertEqual(
+            [],
+            _venv_transaction_paths(canonical.parent, "backup"),
+        )
+
+    def test_partial_repair_publish_failure_restores_prior_partial_root(
+        self,
+    ) -> None:
+        completed, canonical, _toolchain, calls = self._run_instrumented_flow(
+            name="partial-repair-publish-failure",
+            stage="partial-publish-validation",
+            canonical="partial",
+            repair=True,
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertIn("published root .venv failed", completed.stderr)
+        self.assertEqual(
+            "partial",
+            (canonical / "old-environment.txt").read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            [],
+            _venv_transaction_paths(canonical.parent, "backup"),
+        )
+        self.assertEqual(
+            1,
+            len(_venv_transaction_paths(canonical.parent, "failed")),
+        )
+        self.assertIn("published-runtime-verify", calls)
+
+    def test_uv_venv_failure_removes_only_its_unmarked_transaction(self) -> None:
+        completed, canonical, _toolchain, calls = self._run_instrumented_flow(
+            name="uv-venv-failure",
+            stage="venv-create",
+            historical_transaction=True,
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertIn("injected uv venv creation failure", completed.stderr)
+        self.assertFalse(canonical.exists())
+        self.assertIn("staging-venv-create", calls)
+        transaction_base = canonical.parent / ".runtime" / "v"
+        surviving = (
+            list(transaction_base.iterdir())
+            if transaction_base.is_dir()
+            else []
+        )
+        self.assertEqual(["f" * 16], [item.name for item in surviving])
+        self.assertEqual(
+            "historical diagnostic",
+            (
+                transaction_base
+                / ("f" * 16)
+                / "f"
+                / "preserve.txt"
+            ).read_text(encoding="utf-8"),
+        )
+
+    def test_post_publish_validation_failure_atomically_restores_backup(
         self,
     ) -> None:
         completed, canonical, toolchain, calls = self._run_instrumented_flow(
@@ -1900,12 +2121,8 @@ function Invoke-HiaEmbeddingChildProcess {
         )
         backups = _venv_transaction_paths(canonical.parent, "backup")
         failed = _venv_transaction_paths(canonical.parent, "failed")
-        self.assertEqual(1, len(backups))
+        self.assertEqual([], backups)
         self.assertEqual(1, len(failed))
-        self.assertEqual(
-            "healthy",
-            (backups[0] / "old-environment.txt").read_text(encoding="utf-8"),
-        )
         self.assertIn("published-runtime-verify", calls)
 
     def _run_failure(

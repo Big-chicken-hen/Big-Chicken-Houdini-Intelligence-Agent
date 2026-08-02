@@ -264,6 +264,147 @@ class BridgeClientQueueTests(unittest.TestCase):
             client.healthReceived.emission_threads[-1],
         )
 
+    def test_project_team_snapshot_settings_and_guidance_use_narrow_contracts(self) -> None:
+        client, transport = _load_transport_bridge_client()
+
+        client.get_project_team()
+        get_submission = transport.submissions[-1]
+        self.assertEqual("GET", get_submission["method"])
+        self.assertEqual("/v1/project-team", get_submission["path"])
+        self.assertIsNone(get_submission["payload"])
+        self.assertEqual("project_team:get", get_submission["context"])
+
+        client.set_project_team_mode("team")
+        set_submission = transport.submissions[-1]
+        self.assertEqual("POST", set_submission["method"])
+        self.assertEqual("/v1/project-team", set_submission["path"])
+        self.assertEqual({"mode": "team"}, set_submission["payload"])
+        self.assertEqual("project_team:set", set_submission["context"])
+
+        submission_count = len(transport.submissions)
+        self.assertIsNone(client.set_project_team_mode("auto"))
+        self.assertEqual(submission_count, len(transport.submissions))
+
+        client.guide_project_thread(
+            "project-1",
+            "thread-execution",
+            "Keep the result editable.",
+            model="gpt-5.6-sol",
+            effort="high",
+            service_tier="priority",
+            local_image_paths=[r"E:\project\.runtime\attachments\thread-execution\reference.png"],
+            context="project_team:guide:request-1",
+        )
+        guide_submission = transport.submissions[-1]
+        self.assertEqual("POST", guide_submission["method"])
+        self.assertEqual(
+            "/v1/project-team/actions", guide_submission["path"]
+        )
+        self.assertEqual(
+            {
+                "action": "append_guidance",
+                "project_id": "project-1",
+                "thread_id": "thread-execution",
+                "text": "Keep the result editable.",
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "service_tier": "priority",
+                "local_image_paths": [
+                    r"E:\project\.runtime\attachments\thread-execution\reference.png"
+                ],
+            },
+            guide_submission["payload"],
+        )
+        self.assertEqual(
+            "project_team:guide:request-1",
+            guide_submission["context"],
+        )
+
+        client.guide_project_thread(
+            "project-1",
+            "thread-visual-review",
+            "",
+            local_image_paths=[
+                r"E:\project\.runtime\attachments\thread-visual-review\reference.webp"
+            ],
+            context="project_team:guide:request-2",
+        )
+        self.assertEqual(
+            {
+                "action": "append_guidance",
+                "project_id": "project-1",
+                "thread_id": "thread-visual-review",
+                "text": "",
+                "local_image_paths": [
+                    r"E:\project\.runtime\attachments\thread-visual-review\reference.webp"
+                ],
+            },
+            transport.submissions[-1]["payload"],
+        )
+
+        submission_count = len(transport.submissions)
+        self.assertIsNone(
+            client.guide_project_thread(
+                "project-1",
+                "thread-visual-review",
+                "",
+                local_image_paths=[],
+                context="project_team:guide:request-3",
+            )
+        )
+        self.assertEqual(submission_count, len(transport.submissions))
+
+        client.guide_project_supervisor(
+            "Use the added silhouette reference.",
+            expected_project_id="project-1",
+            model="gpt-5.6-sol",
+            effort="high",
+            service_tier="priority",
+            local_image_paths=[
+                r"E:\project\.runtime\attachments\thread-supervisor\silhouette.png"
+            ],
+            context="project_team:guide:supervisor:request-4",
+        )
+        supervisor_submission = transport.submissions[-1]
+        self.assertEqual("POST", supervisor_submission["method"])
+        self.assertEqual(
+            "/v1/project-team/actions", supervisor_submission["path"]
+        )
+        self.assertEqual(
+            {
+                "action": "append_supervisor_guidance",
+                "project_id": "project-1",
+                "text": "Use the added silhouette reference.",
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "service_tier": "priority",
+                "local_image_paths": [
+                    r"E:\project\.runtime\attachments\thread-supervisor\silhouette.png"
+                ],
+            },
+            supervisor_submission["payload"],
+        )
+        self.assertEqual(
+            "project_team:guide:supervisor:request-4",
+            supervisor_submission["context"],
+        )
+
+        client.guide_project_supervisor(
+            "Early project guidance",
+            context="project_team:guide:supervisor:request-5",
+        )
+        self.assertNotIn("project_id", transport.submissions[-1]["payload"])
+
+        submission_count = len(transport.submissions)
+        self.assertIsNone(
+            client.guide_project_supervisor(
+                "",
+                local_image_paths=[],
+                context="project_team:guide:supervisor:request-6",
+            )
+        )
+        self.assertEqual(submission_count, len(transport.submissions))
+
     def test_turn_start_forwards_local_image_paths_in_one_request(self) -> None:
         client, transport = _load_transport_bridge_client()
         image_paths = [
@@ -276,6 +417,7 @@ class BridgeClientQueueTests(unittest.TestCase):
             model="model-a",
             effort="high",
             service_tier="priority",
+            team_override="team",
             local_image_paths=image_paths,
         )
 
@@ -288,23 +430,43 @@ class BridgeClientQueueTests(unittest.TestCase):
                 "model": "model-a",
                 "effort": "high",
                 "service_tier": "priority",
+                "team_override": "team",
                 "local_image_paths": image_paths,
             },
             submission["payload"],
         )
+        submission_count = len(transport.submissions)
+        self.assertIsNone(
+            client.start_turn("invalid", team_override="inherit")
+        )
+        self.assertEqual(submission_count, len(transport.submissions))
 
     def test_thread_start_and_resume_forward_dynamic_service_tier(self) -> None:
         client, transport = _load_transport_bridge_client()
 
-        client.start_thread(model="model-a", service_tier="priority")
+        client.start_thread(
+            model="model-a",
+            service_tier="priority",
+            team_override="single",
+        )
         self.assertEqual(
             {
                 "action": "start",
                 "model": "model-a",
                 "service_tier": "priority",
+                "team_override": "single",
             },
             transport.submissions[-1]["payload"],
         )
+        submission_count = len(transport.submissions)
+        self.assertIsNone(
+            client.start_thread(
+                model=None,
+                service_tier=None,
+                team_override="inherit",
+            )
+        )
+        self.assertEqual(submission_count, len(transport.submissions))
 
         client.resume_thread("thread-a", service_tier=None)
         self.assertEqual(
@@ -410,6 +572,87 @@ class BridgeClientQueueTests(unittest.TestCase):
             "CODEX_REQUEST_TIMEOUT",
             payload["structured_error"]["code"],
         )
+        self.assertEqual([], client.actionCompleted.emissions)
+
+    def test_team_first_turn_accepts_ack_after_old_fifteen_second_bound(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        client_time = client._request.__globals__["time"]
+        with mock.patch.object(
+            client_time,
+            "monotonic",
+            side_effect=(100.0, 160.0),
+        ):
+            client.start_turn(
+                "build a project",
+                team_override="team",
+                context="turn_start:project",
+            )
+            submission = transport.submissions[-1]
+            client._result_queue.put(
+                _result_for(
+                    submission,
+                    raw=(
+                        b'{"ok":true,"thread_id":"thread-root",'
+                        b'"turn_id":"turn-root","routing":"team",'
+                        b'"project_id":"project-1"}'
+                    ),
+                )
+            )
+            client._drain_results()
+
+        self.assertEqual(120_000, submission["timeout_ms"])
+        self.assertEqual([], client.requestFailed.emissions)
+        self.assertEqual(
+            "project-1",
+            client.actionCompleted.emissions[0][1]["project_id"],
+        )
+
+        client.guide_project_thread(
+            "project-1",
+            "thread-root",
+            "preserve the new constraint",
+            context="project_team:guide:project-1",
+        )
+        self.assertEqual(50_000, transport.submissions[-1]["timeout_ms"])
+
+    def test_team_first_turn_true_timeout_is_one_shot_and_late_ack_is_ignored(
+        self,
+    ) -> None:
+        client, transport = _load_transport_bridge_client()
+        client.start_turn(
+            "build a project",
+            team_override="team",
+            context="turn_start:project",
+        )
+        submission = dict(transport.submissions[-1])
+        client._pending[submission["request_id"]]["deadline"] = (
+            time.monotonic() - 1.0
+        )
+
+        client._drain_results()
+
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(1, len(client.requestFailed.emissions))
+        self.assertEqual(
+            "NETWORK_TIMEOUT",
+            client.requestFailed.emissions[0][1]["structured_error"]["code"],
+        )
+        self.assertEqual([], client.actionCompleted.emissions)
+
+        client._result_queue.put(
+            _result_for(
+                submission,
+                raw=(
+                    b'{"ok":true,"thread_id":"thread-root",'
+                    b'"turn_id":"turn-root","routing":"team",'
+                    b'"project_id":"project-1"}'
+                ),
+            )
+        )
+        client._drain_results()
+
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(1, len(client.requestFailed.emissions))
         self.assertEqual([], client.actionCompleted.emissions)
 
     def test_thread_history_requests_preserve_paths_payloads_and_contexts(self) -> None:
@@ -613,6 +856,31 @@ class BridgeClientQueueTests(unittest.TestCase):
         self.assertFalse(client._event_request_active)
         self.assertEqual(1, len(client.eventsReceived.emissions))
         self.assertIsNotNone(client.poll_events(0))
+
+    def test_thread_transfer_event_reaches_panel_unchanged(self) -> None:
+        client, transport = _load_transport_bridge_client()
+        client.poll_events(7)
+        submission = transport.submissions[-1]
+        raw = (
+            b'{"ok":true,"events":[{"type":"thread_transferred",'
+            b'"old_thread_id":"thread-old","new_thread_id":"thread-new",'
+            b'"project_id":"project-1","role":"planning"}],"after":8}'
+        )
+
+        client._result_queue.put(_result_for(submission, raw=raw))
+        client._drain_results()
+
+        payload = client.eventsReceived.emissions[-1][0]
+        self.assertEqual(
+            {
+                "type": "thread_transferred",
+                "old_thread_id": "thread-old",
+                "new_thread_id": "thread-new",
+                "project_id": "project-1",
+                "role": "planning",
+            },
+            payload["events"][0],
+        )
 
     def test_scene_poll_is_atomic_and_uses_separate_secret_header(self) -> None:
         client, transport = _load_transport_bridge_client(

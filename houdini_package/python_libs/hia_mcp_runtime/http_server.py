@@ -31,9 +31,6 @@ _RUNTIME_BINDING_FIELDS = (
     "houdini_pid",
     "executor_module_path",
 )
-_SCENE_WRITE_TOOLS = frozenset(
-    {"hia_execute_hom", "hia_run_effect_experiment"}
-)
 
 
 class _RuntimeHTTPServer(ThreadingHTTPServer):
@@ -141,16 +138,15 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_request()
             tool_name = payload["tool"]
-            scene_write = tool_name in _SCENE_WRITE_TOOLS
             current_identity = self.server.runtime_identity()
             binding_matches = _same_runtime_binding(
                 payload["expected_runtime"],
                 current_identity,
             )
-            if scene_write and not binding_matches:
+            if not binding_matches:
                 raise HiaRuntimeError(
                     "HOUDINI_SESSION_CHANGED",
-                    "The live Houdini process or executor module changed; reconnect before executing",
+                    "The live Houdini process or executor module changed; reconnect before calling tools",
                     {
                         "expected": _runtime_binding(payload["expected_runtime"]),
                         "actual": _runtime_binding(current_identity),

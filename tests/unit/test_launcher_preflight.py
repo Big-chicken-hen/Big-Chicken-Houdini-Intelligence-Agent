@@ -180,16 +180,46 @@ ConvertTo-Json -InputObject $items -Depth 6 -Compress
         self.assertEqual("21.0.440", candidates[0]["version"])
         self.assertEqual(str(expected), candidates[0]["path"])
 
-    def test_discovers_multiple_houdini_21_22_and_future_versions(self) -> None:
+    def test_discovers_houdini_20_21_22_and_future_versions(self) -> None:
         root = self.sandbox / "Side Effects Software"
-        for version in ("Houdini 21.0.440", "Houdini 22.0.100", "Houdini 23.5.7"):
+        versions = (
+            "Houdini 20.0.653",
+            "Houdini 20.5.278",
+            "Houdini 21.0.440",
+            "Houdini 22.0.100",
+            "Houdini 23.5.7",
+        )
+        for version in versions:
             self.make_houdini_install(version)
         candidates = self.discover(root)
         self.assertEqual(
-            {"21.0.440", "22.0.100", "23.5.7"},
+            {value.removeprefix("Houdini ") for value in versions},
             {item["version"] for item in candidates},
         )
         self.assertTrue(all(Path(item["path"]).is_absolute() for item in candidates))
+
+    def test_sidefx_windows_four_field_version_keeps_houdini_build(self) -> None:
+        output = self.run_powershell(
+            """
+$module = Get-Module | Where-Object {
+    $_.Path -and $_.Path.EndsWith('HiaLauncher.Core.psm1')
+} | Select-Object -First 1
+if ($null -eq $module) { throw 'launcher module is unavailable.' }
+$values = & $module {
+    @(
+        Get-HiaHoudiniVersionText -FileVersion '21, 0, 0, 440' -InstallName 'Houdini 21.0.440'
+        Get-HiaHoudiniVersionText -FileVersion '20, 5, 0, 278' -InstallName 'Houdini 20.5.278'
+        Get-HiaHoudiniVersionText -FileVersion '22.0.0.100' -InstallName 'Houdini 22.0.100'
+        Get-HiaHoudiniVersionText -FileVersion '23.5.0' -InstallName 'Houdini 23.5.7'
+    )
+}
+ConvertTo-Json -InputObject @($values) -Compress
+"""
+        )
+        self.assertEqual(
+            ["21.0.440", "20.5.278", "22.0.100", "23.5.7"],
+            json.loads(output),
+        )
 
     def test_explicit_houdini_path_does_not_silently_select_another_version(self) -> None:
         selected = self.make_houdini_install("Houdini 22.0.100")
@@ -466,6 +496,19 @@ $missingMarker = @(Test-HiaHoudiniProbeConsistency `
             houdini.with_name("hython.exe"),
         )
         self.assertEqual("red", levels["houdini.build_match"])
+
+    def test_houdini_20_20_5_21_and_22_matching_probes_are_supported(self) -> None:
+        for version in ("20.0.653", "20.5.278", "21.0.440", "22.0.100"):
+            with self.subTest(version=version):
+                houdini = self.make_houdini_install(f"Houdini {version}")
+                levels = self.probe_consistency(
+                    houdini,
+                    version,
+                    version,
+                    houdini.with_name("hython.exe"),
+                )
+                self.assertEqual("green", levels["houdini.build_match"])
+                self.assertEqual("green", levels["houdini.python_match"])
 
     def test_hython_python_executable_mismatch_is_blocking(self) -> None:
         houdini = self.make_houdini_install("Houdini 22.0.100")

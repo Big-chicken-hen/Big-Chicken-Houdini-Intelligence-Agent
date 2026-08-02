@@ -1690,7 +1690,7 @@ class HybridKnowledgeStore:
             preserves_user_content = (
                 source_kind in _DISTINCT_USER_CONTENT_KINDS
             )
-            content_sha256 = str(metadata.get("sha256") or "").casefold()
+            content_sha256 = _content_identity_hash(metadata)
             if (
                 asset_fragment is not None
                 and asset_fragment in seen_asset_fragments
@@ -2267,6 +2267,17 @@ def _with_source_kind(value: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _content_identity_hash(metadata: Mapping[str, Any]) -> str:
+    nested = metadata.get("provenance")
+    provenance = nested if isinstance(nested, Mapping) else {}
+    return str(
+        metadata.get("content_hash")
+        or provenance.get("content_hash")
+        or metadata.get("sha256")
+        or ""
+    ).casefold()
+
+
 def _fold_canonical_matches(
     matches: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -2281,7 +2292,7 @@ def _fold_canonical_matches(
         asset_fragment = _asset_fragment_identity(details)
         source_kind = str(value.get("source_kind") or "").casefold()
         preserves_user_content = source_kind in _DISTINCT_USER_CONTENT_KINDS
-        content_sha256 = str(details.get("sha256") or "").casefold()
+        content_sha256 = _content_identity_hash(details)
         if (
             asset_fragment is not None
             and asset_fragment in seen_asset_fragments

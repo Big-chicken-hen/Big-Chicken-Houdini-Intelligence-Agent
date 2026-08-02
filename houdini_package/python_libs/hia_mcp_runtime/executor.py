@@ -5676,12 +5676,34 @@ class HoudiniExecutor:
         captured_by_frame = {
             float(record["requested_frame"]): record for record in captured_records
         }
-        endpoint_frames = (
-            [float(frames[0]), float(frames[-1])]
-            if len(frames) > 1
-            else [float(frames[0])]
-        )
-        endpoint_frames = list(dict.fromkeys(endpoint_frames))
+        endpoint_specs = [
+            ("first", float(frames[0])),
+            ("last", float(frames[-1])),
+        ]
+        records_by_frame = {
+            float(record["requested_frame"]): record for record in frame_records
+        }
+        endpoint_records: list[dict[str, Any]] = []
+        for endpoint, frame in endpoint_specs:
+            record = records_by_frame[frame]
+            endpoint_record = {
+                "endpoint": endpoint,
+                "requested_frame": frame,
+                "status": record["status"],
+            }
+            if record["status"] == "captured":
+                endpoint_record.update(
+                    {
+                        "actual_frame": record.get("actual_frame"),
+                        "cook_frame": record.get("cook_frame"),
+                        "quality_status": record.get("quality_status"),
+                        "evidence_path": record["absolute_path"],
+                    }
+                )
+            elif record.get("error") is not None:
+                endpoint_record["error"] = record["error"]
+            endpoint_records.append(endpoint_record)
+        endpoint_frames = [frame for _endpoint, frame in endpoint_specs]
         evidence_records = [
             captured_by_frame[frame]
             for frame in endpoint_frames
@@ -5723,13 +5745,33 @@ class HoudiniExecutor:
             frame = response["result"].get("requested_frame")
             for reason in response["result"].get("quality_reasons", ()):
                 aggregate_quality_reasons.append({"frame": frame, **reason})
-        first = captured_responses[0] if captured_responses else None
-        first_result = dict(first["result"]) if first is not None else {}
-        first_result.update(
+        representative = captured_responses[0] if captured_responses else None
+        sequence_result = (
+            dict(representative["result"]) if representative is not None else {}
+        )
+        for frame_identity_key in (
+            "path",
+            "absolute_path",
+            "requested_frame",
+            "actual_frame",
+            "cook_frame",
+            "quality_frame",
+            "frame_lock",
+            "cook_cache_evidence",
+            "quality_metrics",
+        ):
+            sequence_result.pop(frame_identity_key, None)
+        sequence_result.update(
             {
                 "mode": "sequence",
+                "capture_ok": not missing_frames,
                 "quality_status": aggregate_quality_status,
                 "quality_reasons": aggregate_quality_reasons[:32],
+                "visual_match": (
+                    aggregate_quality_status
+                    if aggregate_quality_status in {"failed", "warning"}
+                    else "unverified"
+                ),
                 "requested_frames": frames,
                 "actual_frames": [
                     record.get("actual_frame") for record in frame_records
@@ -5745,6 +5787,7 @@ class HoudiniExecutor:
                     **temporal_evidence,
                     "temporal_jump_detected": bool(missing_frames),
                     "frames": compact_frames,
+                    "endpoints": endpoint_records,
                     "evidence_paths": evidence_paths,
                     "evidence_frames": [
                         record["requested_frame"] for record in evidence_records
@@ -5756,7 +5799,7 @@ class HoudiniExecutor:
             "ok": bool(captured_responses)
             and not missing_frames
             and not quality_failed_frames,
-            "result": first_result,
+            "result": sequence_result,
             "warnings": list(dict.fromkeys(warnings))[:32],
             "errors": list(dict.fromkeys(errors))[:32],
             "revision": self.scene_revision,
@@ -5851,7 +5894,7 @@ class HoudiniExecutor:
             camera = self._hou.node(camera_path)
             if camera is None:
                 raise HiaRuntimeError("NODE_NOT_FOUND", "The viewport camera does not exist", {"path": camera_path})
-        capture_dir, storage_scope, _source_hip_path = self._artifact_directory(
+        capture_dir, storage_scope, source_hip_path = self._artifact_directory(
             "screenshots",
             fallback=self._screenshot_root,
         )
@@ -6167,6 +6210,11 @@ class HoudiniExecutor:
                 "path": display_path,
                 "absolute_path": absolute_path,
                 "storage_scope": storage_scope,
+                "source_hip_path": (
+                    str(source_hip_path.resolve())
+                    if source_hip_path is not None
+                    else None
+                ),
                 "mode": mode,
                 "width": actual_width,
                 "height": actual_height,

@@ -92,7 +92,7 @@ encoder runtime 与 corpus index 是两个独立状态面：`retrieval.encoder` 
 
 `bootstrap` 是无 Houdini、无网络的首次安装入口：它校验发布包、复制 active built-in pack 并建立完整 FTS5 正文索引；随后可选的 `build` 才分批补齐向量层。`--format jsonl` 使用 `hia-knowledge-index-jsonl/1` 输出 `start/progress/completed/error`；`--format json` 只输出最终 completed/error 对象。退出码为 0 成功、1 runtime error、2 参数/安全校验错误、3 未找到、130 Ctrl+C。build 每批独立提交，只编码缺失或 signature 已变化的 chunk，终止后可恢复；向量扫描使用 SQLite 流式游标与有界 heap，不物化全库向量。
 
-`sources import` 把用户选中的受支持普通文件复制到 `<project-root>/.runtime/knowledge/sources` 并保留原路径与 SHA-256，不移动或修改原文件；delete 只接受该托管目录内的精确普通文件 ID，并立即清理 document、FTS、chunks 与 vectors。显式导入媒体时只接受同 basename（或 `<媒体名>.<字幕后缀>`）的 SRT/VTT/TXT sidecar，只托管 transcript 和媒体 provenance，绝不复制大型媒体、下载 ffmpeg 或执行转写；没有 sidecar 返回退出码 3 和 `TRANSCRIPT_REQUIRED`。文件夹导入继续只扫描文本/PDF，不递归选择媒体。memory 子命令复用 `hia_project_memory` 的同一事务实现，不建立第二份记忆库。
+`sources import` 把用户选中的受支持普通文件复制到 `<project-root>/.runtime/knowledge/sources` 并保留原路径与 SHA-256，不移动或修改原文件；delete 只接受该托管目录内的精确普通文件 ID，并立即清理 document、FTS、chunks 与 vectors。该普通来源入口显式导入媒体时只接受同 basename（或 `<媒体名>.<字幕后缀>`）的 SRT/VTT/TXT sidecar，只托管 transcript 和媒体 provenance，绝不复制大型媒体、下载 ffmpeg 或执行转写；没有 sidecar 返回退出码 3 和 `TRANSCRIPT_REQUIRED`。无 sidecar 的音频或视频必须先显式运行 `assets repair` 准备项目本地 FFmpeg/转写环境，再用 `assets import` 进入带 checkpoint 的媒体管线。文件夹导入继续只扫描文本/PDF，不递归选择媒体。memory 子命令复用 `hia_project_memory` 的同一事务实现，不建立第二份记忆库。
 
 确定性来源适配器只接收调用方显式选择的文件、单个 Thread snapshot 或单条项目记忆；`refresh_explicit_sources` 将其规范记录事务化写入同一 SQLite/FTS/vector 层。托管字幕在 CLI 中保持 `user_transcript` 身份；Thread message key 在正文修改时保持稳定，显式删除会同步移除 FTS chunks 与 vectors。
 
@@ -215,6 +215,6 @@ Cook/cache 证据按 target 和 frame 记录 `needsToCook()`、`isTimeDependent(
 
 每批写入位于一个 Houdini Undo group 内，但只在真实 HOM 异常，或已观察到的显式验证、scope、删除契约失败时请求 Undo；`unknown`、`partial` 与 `NO_OBSERVED_EFFECT` 会保持失败或未证明状态，不会触发整批回滚。调用方读取 `rollback.status` 与错误中的 `automatic_retry_safe`：只有 Undo 栈和 HIP dirty 状态都恢复到批处理前，回滚才会报告 `rolled_back`；随后只有 `automatic_retry_safe=true` 才允许一次修正后的有界重试。Undo 已撤销临时节点但 dirty 状态未恢复时会返回 `DIRTY_STATE_NOT_RESTORED` 和 `not_proven`，不会虚报无残留。未证明回滚、超时和可能存在外部文件/render 副作用时必须先检查实际场景。`protected_paths` 比较持久节点类型、参数、flag 与拓扑，不把切帧造成的 cook 计数、缓存或求值结果变化误判为场景写入。
 
-运行时身份绑定 launcher session、Houdini PID 和已加载的 executor 路径，并报告 HIP、scene revision 及 executor 源码 loaded/disk mtime。运行中源码或会话变化时，`hia_execute_hom` 与 `hia_run_effect_experiment` 在提交写入前返回 `restart_required`；health 和只读工具仍可用于确认实际连接，正常重连或重启后再写，不做热重载。HIP 路径和 revision 是状态证据，不会因为正常打开另一份 HIP 而永久锁死写入。
+运行时身份绑定 launcher session、Houdini PID 和已加载的 executor 路径，并报告 HIP、scene revision 及 executor 源码 loaded/disk mtime。launcher session、Houdini 进程或已加载 executor 路径不一致时，读写工具都在 dispatch 前硬拒绝，避免从错误会话取得证据或修改场景；正常重连或重启后再调用，不做热重载。仅当会话、进程和已加载模块均一致，而磁盘源码 mtime 更新时，继续调用 Houdini 中已加载的 executor，并返回 `restart_required=false` 的 advisory。HIP 路径和 revision 是状态证据，不会因为正常打开另一份 HIP 而永久锁死写入。
 
 每次 HOM 执行返回后，runtime 在 `.runtime/hia-mcp-v2/execution-traces/<session>.jsonl` 追加一条不超过 64 KiB 的机器事实：脚本 SHA-256、前后 revision、观察到的路径、check 状态、错误 code 与阶段耗时。Trace 不保存脚本正文、task 正文、聊天、stdout、结果、traceback、凭据，也不会自动写项目记忆或晋升为知识。协议工具为 18 个、Houdini runtime 工具为 17 个；本次只新增唯一通用 `hia_run_effect_experiment`，没有新增服务。

@@ -117,6 +117,78 @@ class PanelTurnState:
         self._touch()
         return True
 
+    def rebind_idle_thread(self, thread_id: str) -> bool:
+        """Replace the selected Thread identity while no Turn is active.
+
+        A native Thread transfer happens only after the previous Turn is idle.
+        Advancing the generation here invalidates every async token captured
+        for the deleted identity before the next ``turn/start`` is reserved.
+        """
+
+        normalized_thread_id = self._identifier(thread_id)
+        if normalized_thread_id is None or self._phase is not TurnPhase.IDLE:
+            return False
+        if self._thread_id == normalized_thread_id and self._turn_id is None:
+            return True
+        self._generation += 1
+        self._reconciliation_claims.clear()
+        self._thread_id = normalized_thread_id
+        self._turn_id = None
+        self._touch()
+        return True
+
+    def rebind_transferred_thread(
+        self,
+        old_thread_id: str,
+        new_thread_id: str,
+    ) -> bool:
+        """Apply an authoritative native transfer even if completion arrived late.
+
+        The Bridge emits a successful transfer only after the old native Turn is
+        idle, ownership is switched, and the old Thread is deleted.  Its event can
+        race ahead of the Panel's queued ``turn/completed`` notification, so the
+        local phase is not an authority here.  Exact old/new identity matching
+        keeps an unrelated or stale transfer from unlocking the selected Turn.
+        """
+
+        normalized_old = self._identifier(old_thread_id)
+        normalized_new = self._identifier(new_thread_id)
+        if (
+            normalized_old is None
+            or normalized_new is None
+            or normalized_old == normalized_new
+            or self._thread_id != normalized_old
+        ):
+            return False
+        self._generation += 1
+        self._reconciliation_claims.clear()
+        self._thread_id = normalized_new
+        self._turn_id = None
+        self._phase = TurnPhase.IDLE
+        self._touch()
+        return True
+
+    def switch_selected_thread(self, thread_id: str) -> bool:
+        """Move observation to another existing Thread without stopping work.
+
+        Project roles can continue in the background while the Panel opens a
+        sibling role.  The switch is applied only after ``thread/resume`` has
+        succeeded; advancing the generation here invalidates every callback
+        captured for the formerly selected role without claiming that its
+        remote Turn was stopped.
+        """
+
+        normalized_thread_id = self._identifier(thread_id)
+        if normalized_thread_id is None:
+            return False
+        self._generation += 1
+        self._reconciliation_claims.clear()
+        self._thread_id = normalized_thread_id
+        self._turn_id = None
+        self._phase = TurnPhase.IDLE
+        self._touch()
+        return True
+
     def acknowledge_start(
         self,
         token: TurnStateToken,

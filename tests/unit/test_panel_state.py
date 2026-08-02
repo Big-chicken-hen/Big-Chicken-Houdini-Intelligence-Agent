@@ -12,6 +12,27 @@ from hia_panel.turn_state import PanelTurnState, TurnPhase  # noqa: E402
 
 
 class PanelTurnStateTests(unittest.TestCase):
+    def test_authoritative_transfer_rebinds_before_late_completion(self) -> None:
+        state = PanelTurnState()
+        self.assertTrue(state.begin_start("thread-old"))
+        token = state.capture_token()
+        self.assertTrue(state.acknowledge_start(token, "thread-old", "turn-old"))
+
+        self.assertTrue(
+            state.rebind_transferred_thread("thread-old", "thread-new")
+        )
+        self.assertFalse(state.busy)
+        self.assertEqual("thread-new", state.thread_id)
+        self.assertIsNone(state.turn_id)
+        self.assertFalse(state.token_generation_is_current(token))
+        self.assertFalse(state.observe_completed("thread-old", "turn-old"))
+
+        unrelated = state.capture_token()
+        self.assertFalse(
+            state.rebind_transferred_thread("other-old", "other-new")
+        )
+        self.assertTrue(state.token_is_current(unrelated))
+
     def test_start_ack_keeps_start_controls_locked_and_enables_valid_stop(self) -> None:
         state = PanelTurnState()
         self.assertTrue(state.begin_start("thread-1"))
@@ -366,6 +387,28 @@ class PanelTurnStateTests(unittest.TestCase):
             selected_thread_id="thread-1",
         )
         self.assertFalse(starting.stop)
+
+    def test_selected_thread_switch_invalidates_old_running_callbacks(self) -> None:
+        state = PanelTurnState()
+        self.assertTrue(state.begin_start("project-supervisor"))
+        old_token = state.capture_token()
+        self.assertTrue(state.acknowledge_start(
+            old_token,
+            "project-supervisor",
+            "supervisor-turn",
+        ))
+        running_token = state.capture_token()
+
+        self.assertTrue(state.switch_selected_thread("project-execution"))
+
+        self.assertEqual(TurnPhase.IDLE, state.phase)
+        self.assertEqual("project-execution", state.thread_id)
+        self.assertIsNone(state.turn_id)
+        self.assertFalse(state.token_is_current(running_token))
+        self.assertFalse(
+            state.observe_completed("project-supervisor", "supervisor-turn")
+        )
+        self.assertTrue(state.begin_start("project-execution"))
 
 
 if __name__ == "__main__":

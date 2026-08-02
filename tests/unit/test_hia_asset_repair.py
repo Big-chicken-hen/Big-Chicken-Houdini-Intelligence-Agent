@@ -139,7 +139,22 @@ class AssetRepairTests(unittest.TestCase):
         self.assertNotIn("torch", arguments[-4:])
 
     def test_repair_process_paths_use_the_short_project_runtime_root(self) -> None:
-        environment = repair._repair_environment(self.root)
+        hostile = {
+            "PYTHONHOME": r"Z:\hostile-python",
+            "VIRTUAL_ENV": r"Z:\hostile-venv",
+            "PIP_CONFIG_FILE": r"Z:\hostile-pip.ini",
+            "PIP_INDEX_URL": "https://invalid.example.invalid/simple",
+            "UV_CONFIG_FILE": r"Z:\hostile-uv.toml",
+            "UV_INDEX_URL": "https://invalid.example.invalid/simple",
+            "UV_OFFLINE": "1",
+            "HF_TOKEN": "must-not-reach-child",
+            "HF_HUB_OFFLINE": "1",
+        }
+        with mock.patch.dict(repair.os.environ, hostile, clear=False):
+            environment = repair._repair_environment(self.root)
+            repair._activate_repair_environment(environment)
+            self.assertNotIn("HF_HUB_OFFLINE", repair.os.environ)
+            self.assertNotIn("UV_CONFIG_FILE", repair.os.environ)
         short_root = self.root / ".runtime" / "a"
 
         self.assertEqual(str(short_root / "t"), environment["TEMP"])
@@ -183,6 +198,18 @@ class AssetRepairTests(unittest.TestCase):
             "PIP_CACHE_DIR",
         ):
             self.assertTrue(Path(environment[name]).is_relative_to(self.root))
+        for name in (
+            "PYTHONHOME",
+            "VIRTUAL_ENV",
+            "PIP_CONFIG_FILE",
+            "PIP_INDEX_URL",
+            "UV_CONFIG_FILE",
+            "UV_INDEX_URL",
+            "UV_OFFLINE",
+            "HF_TOKEN",
+            "HF_HUB_OFFLINE",
+        ):
+            self.assertNotIn(name, environment)
 
     def test_package_install_retries_once_with_the_same_uv_cache(self) -> None:
         output = io.StringIO()
@@ -584,6 +611,7 @@ class AssetRepairTests(unittest.TestCase):
             )
             return result
 
+        environment_before = dict(repair.os.environ)
         with (
             mock.patch.object(repair, "_assert_managed_python"),
             mock.patch.object(
@@ -609,6 +637,7 @@ class AssetRepairTests(unittest.TestCase):
             )
 
         self.assertEqual(0, exit_code)
+        self.assertEqual(environment_before, dict(repair.os.environ))
         events = [
             json.loads(line)
             for line in output.getvalue().splitlines()
@@ -666,6 +695,7 @@ class AssetRepairTests(unittest.TestCase):
                 "stable fixture model failure",
             )
 
+        environment_before = dict(repair.os.environ)
         with (
             mock.patch.object(repair, "_assert_managed_python"),
             mock.patch.object(
@@ -691,6 +721,7 @@ class AssetRepairTests(unittest.TestCase):
             )
 
         self.assertEqual(1, exit_code)
+        self.assertEqual(environment_before, dict(repair.os.environ))
         self.assertEqual(["package", "ffmpeg", "model"], call_order)
         self.assertTrue(ffmpeg.is_file())
         verify.assert_not_called()

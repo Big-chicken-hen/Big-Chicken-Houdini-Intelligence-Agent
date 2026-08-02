@@ -1,14 +1,14 @@
 # Research and Sources
 
-Use the uncertainty-triggered local-retrieval rule in `knowledge-and-memory.md`; do not search merely because a scene write will occur. Use external research when it materially affects technique or visual fidelity. For complex, unfamiliar, reference-driven, material, rendering, simulation, animation, version-sensitive, or ShaderToy work, complete necessary external research before the first write, iterate through as many high-quality sources as the decision genuinely needs, and do not impose a fixed limit on search rounds or source count. A known deterministic edit and a read-only inspection require no research.
+Use the uncertainty-triggered local-retrieval rule in `knowledge-and-memory.md`; do not search merely because work is Full, complex, reference-driven, material, rendering, simulation, animation, or because a scene write will occur. Use external research before the affected write only when it can materially change technique, node or parameter choice, version compatibility, licensing, or visual fidelity. Iterate through only as many high-quality sources as that decision genuinely needs. A known route, supplied reference that can be directly decomposed, deterministic edit, and read-only inspection require no external research.
 
-Research is required when the user names or links a ShaderToy, GLSL example, paper, tutorial, website, artist, project, named effect, or reference image, and when current Houdini/version limitations could change the decision.
+External research is required when the user names or links a specific source whose relevant contents were not supplied, or when uncertain current Houdini/version limitations can change the decision. A supplied image by itself requires visual decomposition, not a web search; search its origin or surrounding technique only when that evidence changes construction or acceptance.
 
 ## Research depth
 
 - `none`: Use for a simple, deterministic operation, known direct edit, or known parameter read when external evidence would not change the result.
-- `light`: Use focused current sources for a familiar visual task when a small technique, renderer, or version check can improve the implementation.
-- `deep`: Use multiple research rounds and sources; search iteratively and cross-check high-quality sources for ShaderToy/GLSL, papers, unfamiliar techniques, complex materials, rendering, simulation, animation, ambiguous references, or uncertain Houdini/version behavior.
+- `light`: Use focused current sources when a small technique, renderer, licensing, or version check can materially improve the implementation.
+- `deep`: Use multiple research rounds and sources only for an unsupplied ShaderToy/GLSL implementation, paper, unfamiliar technique, ambiguous external reference, or uncertain Houdini/version behavior that materially affects the decision.
 
 Treat these as semantic reasoning labels, not fixed search counts, time budgets, or approval gates. Change depth as evidence develops.
 
@@ -42,7 +42,7 @@ Do not manually search this repository's src, services, or contracts as visual r
 
 Write findings as an original short memo that captures the decision, reusable facts, Houdini translation, constraints, sources, and remaining uncertainty. Summarize and re-derive; do not copy a tutorial, paper, repository, or ShaderToy implementation into the memo.
 
-Return a compact synthesis to the Director: decision, evidence, risks, necessary source links, and unverified items. Keep the full ledger or detailed memo at its referenced path; do not paste full source documents, every search result, or a long research-subtask transcript into the main task context.
+Return a compact internal synthesis to Planning: decision, evidence, risks, necessary source links, and unverified items. Synthesize it into the detailed user-visible blueprint; keep the full ledger or memo at its referenced path and do not paste source documents, every search result, or a long research-subtask transcript into the Supervisor context.
 
 Keep every draft, partial synthesis, rejected approach, and hypothesis only under:
 

@@ -145,6 +145,8 @@ class ReleasePackagingTests(unittest.TestCase):
             "houdini_package/python_libs/hia_mcp_runtime/knowledge_index_cli.py",
             "houdini_package/python_libs/hia_mcp_runtime/local_extractors.py",
             "houdini_package/python_libs/hia_panel/panel.py",
+            "houdini_package/python_libs/hia_panel/project_team.py",
+            "houdini_package/python_libs/hia_panel/project_team_view.py",
             "houdini_package/python_libs/hia_panel/task_insights.py",
             'Big-Chicken-Houdini-Intelligence-Agent-v$Version-win-x64',
             "BigChickenLauncher.exe",

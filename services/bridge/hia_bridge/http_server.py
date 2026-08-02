@@ -702,6 +702,11 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/threads":
             result = application.session.list_threads()
             return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/project-team":
+            return {
+                "ok": True,
+                "project_team": application.session.project_team_snapshot(),
+            }, HTTPStatus.OK
         if path == "/v1/goal":
             values = parse_qs(query, keep_blank_values=True)
             thread_ids = values.get("thread_id", [])
@@ -777,9 +782,18 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/session":
             action = body.get("action")
             if action == "start":
+                allowed = {"action", "model", "service_tier", "team_override"}
+                if set(body) - allowed:
+                    raise BridgeError(
+                        "INVALID_REQUEST",
+                        "Session start accepts only action and optional model, service_tier, and team_override",
+                        HTTPStatus.BAD_REQUEST,
+                        {"allowed_fields": sorted(allowed)},
+                    )
                 result = application.session.start_thread(
                     model=body.get("model"),
                     service_tier=body.get("service_tier"),
+                    team_override=body.get("team_override"),
                 )
             elif action == "resume":
                 result = application.session.resume_thread(
@@ -801,6 +815,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 effort=body.get("effort"),
                 local_image_paths=body.get("local_image_paths"),
                 service_tier=body.get("service_tier"),
+                team_override=body.get("team_override"),
             )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/project-memory":
@@ -818,6 +833,64 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/threads/delete":
             self._require_exact_fields(body, {"thread_id"})
             result = application.session.delete_thread(body.get("thread_id"))
+            return {"ok": True, **result}, HTTPStatus.OK
+        if path == "/v1/project-team":
+            self._require_exact_fields(body, {"mode"})
+            result = application.session.update_project_team_mode(
+                mode=body.get("mode"),
+            )
+            return {"ok": True, "project_team": result}, HTTPStatus.OK
+        if path == "/v1/project-team/actions":
+            if body.get("action") == "append_supervisor_guidance":
+                required = {"action", "text"}
+                allowed = required | {
+                    "project_id",
+                    "model",
+                    "effort",
+                    "service_tier",
+                    "local_image_paths",
+                }
+                if not required.issubset(body) or not set(body).issubset(allowed):
+                    raise BridgeError(
+                        "INVALID_PROJECT_THREAD_ACTION",
+                        "Supervisor guidance requires text and only an optional expected project_id, model settings, or local_image_paths",
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                result = application.session.append_active_supervisor_guidance(
+                    project_id=body.get("project_id"),
+                    text=body.get("text"),
+                    model=body.get("model"),
+                    effort=body.get("effort"),
+                    service_tier=body.get("service_tier"),
+                    local_image_paths=body.get("local_image_paths"),
+                )
+                return {"ok": True, **result}, HTTPStatus.OK
+            required = {"action", "project_id", "thread_id", "text"}
+            allowed = required | {
+                "model",
+                "effort",
+                "service_tier",
+                "local_image_paths",
+            }
+            if (
+                body.get("action") != "append_guidance"
+                or not required.issubset(body)
+                or not set(body).issubset(allowed)
+            ):
+                raise BridgeError(
+                    "INVALID_PROJECT_THREAD_ACTION",
+                    "Project action must be append_guidance with project_id, thread_id, text, and only optional model settings or local_image_paths",
+                    HTTPStatus.BAD_REQUEST,
+                )
+            result = application.session.append_project_guidance(
+                project_id=body.get("project_id"),
+                thread_id=body.get("thread_id"),
+                text=body.get("text"),
+                model=body.get("model"),
+                effort=body.get("effort"),
+                service_tier=body.get("service_tier"),
+                local_image_paths=body.get("local_image_paths"),
+            )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/goal":
             action = body.get("action")

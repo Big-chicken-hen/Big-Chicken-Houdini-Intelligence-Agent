@@ -21,6 +21,13 @@ _RECONCILIATION_TIMEOUT_MS = 5_000
 _EVENT_POLL_TIMEOUT_MS = 20_000
 _DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 _SESSION_ACTION_TIMEOUT_MS = 50_000
+# A project first Turn synchronously creates four role Threads before the root
+# Turn ACK.  Live app-server 0.144.3 evidence showed those Threads at
+# +12/+24/+36/+48 seconds and the root submission at about +55 seconds, so the
+# ordinary 15-second request bound cannot represent this endpoint.  Keep a
+# separate bounded allowance without widening ordinary Turn requests.
+_PROJECT_START_TIMEOUT_MS = 120_000
+_PROJECT_ACTION_TIMEOUT_MS = 50_000
 _INTERRUPT_TIMEOUT_MS = 7_000
 _PROJECT_MEMORY_TIMEOUT_MS = 65_000
 _KNOWLEDGE_TIMEOUT_MS = 65_000
@@ -103,6 +110,111 @@ class BridgeClient(QtCore.QObject):
 
     def get_threads(self) -> str | None:
         return self._request("GET", "/v1/threads", context="threads")
+
+    def get_project_team(self) -> str | None:
+        """Read the authoritative project container snapshot."""
+
+        return self._request(
+            "GET",
+            "/v1/project-team",
+            context="project_team:get",
+        )
+
+    def set_project_team_mode(self, mode: str) -> str | None:
+        """Persist only the project routing mode."""
+
+        if mode not in {"single", "team"}:
+            return None
+        return self._request(
+            "POST",
+            "/v1/project-team",
+            {"mode": mode},
+            context="project_team:set",
+        )
+
+    def guide_project_thread(
+        self,
+        project_id: str,
+        thread_id: str,
+        text: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        local_image_paths: list[str] | None = None,
+        context: str,
+    ) -> str | None:
+        """Append one bounded user instruction to an authoritative role Thread."""
+
+        image_paths = (
+            list(local_image_paths) if local_image_paths is not None else []
+        )
+        if (
+            not project_id
+            or not thread_id
+            or not isinstance(text, str)
+            or (not text.strip() and not image_paths)
+        ):
+            return None
+        payload: dict[str, Any] = {
+            "action": "append_guidance",
+            "project_id": project_id,
+            "thread_id": thread_id,
+            "text": text,
+        }
+        if model is not None:
+            payload["model"] = model
+        if effort is not None:
+            payload["effort"] = effort
+        if service_tier is not None:
+            payload["service_tier"] = service_tier
+        if local_image_paths is not None:
+            payload["local_image_paths"] = image_paths
+        return self._request(
+            "POST",
+            "/v1/project-team/actions",
+            payload,
+            context=context,
+        )
+
+    def guide_project_supervisor(
+        self,
+        text: str,
+        *,
+        expected_project_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        service_tier: str | None = None,
+        local_image_paths: list[str] | None = None,
+        context: str,
+    ) -> str | None:
+        """Append guidance to the unique active project's Supervisor."""
+
+        image_paths = (
+            list(local_image_paths) if local_image_paths is not None else []
+        )
+        if not isinstance(text, str) or (not text.strip() and not image_paths):
+            return None
+        payload: dict[str, Any] = {
+            "action": "append_supervisor_guidance",
+            "text": text,
+        }
+        if expected_project_id is not None:
+            payload["project_id"] = expected_project_id
+        if model is not None:
+            payload["model"] = model
+        if effort is not None:
+            payload["effort"] = effort
+        if service_tier is not None:
+            payload["service_tier"] = service_tier
+        if local_image_paths is not None:
+            payload["local_image_paths"] = image_paths
+        return self._request(
+            "POST",
+            "/v1/project-team/actions",
+            payload,
+            context=context,
+        )
 
     def get_goal(self, thread_id: str) -> str | None:
         return self._request(
@@ -219,11 +331,16 @@ class BridgeClient(QtCore.QObject):
         *,
         model: str | None = None,
         service_tier: str | None = None,
+        team_override: str | None = None,
     ) -> str | None:
+        if team_override not in {None, "single", "team"}:
+            return None
         payload: dict[str, Any] = {
             "action": "start",
             "service_tier": service_tier,
         }
+        if team_override is not None:
+            payload["team_override"] = team_override
         if model is not None:
             payload["model"] = model
         return self._request(
@@ -258,13 +375,18 @@ class BridgeClient(QtCore.QObject):
         model: str | None = None,
         effort: str | None = None,
         service_tier: str | None = None,
+        team_override: str | None = None,
         local_image_paths: list[str] | None = None,
         context: str = "turn_start",
     ) -> str | None:
+        if team_override not in {None, "single", "team"}:
+            return None
         payload: dict[str, Any] = {
             "text": text,
             "service_tier": service_tier,
         }
+        if team_override is not None:
+            payload["team_override"] = team_override
         if model is not None:
             payload["model"] = model
         if effort is not None:
@@ -442,6 +564,15 @@ class BridgeClient(QtCore.QObject):
             timeout_ms = _PROJECT_MEMORY_TIMEOUT_MS
         elif context.startswith("knowledge:"):
             timeout_ms = _KNOWLEDGE_TIMEOUT_MS
+        elif (
+            method == "POST"
+            and path == "/v1/turn"
+            and isinstance(payload, dict)
+            and payload.get("team_override") == "team"
+        ):
+            timeout_ms = _PROJECT_START_TIMEOUT_MS
+        elif method == "POST" and path == "/v1/project-team/actions":
+            timeout_ms = _PROJECT_ACTION_TIMEOUT_MS
         elif (
             method == "POST"
             and path == "/v1/session"

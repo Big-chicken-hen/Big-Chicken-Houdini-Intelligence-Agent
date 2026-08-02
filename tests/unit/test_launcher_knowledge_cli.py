@@ -1510,7 +1510,9 @@ try {{
             "[string]$paths.staging,\n            [string]$paths.canonical"
         )
         restore = publish_venv.index(
-            "Copy-HiaKnowledgeManagedVenvTree",
+            "[System.IO.Directory]::Move(\n"
+            "                [string]$paths.backup,\n"
+            "                [string]$paths.canonical",
             staged_publish,
         )
         self.assertLess(root_backup, staged_publish)
@@ -1602,7 +1604,6 @@ $wanted = @(
     'Get-HiaKnowledgeTransactionPaths',
     'New-HiaKnowledgeManagedVenv',
     'Publish-HiaKnowledgeManagedVenv',
-    'Copy-HiaKnowledgeManagedVenvTree',
     'Undo-HiaKnowledgeManagedVenvPublication'
 )
 foreach ($name in $wanted) {{
@@ -1730,9 +1731,9 @@ $legacyPreserved = (
 $failedWorker = Join-Path (
     [string]$rollback.isolated_failed_venv
 ) 'Scripts\python.exe'
-$backupSentinel = Join-Path (
-    [string]$rollback.preserved_backup
-) 'old-root-environment.txt'
+$firstBackupConsumed = -not (Test-Path -LiteralPath (
+    [string]$firstTransaction.backup_root
+))
 $retryTransaction = & $newTransaction
 $retryPublish = Publish-HiaKnowledgeManagedVenv `
     -ProjectRoot {_ps_literal(case_root)} `
@@ -1745,10 +1746,7 @@ $retryPublish = Publish-HiaKnowledgeManagedVenv `
         (Test-Path -LiteralPath $failedWorker -PathType Leaf) -and
         ([System.IO.File]::ReadAllText($failedWorker) -eq 'staged python')
     )
-    backup_preserved = (
-        (Test-Path -LiteralPath $backupSentinel -PathType Leaf) -and
-        ([System.IO.File]::ReadAllText($backupSentinel) -eq 'preserve root')
-    )
+    first_backup_consumed = $firstBackupConsumed
     retry_succeeded = (
         (Test-Path -LiteralPath (
             Join-Path {_ps_literal(canonical_venv)} 'Scripts\python.exe'
@@ -1795,7 +1793,7 @@ $retryPublish = Publish-HiaKnowledgeManagedVenv `
         self.assertTrue(payload["root_restored"])
         self.assertTrue(payload["legacy_preserved"])
         self.assertTrue(payload["failed_isolated"])
-        self.assertTrue(payload["backup_preserved"])
+        self.assertTrue(payload["first_backup_consumed"])
         self.assertTrue(payload["retry_succeeded"])
         self.assertTrue(payload["legacy_preserved_after_retry"])
         self.assertEqual(0, payload["staging_count"])

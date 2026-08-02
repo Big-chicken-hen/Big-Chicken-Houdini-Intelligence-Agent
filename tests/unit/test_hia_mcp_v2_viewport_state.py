@@ -15,7 +15,11 @@ from unittest import mock
 REPOSITORY_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "houdini_package" / "python_libs"))
 
-from hia_mcp_runtime.executor import HoudiniExecutor, HiaRuntimeError  # noqa: E402
+from hia_mcp_runtime.executor import (  # noqa: E402
+    MAX_INLINE_CAPTURE_BYTES,
+    HoudiniExecutor,
+    HiaRuntimeError,
+)
 
 
 _UNSET = object()
@@ -475,6 +479,23 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
             )
         return hou_module, executor
 
+    def assert_sequence_has_no_single_frame_identity(
+        self,
+        result: dict[str, object],
+    ) -> None:
+        for key in (
+            "path",
+            "absolute_path",
+            "requested_frame",
+            "actual_frame",
+            "cook_frame",
+            "quality_frame",
+            "frame_lock",
+            "cook_cache_evidence",
+            "quality_metrics",
+        ):
+            self.assertNotIn(key, result)
+
     def test_saved_hip_capture_and_save_as_choose_current_hip_directory(self) -> None:
         viewport = FakeViewport(
             original_camera=None,
@@ -510,6 +531,8 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
 
         self.assertEqual("hip", first["result"]["storage_scope"])
         self.assertEqual("hip", second["result"]["storage_scope"])
+        self.assertEqual(str(first_hip.resolve()), first["result"]["source_hip_path"])
+        self.assertEqual(str(second_hip.resolve()), second["result"]["source_hip_path"])
         self.assertEqual(
             first_parent / ".hia" / "screenshots",
             Path(first["result"]["absolute_path"]).parent,
@@ -546,6 +569,7 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
             )
 
         self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
+        self.assertIsNone(response["result"]["source_hip_path"])
         self.assertTrue(
             Path(response["result"]["absolute_path"]).is_relative_to(
                 self.project_root / ".runtime" / "cache" / "screenshots"
@@ -1121,6 +1145,23 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
             [1.0, 3.0],
             response["result"]["sequence"]["evidence_frames"],
         )
+        endpoints = response["result"]["sequence"]["endpoints"]
+        self.assertEqual(
+            [("first", 1.0, "captured"), ("last", 3.0, "captured")],
+            [
+                (
+                    endpoint["endpoint"],
+                    endpoint["requested_frame"],
+                    endpoint["status"],
+                )
+                for endpoint in endpoints
+            ],
+        )
+        self.assertEqual(
+            response["result"]["sequence"]["evidence_paths"],
+            [endpoint["evidence_path"] for endpoint in endpoints],
+        )
+        self.assert_sequence_has_no_single_frame_identity(response["result"])
         self.assertEqual("returned", response["result"]["visual_content_status"])
         self.assertEqual("capture_integrity_only", response["result"]["quality_scope"])
         self.assertEqual(2, len(response["images"]))
@@ -1160,6 +1201,63 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
             [3.0],
             response["result"]["sequence"]["evidence_frames"],
         )
+        endpoints = response["result"]["sequence"]["endpoints"]
+        self.assertEqual("failed", endpoints[0]["status"])
+        self.assertEqual(1.0, endpoints[0]["requested_frame"])
+        self.assertIn("error", endpoints[0])
+        self.assertNotIn("evidence_path", endpoints[0])
+        self.assertEqual("captured", endpoints[1]["status"])
+        self.assertEqual(3.0, endpoints[1]["requested_frame"])
+        self.assertEqual(
+            [endpoints[1]["evidence_path"]],
+            response["result"]["sequence"]["evidence_paths"],
+        )
+        self.assert_sequence_has_no_single_frame_identity(response["result"])
+        self.assertEqual(1, response["result"]["inline_image_count"])
+        self.assertEqual(2, response["result"]["expected_inline_image_count"])
+        self.assertEqual("partial", response["result"]["visual_content_status"])
+        self.assertEqual(1, len(response["images"]))
+
+    def test_sequence_never_substitutes_an_internal_frame_when_last_endpoint_fails(
+        self,
+    ) -> None:
+        viewport = FakeViewport(
+            original_camera=None,
+            default_camera_state="view",
+            camera_locked=False,
+            image_size=(320, 180),
+        )
+        hou_module, executor = self.make_executor(viewport)
+        hou_module.scene_viewer.frame_colors = {
+            1: (72, 104, 136),
+            2: (88, 118, 148),
+            3: (104, 132, 160),
+        }
+        hou_module.scene_viewer.missing_frames = {3}
+
+        response = executor.dispatch(
+            "hia_capture_viewport",
+            {"mode": "flipbook", "frames": [1, 2, 3], "return_image": True},
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual([1.0], response["result"]["inline_image_frames"])
+        self.assertEqual(
+            [1.0],
+            response["result"]["sequence"]["evidence_frames"],
+        )
+        endpoints = response["result"]["sequence"]["endpoints"]
+        self.assertEqual("captured", endpoints[0]["status"])
+        self.assertEqual(1.0, endpoints[0]["requested_frame"])
+        self.assertEqual("failed", endpoints[1]["status"])
+        self.assertEqual(3.0, endpoints[1]["requested_frame"])
+        self.assertIn("error", endpoints[1])
+        self.assertNotIn("evidence_path", endpoints[1])
+        self.assertEqual(
+            [endpoints[0]["evidence_path"]],
+            response["result"]["sequence"]["evidence_paths"],
+        )
+        self.assert_sequence_has_no_single_frame_identity(response["result"])
         self.assertEqual(1, response["result"]["inline_image_count"])
         self.assertEqual(2, response["result"]["expected_inline_image_count"])
         self.assertEqual("partial", response["result"]["visual_content_status"])
@@ -1187,6 +1285,20 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertEqual([], response["result"]["inline_image_frames"])
         self.assertEqual([], response["result"]["sequence"]["evidence_frames"])
         self.assertEqual([], response["result"]["sequence"]["evidence_paths"])
+        endpoints = response["result"]["sequence"]["endpoints"]
+        self.assertEqual(
+            [("first", 1.0, "failed"), ("last", 3.0, "failed")],
+            [
+                (
+                    endpoint["endpoint"],
+                    endpoint["requested_frame"],
+                    endpoint["status"],
+                )
+                for endpoint in endpoints
+            ],
+        )
+        self.assertTrue(all("evidence_path" not in endpoint for endpoint in endpoints))
+        self.assert_sequence_has_no_single_frame_identity(response["result"])
         self.assertEqual(0, response["result"]["inline_image_count"])
         self.assertEqual("unavailable", response["result"]["visual_content_status"])
         self.assertNotIn("images", response)
@@ -1214,6 +1326,18 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(0, response["result"]["inline_image_count"])
         self.assertEqual("not_requested", response["result"]["visual_content_status"])
+        self.assertEqual(
+            [1.0, 2.0],
+            response["result"]["sequence"]["evidence_frames"],
+        )
+        self.assertEqual(
+            [1.0, 2.0],
+            [
+                endpoint["requested_frame"]
+                for endpoint in response["result"]["sequence"]["endpoints"]
+            ],
+        )
+        self.assert_sequence_has_no_single_frame_identity(response["result"])
         self.assertNotIn("images", response)
 
     def test_sequence_downgrades_both_images_when_aggregate_budget_is_exceeded(self) -> None:
@@ -1242,6 +1366,19 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertNotIn("images", response)
         self.assertEqual(0, response["result"]["inline_image_count"])
         self.assertEqual("path_only", response["result"]["visual_content_status"])
+        self.assertEqual(2_500_000, MAX_INLINE_CAPTURE_BYTES)
+        self.assertEqual(
+            [1.0, 2.0],
+            response["result"]["sequence"]["evidence_frames"],
+        )
+        self.assertEqual(
+            response["result"]["sequence"]["evidence_paths"],
+            [
+                endpoint["evidence_path"]
+                for endpoint in response["result"]["sequence"]["endpoints"]
+            ],
+        )
+        self.assert_sequence_has_no_single_frame_identity(response["result"])
         self.assertTrue(
             any("aggregate inline MCP budget" in warning for warning in response["warnings"])
         )

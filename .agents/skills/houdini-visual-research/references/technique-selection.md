@@ -29,7 +29,7 @@ Use a legacy material context only when the user explicitly requests it, the exi
 3. Decide whether the result needs temporal state. Use direct time functions or keyframes for stateless motion; use a solver only for feedback, collisions, accumulation, or history.
 4. Decide the renderer target early. For Karma XPU, plan around MaterialX/USD-supported shading rather than legacy VEX shading.
 5. Expose controls that correspond to the user's art direction: primary dimensions, counts, seed, timing, shape language, material values, and quality tiers.
-6. Inspect the installed Houdini build and live node categories before authoring; names and capabilities can change by version.
+6. When a version or installed-type difference can affect the chosen technique, inspect the active Houdini build and relevant live node categories before authoring; do not assume a fixed release name or versioned internal node type.
 
 ## Reference-driven asset hierarchy
 

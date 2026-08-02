@@ -63,6 +63,43 @@ PACKAGE_INSTALL_ATTEMPTS = 2
 UV_HTTP_CONNECT_TIMEOUT_SECONDS = 15
 UV_HTTP_TIMEOUT_SECONDS = 60
 UV_HTTP_RETRIES = 1
+_UNTRUSTED_PACKAGE_ENVIRONMENT = (
+    "CONDA_PREFIX",
+    "HF_HUB_OFFLINE",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "PIP_CONFIG_FILE",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_FIND_LINKS",
+    "PIP_INDEX_URL",
+    "PIP_NO_INDEX",
+    "PIP_PREFIX",
+    "PIP_TARGET",
+    "PIP_TRUSTED_HOST",
+    "PIP_USER",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "UV_CONFIG_FILE",
+    "UV_DEFAULT_INDEX",
+    "UV_EXTRA_INDEX_URL",
+    "UV_FIND_LINKS",
+    "UV_INSTALL_DIR",
+    "UV_INDEX",
+    "UV_INDEX_STRATEGY",
+    "UV_INDEX_URL",
+    "UV_INSECURE_HOST",
+    "UV_NO_CONFIG",
+    "UV_NO_INDEX",
+    "UV_OFFLINE",
+    "UV_PYTHON",
+    "UV_PYTHON_BIN_DIR",
+    "UV_PYTHON_INSTALL_DIR",
+    "UV_TORCH_BACKEND",
+    "UV_TOOL_BIN_DIR",
+    "UV_UNMANAGED_INSTALL",
+    "VIRTUAL_ENV",
+    "TRANSFORMERS_OFFLINE",
+)
 MODEL_DOWNLOAD_ATTEMPTS = 2
 HF_HUB_ETAG_TIMEOUT_SECONDS = 30
 HF_HUB_DOWNLOAD_TIMEOUT_SECONDS = 120
@@ -184,6 +221,13 @@ def _repair_environment(root: Path) -> dict[str, str]:
     ):
         directory.mkdir(parents=True, exist_ok=True)
     environment = dict(os.environ)
+    # A launcher repair must be reproducible on machines whose interactive
+    # shell carries pip/uv configuration for unrelated work.  uv reads some
+    # of these variables before command-line ``--no-config`` is applied, so
+    # remove them before constructing the exact project-local environment.
+    # Network proxy variables remain available intentionally.
+    for name in _UNTRUSTED_PACKAGE_ENVIRONMENT:
+        environment.pop(name, None)
     environment.update(
         {
             "HIA_PROJECT_ROOT": str(root),
@@ -214,9 +258,14 @@ def _repair_environment(root: Path) -> dict[str, str]:
             "TMPDIR": str(temporary),
         }
     )
-    for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "CONDA_PREFIX"):
-        environment.pop(name, None)
     return environment
+
+
+def _activate_repair_environment(environment: Mapping[str, str]) -> None:
+    """Apply the sanitized map to this dedicated repair process as well."""
+
+    os.environ.clear()
+    os.environ.update(environment)
 
 
 def _run(
@@ -791,12 +840,15 @@ def main(
 ) -> int:
     stream = stdout if stdout is not None else sys.stdout
     emitter = JsonlEmitter(stream)
+    original_environment: dict[str, str] | None = None
     try:
         arguments = _parser().parse_args(argv)
         root = _project_root(arguments.project_root)
         _assert_managed_python(root)
         model_path = _model_path(arguments.asr_model_path, root)
         environment = _repair_environment(root)
+        original_environment = dict(os.environ)
+        _activate_repair_environment(environment)
         emitter.emit(
             "started",
             stage="package",
@@ -841,6 +893,12 @@ def main(
             },
         )
         return 1
+    finally:
+        # The launcher invokes this file in a dedicated child process, but
+        # keeping main() scoped makes imports and test harnesses safe too.
+        if original_environment is not None:
+            os.environ.clear()
+            os.environ.update(original_environment)
 
 
 if __name__ == "__main__":

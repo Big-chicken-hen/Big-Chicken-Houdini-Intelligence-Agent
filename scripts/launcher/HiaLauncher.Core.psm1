@@ -1750,6 +1750,53 @@ function Get-HiaVersionText {
     return 'unknown'
 }
 
+function Get-HiaHoudiniVersionText {
+    param(
+        [AllowEmptyString()][string]$FileVersion,
+        [AllowEmptyString()][string]$InstallName
+    )
+
+    # SideFX Windows binaries commonly expose a four-field file version such
+    # as "21, 0, 0, 440", while Houdini itself and the install directory use
+    # "21.0.440".  Treat the third zero as the Windows revision slot and keep
+    # the fourth field as the Houdini build.  This is shape-based so new
+    # Houdini majors and minors do not require launcher changes.
+    $fileCandidate = 'unknown'
+    if (
+        $FileVersion -and
+        $FileVersion -match (
+            '(?<!\d)(\d+)\s*[,\.]\s*(\d+)\s*[,\.]\s*' +
+            '0\s*[,\.]\s*(\d+)(?!\d)'
+        )
+    ) {
+        $fileCandidate = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+    } else {
+        $fileCandidate = Get-HiaVersionText -Text $FileVersion -Fallback ''
+    }
+    $installCandidate = Get-HiaVersionText -Text $InstallName -Fallback ''
+
+    if ($fileCandidate -eq 'unknown') { return $installCandidate }
+    if ($installCandidate -eq 'unknown') { return $fileCandidate }
+
+    $fileParts = @($fileCandidate -split '\.')
+    $installParts = @($installCandidate -split '\.')
+    if (
+        $fileParts.Count -ge 2 -and
+        $installParts.Count -ge 2 -and
+        $fileParts[0] -eq $installParts[0] -and
+        $fileParts[1] -eq $installParts[1] -and
+        $fileParts.Count -ge 3 -and
+        $installParts.Count -ge 3 -and
+        [int64]$fileParts[2] -eq 0 -and
+        [int64]$installParts[2] -gt 0
+    ) {
+        # Some builds publish only major.minor.0 in ProductVersion.  The
+        # matching SideFX install-directory build is more specific evidence.
+        return $installCandidate
+    }
+    return $fileCandidate
+}
+
 function Add-HiaCandidatePath {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Candidates,
@@ -1887,7 +1934,9 @@ function Get-HiaHoudiniCandidates {
             }
         }
         $installName = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $path))
-        $version = Get-HiaVersionText -Text $fileVersion -Fallback $installName
+        $version = Get-HiaHoudiniVersionText `
+            -FileVersion $fileVersion `
+            -InstallName $installName
         $display = "Houdini $version — $path"
         if (-not $exists) { $display = "缺失 — $path" }
         $results += [pscustomobject]@{

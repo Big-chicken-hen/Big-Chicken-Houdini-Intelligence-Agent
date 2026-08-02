@@ -271,26 +271,7 @@ class LoopbackTransport:
                     {"limit_bytes": MAX_REQUEST_BYTES},
                 )
             identity_started = time.monotonic()
-            try:
-                identity = self._runtime_identity()
-            except TransportError as exc:
-                raw_identity = exc.details.get("runtime_identity")
-                if (
-                    scene_write
-                    or exc.code
-                    not in {
-                        "HOUDINI_SESSION_CHANGED",
-                        "HOUDINI_RUNTIME_SOURCE_CHANGED",
-                        "STALE_HOUDINI_RUNTIME",
-                    }
-                    or not isinstance(raw_identity, Mapping)
-                ):
-                    raise
-                identity = _validated_identity(
-                    raw_identity,
-                    self.config,
-                    enforce_expected=False,
-                )
+            identity = self._runtime_identity()
             identity_seconds = max(0.0, time.monotonic() - identity_started)
             serialization_started = time.monotonic()
             body = json.dumps(
@@ -457,23 +438,10 @@ class LoopbackTransport:
                         "automatic_retry_safe": False,
                     },
                 )
-            if scene_write:
-                observed_identity = self._accept_identity(
-                    response_identity,
-                    request_submitted=True,
-                )
-            else:
-                observed_identity = _validated_identity(
-                    response_identity,
-                    self.config,
-                    request_submitted=True,
-                    enforce_expected=False,
-                )
-                if self._identity_warning(observed_identity) is None:
-                    self._accept_identity(
-                        observed_identity,
-                        request_submitted=True,
-                    )
+            observed_identity = self._accept_identity(
+                response_identity,
+                request_submitted=True,
+            )
             warning = self._identity_warning(observed_identity)
             if warning is not None:
                 result = dict(result)
@@ -593,35 +561,13 @@ class LoopbackTransport:
         self,
         identity: Mapping[str, Any],
     ) -> dict[str, str] | None:
-        if identity.get("launcher_session_id") != self.config.launcher_session_id:
-            code = "HOUDINI_SESSION_CHANGED"
-        elif os.path.normcase(str(identity.get("executor_module_path"))) != os.path.normcase(
-            self.config.executor_module_path
-        ):
-            code = "HOUDINI_RUNTIME_SOURCE_CHANGED"
-        else:
-            with self._identity_lock:
-                previous = self._latched_identity
-                changed = (
-                    previous is not None
-                    and _runtime_binding(previous)
-                    != _runtime_binding(identity)
-                )
-            code = "HOUDINI_SESSION_CHANGED" if changed else ""
-        if not code and identity.get("executor_source_status") != "current":
-            code = "STALE_HOUDINI_RUNTIME"
-        if not code:
+        if identity.get("executor_source_status") == "current":
             return None
         return {
-            "code": code,
+            "code": "STALE_HOUDINI_RUNTIME",
             "message": (
                 "The operation completed against the executor already loaded "
                 "in Houdini; restart only to load newer source changes from disk"
-                if code == "STALE_HOUDINI_RUNTIME"
-                else (
-                    "The read completed against the observed Houdini runtime; "
-                    "reconnect before any scene write"
-                )
             ),
         }
 

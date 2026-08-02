@@ -1,6 +1,6 @@
 # Installation and first run
 
-Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The launcher discovers the selected Houdini installation dynamically rather than pinning a Houdini major version. The source package includes UI startup adapters for Python 3.10, 3.11, and 3.13, covering Houdini 22's standard Python 3.13 build and its separate Python 3.11 build. Houdini 21.0.440/Python 3.11 remains the configuration with completed live-GUI evidence on this machine. The Bridge/local-knowledge environment uses project-managed CPython 3.10.11 and Codex 0.144.3. The published v0.1.1 Preview ZIP is the historical 2026-07-24 snapshot and does not represent later source changes. Use that ZIP only to reproduce its published version; use a source checkout to inspect current development until a newer Preview is published.
+Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The launcher discovers the selected Houdini installation dynamically rather than pinning a Houdini major version. The source package includes UI startup adapters for Python 3.10, 3.11, and 3.13, covering Houdini 22's standard Python 3.13 build and its separate Python 3.11 build. Houdini 21.0.440/Python 3.11 is the installed baseline used by earlier live launcher and basic-Panel checks; the current project-team Panel changes still require a post-restart embedded-H21 run, and no live H22 GUI run is claimed. The Bridge/local-knowledge environment uses project-managed CPython 3.10.11 and Codex 0.144.3. The published v0.1.1 Preview ZIP is the historical 2026-07-24 snapshot and does not represent later source changes. Use that ZIP only to reproduce its published version; use a source checkout to inspect current development until a newer Preview is published.
 
 ## 1. Download and fully extract the historical Preview ZIP
 
@@ -31,7 +31,7 @@ intentionally omits those maintainer scripts.
 
 Install separately:
 
-- SideFX Houdini. Installed builds are discovered dynamically; Houdini 21.0.440 is the currently live-verified build, while the bundled Python 3.13 adapter covers the standard Houdini 22 startup path without treating version metadata as a gate.
+- SideFX Houdini. Installed builds are discovered dynamically; Houdini 21.0.440 is the installed baseline with earlier live launcher/basic-Panel evidence, while the current project-team UI awaits an embedded-H21 rerun. The bundled Python 3.13 adapter covers the standard Houdini 22 startup path without treating version metadata as a gate, but no live H22 GUI run is claimed.
 - A valid Codex/ChatGPT sign-in and network access to the OpenAI service.
 
 Normal installation does not require global Python, a PATH Python, administrator
@@ -61,11 +61,12 @@ selected Houdini installation and is never modified or redirected through
 environment; it is not merged into HIA's `.venv`.
 
 Big-Chicken Houdini Intelligence Agent does not redistribute Houdini. Houdini
-must already be installed and licensed. Other Houdini versions may be discovered,
-but only Houdini 21.0.440 with Python 3.11 has completed the current real-GUI
-acceptance path. Houdini 22's Python 3.13 and separate Python 3.11 startup
-paths are bundled and are reported as unverified rather than rejected when no
-matching live-GUI evidence is available.
+must already be installed and licensed. Other Houdini versions may be discovered.
+Houdini 21.0.440 with Python 3.11 is the installed baseline with earlier live
+launcher/basic-Panel evidence; the current project-team UI still needs a
+post-restart embedded-H21 run. Houdini 22's Python 3.13 and separate Python 3.11
+startup paths are bundled and are reported as unverified rather than rejected
+when no matching live-GUI evidence is available.
 
 ## 3. Install or repair the project-local runtimes
 
@@ -272,15 +273,21 @@ one asset; and `assets resume` continues bounded OCR/transcription work.
 Extracted `user_document` and `user_transcript` fragments enter the same SQLite
 FTS5 and optional Qwen vector index rather than a second knowledge store.
 
-Current source-tree acceptance is intentionally explicit: the clean-clone
-fixture reports RapidOCR/ONNX Runtime image OCR and scanned-PDF page OCR ready,
-and a real Markdown asset reaches the shared FTS5/Qwen index. The
-media-transcription code path is present, but this machine could not finish the
-external faster-whisper model or FFmpeg downloads because both endpoints
-returned `WinError 10060`; no real no-sidecar video-ASR acceptance is claimed
-yet. Ordinary imports are managed under `.runtime\knowledge\sources`, asset
-state stays under `.runtime\knowledge\assets`, and deletion never changes the
-original selected file.
+Current source-tree acceptance is explicit and artifact-backed. An isolated
+Windows clean-root fixture began without `.venv` or `.runtime`, installed the
+managed parser environment, reused only project-local download caches, repaired
+the CUDA Qwen embedding runtime, and built the bundled plus user vector index.
+RapidOCR/ONNX Runtime image and PDF-page OCR, faster-whisper, and the
+project-local FFmpeg/ffprobe pair all report ready. A new Markdown document, a
+synthesized WAV speech sample, and a real MP4 made from a generated video
+stream plus that audio completed extraction, shared FTS5/Qwen indexing, and
+immediate hybrid retrieval. The MP4 acceptance exercised the no-sidecar
+FFmpeg -> faster-whisper -> FTS5 -> Qwen path. The fixture and logs remain below
+`.runtime\audits\launcher-knowledge-20260802\clean-root` and are not shipped in
+the release. Ordinary imports are managed under
+`.runtime\knowledge\sources`, asset state stays under
+`.runtime\knowledge\assets`, and deletion never changes the original selected
+file.
 
 The WPF page maps these actions to **导入文件**, **导入文件夹**, managed-source
 rows showing origin/format/size/index state, **删除所选**, **重新扫描**, and
@@ -488,7 +495,7 @@ or changed after confirmation.
 
 ### Several Houdini versions were found
 
-Select the desired `houdini.exe` explicitly. Discovery is dynamic and is not itself a compatibility guarantee; Houdini 21.0.440 is the current live-verified build, and Houdini 22's Python 3.13/3.11 UI startup paths are included pending a live H22 run.
+Select the desired `houdini.exe` explicitly. Discovery is dynamic and is not itself a compatibility guarantee. Houdini 21.0.440 is the installed baseline with earlier live launcher/basic-Panel evidence; the current project-team UI still awaits a post-restart embedded-H21 run. Houdini 22's Python 3.13/3.11 UI startup paths are included pending a live H22 run.
 
 ### HIA MCP V2 is unavailable
 

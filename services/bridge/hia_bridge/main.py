@@ -32,6 +32,9 @@ PINNED_CODEX_RELATIVE_PATH = Path(
 CODEX_HOME_RELATIVE_PATH = Path(".runtime/codex-home")
 CACHE_RELATIVE_PATH = Path(".runtime/cache")
 FOCUS_STATE_RELATIVE_PATH = Path(".runtime/bridge/focus-mode.json")
+PROJECT_TEAM_STATE_RELATIVE_PATH = Path(
+    ".runtime/bridge/project-team.json"
+)
 HIA_MCP_V2_SERVICE_RELATIVE_PATH = Path("services/hia_mcp_v2")
 HIA_MCP_V2_RUNTIME_RELATIVE_PATH = Path(".runtime/hia-mcp-v2")
 HIA_MCP_V2_EXECUTOR_RELATIVE_PATH = Path(
@@ -460,6 +463,10 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "INVALID_FOCUS_STATE_PATH",
                 f"HIA_FOCUS_STATE_PATH must be {expected_focus_state}",
             )
+        project_team_state_path = validate_project_subpath(
+            project_root / PROJECT_TEAM_STATE_RELATIVE_PATH,
+            project_root=project_root,
+        )
         configured_render_output = os.environ.get("HIA_RENDER_OUTPUT_DIR")
         render_output_directory = (
             configured_render_output.strip()
@@ -596,6 +603,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             events,
             mcp_backend=backend,
             focus_state_path=focus_state_path,
+            project_team_state_path=project_team_state_path,
         )
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1

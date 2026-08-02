@@ -332,7 +332,7 @@ class CodexProtocolContractTests(unittest.TestCase):
             self.allowed_methods("server_notifications"),
         )
 
-    def test_automatic_compaction_is_receive_only(self) -> None:
+    def test_automatic_compaction_has_no_manual_request_but_allows_native_transfer(self) -> None:
         self.assertIn(
             "thread/compacted",
             self.allowed_methods("server_notifications"),
@@ -341,6 +341,8 @@ class CodexProtocolContractTests(unittest.TestCase):
             "thread/compact/start",
             self.allowed_methods("client_requests"),
         )
+        self.assertIn("thread/fork", self.allowed_methods("client_requests"))
+        self.assertIn("thread/delete", self.allowed_methods("client_requests"))
 
     def test_request_user_input_remains_experimentally_excluded(self) -> None:
         method = "item/tool/requestUserInput"

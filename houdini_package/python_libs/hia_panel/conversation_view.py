@@ -154,7 +154,11 @@ class _MarkdownBody(QtWidgets.QTextBrowser):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.setStyleSheet("QTextBrowser { background: transparent; border: 0; }")
+        self.setStyleSheet(
+            "QTextBrowser {"
+            f"color: {foreground}; background: transparent; border: 0;"
+            "}"
+        )
         self.document().setDocumentMargin(0)
         self.document().setDefaultStyleSheet(
             "body { color: %s; } "
@@ -579,6 +583,30 @@ class ConversationView(QtWidgets.QWidget):
             self._scroll_to_bottom()
         elif not self._stream_flush_timer.isActive():
             self._stream_flush_timer.start()
+
+    def discard_pending_codex_message(self) -> bool:
+        """Remove only an empty pending card without freezing later output."""
+
+        if self._active_codex_card is None or self._active_codex_text:
+            return False
+        if self._stream_flush_timer.isActive():
+            self._stream_flush_timer.stop()
+        card = self._active_codex_card
+        entry = self._active_codex_entry
+        if entry in self._transcript:
+            self._transcript.remove(entry)
+        if card in self._message_cards:
+            self._message_cards.remove(card)
+        row = card.parentWidget()
+        if row is not None:
+            self._layout.removeWidget(row)
+            row.deleteLater()
+        self._active_codex_card = None
+        self._active_codex_text = ""
+        self._rendered_codex_text = ""
+        self._active_codex_entry = None
+        self._codex_stream_frozen = False
+        return True
 
     def finish_codex_message(self) -> None:
         if self._stream_flush_timer.isActive():

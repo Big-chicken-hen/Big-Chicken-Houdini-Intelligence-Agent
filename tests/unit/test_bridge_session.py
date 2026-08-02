@@ -978,6 +978,38 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
         self.assertEqual("message-0", projected[0]["text"])
         self.assertEqual("message-171", projected[-1]["text"])
 
+    def test_project_thread_messages_preserve_long_blueprint_text_without_truncation(
+        self,
+    ) -> None:
+        user_text = "用户木屋约束" * 20_000
+        blueprint = "完整施工蓝图步骤" * 20_000
+        client = _ThreadContentClient(
+            {
+                "thread": {
+                    "id": "thread-current",
+                    "turns": [
+                        {
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "content": [{"type": "text", "text": user_text}],
+                                },
+                                {"type": "agentMessage", "text": blueprint},
+                            ]
+                        }
+                    ],
+                }
+            }
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.read_thread("thread-current")["result"]["thread"]
+
+        items = result["turns"][0]["items"]
+        self.assertEqual(user_text, items[0]["content"][0]["text"])
+        self.assertEqual(blueprint, items[1]["text"])
+        self.assertGreater(len(items[1]["text"]), 120_000)
+
     def test_read_preserves_only_safe_public_ids_and_final_chat(self) -> None:
         client = _ThreadContentClient(
             {
@@ -1780,6 +1812,172 @@ class BridgeSessionSteerTests(unittest.TestCase):
         session.start_turn("initial request")
         active_client.requests.clear()
         return session, active_client
+
+    def make_managed_project_session(
+        self,
+    ) -> tuple[BridgeSession, _RecordingClient, str]:
+        client = _RecordingClient()
+        session = BridgeSession(self.project_root, client, EventBuffer())
+        started = session.start_thread(team_override="team")
+        original_request = client.request
+
+        def prepare_request(
+            method: str, params: dict[str, Any]
+        ) -> dict[str, Any]:
+            if method == "thread/name/set":
+                client.requests.append((method, dict(params)))
+                return {}
+            return original_request(method, params)
+
+        with mock.patch.object(
+            client, "request", side_effect=prepare_request
+        ), mock.patch.object(
+            session._project_threads, "_create_thread", return_value=None
+        ):
+            project = session._project_threads.prepare_project(
+                started["thread_id"],
+                "Build one managed project for routing verification",
+            )
+        client.requests.clear()
+        return session, client, project["project_id"]
+
+    def test_project_identity_is_authoritative_in_snapshot_and_resume(self) -> None:
+        session, client, project_id = self.make_managed_project_session()
+
+        snapshot = session.snapshot()
+        self.assertEqual("supervisor", snapshot["permission_profile"])
+        self.assertEqual(project_id, snapshot["project_id"])
+        self.assertEqual("supervisor", snapshot["project_role"])
+
+        resumed = session.resume_thread("thread-test")
+
+        self.assertEqual("supervisor", resumed["permission_profile"])
+        self.assertEqual(project_id, resumed["project_id"])
+        self.assertEqual("supervisor", resumed["project_role"])
+        self.assertEqual(
+            ["thread/resume"], [method for method, _params in client.requests]
+        )
+
+    def test_unassociated_team_root_never_claims_project_identity(self) -> None:
+        client = _RecordingClient()
+        session = BridgeSession(self.project_root, client, EventBuffer())
+
+        session.start_thread(team_override="team")
+        snapshot = session.snapshot()
+
+        self.assertIsNone(snapshot["permission_profile"])
+        self.assertIsNone(snapshot["project_id"])
+        self.assertIsNone(snapshot["project_role"])
+
+    def test_snapshot_never_holds_session_lock_while_waiting_for_project_identity(
+        self,
+    ) -> None:
+        session, _client, project_id = self.make_managed_project_session()
+        coordinator = session._project_threads
+        condition_held = threading.Event()
+        identity_started = threading.Event()
+        attempt_session_lock = threading.Event()
+        session_lock_acquired = threading.Event()
+        snapshot_done = threading.Event()
+        snapshot_result: dict[str, Any] = {}
+        original_identity = coordinator.project_identity_for_thread
+
+        def held_condition() -> None:
+            with coordinator._condition:
+                condition_held.set()
+                self.assertTrue(attempt_session_lock.wait(1.0))
+                acquired = session._lock.acquire(timeout=0.5)
+                if acquired:
+                    session_lock_acquired.set()
+                    session._lock.release()
+
+        def observed_identity(thread_id: Any) -> dict[str, str] | None:
+            identity_started.set()
+            return original_identity(thread_id)
+
+        def take_snapshot() -> None:
+            try:
+                snapshot_result.update(session.snapshot())
+            finally:
+                snapshot_done.set()
+
+        holder = threading.Thread(target=held_condition, daemon=True)
+        holder.start()
+        self.assertTrue(condition_held.wait(1.0))
+        with mock.patch.object(
+            coordinator,
+            "project_identity_for_thread",
+            side_effect=observed_identity,
+        ):
+            reader = threading.Thread(target=take_snapshot, daemon=True)
+            reader.start()
+            self.assertTrue(identity_started.wait(1.0))
+            attempt_session_lock.set()
+            self.assertTrue(session_lock_acquired.wait(1.0))
+            self.assertTrue(snapshot_done.wait(1.0))
+            reader.join(1.0)
+        holder.join(1.0)
+        self.assertFalse(holder.is_alive())
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(project_id, snapshot_result["project_id"])
+        self.assertEqual("supervisor", snapshot_result["project_role"])
+
+    def test_project_role_plain_steer_fails_closed_before_app_server(self) -> None:
+        session, client, project_id = self.make_managed_project_session()
+        image = self.thread_directory / "project-guidance.png"
+        image.write_bytes(b"project-guidance-image")
+        with session._lock:
+            session._turn_id = "turn-project-active"
+            session._turn_status = "inProgress"
+            session._turn_active = True
+            session._turn_created = True
+        before = session.snapshot()
+
+        with self.assertRaises(BridgeError) as raised:
+            session.steer_turn(
+                "Append this instruction to the managed project",
+                local_image_paths=[str(image)],
+            )
+
+        self.assertEqual(
+            "PROJECT_THREAD_GUIDANCE_REQUIRED", raised.exception.code
+        )
+        self.assertEqual(409, raised.exception.http_status)
+        self.assertEqual(project_id, raised.exception.details["project_id"])
+        self.assertEqual(
+            "supervisor", raised.exception.details["project_role"]
+        )
+        self.assertEqual("thread-test", raised.exception.details["thread_id"])
+        self.assertEqual([], client.requests)
+        self.assertEqual(before, session.snapshot())
+        self.assertEqual(b"project-guidance-image", image.read_bytes())
+
+    def test_project_role_plain_start_turn_returns_exact_guidance_identity(
+        self,
+    ) -> None:
+        session, client, project_id = self.make_managed_project_session()
+        image = self.thread_directory / "project-new-turn-guidance.png"
+        image.write_bytes(b"project-new-turn-image")
+        before = session.snapshot()
+
+        with self.assertRaises(BridgeError) as raised:
+            session.start_turn(
+                "This must remain project guidance",
+                local_image_paths=[str(image)],
+            )
+
+        self.assertEqual(
+            "PROJECT_THREAD_GUIDANCE_REQUIRED", raised.exception.code
+        )
+        self.assertEqual(409, raised.exception.http_status)
+        self.assertEqual(project_id, raised.exception.details["project_id"])
+        self.assertEqual(
+            "supervisor", raised.exception.details["project_role"]
+        )
+        self.assertEqual("thread-test", raised.exception.details["thread_id"])
+        self.assertEqual([], client.requests)
+        self.assertEqual(before, session.snapshot())
+        self.assertEqual(b"project-new-turn-image", image.read_bytes())
 
     def test_steer_uses_expected_turn_and_does_not_change_lifecycle(self) -> None:
         image = self.thread_directory / "follow-up.png"
@@ -2656,7 +2854,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         self.assertEqual("on-request", params["approvalPolicy"])
         self.assertIsNone(params["serviceTier"])
         instructions = params["developerInstructions"]
-        self.assertLessEqual(len(instructions), 1_000)
+        self.assertLessEqual(len(instructions), 1_150)
         for required_text in (
             "当前场景的创建、修改、连接、材质和动画默认使用",
             "FXHoudini MCP 与 HOM",
@@ -2676,6 +2874,9 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "PATH 中的 hython.exe",
             "普通场景请求不先搜索项目源码/文档",
             "仅诊断或修改 Panel、Bridge、MCP/项目代码时读取",
+            "Houdini Full 发布详细用户可见蓝图",
+            "完整当前阶段卡和最新证据",
+            "禁回塞全蓝图",
             "上下文仅用 app-server 自动整理",
             "不手动 compact",
             "不创建本地摘要或记忆",
@@ -2704,7 +2905,197 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         for asset_specific_text in ("售货机", "桌子", "楼梯", "vending_machine"):
             self.assertNotIn(asset_specific_text, instructions)
         self.assertNotIn("baseInstructions", params)
-        self.assertNotIn("config", params)
+        self.assertEqual(
+            {
+                "mcp_servers.hia_mcp_v2.enabled": True,
+                "mcp_servers.houdini_intelligence.enabled": True,
+            },
+            params["config"],
+        )
+
+    def test_new_entry_override_freezes_routing_before_first_turn(self) -> None:
+        cases = (
+            ("team", "single", "single"),
+            ("single", "team", "team"),
+            ("single", None, "single"),
+            ("team", None, "team"),
+        )
+        for default_mode, override, expected in cases:
+            with self.subTest(default_mode=default_mode, override=override):
+                session, client = self.make_session("hia_v2")
+                session.update_project_team_mode(mode=default_mode)
+
+                started = session.start_thread(team_override=override)
+                self.assertEqual(expected, started["routing"])
+                start_params = client.requests[-1][1]
+                self.assertEqual(
+                    "read-only" if expected == "team" else "workspace-write",
+                    start_params["sandbox"],
+                )
+                client.requests.clear()
+
+                if expected == "team":
+                    with mock.patch.object(
+                        session._project_threads,
+                        "prepare_project",
+                        return_value={
+                            "project_id": "project-test",
+                            "output_schema": {},
+                        },
+                    ), mock.patch.object(
+                        session._project_threads, "begin_root_turn_request"
+                    ), mock.patch.object(
+                        session._project_threads, "attach_root_turn"
+                    ):
+                        turn = session.start_turn(
+                            "route this entry", team_override=override
+                        )
+                else:
+                    turn = session.start_turn(
+                        "route this entry", team_override=override
+                    )
+
+                self.assertEqual(expected, turn["routing"])
+                self.assertEqual(
+                    ["turn/start"], [method for method, _params in client.requests]
+                )
+
+    def test_mode_change_cannot_convert_existing_normal_thread(self) -> None:
+        session, client = self.make_session("hia_v2")
+        session.update_project_team_mode(mode="single")
+        session.start_thread(team_override="single")
+        session.update_project_team_mode(mode="team")
+        client.requests.clear()
+
+        with self.assertRaises(BridgeError) as raised:
+            session.start_turn("must stay ordinary", team_override="team")
+
+        self.assertEqual("THREAD_ROUTING_MISMATCH", raised.exception.code)
+        self.assertEqual(409, raised.exception.http_status)
+        self.assertEqual(
+            {
+                "field": "team_override",
+                "current_routing": "single",
+                "requested_routing": "team",
+            },
+            raised.exception.details,
+        )
+        self.assertEqual([], client.requests)
+        self.assertFalse(session.snapshot()["turn_active"])
+        self.assertEqual([], session.project_team_snapshot()["projects"])
+
+        turn = session.start_turn("continue as ordinary")
+        self.assertEqual("single", turn["routing"])
+        self.assertEqual(["turn/start"], [method for method, _ in client.requests])
+
+    def test_team_entry_rejects_single_first_turn_before_project_or_rpc(self) -> None:
+        session, client = self.make_session("hia_v2")
+        started = session.start_thread(team_override="team")
+        client.requests.clear()
+
+        with mock.patch.object(
+            session._project_threads, "prepare_project"
+        ) as prepare_project, self.assertRaises(BridgeError) as raised:
+            session.start_turn("must stay a project", team_override="single")
+
+        self.assertEqual("THREAD_ROUTING_MISMATCH", raised.exception.code)
+        self.assertEqual(409, raised.exception.http_status)
+        self.assertEqual(
+            {
+                "field": "team_override",
+                "current_routing": "team",
+                "requested_routing": "single",
+            },
+            raised.exception.details,
+        )
+        self.assertEqual([], client.requests)
+        prepare_project.assert_not_called()
+        self.assertIsNone(
+            session._project_threads.role_for_thread(started["thread_id"])
+        )
+        self.assertEqual([], session.project_team_snapshot()["projects"])
+        self.assertFalse(session.snapshot()["turn_active"])
+
+    def test_failed_project_root_turn_start_blocks_same_thread_retry(self) -> None:
+        session, client = self.make_session("hia_v2")
+        started = session.start_thread(team_override="team")
+        client.requests.clear()
+        worker_index = 0
+        goal: dict[str, Any] | None = None
+
+        def project_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            nonlocal worker_index, goal
+            client.requests.append((method, dict(params)))
+            if method == "thread/start":
+                worker_index += 1
+                return {"thread": {"id": f"thread-worker-{worker_index}"}}
+            if method == "thread/name/set":
+                return {}
+            if method == "thread/goal/get":
+                return {"goal": dict(goal) if goal is not None else None}
+            if method == "thread/goal/set":
+                goal = {
+                    "threadId": params["threadId"],
+                    "objective": params["objective"],
+                    "status": params["status"],
+                    "tokenBudget": params["tokenBudget"],
+                }
+                return {"goal": dict(goal)}
+            if method == "turn/start":
+                raise CodexRPCError(
+                    "turn/start", {"message": "forced root Turn rejection"}
+                )
+            raise AssertionError(f"Unexpected request: {method}")
+
+        with mock.patch.object(client, "request", side_effect=project_request):
+            with self.assertRaises(BridgeError) as first:
+                session.start_turn("build the project", team_override="team")
+
+            self.assertEqual("CODEX_RPC_ERROR", first.exception.code)
+            self.assertFalse(session.snapshot()["turn_active"])
+            project = session.project_team_snapshot()["projects"][0]
+            self.assertEqual("failed", project["status"])
+            self.assertEqual(5, len(project["threads"]))
+            self.assertEqual(
+                "supervisor",
+                session._project_threads.role_for_thread(started["thread_id"]),
+            )
+            request_count = len(client.requests)
+
+            with self.assertRaises(BridgeError) as retry:
+                session.start_turn("build the project", team_override="team")
+
+            self.assertEqual("PROJECT_THREAD_GUIDANCE_REQUIRED", retry.exception.code)
+            self.assertEqual(409, retry.exception.http_status)
+            self.assertEqual(request_count, len(client.requests))
+
+    def test_normal_resume_stays_single_when_next_entry_default_is_team(self) -> None:
+        session, client = self.make_session("hia_v2")
+        session.update_project_team_mode(mode="team")
+
+        session.resume_thread("thread-existing")
+
+        method, params = client.requests[-1]
+        self.assertEqual("thread/resume", method)
+        self.assertEqual("workspace-write", params["sandbox"])
+        self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual(
+            {
+                "mcp_servers.hia_mcp_v2.enabled": True,
+                "mcp_servers.houdini_intelligence.enabled": True,
+            },
+            params["config"],
+        )
+
+    def test_thread_start_rejects_invalid_routing_without_rpc(self) -> None:
+        session, client = self.make_session("hia_v2")
+
+        with self.assertRaises(BridgeError) as raised:
+            session.start_thread(team_override="auto")
+
+        self.assertEqual("INVALID_TEAM_OVERRIDE", raised.exception.code)
+        self.assertEqual({"field": "team_override"}, raised.exception.details)
+        self.assertEqual([], client.requests)
 
     def test_hia_v2_thread_instructions_use_only_hia_batch_and_validation_tools(
         self,
@@ -2714,7 +3105,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         session.start_thread()
 
         instructions = client.requests[0][1]["developerInstructions"]
-        self.assertLessEqual(len(instructions), 1_700)
+        self.assertLessEqual(len(instructions), 1_825)
         for required_text in (
             "HIA MCP V2 与 HOM",
             "已知小改回读目标值/连接后直改",
@@ -2729,7 +3120,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "每批同一 scope 内一次 hia_execute_hom",
             "fresh cook、hia_scene_diff/hia_validate",
             "plan/revision/tool completed 不算通过",
-            "复杂资产把承诺、可识别特征和禁项写入简短 Brief，不得静默缩水",
+            "Full蓝图列承诺、可识别特征和禁项，禁静默缩水",
             "用户负约束必须原样保留并进入验收",
             "禁止用语义等价或换皮替代绕过",
             "禁 Box 也禁盒状代用品",
@@ -2758,9 +3149,10 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "QUEUE_FULL 不立即重试",
             "checkpoint_label 仅用于 Goal 的有意义成功阶段",
             "不确定时，受影响写入前用 hia_local_help_search 一次合批并复用",
-            "主任务只保留原生 Goal、决定和子任务短摘要",
-            "子任务详情按需查看",
-            "不塞入主上下文",
+            "Houdini Full 发布详细用户可见蓝图",
+            "Supervisor 只带硬约束",
+            "完整当前阶段卡和最新证据",
+            "禁回塞全蓝图",
             "安全已存 HIP 截图写同级 .hia/screenshots",
             "否则用 HIA_CACHE_DIR/screenshots",
             "附件/知识/模型/索引留 .runtime",
@@ -2828,7 +3220,13 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         self.assertEqual("priority", params["serviceTier"])
         self.assertIn("FXHoudini MCP 与 HOM", params["developerInstructions"])
         self.assertNotIn("baseInstructions", params)
-        self.assertNotIn("config", params)
+        self.assertEqual(
+            {
+                "mcp_servers.hia_mcp_v2.enabled": True,
+                "mcp_servers.houdini_intelligence.enabled": True,
+            },
+            params["config"],
+        )
 
     def test_turn_start_reasserts_workspace_write_and_on_request(self) -> None:
         session, client = self.make_session()

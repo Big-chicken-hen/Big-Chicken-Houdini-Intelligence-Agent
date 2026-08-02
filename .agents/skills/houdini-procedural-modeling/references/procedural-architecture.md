@@ -68,4 +68,4 @@ Before finishing, bypass or remove exploratory branches that make no useful tech
 
 Use one or a small number of serial `hia_execute_hom` batches for substantial construction. Let each batch create or revise a coherent subsystem, set its controls, connect and position nodes, and return important paths. Inspect installed node types narrowly when compatibility is uncertain; do not impose a node allowlist or fan out repeated searches.
 
-Never let multiple tasks write the current HIP in parallel. A modeling subtask supplies a plan and HOM draft; the main task performs scene mutations serially.
+Never let multiple Threads write the current HIP in parallel. Planning or an internal modeling subtask supplies a plan and bounded HOM draft; only Execution performs scene mutations, one bounded semantic change at a time.

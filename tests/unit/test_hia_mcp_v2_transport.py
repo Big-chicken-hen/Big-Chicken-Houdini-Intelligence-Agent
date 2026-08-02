@@ -329,21 +329,100 @@ class HiaMcpV2TransportTests(unittest.TestCase):
             self.assertTrue(raised.exception.details["restart_required"])
         self.assertEqual([], executor.calls)
 
-        inspected = transport.call(
-            "hia_inspect",
-            {"paths": ["/obj"]},
-            request_id=24,
-            cancellation=CancellationToken(),
+        with self.assertRaises(TransportError) as raised:
+            transport.call(
+                "hia_inspect",
+                {"paths": ["/obj"]},
+                request_id=24,
+                cancellation=CancellationToken(),
+            )
+        self.assertEqual("HOUDINI_SESSION_CHANGED", raised.exception.code)
+        self.assertFalse(raised.exception.details["request_submitted"])
+        self.assertTrue(raised.exception.details["restart_required"])
+        self.assertEqual([], executor.calls)
+
+    def test_runtime_rejects_read_before_dispatch_on_binding_mismatch(self) -> None:
+        token = "R" * 48
+        executor = FakeExecutor()
+        session = start_test_runtime(
+            executor=executor,
+            project_root=REPOSITORY_ROOT,
+            token=token,
+            port=0,
         )
-        self.assertTrue(inspected["restart_required"])
-        self.assertEqual(
-            "HOUDINI_SESSION_CHANGED",
-            inspected["identity_warning"]["code"],
-        )
-        self.assertEqual(
-            [("hia_inspect", {"paths": ["/obj"]})],
-            executor.calls,
-        )
+        self.addCleanup(session.stop)
+        for expected_runtime_override in (
+            {"houdini_pid": os.getpid() + 1},
+            {
+                "executor_module_path": str(
+                    REPOSITORY_ROOT / "other" / "executor.py"
+                )
+            },
+        ):
+            with self.subTest(expected_runtime_override=expected_runtime_override):
+                body = json.dumps(
+                    {
+                        "protocol": WIRE_PROTOCOL,
+                        "id": 24,
+                        "tool": "hia_inspect",
+                        "arguments": {"paths": ["/obj"]},
+                        "expected_runtime": {
+                            **expected_runtime(),
+                            **expected_runtime_override,
+                        },
+                    }
+                ).encode("utf-8")
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{session.port}{EXECUTE_ROUTE}",
+                    data=body,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request, timeout=2)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(
+                    "HOUDINI_SESSION_CHANGED",
+                    payload["error"]["code"],
+                )
+                self.assertFalse(
+                    payload["error"]["details"]["request_submitted"]
+                )
+        self.assertEqual([], executor.calls)
+
+    def test_read_response_binding_change_is_rejected_as_submitted(self) -> None:
+        transport = LoopbackTransport(transport_config(45123, "Q" * 48))
+        latch_transport(transport)
+        response = {
+            "protocol": WIRE_PROTOCOL,
+            "ok": True,
+            "id": 25,
+            "result": {
+                "ok": True,
+                "runtime_identity": {
+                    **expected_identity(),
+                    "houdini_pid": os.getpid() + 1,
+                },
+            },
+        }
+
+        with mock.patch(
+            "hia_mcp_v2.transport.urllib.request.urlopen",
+            return_value=io.BytesIO(json.dumps(response).encode("utf-8")),
+        ), self.assertRaises(TransportError) as raised:
+            transport.call(
+                "hia_inspect",
+                {"paths": ["/obj"]},
+                request_id=25,
+                cancellation=CancellationToken(),
+            )
+
+        self.assertEqual("HOUDINI_SESSION_CHANGED", raised.exception.code)
+        self.assertTrue(raised.exception.details["request_submitted"])
+        self.assertFalse(raised.exception.details["automatic_retry_safe"])
 
     def test_changed_executor_source_is_advisory_and_dispatches_loaded_runtime(
         self,

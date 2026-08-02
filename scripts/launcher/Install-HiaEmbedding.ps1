@@ -1377,26 +1377,72 @@ function Assert-HiaKnowledgeManagedVenvTree {
         $vanished = $false
         for ($attempt = 1; $attempt -le 3; $attempt++) {
             try {
-                $currentItem = Get-Item `
-                    -LiteralPath $current `
-                    -Force `
-                    -ErrorAction Stop
-                if (
-                    $currentItem -isnot [System.IO.DirectoryInfo] -or
-                    ([int]$currentItem.Attributes -band
-                        [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
-                ) {
-                    throw (
-                        'Managed venv tree contains a reparse point or ' +
-                        'unknown object.'
+                if ($current.Length -ge 240) {
+                    # Windows PowerShell 5.1 can report DirectoryNotFound for
+                    # ordinary Torch package paths near MAX_PATH.  The .NET
+                    # extended-length API can enumerate the same tree without
+                    # weakening the reparse-point or project-boundary audit.
+                    $extendedCurrent = ConvertTo-HiaKnowledgeExtendedPath `
+                        -Path $current
+                    $currentAttributes = [System.IO.File]::GetAttributes(
+                        $extendedCurrent
                     )
-                }
-                $items = @(
-                    Get-ChildItem `
+                    if (
+                        ([int]$currentAttributes -band
+                            [int][System.IO.FileAttributes]::Directory) -eq 0 -or
+                        ([int]$currentAttributes -band
+                            [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+                    ) {
+                        throw (
+                            'Managed venv tree contains a reparse point or ' +
+                            'unknown object.'
+                        )
+                    }
+                    $items = @(
+                        foreach ($entry in @(
+                            [System.IO.Directory]::EnumerateFileSystemEntries(
+                                $extendedCurrent
+                            )
+                        )) {
+                            $attributes = [System.IO.File]::GetAttributes(
+                                [string]$entry
+                            )
+                            $isDirectory = (
+                                ([int]$attributes -band
+                                    [int][System.IO.FileAttributes]::Directory
+                                ) -ne 0
+                            )
+                            [pscustomobject]@{
+                                FullName = ConvertFrom-HiaKnowledgeExtendedPath `
+                                    -Path ([string]$entry)
+                                Attributes = $attributes
+                                HiaIsDirectory = $isDirectory
+                                HiaIsFile = -not $isDirectory
+                            }
+                        }
+                    )
+                } else {
+                    $currentItem = Get-Item `
                         -LiteralPath $current `
                         -Force `
                         -ErrorAction Stop
-                )
+                    if (
+                        $currentItem -isnot [System.IO.DirectoryInfo] -or
+                        ([int]$currentItem.Attributes -band
+                            [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
+                    ) {
+                        throw (
+                            'Managed venv tree contains a reparse point or ' +
+                            'unknown object.'
+                        )
+                    }
+                    $items = @(
+                        Get-ChildItem `
+                            -LiteralPath $current `
+                            -Force `
+                            -ErrorAction Stop
+                    )
+                }
                 break
             } catch {
                 $exception = $_.Exception
@@ -1421,12 +1467,16 @@ function Assert-HiaKnowledgeManagedVenvTree {
                         $current,
                         $root
                     ) -and
-                    -not (
+                    -not $(if ($current.Length -ge 240) {
+                        [System.IO.Directory]::Exists(
+                            (ConvertTo-HiaKnowledgeExtendedPath -Path $current)
+                        )
+                    } else {
                         Test-Path `
                             -LiteralPath $current `
                             -PathType Container `
                             -ErrorAction SilentlyContinue
-                    )
+                    })
                 ) {
                     $vanished = $true
                     break
@@ -1440,6 +1490,19 @@ function Assert-HiaKnowledgeManagedVenvTree {
             continue
         }
         foreach ($item in @($items)) {
+            $extendedProperty = $item.PSObject.Properties['HiaIsDirectory']
+            $isDirectory = if ($null -ne $extendedProperty) {
+                [bool]$extendedProperty.Value
+            } else {
+                $item -is [System.IO.DirectoryInfo]
+            }
+            $isFile = if (
+                $null -ne $item.PSObject.Properties['HiaIsFile']
+            ) {
+                [bool]$item.PSObject.Properties['HiaIsFile'].Value
+            } else {
+                $item -is [System.IO.FileInfo]
+            }
             $fullName = [System.IO.Path]::GetFullPath(
                 [string]$item.FullName
             )
@@ -1450,20 +1513,42 @@ function Assert-HiaKnowledgeManagedVenvTree {
                 ) -or
                 ([int]$item.Attributes -band
                     [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                ($item -isnot [System.IO.DirectoryInfo] -and
-                    $item -isnot [System.IO.FileInfo])
+                (-not $isDirectory -and -not $isFile)
             ) {
                 throw (
                     'Managed venv tree contains a reparse point or ' +
                     'unknown object.'
                 )
             }
-            if ($item -is [System.IO.DirectoryInfo]) {
+            if ($isDirectory) {
                 $pending.Push($fullName)
             }
         }
     }
     return $resolved
+}
+
+function ConvertTo-HiaKnowledgeExtendedPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    if ($full.StartsWith('\\?\')) { return $full }
+    if ($full.StartsWith('\\')) {
+        return '\\?\UNC\' + $full.Substring(2)
+    }
+    return '\\?\' + $full
+}
+
+function ConvertFrom-HiaKnowledgeExtendedPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ($Path.StartsWith('\\?\UNC\')) {
+        return '\\' + $Path.Substring(8)
+    }
+    if ($Path.StartsWith('\\?\')) {
+        return $Path.Substring(4)
+    }
+    return $Path
 }
 
 function Get-HiaKnowledgeTransactionPaths {
@@ -1557,30 +1642,12 @@ function Remove-HiaKnowledgeInstallerOwnedDirectory {
         -Path $Path `
         -Kind $Kind `
         -InstallId $InstallId
-    Remove-Item -LiteralPath $validated -Recurse -Force
-    return $true
-}
-
-function Copy-HiaKnowledgeManagedVenvTree {
-    param(
-        [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)][string]$Source,
-        [Parameter(Mandatory = $true)][string]$Destination
-    )
-
-    $safeSource = Assert-HiaKnowledgeManagedVenvTree `
-        -ProjectRoot $ProjectRoot `
-        -Path $Source
-    Assert-HiaKnowledgeProjectDirectory `
-        -ProjectRoot $ProjectRoot `
-        -Path $Destination | Out-Null
-    if (Test-Path -LiteralPath $Destination -ErrorAction SilentlyContinue) {
-        throw 'Managed venv restore destination already exists.'
+    $extended = ConvertTo-HiaKnowledgeExtendedPath -Path $validated
+    [System.IO.Directory]::Delete($extended, $true)
+    if ([System.IO.Directory]::Exists($extended)) {
+        throw 'Managed venv cleanup target still exists after exact deletion.'
     }
-    Copy-Item -LiteralPath $safeSource -Destination $Destination -Recurse
-    Assert-HiaKnowledgeManagedVenvTree `
-        -ProjectRoot $ProjectRoot `
-        -Path $Destination | Out-Null
+    return $true
 }
 
 function New-HiaKnowledgeManagedVenv {
@@ -1592,7 +1659,8 @@ function New-HiaKnowledgeManagedVenv {
         [Parameter(Mandatory = $true)][string]$PythonInstallRoot,
         [Parameter(Mandatory = $true)][string]$UvExe,
         [Parameter(Mandatory = $true)][hashtable]$Environment,
-        [Parameter(Mandatory = $true)][string[]]$RemoveEnvironment
+        [Parameter(Mandatory = $true)][string[]]$RemoveEnvironment,
+        [bool]$RepairRequested = $false
     )
 
     $expectedCanonical = Join-Path $ProjectRoot '.venv'
@@ -1617,23 +1685,29 @@ function New-HiaKnowledgeManagedVenv {
         -Create | Out-Null
 
     if (Test-Path -LiteralPath $VenvRoot -ErrorAction SilentlyContinue) {
-        if (
-            -not (Test-Path -LiteralPath $VenvRoot -PathType Container) -or
-            $null -eq (
-                Get-HiaKnowledgeManagedVenvMarker `
-                    -ProjectRoot $ProjectRoot `
-                    -VenvRoot $VenvRoot
-            ) -or
-            -not (
-                Test-HiaKnowledgeManagedVenv `
-                    -ProjectRoot $ProjectRoot `
-                    -VenvRoot $VenvRoot `
-                    -PythonInstallRoot $PythonInstallRoot `
-                    -Environment $Environment `
-                    -RemoveEnvironment $RemoveEnvironment
-            )
+        $existingMarker = if (
+            Test-Path -LiteralPath $VenvRoot -PathType Container
         ) {
-            throw 'Existing root .venv is unmarked, partial, or unsafe; refusing to replace it.'
+            Get-HiaKnowledgeManagedVenvMarker `
+                -ProjectRoot $ProjectRoot `
+                -VenvRoot $VenvRoot
+        } else {
+            $null
+        }
+        if ($null -eq $existingMarker) {
+            throw 'Existing root .venv is unmarked or unsafe; refusing to replace it.'
+        }
+        Assert-HiaKnowledgeManagedVenvTree `
+            -ProjectRoot $ProjectRoot `
+            -Path $VenvRoot | Out-Null
+        $existingRuntimeValid = Test-HiaKnowledgeManagedVenv `
+            -ProjectRoot $ProjectRoot `
+            -VenvRoot $VenvRoot `
+            -PythonInstallRoot $PythonInstallRoot `
+            -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment
+        if (-not $existingRuntimeValid -and -not $RepairRequested) {
+            throw 'Existing root .venv is partial; run environment-repair to replace it safely.'
         }
     }
 
@@ -1654,88 +1728,124 @@ function New-HiaKnowledgeManagedVenv {
         }
     }
     $stagingPath = [string]$paths.staging
-    Write-HiaEmbeddingInstallLog `
-        -Level 'INFO' `
-        -Message (
-            'Staged managed venv transaction path: {0}; length={1}.' -f
-                $stagingPath,
-                $stagingPath.Length
-        )
-
-    Write-HiaEmbeddingInstallLog `
-        -Level 'INFO' `
-        -Message 'Creating the staged project-local .venv from managed Python.'
-    $venvResult = Invoke-HiaEmbeddingChildProcess `
-        -FilePath $UvExe `
-        -Arguments @(
-            '--no-config',
-            'venv',
-            '--python', $ManagedPython,
-            '--managed-python',
-            '--no-python-downloads',
-            '--relocatable',
-            [string]$paths.staging
-        ) `
-        -Environment $Environment `
-        -RemoveEnvironment $RemoveEnvironment `
-        -WorkingDirectory $ProjectRoot
-    Assert-HiaEmbeddingProcessSucceeded `
-        -Result $venvResult `
-        -Operation 'Staged project-local .venv creation'
-    Assert-HiaKnowledgeProjectDirectory `
-        -ProjectRoot $ProjectRoot `
-        -Path ([string]$paths.staging) | Out-Null
-
-    $markerPath = Join-Path (
-        [string]$paths.staging
-    ) $script:HiaManagedVenvMarkerName
-    $relativeManagedPython = (
-        [System.IO.Path]::GetFullPath($ManagedPython).Substring(
-            [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\').Length + 1
-        ) -replace '\\', '/'
-    )
-    $markerPayload = [ordered]@{
-        schema = $script:HiaManagedVenvMarkerSchema
-        role = 'hia-embedding'
-        install_id = $installId
-        python_version = $script:HiaKnowledgePythonVersion
-        created_at_utc = [DateTime]::UtcNow.ToString('o')
-        managed_python = $relativeManagedPython
-    } | ConvertTo-Json -Compress
-    $markerStream = [System.IO.File]::Open(
-        $markerPath,
-        [System.IO.FileMode]::CreateNew,
-        [System.IO.FileAccess]::Write,
-        [System.IO.FileShare]::Read
-    )
     try {
-        $markerBytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
-            $markerPayload + [Environment]::NewLine
-        )
-        $markerStream.Write($markerBytes, 0, $markerBytes.Length)
-        $markerStream.Flush($true)
-    } finally {
-        $markerStream.Dispose()
-    }
-    if (-not (
-        Test-HiaKnowledgeManagedVenv `
-            -ProjectRoot $ProjectRoot `
-            -VenvRoot ([string]$paths.staging) `
-            -PythonInstallRoot $PythonInstallRoot `
+        Write-HiaEmbeddingInstallLog `
+            -Level 'INFO' `
+            -Message (
+                'Staged managed venv transaction path: {0}; length={1}.' -f
+                    $stagingPath,
+                    $stagingPath.Length
+            )
+
+        Write-HiaEmbeddingInstallLog `
+            -Level 'INFO' `
+            -Message 'Creating the staged project-local .venv from managed Python.'
+        $venvResult = Invoke-HiaEmbeddingChildProcess `
+            -FilePath $UvExe `
+            -Arguments @(
+                '--no-config',
+                'venv',
+                '--python', $ManagedPython,
+                '--managed-python',
+                '--no-python-downloads',
+                '--relocatable',
+                [string]$paths.staging
+            ) `
             -Environment $Environment `
-            -RemoveEnvironment $RemoveEnvironment
-    )) {
-        throw 'The staged project-local .venv did not pass base portability validation.'
-    }
-    return [pscustomobject]@{
-        venv_root = [string]$paths.canonical
-        legacy_root = [string]$paths.legacy
-        transaction_root = [string]$paths.transaction_root
-        staging_root = [string]$paths.staging
-        staging_python = Join-Path ([string]$paths.staging) 'Scripts\python.exe'
-        backup_root = [string]$paths.backup
-        failed_root = [string]$paths.failed
-        install_id = $installId
+            -RemoveEnvironment $RemoveEnvironment `
+            -WorkingDirectory $ProjectRoot
+        Assert-HiaEmbeddingProcessSucceeded `
+            -Result $venvResult `
+            -Operation 'Staged project-local .venv creation'
+        Assert-HiaKnowledgeProjectDirectory `
+            -ProjectRoot $ProjectRoot `
+            -Path ([string]$paths.staging) | Out-Null
+
+        $markerPath = Join-Path (
+            [string]$paths.staging
+        ) $script:HiaManagedVenvMarkerName
+        $relativeManagedPython = (
+            [System.IO.Path]::GetFullPath($ManagedPython).Substring(
+                [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\').Length + 1
+            ) -replace '\\', '/'
+        )
+        $markerPayload = [ordered]@{
+            schema = $script:HiaManagedVenvMarkerSchema
+            role = 'hia-embedding'
+            install_id = $installId
+            python_version = $script:HiaKnowledgePythonVersion
+            created_at_utc = [DateTime]::UtcNow.ToString('o')
+            managed_python = $relativeManagedPython
+        } | ConvertTo-Json -Compress
+        $markerStream = [System.IO.File]::Open(
+            $markerPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::Read
+        )
+        try {
+            $markerBytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
+                $markerPayload + [Environment]::NewLine
+            )
+            $markerStream.Write($markerBytes, 0, $markerBytes.Length)
+            $markerStream.Flush($true)
+        } finally {
+            $markerStream.Dispose()
+        }
+        if (-not (
+            Test-HiaKnowledgeManagedVenv `
+                -ProjectRoot $ProjectRoot `
+                -VenvRoot ([string]$paths.staging) `
+                -PythonInstallRoot $PythonInstallRoot `
+                -Environment $Environment `
+                -RemoveEnvironment $RemoveEnvironment
+        )) {
+            throw 'The staged project-local .venv did not pass base portability validation.'
+        }
+        return [pscustomobject]@{
+            venv_root = [string]$paths.canonical
+            legacy_root = [string]$paths.legacy
+            transaction_root = [string]$paths.transaction_root
+            staging_root = [string]$paths.staging
+            staging_python = Join-Path ([string]$paths.staging) 'Scripts\python.exe'
+            backup_root = [string]$paths.backup
+            failed_root = [string]$paths.failed
+            install_id = $installId
+        }
+    } catch {
+        $creationFailure = $_.Exception
+        try {
+            if (Test-Path -LiteralPath $paths.staging -ErrorAction SilentlyContinue) {
+                [void](Remove-HiaKnowledgeInstallerOwnedDirectory `
+                    -ProjectRoot $ProjectRoot `
+                    -Path ([string]$paths.staging) `
+                    -Kind 'staging' `
+                    -InstallId $installId)
+            }
+            if (Test-Path -LiteralPath $paths.transaction_root -PathType Container) {
+                $validatedTransactionRoot = Assert-HiaKnowledgeProjectDirectory `
+                    -ProjectRoot $ProjectRoot `
+                    -Path ([string]$paths.transaction_root)
+                $remaining = @(
+                    Get-ChildItem `
+                        -LiteralPath $validatedTransactionRoot `
+                        -Force `
+                        -ErrorAction Stop
+                )
+                if ($remaining.Count -ne 0) {
+                    throw 'The exact failed transaction root contains an unexpected surviving item.'
+                }
+                [System.IO.Directory]::Delete($validatedTransactionRoot, $false)
+            }
+        } catch {
+            throw (
+                'Staged project-local .venv preparation failed: {0}. ' +
+                'Exact transaction cleanup also failed: {1}' -f
+                    $creationFailure.Message,
+                    [string]$_.Exception.Message
+            )
+        }
+        throw $creationFailure
     }
 }
 
@@ -1817,10 +1927,13 @@ function Publish-HiaKnowledgeManagedVenv {
             -not (Test-Path -LiteralPath $paths.canonical) -and
             (Test-Path -LiteralPath $paths.backup -PathType Container)
         ) {
-            Copy-HiaKnowledgeManagedVenvTree `
+            [System.IO.Directory]::Move(
+                [string]$paths.backup,
+                [string]$paths.canonical
+            )
+            Assert-HiaKnowledgeManagedVenvTree `
                 -ProjectRoot $ProjectRoot `
-                -Source ([string]$paths.backup) `
-                -Destination ([string]$paths.canonical)
+                -Path ([string]$paths.canonical) | Out-Null
         }
         throw
     }
@@ -1918,23 +2031,27 @@ function Undo-HiaKnowledgeManagedVenvPublication {
     } elseif (Test-Path -LiteralPath $paths.canonical) {
         throw 'Knowledge environment rollback found a non-directory root .venv.'
     }
+    $restoredVenv = ''
     if (-not [string]::IsNullOrWhiteSpace($resolvedBackup)) {
-        Copy-HiaKnowledgeManagedVenvTree `
+        [System.IO.Directory]::Move(
+            $resolvedBackup,
+            [string]$paths.canonical
+        )
+        Assert-HiaKnowledgeManagedVenvTree `
             -ProjectRoot $ProjectRoot `
-            -Source $resolvedBackup `
-            -Destination ([string]$paths.canonical)
+            -Path ([string]$paths.canonical) | Out-Null
+        $restoredVenv = [string]$paths.canonical
+        $resolvedBackup = ''
     }
     Write-HiaEmbeddingInstallLog `
         -Level 'WARNING' `
         -Message (
             'The failed replacement was isolated and the prior root .venv ' +
-            'was preserved from its transaction backup.'
+            'was atomically restored from its transaction backup.'
         )
     return [pscustomobject]@{
-        restored_venv = if (
-            [string]::IsNullOrWhiteSpace($resolvedBackup)
-        ) { '' } else { [string]$paths.canonical }
-        preserved_backup = $resolvedBackup
+        restored_venv = $restoredVenv
+        preserved_backup = ''
         isolated_failed_venv = if (
             $currentMoved
         ) { [string]$paths.failed } else { '' }
@@ -2122,16 +2239,21 @@ function Invoke-HiaKnowledgeParserEnvironment {
             -Create | Out-Null
     }
     if (Test-Path -LiteralPath $venvRoot -ErrorAction SilentlyContinue) {
-        if (
-            -not (Test-Path -LiteralPath $venvRoot -PathType Container) -or
-            $null -eq (
-                Get-HiaKnowledgeManagedVenvMarker `
-                    -ProjectRoot $ProjectRoot `
-                    -VenvRoot $venvRoot
-            )
+        $canonicalMarker = if (
+            Test-Path -LiteralPath $venvRoot -PathType Container
         ) {
+            Get-HiaKnowledgeManagedVenvMarker `
+                -ProjectRoot $ProjectRoot `
+                -VenvRoot $venvRoot
+        } else {
+            $null
+        }
+        if ($null -eq $canonicalMarker) {
             throw 'Existing root .venv is unmarked or unsafe; refusing to repair or replace it.'
         }
+        Assert-HiaKnowledgeManagedVenvTree `
+            -ProjectRoot $ProjectRoot `
+            -Path $venvRoot | Out-Null
     }
 
     $removeEnvironment = @(Get-HiaKnowledgeRemoveEnvironment)
@@ -2189,43 +2311,52 @@ function Invoke-HiaKnowledgeParserEnvironment {
             -Environment $childEnvironment `
             -RemoveEnvironment $removeEnvironment
         if (-not $canonicalBaseValid) {
-            throw 'Existing root .venv is partial or no longer uses managed Python; refusing to replace it.'
-        }
-        $canonicalParserValid = Test-HiaKnowledgeManagedVenv `
-            -ProjectRoot $ProjectRoot `
-            -VenvRoot $venvRoot `
-            -PythonInstallRoot $pythonInstallRoot `
-            -Environment $childEnvironment `
-            -RemoveEnvironment $removeEnvironment `
-            -RequireParser
-        if (
-            $canonicalParserValid -and
-            -not $RepairRequested -and
-            -not $DeferPublish
-        ) {
-            $verifiedExisting = Get-HiaKnowledgePythonProbe `
-                -PythonExe (Join-Path $venvRoot 'Scripts\python.exe') `
+            if (-not $RepairRequested) {
+                throw 'Existing root .venv is partial or no longer uses managed Python; run environment-repair to replace it safely.'
+            }
+            Write-HiaEmbeddingInstallLog `
+                -Level 'WARNING' `
+                -Message (
+                    'The marker-owned root .venv is incomplete; explicit ' +
+                    'repair will replace it through the staged transaction.'
+                )
+        } else {
+            $canonicalParserValid = Test-HiaKnowledgeManagedVenv `
+                -ProjectRoot $ProjectRoot `
+                -VenvRoot $venvRoot `
+                -PythonInstallRoot $pythonInstallRoot `
                 -Environment $childEnvironment `
                 -RemoveEnvironment $removeEnvironment `
-                -WorkingDirectory $ProjectRoot
-            return [ordered]@{
-                status = 'already_installed'
-                mode = 'knowledge-parser-only'
-                transaction_pending = $false
-                venv_root = $venvRoot
-                worker_python = Join-Path $venvRoot 'Scripts\python.exe'
-                python_version = [string]$verifiedExisting.version
-                python_bits = [int]$verifiedExisting.bits
-                base_prefix = [string]$verifiedExisting.base_prefix
-                portable = $true
-                pypdf_version = [string]$verifiedExisting.pypdf_version
-                uv_version = [string]$uv.version
-                backup_root = ''
-                install_id = ''
-                installed_torch = $false
-                installed_model = $false
-                uv_cache_cleanup_candidate = Join-Path $cacheRoot 'uv'
-                log_path = [string]$script:HiaEmbeddingInstallLogPath
+                -RequireParser
+            if (
+                $canonicalParserValid -and
+                -not $RepairRequested -and
+                -not $DeferPublish
+            ) {
+                $verifiedExisting = Get-HiaKnowledgePythonProbe `
+                    -PythonExe (Join-Path $venvRoot 'Scripts\python.exe') `
+                    -Environment $childEnvironment `
+                    -RemoveEnvironment $removeEnvironment `
+                    -WorkingDirectory $ProjectRoot
+                return [ordered]@{
+                    status = 'already_installed'
+                    mode = 'knowledge-parser-only'
+                    transaction_pending = $false
+                    venv_root = $venvRoot
+                    worker_python = Join-Path $venvRoot 'Scripts\python.exe'
+                    python_version = [string]$verifiedExisting.version
+                    python_bits = [int]$verifiedExisting.bits
+                    base_prefix = [string]$verifiedExisting.base_prefix
+                    portable = $true
+                    pypdf_version = [string]$verifiedExisting.pypdf_version
+                    uv_version = [string]$uv.version
+                    backup_root = ''
+                    install_id = ''
+                    installed_torch = $false
+                    installed_model = $false
+                    uv_cache_cleanup_candidate = Join-Path $cacheRoot 'uv'
+                    log_path = [string]$script:HiaEmbeddingInstallLogPath
+                }
             }
         }
     }
@@ -2241,7 +2372,8 @@ function Invoke-HiaKnowledgeParserEnvironment {
             -PythonInstallRoot $pythonInstallRoot `
             -UvExe $uvExecutable `
             -Environment $childEnvironment `
-            -RemoveEnvironment $removeEnvironment
+            -RemoveEnvironment $removeEnvironment `
+            -RepairRequested $RepairRequested
         $stagingPython = [string]$transaction.staging_python
         $parserArguments = @(
             '--no-config',
