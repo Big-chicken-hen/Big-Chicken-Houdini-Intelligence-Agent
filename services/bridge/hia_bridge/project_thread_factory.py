@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
 
-from .project_contracts import ProjectState, ProjectStatus, Role, RoleThread
+from .project_contracts import ProjectState, Role, RoleThread
 from .project_permissions import (
     permission_profile,
     require_complete_project_roles,
@@ -44,8 +44,7 @@ _PROJECT_PROTOCOL_INSTRUCTION = (
     "it is the only current project action. Follow its response_contract "
     "exactly, return one JSON object "
     "only, and do not call update_goal. Do not start independent work outside "
-    "the envelope. Do not create, fork, or delegate to internal subagents; the "
-    "five native project role Threads are the complete project team. On the first "
+    "the envelope. The five native project role Threads remain the baseline team. On the first "
     "project Turn, respond naturally to the user's task. If fulfilling it "
     "requires the live Houdini scene, hand it to Planning; otherwise answer it "
     "yourself and complete the project. Never expose an eligibility classifier "
@@ -57,7 +56,13 @@ _PROJECT_PROTOCOL_INSTRUCTION = (
 )
 
 ROLE_INSTRUCTIONS = {
-    role: instruction + _PROJECT_PROTOCOL_INSTRUCTION
+    role: instruction
+    + _PROJECT_PROTOCOL_INSTRUCTION
+    + (
+        " Do not create, fork, or delegate to internal subagents; Execution must remain the sole serialized scene writer."
+        if role is Role.EXECUTION
+        else " If native subagent tools are actually available, use them only for genuinely parallel, non-overlapping read-only research or review; they never replace a project role and must not call HIA/HOM."
+    )
     for role, instruction in ROLE_INSTRUCTIONS.items()
 }
 
@@ -86,7 +91,7 @@ class ProjectThreadFactory:
             server_transports,
         )
 
-    def start_role(
+    def _start_role(
         self,
         state: ProjectState,
         role: Role,
@@ -159,47 +164,6 @@ class ProjectThreadFactory:
         }
         return replace(state, **changes)
 
-    def start_supervisor(
-        self,
-        state: ProjectState,
-        *,
-        model: str | None = None,
-        effort: str | None = None,
-        service_tier: str | None = None,
-    ) -> ProjectState:
-        if state.status is not ProjectStatus.PLANNING:
-            raise ValueError("Supervisor must be created while project planning starts")
-        started = self.start_role(
-            state,
-            Role.SUPERVISOR,
-            model=model,
-            effort=effort,
-            service_tier=service_tier,
-        )
-        return started
-
-    def provision_workers(self, state: ProjectState) -> ProjectState:
-        """Create the remaining four native roles immediately after Supervisor."""
-
-        if set(state.roles) != {Role.SUPERVISOR}:
-            raise ValueError("project role creation requires exactly one Supervisor")
-        supervisor = state.roles[Role.SUPERVISOR]
-        for role in (
-            Role.PLANNING,
-            Role.EXECUTION,
-            Role.VISUAL_REVIEW,
-            Role.TECHNICAL_REVIEW,
-        ):
-            state = self.start_role(
-                state,
-                role,
-                model=supervisor.model,
-                effort=supervisor.effort,
-                service_tier=supervisor.service_tier,
-            )
-        require_complete_project_roles(state.roles)
-        return state
-
     def create_all_roles(
         self,
         state: ProjectState,
@@ -215,7 +179,7 @@ class ProjectThreadFactory:
         created: list[str] = []
         try:
             for role in Role:
-                state = self.start_role(
+                state = self._start_role(
                     state,
                     role,
                     model=model,

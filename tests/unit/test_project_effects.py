@@ -19,6 +19,7 @@ from services.bridge.hia_bridge.project_effects import (
     ProjectRoleError,
     ProjectRoleExecutor,
     _review_coverage_proof,
+    _response_contract,
     _stage_evidence_needs,
 )
 from services.bridge.hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent
@@ -60,14 +61,22 @@ class _Client:
             return self.histories.get(thread_id, {"thread": {"id": thread_id, "turns": []}})
         raise AssertionError(f"unexpected RPC: {method}")
 
-    def start_turn_when_idle(self, params: dict, timeout_seconds: float):
-        return self.request("turn/start", params)
-
     def wait_for_turn(self, thread_id: str, turn_id: str, timeout_seconds: float) -> CompletedTurn:
         if not self.payloads:
             raise AssertionError("no queued payload")
         payload = self.payloads.pop(0)
         return CompletedTurn(thread_id, turn_id, "completed", payload)
+
+
+class _UncreatedTurnError(RuntimeError):
+    turn_created = False
+
+
+class _BusyClient(_Client):
+    def request(self, method: str, params: dict):
+        if method == "turn/start":
+            raise _UncreatedTurnError("project Thread is busy")
+        return super().request(method, params)
 
 
 class ProjectRoleExecutorTests(unittest.TestCase):
@@ -171,6 +180,17 @@ class ProjectRoleExecutorTests(unittest.TestCase):
                 {"depth": "direct", "required_evidence": ["visual"]}
             ),
         )
+
+    def test_planning_contract_uses_only_legal_evidence_tokens(self) -> None:
+        contract = _response_contract("hia-project-plan/1")
+        stage = contract["stages"][0]
+        evidence = stage["required_evidence"]
+        self.assertEqual("array", evidence["output_type"])
+        self.assertEqual(
+            [["visual"], ["technical"], ["visual", "technical"]],
+            evidence["allowed_combinations"],
+        )
+        self.assertIn("only evidence genuinely needed", evidence["rule"])
         self.assertEqual(
             (False, True),
             _stage_evidence_needs(
@@ -241,6 +261,23 @@ class ProjectRoleExecutorTests(unittest.TestCase):
             "hia-project-start/1",
             time.monotonic() + 1.0,
         )
+        self.assertIsNone(writer.snapshot()["owner"])
+        self.assertFalse(writer.snapshot()["starting"])
+        ordinary = writer.reserve("ordinary", "ordinary-thread")
+        writer.abandon_uncreated(ordinary)
+
+    def test_busy_execution_thread_releases_uncreated_writer_without_waiting(self) -> None:
+        writer = SceneWriterOwnership()
+        started = time.monotonic()
+        with self.assertRaises(_UncreatedTurnError):
+            self.executor(_BusyClient(), writer=writer)._run_structured(
+                self.state,
+                Role.EXECUTION,
+                {"schema": "hia-project-role-request/1", "action": "probe"},
+                "hia-project-start/1",
+                time.monotonic() + 1.0,
+            )
+        self.assertLess(time.monotonic() - started, 0.25)
         self.assertIsNone(writer.snapshot()["owner"])
         self.assertFalse(writer.snapshot()["starting"])
 

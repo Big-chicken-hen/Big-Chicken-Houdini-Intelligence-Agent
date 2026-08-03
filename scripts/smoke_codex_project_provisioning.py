@@ -1,4 +1,4 @@
-"""Real app-server smoke for lazy five-role project provisioning and isolation."""
+"""Real app-server smoke for atomic five-role project creation and isolation."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "services" / "bridge"))
 from hia_bridge.codex_stdio import CodexStdioClient  # noqa: E402
 from hia_bridge.project_contracts import (  # noqa: E402
     ProjectState,
-    ProjectStatus,
     Role,
     authoritative_task_identity,
 )
@@ -174,7 +173,6 @@ def main() -> int:
     read_ids: list[str] = []
     cleanup_error: str | None = None
     initialize_result: Any = None
-    supervisor_only_ids: list[str] = []
     final_role_ids: dict[str, str] = {}
     permission_records: list[dict[str, Any]] = []
     try:
@@ -186,7 +184,6 @@ def main() -> int:
         project_id = f"smoke-project-{run_id}"
         state = ProjectState(
             project_id=project_id,
-            goal_thread_id=f"pending-{project_id}",
             authoritative_task_id=task_id,
             authoritative_task_sha256=task_digest,
         )
@@ -208,37 +205,10 @@ def main() -> int:
             "hia_mcp_v2",
             transports,
         )
-        state = factory.start_supervisor(state)
-        created_ids.extend(binding.thread_id for binding in state.roles.values())
-        if set(state.roles) != {Role.SUPERVISOR}:
-            raise RuntimeError("lazy provisioning created roles before eligibility")
-        supervisor_id = state.roles[Role.SUPERVISOR].thread_id
-        supervisor_read = client.request(
-            "thread/read",
-            {"threadId": supervisor_id, "includeTurns": False},
-        )
-        supervisor_thread = (
-            supervisor_read.get("thread")
-            if isinstance(supervisor_read, dict)
-            else None
-        )
-        if (
-            not isinstance(supervisor_thread, dict)
-            or supervisor_thread.get("id") != supervisor_id
-            or len(recorder.accepted_starts) != 1
-        ):
-            raise RuntimeError("real app-server did not prove Supervisor-only intake")
-        supervisor_only_ids = [supervisor_id]
-
-        state = replace(
-            state,
-            status=ProjectStatus.PROVISIONING_ROLES,
-            revision=state.revision + 1,
-        )
-        state = factory.provision_workers(state)
+        state = factory.create_all_roles(state)
         created_ids = [state.roles[role].thread_id for role in Role]
-        if set(state.roles) != set(Role):
-            raise RuntimeError("eligible provisioning did not create exactly five roles")
+        if set(state.roles) != set(Role) or len(recorder.accepted_starts) != 5:
+            raise RuntimeError("atomic project creation did not create exactly five roles")
 
         accepted_by_source = {
             item["threadSource"]: item for item in recorder.accepted_starts
@@ -350,7 +320,6 @@ def main() -> int:
         "ok": (
             cleanup_error is None
             and not client.is_running
-            and len(supervisor_only_ids) == 1
             and len(final_role_ids) == 5
             and set(read_ids) == set(final_role_ids.values())
         ),
@@ -363,10 +332,9 @@ def main() -> int:
             "userAgent": initialize.get("userAgent"),
             "platformFamily": initialize.get("platformFamily"),
         },
-        "lazy_provisioning": {
-            "supervisor_only_thread_ids": supervisor_only_ids,
-            "other_roles_before_eligibility": 0,
-            "final_role_thread_ids": final_role_ids,
+        "atomic_role_creation": {
+            "role_thread_ids": final_role_ids,
+            "created_count": len(final_role_ids),
         },
         "permission_isolation": permission_records,
         "read_back_thread_ids": read_ids,

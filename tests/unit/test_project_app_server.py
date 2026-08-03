@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import threading
-import time
 import unittest
 
 from services.bridge.hia_bridge.events import EventBuffer
@@ -111,7 +109,7 @@ class ProjectAppServerTests(unittest.TestCase):
         self.assertEqual("visual", visual.payload["role"])
         self.assertEqual("technical", technical.payload["role"])
 
-    def test_same_thread_workflow_waits_while_guidance_start_fails_fast(self) -> None:
+    def test_same_thread_start_fails_fast_without_queueing(self) -> None:
         events = EventBuffer()
         client = _Client(events)
         adapter = ProjectRoleClient(client, events, poll_interval_seconds=0.002)
@@ -120,25 +118,17 @@ class ProjectAppServerTests(unittest.TestCase):
         with self.assertRaises(ProjectAppServerError) as busy:
             adapter.request("turn/start", {"threadId": "thread-supervisor", "input": []})
         self.assertEqual("PROJECT_THREAD_BUSY", busy.exception.code)
+        self.assertIs(False, busy.exception.turn_created)
 
-        result: dict[str, object] = {}
-
-        def start_second() -> None:
-            client.next_turn = "turn-second"
-            result["ack"] = adapter.start_turn_when_idle(
-                {"threadId": "thread-supervisor", "input": []}, 0.5
-            )
-
-        worker = threading.Thread(target=start_second)
-        worker.start()
-        time.sleep(0.03)
-        self.assertTrue(worker.is_alive())
         _agent(events, "thread-supervisor", "turn-first", '{"schema":"first/1"}')
         _terminal(events, "thread-supervisor", "turn-first")
         adapter.wait_for_turn("thread-supervisor", "turn-first", 0.2)
-        worker.join(0.5)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual("turn-second", result["ack"]["turn"]["id"])
+
+        client.next_turn = "turn-second"
+        ack = adapter.request(
+            "turn/start", {"threadId": "thread-supervisor", "input": []}
+        )
+        self.assertEqual("turn-second", ack["turn"]["id"])
 
     def test_keeps_only_current_turn_completed_hia_items(self) -> None:
         events = EventBuffer()

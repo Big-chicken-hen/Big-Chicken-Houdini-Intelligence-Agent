@@ -210,7 +210,7 @@ class ProjectTeamService:
         return None
 
     def read_role_thread(self, thread_id: str) -> dict[str, Any]:
-        """Read one project role without resuming it or changing ordinary Session."""
+        """Read one project role without a resume call or ordinary Session mutation."""
 
         identity = self.role_identity_for_thread(thread_id)
         if identity is None:

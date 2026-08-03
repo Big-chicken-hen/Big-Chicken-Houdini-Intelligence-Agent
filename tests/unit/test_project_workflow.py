@@ -119,17 +119,25 @@ class ProjectWorkflowTests(unittest.TestCase):
 
     def test_bridge_restart_does_not_auto_resume_or_recreate_queue(self) -> None:
         self.registry.put(_record("p1", ProjectStatus.EXECUTING, stage="stage-1"))
+        hia_writes = ["stage-1 completed before Bridge exit"]
+
+        class _ReplayDetector:
+            def execute(self, state, action):
+                hia_writes.append(f"unexpected replay: {action.kind}")
+                return ProjectActionResult(state, None)
+
         restarted_registry = ProjectRegistry(self.registry.path)
         restarted_runner = ProjectRunner(restarted_registry)
         host = ProjectWorkflowHost(
             registry=restarted_registry,
             runner=restarted_runner,
-            executor_factory=lambda _: _Executor(),
+            executor_factory=lambda _: _ReplayDetector(),
         )
         try:
             self.assertEqual(ProjectStatus.STOPPED, restarted_registry.require("p1").state.status)
             self.assertFalse(restarted_runner.has_pending("p1"))
             self.assertFalse(host.start("p1"))
+            self.assertEqual(["stage-1 completed before Bridge exit"], hia_writes)
         finally:
             host.close()
 

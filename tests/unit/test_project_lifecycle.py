@@ -74,6 +74,31 @@ class ProjectLifecycleTests(unittest.TestCase):
         self.assertEqual(ProjectStatus.REVIEWING, state.status)
         self.assertEqual([ProjectCommand.START_REVIEWS], [item.kind for item in commands])
 
+    def test_plan_rejection_allows_one_revision_then_waits_for_user(self) -> None:
+        state = _state(ProjectStatus.PLANNING)
+        state, commands = self.apply(
+            state,
+            ProjectEvent.PLAN_REJECTED,
+            feedback="fix stage coverage",
+        )
+        self.assertEqual(ProjectStatus.PLANNING, state.status)
+        self.assertEqual(1, state.plan_rejection_count)
+        self.assertEqual([ProjectCommand.REQUEST_PLAN], [item.kind for item in commands])
+        self.assertEqual(
+            {"supervisor_feedback": "fix stage coverage"},
+            dict(commands[0].data or {}),
+        )
+
+        state, commands = self.apply(
+            state,
+            ProjectEvent.PLAN_REJECTED,
+            feedback="still incomplete",
+        )
+        self.assertEqual(ProjectStatus.WAITING_USER, state.status)
+        self.assertEqual(2, state.plan_rejection_count)
+        self.assertEqual((), commands)
+        self.assertEqual("still incomplete", state.attention_reason)
+
     def test_non_scene_supervisor_answer_completes_without_workers_or_goal(self) -> None:
         state, _ = self.apply(_state(), ProjectEvent.PROJECT_STARTED)
         state, commands = self.apply(state, ProjectEvent.PROJECT_ANSWERED)

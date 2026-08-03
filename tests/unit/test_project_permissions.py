@@ -16,17 +16,31 @@ from services.bridge.hia_bridge.project_permissions import (
     validate_observable_role_response,
     validate_role_permissions,
 )
-from services.bridge.hia_bridge.project_thread_factory import ROLE_INSTRUCTIONS, ProjectThreadFactory
+from services.bridge.hia_bridge.project_thread_factory import (
+    ROLE_INSTRUCTIONS,
+    ProjectRoleCreationError,
+    ProjectThreadFactory,
+)
 from tests.unit.project_test_support import observable_thread_response, server_transports
 
 
 class _Client:
-    def __init__(self, *, fail_role: Role | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_role: Role | None = None,
+        fail_delete_ids: set[str] | None = None,
+    ) -> None:
         self.fail_role = fail_role
+        self.fail_delete_ids = set(fail_delete_ids or ())
         self.calls: list[tuple[str, dict]] = []
 
     def request(self, method: str, params: dict):
         self.calls.append((method, dict(params)))
+        if method == "thread/delete":
+            if params["threadId"] in self.fail_delete_ids:
+                raise RuntimeError("injected delete failure")
+            return {"deleted": True}
         if method != "thread/start":
             raise AssertionError(f"unexpected RPC: {method}")
         role = Role(params["threadSource"].rsplit("/", 1)[-1])
@@ -46,7 +60,7 @@ def _state() -> ProjectState:
 
 
 class ProjectPermissionTests(unittest.TestCase):
-    def test_role_instructions_forbid_internal_project_subagents(self) -> None:
+    def test_role_instructions_keep_execution_serial_and_readonly_collaboration_bounded(self) -> None:
         for role, instruction in ROLE_INSTRUCTIONS.items():
             with self.subTest(role=role):
                 self.assertIn("hia-project-role-request/1", instruction)
@@ -54,6 +68,12 @@ class ProjectPermissionTests(unittest.TestCase):
                 self.assertIn("do not call update_goal", instruction)
                 self.assertNotIn("spawn_agent", instruction)
                 self.assertNotIn("collabAgentToolCall", instruction)
+                if role is Role.EXECUTION:
+                    self.assertIn("sole serialized scene writer", instruction)
+                    self.assertIn("Do not create, fork, or delegate", instruction)
+                else:
+                    self.assertIn("native subagent tools are actually available", instruction)
+                    self.assertIn("non-overlapping read-only", instruction)
 
     def test_non_execution_is_read_only_and_execution_is_workspace_write(self) -> None:
         transports = server_transports()
@@ -117,11 +137,11 @@ class ProjectPermissionTests(unittest.TestCase):
     def test_five_roles_are_created_directly_without_eligibility_phase(self) -> None:
         client = _Client()
         factory = ProjectThreadFactory(client, Path.cwd(), "hia_mcp_v2", server_transports())
-        state = factory.start_supervisor(_state(), model="gpt-test")
-        state = factory.provision_workers(state)
+        state = factory.create_all_roles(_state(), model="gpt-test")
         require_complete_project_roles(state.roles)
         self.assertEqual(set(Role), set(state.roles))
-        self.assertEqual(5, len(client.calls))
+        starts = [params for method, params in client.calls if method == "thread/start"]
+        self.assertEqual(5, len(starts))
         self.assertEqual(
             [
                 Role.SUPERVISOR,
@@ -130,16 +150,33 @@ class ProjectPermissionTests(unittest.TestCase):
                 Role.VISUAL_REVIEW,
                 Role.TECHNICAL_REVIEW,
             ],
-            [Role(params["threadSource"].rsplit("/", 1)[-1]) for _, params in client.calls],
+            [Role(params["threadSource"].rsplit("/", 1)[-1]) for params in starts],
         )
 
-    def test_partial_creation_failure_never_deletes_visible_threads(self) -> None:
+    def test_partial_creation_failure_deletes_every_known_role_thread(self) -> None:
         client = _Client(fail_role=Role.EXECUTION)
         factory = ProjectThreadFactory(client, Path.cwd(), "hia_mcp_v2", server_transports())
-        state = factory.start_supervisor(_state())
-        with self.assertRaisesRegex(RuntimeError, "injected start failure"):
-            factory.provision_workers(state)
-        self.assertFalse(any(method == "thread/delete" for method, _ in client.calls))
+        with self.assertRaises(ProjectRoleCreationError) as raised:
+            factory.create_all_roles(_state())
+        self.assertEqual((), raised.exception.orphan_thread_ids)
+        self.assertEqual(
+            ["thread-supervisor", "thread-planning"],
+            [
+                params["threadId"]
+                for method, params in client.calls
+                if method == "thread/delete"
+            ],
+        )
+
+    def test_incomplete_creation_cleanup_reports_exact_orphan_ids(self) -> None:
+        client = _Client(
+            fail_role=Role.EXECUTION,
+            fail_delete_ids={"thread-planning"},
+        )
+        factory = ProjectThreadFactory(client, Path.cwd(), "hia_mcp_v2", server_transports())
+        with self.assertRaises(ProjectRoleCreationError) as raised:
+            factory.create_all_roles(_state())
+        self.assertEqual(("thread-planning",), raised.exception.orphan_thread_ids)
 
 
 if __name__ == "__main__":

@@ -30,9 +30,11 @@ class ProjectAppServerError(RuntimeError):
         message: str,
         *,
         turn_terminal_no_hia: bool = False,
+        turn_created: bool | None = None,
     ) -> None:
         self.code = code
         self.turn_terminal_no_hia = bool(turn_terminal_no_hia)
+        self.turn_created = turn_created
         super().__init__(message)
 
 
@@ -73,54 +75,35 @@ class ProjectRoleClient:
         self._poll_interval = float(poll_interval_seconds)
         self._clock = clock
         self._lock = threading.Lock()
-        self._idle = threading.Condition(self._lock)
         self._starting_threads: set[str] = set()
         self._turns: dict[tuple[str, str], _TurnCursor] = {}
 
     def request(self, method: str, params: Mapping[str, Any]) -> Any:
         if method != "turn/start":
             return self._client.request(method, params)
-        return self._start_turn(params, timeout_seconds=None)
-
-    def start_turn_when_idle(
-        self, params: Mapping[str, Any], timeout_seconds: float
-    ) -> Any:
-        if timeout_seconds <= 0:
-            raise ProjectTurnTimeout("project Thread idle wait budget is exhausted")
-        return self._start_turn(params, timeout_seconds=timeout_seconds)
+        return self._start_turn(params)
 
     def _start_turn(
         self,
         params: Mapping[str, Any],
-        *,
-        timeout_seconds: float | None,
     ) -> Any:
         thread_id = params.get("threadId")
         if not _identifier(thread_id):
             raise ProjectAppServerError(
-                "INVALID_TURN_REQUEST", "turn/start requires a non-empty threadId"
+                "INVALID_TURN_REQUEST",
+                "turn/start requires a non-empty threadId",
+                turn_created=False,
             )
         thread_id = str(thread_id)
-        with self._idle:
-            deadline = (
-                None
-                if timeout_seconds is None
-                else time.monotonic() + timeout_seconds
-            )
-            while thread_id in self._starting_threads or any(
+        with self._lock:
+            if thread_id in self._starting_threads or any(
                 active_thread_id == thread_id for active_thread_id, _ in self._turns
             ):
-                if deadline is None:
-                    raise ProjectAppServerError(
-                        "PROJECT_THREAD_BUSY",
-                        "the project Thread already has an active Turn",
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ProjectTurnTimeout(
-                        "project Thread did not become idle before its deadline"
-                    )
-                self._idle.wait(remaining)
+                raise ProjectAppServerError(
+                    "PROJECT_THREAD_BUSY",
+                    "the project Thread already has an active Turn",
+                    turn_created=False,
+                )
             self._starting_threads.add(thread_id)
         try:
             cursor = self._events.cursor()
@@ -138,16 +121,15 @@ class ProjectRoleClient:
                     "INVALID_TURN_ACK", "turn/start did not acknowledge a valid Turn"
                 )
             key = (thread_id, str(turn_id))
-            with self._idle:
+            with self._lock:
                 if key in self._turns:
                     raise ProjectAppServerError(
                         "DUPLICATE_TURN_ACK", "the acknowledged Turn is already tracked"
                     )
                 self._turns[key] = _TurnCursor(cursor=cursor, started_at=started_at)
         finally:
-            with self._idle:
+            with self._lock:
                 self._starting_threads.discard(thread_id)
-                self._idle.notify_all()
         return result
 
     def interrupt_threads(
@@ -183,22 +165,6 @@ class ProjectRoleClient:
             return thread_id in self._starting_threads or any(
                 active_thread_id == thread_id for active_thread_id, _ in self._turns
             )
-
-    def wait_until_thread_idle(self, thread_id: str, timeout_seconds: float) -> bool:
-        if not _identifier(thread_id):
-            raise ValueError("thread_id must be non-empty")
-        if timeout_seconds <= 0:
-            return False
-        deadline = time.monotonic() + timeout_seconds
-        with self._idle:
-            while thread_id in self._starting_threads or any(
-                active_thread_id == thread_id for active_thread_id, _ in self._turns
-            ):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._idle.wait(remaining)
-            return True
 
     def wait_for_turn(
         self, thread_id: str, turn_id: str, timeout_seconds: float
@@ -383,9 +349,8 @@ class ProjectRoleClient:
                         "Codex app-server exited while a project Turn was active",
                     )
         finally:
-            with self._idle:
+            with self._lock:
                 self._turns.pop(key, None)
-                self._idle.notify_all()
 
     def _parse_payload(
         self,

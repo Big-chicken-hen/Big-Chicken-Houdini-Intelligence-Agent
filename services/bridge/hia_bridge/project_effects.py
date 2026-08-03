@@ -46,14 +46,6 @@ class ProjectRoleClient(Protocol):
         self, thread_id: str, turn_id: str, timeout_seconds: float
     ) -> "CompletedTurn": ...
 
-    def wait_until_thread_idle(
-        self, thread_id: str, timeout_seconds: float
-    ) -> bool: ...
-
-    def start_turn_when_idle(
-        self, params: Mapping[str, Any], timeout_seconds: float
-    ) -> Any: ...
-
 
 @dataclass(frozen=True)
 class CompletedTurn:
@@ -825,7 +817,9 @@ class ProjectRoleExecutor:
                 if reservation is not None:
                     self._scene_writer.abandon_uncreated(reservation)
                 raise
-            except Exception:
+            except Exception as exc:
+                if reservation is not None and getattr(exc, "turn_created", None) is False:
+                    self._scene_writer.abandon_uncreated(reservation)
                 # A transport or protocol failure does not prove that Codex did
                 # not create the Execution Turn.  Retain the reservation so a
                 # second scene writer cannot start against an unknown writer.
@@ -943,9 +937,7 @@ class ProjectRoleExecutor:
         )
         self._remaining(deadline)
         try:
-            result = self._client.start_turn_when_idle(
-                params, self._remaining(deadline)
-            )
+            result = self._client.request("turn/start", params)
             if not isinstance(result, Mapping):
                 raise ValueError("turn/start ACK must be an object")
             state, _ = self._ledger.acknowledge(state, role, request_id, result)
@@ -1726,7 +1718,15 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
                     "depth": "direct|focused|full",
                     "stage_id": "stable ordered ID",
                     "requirement_ids": ["covered requirement IDs"],
-                    "required_evidence": ["visual and/or technical"],
+                    "required_evidence": {
+                        "output_type": "array",
+                        "allowed_combinations": [
+                            ["visual"],
+                            ["technical"],
+                            ["visual", "technical"],
+                        ],
+                        "rule": "declare only evidence genuinely needed by this stage",
+                    },
                     "ordered_steps": [
                         {
                             "step_id": "stable ID",
