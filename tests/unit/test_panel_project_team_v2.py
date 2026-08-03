@@ -298,6 +298,7 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.new_routes = []
         self.opened = []
         self.deleted = []
+        self.copied = []
         self.errors = []
         self.controller = ProjectTeamController(
             self.view,
@@ -305,6 +306,7 @@ class ProjectTeamControllerTests(unittest.TestCase):
             on_new_task=self.new_routes.append,
             on_open_thread=self.opened.append,
             on_delete_thread=self.deleted.append,
+            on_copy_thread_id=self.copied.append,
             on_error=self.errors.append,
         )
 
@@ -339,6 +341,11 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.controller.show()
         self.view.deleteThreadRequested.emit("thread-ordinary")
         self.assertEqual(["thread-ordinary"], self.deleted)
+
+    def test_copy_signal_forwards_ordinary_thread_id(self) -> None:
+        self.controller.show()
+        self.view.copyThreadIdRequested.emit("thread-ordinary")
+        self.assertEqual(["thread-ordinary"], self.copied)
 
 
     def test_close_reopen_reconnects_gateway_once_without_reconnecting_view(self) -> None:

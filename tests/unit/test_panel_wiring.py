@@ -1323,6 +1323,19 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("检查连接和净空", rendered)
         self.assertNotIn("\"requirements\"", rendered)
 
+    def test_invalid_project_role_json_is_reported_honestly_without_retry_claim(self) -> None:
+        rendered = HoudiniIntelligencePanel._project_role_agent_text(
+            "not-json project role output",
+            "Planning",
+            project_status="waiting_user",
+        )
+
+        self.assertIn("JSONDecodeError", rendered)
+        self.assertIn("waiting_user", rendered)
+        self.assertIn("not-json project role output", rendered)
+        self.assertNotIn("retry", rendered.casefold())
+        self.assertNotIn("reprocess", rendered.casefold())
+
     def test_mcp_backend_initialization_defaults_to_hia_and_rejects_unknown(self) -> None:
         cases = (
             (None, "hia_v2"),

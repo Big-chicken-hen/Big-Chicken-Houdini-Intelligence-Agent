@@ -156,6 +156,59 @@ class PanelProjectTeamWiringTests(unittest.TestCase):
         )
         self.assertEqual([], panel._client.turn_requests)
 
+    def test_role_read_response_preserves_ordinary_goal_focus_attachments_and_turn(self) -> None:
+        panel = self._team_panel()
+        panel.project_team_view = SimpleNamespace(state=ProjectPanelState())
+        panel.project_team_view.state.apply_snapshot(_project_snapshot())
+        panel.project_team_view.state.select("role:project-house:planning")
+        panel._current_goal = {"objective": "ordinary goal", "status": "active"}
+        panel._focus_mode = True
+        panel.attachment_strip.add_path("ordinary.png")
+        self.assertTrue(panel._turn_state.begin_start("ordinary-thread"))
+        token = panel._turn_state.capture_token()
+        self.assertTrue(
+            panel._turn_state.acknowledge_start(
+                token,
+                "ordinary-thread",
+                "ordinary-turn",
+            )
+        )
+        panel._stream_thread_id = "ordinary-thread"
+        panel._stream_turn_id = "ordinary-turn"
+        before_turn = panel._turn_state.capture_token()
+
+        panel._on_action_completed(
+            "project_role_read:thread-planning",
+            {
+                "read": {
+                    "thread": {
+                        "id": "thread-planning",
+                        "turns": [
+                            {
+                                "items": [
+                                    {
+                                        "type": "agentMessage",
+                                        "text": '{"schema":"hia-project-plan/1","requirements":[],"stages":[]}',
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+
+        self.assertEqual("ordinary-thread", panel._selected_thread_id)
+        self.assertEqual(
+            {"objective": "ordinary goal", "status": "active"},
+            panel._current_goal,
+        )
+        self.assertTrue(panel._focus_mode)
+        self.assertEqual(["ordinary.png"], panel.attachment_strip.paths())
+        self.assertEqual(before_turn, panel._turn_state.capture_token())
+        self.assertEqual("ordinary-thread", panel._stream_thread_id)
+        self.assertEqual("ordinary-turn", panel._stream_turn_id)
+
     def test_central_composer_never_turns_into_project_guidance(self) -> None:
         panel = self._team_panel()
         panel.project_team_view = SimpleNamespace(state=ProjectPanelState())

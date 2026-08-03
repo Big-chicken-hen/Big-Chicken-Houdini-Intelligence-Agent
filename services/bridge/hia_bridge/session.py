@@ -518,11 +518,7 @@ class BridgeSession:
             },
         )
         resolved_id = self._extract_thread_id(resumed)
-        self._remember_thread_classification(
-            resumed,
-            resolved_id,
-            ordinary_if_source_missing=True,
-        )
+        self._require_ordinary_thread_result(resumed, resolved_id)
         read_result = self._project_thread_messages(resumed, resolved_id)
         with self._lock:
             self._thread_id = resolved_id
@@ -2016,24 +2012,6 @@ class BridgeSession:
         with self._lock:
             self._ordinary_thread_ids.add(thread_id)
             self._project_thread_identities.pop(thread_id, None)
-
-    def _remember_thread_classification(
-        self,
-        result: Any,
-        thread_id: str,
-        *,
-        ordinary_if_source_missing: bool,
-    ) -> None:
-        if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
-            return
-        identity = parse_project_thread_source(result["thread"].get("threadSource"))
-        with self._lock:
-            if identity is not None:
-                self._project_thread_identities[thread_id] = identity
-                self._ordinary_thread_ids.discard(thread_id)
-            elif ordinary_if_source_missing:
-                self._ordinary_thread_ids.add(thread_id)
-                self._project_thread_identities.pop(thread_id, None)
 
     @staticmethod
     def _raise_project_role_api_required(

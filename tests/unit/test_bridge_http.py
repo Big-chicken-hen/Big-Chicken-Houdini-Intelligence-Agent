@@ -846,6 +846,35 @@ class BridgeHTTPTests(unittest.TestCase):
                 received["input"],
             )
 
+    def test_turn_endpoint_accepts_image_only_without_invented_text(self) -> None:
+        attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="bridge-http-image-only-",
+            dir=attachments_root,
+        ) as temporary_thread_directory:
+            thread_directory = Path(temporary_thread_directory)
+            thread_id = thread_directory.name
+            image = thread_directory / "reference.png"
+            image.write_bytes(b"image-only payload")
+            self.request(
+                "POST",
+                "/v1/session",
+                {"action": "resume", "thread_id": thread_id},
+            )
+
+            response = self.request(
+                "POST",
+                "/v1/turn",
+                {"local_image_paths": [str(image)]},
+            )
+
+            received = response["result"]["receivedParams"]
+            self.assertEqual(
+                [{"type": "localImage", "path": str(image.resolve())}],
+                received["input"],
+            )
+
     def test_steer_endpoint_appends_to_the_same_active_turn(self) -> None:
         attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
         attachments_root.mkdir(parents=True, exist_ok=True)

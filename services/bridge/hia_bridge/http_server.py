@@ -911,7 +911,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             result = application.session.start_turn(
-                text=body.get("text"),
+                text=body.get("text", ""),
                 model=body.get("model"),
                 effort=body.get("effort"),
                 local_image_paths=body.get("local_image_paths"),
