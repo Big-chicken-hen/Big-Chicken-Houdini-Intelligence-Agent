@@ -16,7 +16,7 @@ import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .project_budget import ProgressObservation, record_progress
-from .errors import CodexRPCError
+from .errors import BridgeError, CodexRPCError
 from .project_contracts import (
     ProjectState,
     Requirement,
@@ -24,7 +24,7 @@ from .project_contracts import (
     Role,
     StageState,
 )
-from .project_evidence import validate_evidence
+from .project_evidence import EvidenceValidationError, validate_evidence
 from .project_guidance import validate_requirement_coverage
 from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_payloads import (
@@ -45,6 +45,8 @@ class ProjectRoleClient(Protocol):
     def wait_for_turn(
         self, thread_id: str, turn_id: str, timeout_seconds: float
     ) -> "CompletedTurn": ...
+
+    def bind_scene_writer(self, thread_id: str, turn_id: str, owner: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,42 @@ class ProjectRoleError(RuntimeError):
         self.code = code
         self.state = state
         super().__init__(message)
+
+
+_MODEL_OUTPUT_ERROR_CODES = frozenset(
+    {
+        "DUPLICATE_REVIEW_CLAIM",
+        "DUPLICATE_STAGE_REVIEW",
+        "INCOMPLETE_REVIEW_COVERAGE",
+        "INVALID_AUTHORIZATION_SCHEMA",
+        "INVALID_EXECUTION_SCHEMA",
+        "INVALID_PLAN_SCHEMA",
+        "INVALID_PROJECT_START",
+        "INVALID_REPAIR_CARD",
+        "INVALID_REVIEW_EXEMPTION",
+        "INVALID_REVIEW_REQUIREMENTS",
+        "INVALID_REVIEW_SCHEMA",
+        "INVALID_STAGE_DECISION",
+        "INVALID_STAGE_EVIDENCE",
+        "INVALID_STRUCTURED_OUTPUT",
+        "INVALID_STRUCTURED_PAYLOAD",
+        "MISSING_EXECUTION_EVIDENCE",
+        "MISSING_NATIVE_ROLE_OUTPUT",
+        "MISSING_REPAIR_CARD",
+        "MISSING_REVIEW_CLAIM",
+        "MISSING_STAGE_ARTIFACT",
+        "MISSING_STAGE_REVIEW",
+        "MISSING_TECHNICAL_EVIDENCE",
+        "MISSING_VISUAL_EVIDENCE",
+        "MISSING_VISUAL_REVIEW_IMAGE",
+        "REVIEW_EVIDENCE_KIND_MISMATCH",
+        "REVIEW_OWNERSHIP_MISMATCH",
+        "STAGE_OWNERSHIP_MISMATCH",
+        "STALE_STAGE_DECISION",
+        "UNKNOWN_REVIEW_CLAIM",
+        "UNKNOWN_REVIEW_EVIDENCE",
+    }
+)
 
 
 class _BudgetStop(Exception):
@@ -146,14 +184,26 @@ class ProjectRoleExecutor:
                     {"reason": "project_role_timeout"},
                 ),
             )
+        except BridgeError as exc:
+            if exc.code != "SCENE_WRITER_BUSY":
+                raise
+            return ProjectActionResult(
+                state,
+                LifecycleEvent(ProjectEvent.PROJECT_BLOCKED, {"reason": exc.code}),
+            )
+        except EvidenceValidationError as exc:
+            return ProjectActionResult(
+                state,
+                LifecycleEvent(ProjectEvent.PROJECT_BLOCKED, {"reason": exc.code}),
+            )
         except ProjectRoleError as exc:
-            if exc.code != "INVALID_STRUCTURED_OUTPUT":
+            if exc.code not in _MODEL_OUTPUT_ERROR_CODES:
                 raise
             return ProjectActionResult(
                 exc.state or state,
                 LifecycleEvent(
                     ProjectEvent.PROJECT_BLOCKED,
-                    {"reason": str(exc)},
+                    {"reason": exc.code},
                 ),
             )
 
@@ -297,6 +347,19 @@ class ProjectRoleExecutor:
         self, state: ProjectState, action: ProjectAction, deadline: float
     ) -> ProjectActionResult:
         plan = self._action_plan(state, action)
+        plan_identity = {
+            "planning_thread_id": plan.get("planning_thread_id"),
+            "planning_turn_id": plan.get("planning_turn_id"),
+            "guidance_revision": plan.get("guidance_revision"),
+        }
+        if plan_identity["guidance_revision"] != state.guidance_revision:
+            return ProjectActionResult(
+                state,
+                LifecycleEvent(
+                    ProjectEvent.PLAN_REJECTED,
+                    {"feedback": "Planning Turn predates the current guidance revision"},
+                ),
+            )
         request = self._base_request(state, Role.SUPERVISOR, "authorize_plan")
         request["authoritative_task"] = self._authoritative_task_capsule(state)
         request["plan"] = plan
@@ -314,6 +377,9 @@ class ProjectRoleExecutor:
             "authorized",
             "stage_ids",
             "semantic_review",
+            "planning_thread_id",
+            "planning_turn_id",
+            "guidance_revision",
         }:
             raise ProjectRoleError("INVALID_AUTHORIZATION_SCHEMA", "authorization fields are invalid")
         expected = [stage["stage_id"] for stage in plan["stages"]]
@@ -329,6 +395,7 @@ class ProjectRoleExecutor:
             payload.get("authorized") is not True
             or not all_pass
             or payload.get("stage_ids") != expected
+            or any(payload.get(key) != value for key, value in plan_identity.items())
         ):
             failed_items = {
                 key: value
@@ -337,9 +404,13 @@ class ProjectRoleExecutor:
             }
             feedback = json.dumps(
                 {
-                    "reason": "Supervisor did not authorize the exact blueprint revision",
+                    "reason": "Supervisor did not authorize the exact Planning Turn",
                     "failed_semantic_items": failed_items,
                     "stage_ids_match": payload.get("stage_ids") == expected,
+                    "plan_identity_match": all(
+                        payload.get(key) == value
+                        for key, value in plan_identity.items()
+                    ),
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -376,13 +447,21 @@ class ProjectRoleExecutor:
             decision = self._read_latest_payload(
                 state, Role.SUPERVISOR, "hia-project-stage-decision/1"
             )
-            repair_card = decision.get("repair_card")
-            if not isinstance(repair_card, Mapping):
+            execution = self._read_execution_history(state, stage)
+            if (
+                decision.get("execution_thread_id") != execution.get("thread_id")
+                or decision.get("execution_turn_id") != execution.get("turn_id")
+                or decision.get("stage_id") != execution.get("stage_id")
+            ):
                 raise ProjectRoleError(
-                    "MISSING_REPAIR_CARD",
-                    "Supervisor native Thread has no repair card for this stage",
+                    "STALE_STAGE_DECISION",
+                    "Supervisor decision does not target the latest Execution Turn",
                 )
-            request["repair_card"] = repair_card
+            request["repair_card"] = _parse_repair_card(
+                decision.get("repair_card"),
+                stage["stage_id"],
+                execution,
+            )
         state, completed = self._run_structured(
             state,
             Role.EXECUTION,
@@ -390,6 +469,7 @@ class ProjectRoleExecutor:
             "hia-project-execution/1",
             deadline,
             record_success=False,
+            allow_correction=False,
         )
         payload = completed.payload
         if set(payload) != {"schema", "stage_id", "evidence_refs", "claims_visual_change"}:
@@ -468,10 +548,20 @@ class ProjectRoleExecutor:
             "final_stage",
             "repair_card",
             "approved_exemptions",
+            "execution_thread_id",
+            "execution_turn_id",
         }:
             raise ProjectRoleError("INVALID_STAGE_DECISION", "stage decision fields are invalid")
         if payload.get("stage_id") != stage["stage_id"]:
             raise ProjectRoleError("STAGE_OWNERSHIP_MISMATCH", "Supervisor decided the wrong stage")
+        if (
+            payload.get("execution_thread_id") != execution.get("thread_id")
+            or payload.get("execution_turn_id") != execution.get("turn_id")
+        ):
+            raise ProjectRoleError(
+                "STALE_STAGE_DECISION",
+                "Supervisor decision does not target the reviewed Execution Turn",
+            )
         failed = any(
             claim["disposition"] in {"failed", "unverified"}
             for review in reviews
@@ -812,7 +902,16 @@ class ProjectRoleExecutor:
                     local_image_paths=local_image_paths,
                 )
                 if reservation is not None:
-                    scene_owner = self._scene_writer.bind(reservation, call.turn_id)
+                    scene_owner = self._scene_writer.bind(
+                        reservation, call.thread_id, call.turn_id
+                    )
+                    bind_scene_writer = getattr(
+                        self._client, "bind_scene_writer", None
+                    )
+                    if callable(bind_scene_writer):
+                        bind_scene_writer(
+                            call.thread_id, call.turn_id, scene_owner
+                        )
             except CodexRPCError:
                 if reservation is not None:
                     self._scene_writer.abandon_uncreated(reservation)
@@ -838,7 +937,8 @@ class ProjectRoleExecutor:
                     self._scene_writer.turn_terminal(scene_owner)
                 raise
             if scene_owner is not None:
-                if not self._scene_writer.turn_terminal(scene_owner):
+                released = self._scene_writer.turn_terminal(scene_owner)
+                if not released and self._scene_writer.is_current(scene_owner):
                     raise ProjectRoleError(
                         "SCENE_WRITER_STILL_ACTIVE",
                         "Execution ended while an HIA scene write was still active",
@@ -927,7 +1027,7 @@ class ProjectRoleExecutor:
                         for path in local_image_paths
                     ),
                 ],
-                "approvalPolicy": "on-request" if role is Role.EXECUTION else "never",
+                "approvalPolicy": "never",
                 "sandboxPolicy": (
                     {"type": "workspaceWrite", "networkAccess": False}
                     if role is Role.EXECUTION
@@ -1153,7 +1253,56 @@ class ProjectRoleExecutor:
                 except ValueError:
                     continue
                 if isinstance(payload, Mapping) and payload.get("schema") == schema:
-                    return payload
+                    result = dict(payload)
+                    if schema == "hia-project-plan/1":
+                        turn_id = turn.get("id")
+                        guidance_revisions: set[int] = set()
+                        for request_item in items:
+                            if (
+                                not isinstance(request_item, Mapping)
+                                or request_item.get("type") != "userMessage"
+                                or not isinstance(request_item.get("content"), list)
+                            ):
+                                continue
+                            for content in request_item["content"]:
+                                if (
+                                    not isinstance(content, Mapping)
+                                    or content.get("type") != "text"
+                                    or not isinstance(content.get("text"), str)
+                                ):
+                                    continue
+                                try:
+                                    request_payload = json.loads(content["text"])
+                                except ValueError:
+                                    continue
+                                revision = (
+                                    request_payload.get("guidance_revision")
+                                    if isinstance(request_payload, Mapping)
+                                    else None
+                                )
+                                if (
+                                    isinstance(revision, int)
+                                    and not isinstance(revision, bool)
+                                    and revision >= 0
+                                ):
+                                    guidance_revisions.add(revision)
+                        if (
+                            not isinstance(turn_id, str)
+                            or not turn_id
+                            or len(guidance_revisions) != 1
+                        ):
+                            raise ProjectRoleError(
+                                "INVALID_PLAN_IDENTITY",
+                                "Planning native Turn identity is incomplete",
+                            )
+                        result.update(
+                            {
+                                "planning_thread_id": state.roles[role].thread_id,
+                                "planning_turn_id": turn_id,
+                                "guidance_revision": next(iter(guidance_revisions)),
+                            }
+                        )
+                    return result
         raise ProjectRoleError(
             "MISSING_NATIVE_ROLE_OUTPUT",
             f"{role.value} native Thread has no {schema} output",
@@ -1315,6 +1464,9 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             "authorized",
             "stage_ids",
             "semantic_review",
+            "planning_thread_id",
+            "planning_turn_id",
+            "guidance_revision",
         },
         "hia-project-execution/1": {
             "schema",
@@ -1326,6 +1478,8 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
         "hia-project-stage-decision/1": {
             "schema",
             "stage_id",
+            "execution_thread_id",
+            "execution_turn_id",
             "decision",
             "final_stage",
             "repair_card",
@@ -1376,6 +1530,15 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             raise ValueError("authorized must be boolean")
         _text_list(payload.get("stage_ids"))
         _validate_semantic_review_shape(payload.get("semantic_review"))
+        _plain_text(payload.get("planning_thread_id"))
+        _plain_text(payload.get("planning_turn_id"))
+        revision = payload.get("guidance_revision")
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 0
+        ):
+            raise ValueError("guidance_revision must be a non-negative integer")
     elif schema == "hia-project-execution/1":
         _plain_text(payload.get("stage_id"))
         refs = payload.get("evidence_refs")
@@ -1395,6 +1558,8 @@ def _validate_payload_shape(schema: str, payload: Mapping[str, Any]) -> None:
             parse_review_claim(claim)
     elif schema == "hia-project-stage-decision/1":
         _plain_text(payload.get("stage_id"))
+        _plain_text(payload.get("execution_thread_id"))
+        _plain_text(payload.get("execution_turn_id"))
         if payload.get("decision") not in {"pass", "repair"}:
             raise ValueError("stage decision is invalid")
         if not isinstance(payload.get("final_stage"), bool):
@@ -1486,12 +1651,22 @@ def _parse_repair_card(
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {
         "stage_id",
+        "execution_thread_id",
+        "execution_turn_id",
         "instructions",
         "evidence_refs",
     }:
         raise ProjectRoleError("INVALID_REPAIR_CARD", "repair card fields are invalid")
     if value.get("stage_id") != stage_id:
         raise ProjectRoleError("INVALID_REPAIR_CARD", "repair card stage mismatch")
+    if (
+        value.get("execution_thread_id") != execution.get("thread_id")
+        or value.get("execution_turn_id") != execution.get("turn_id")
+    ):
+        raise ProjectRoleError(
+            "INVALID_REPAIR_CARD",
+            "repair card does not target the reviewed Execution Turn",
+        )
     instructions = value.get("instructions")
     refs = value.get("evidence_refs")
     if not isinstance(instructions, list) or not instructions or not all(
@@ -1767,6 +1942,9 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
         "hia-project-authorization/1": {
             "schema": schema,
             "authorized": True,
+            "planning_thread_id": "exact Planning Thread ID supplied with the plan",
+            "planning_turn_id": "exact Planning Turn ID supplied with the plan",
+            "guidance_revision": "exact integer supplied with the plan",
             "stage_ids": ["exact plan stage IDs in order"],
             "semantic_review": {
                 name: {
@@ -1826,9 +2004,14 @@ def _response_contract(schema: str) -> Mapping[str, Any]:
         "hia-project-stage-decision/1": {
             "schema": schema,
             "stage_id": "exact current stage ID",
+            "execution_thread_id": "exact reviewed Execution Thread ID",
+            "execution_turn_id": "exact reviewed Execution Turn ID",
             "decision": "pass|repair",
             "final_stage": "boolean derived from persisted plan",
-            "repair_card": "null for pass; structured repair card for repair",
+            "repair_card": (
+                "null for pass; for repair use an object with exactly stage_id, "
+                "execution_thread_id, execution_turn_id, instructions, and evidence_refs"
+            ),
             "approved_exemptions": [
                 {
                     "reviewer": "exact reviewer owning the not_applicable claim",

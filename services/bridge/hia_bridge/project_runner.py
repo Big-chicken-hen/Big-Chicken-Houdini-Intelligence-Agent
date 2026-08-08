@@ -129,6 +129,12 @@ class ProjectRunner:
             self._queues.pop(project_id, None)
         return self.dispatch(project_id, event)
 
+    def discard(self, project_id: str) -> None:
+        """Drop only the unstarted process-local action for a failed create."""
+
+        with self._lock:
+            self._queues.pop(project_id, None)
+
     def fail(self, project_id: str, error: BaseException) -> ProjectRecord:
         with self._lock:
             self._queues.pop(project_id, None)

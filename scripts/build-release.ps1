@@ -57,7 +57,6 @@ $releaseFileAllowlist = @(
     'houdini_package/python_libs/hia_mcp_runtime/knowledge_index.py',
     'houdini_package/python_libs/hia_mcp_runtime/knowledge_index_cli.py',
     'houdini_package/python_libs/hia_panel/__init__.py',
-    'houdini_package/python_libs/hia_panel/approval_card.py',
     'houdini_package/python_libs/hia_panel/attachment_store.py',
     'houdini_package/python_libs/hia_panel/bridge_client.py',
     'houdini_package/python_libs/hia_panel/composer.py',

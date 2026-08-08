@@ -51,7 +51,7 @@ def permission_profile(
     return RolePermissionProfile(
         role=role,
         sandbox="read-only" if read_only else "workspace-write",
-        approval_policy="never" if read_only else "on-request",
+        approval_policy="never",
         config=config,
     )
 
@@ -95,7 +95,7 @@ def validate_observable_role_response(
 
     read_only = role in READ_ONLY_ROLES
     allowed_sandboxes = {"readOnly"} if read_only else {"workspaceWrite"}
-    expected_approval = "never" if read_only else "on-request"
+    expected_approval = "never"
     sandbox = descriptor.get("sandbox")
     sandbox_type = sandbox.get("type") if isinstance(sandbox, Mapping) else None
     if sandbox_type not in allowed_sandboxes:

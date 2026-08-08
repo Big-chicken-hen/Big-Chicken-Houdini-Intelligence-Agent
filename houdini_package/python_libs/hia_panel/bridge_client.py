@@ -433,14 +433,6 @@ class BridgeClient(QtCore.QObject):
     def interrupt(self, *, context: str = "interrupt") -> str | None:
         return self._request("POST", "/v1/interrupt", {}, context=context)
 
-    def resolve_approval(self, request_id: Any, decision: str) -> str | None:
-        return self._request(
-            "POST",
-            "/v1/approval",
-            {"request_id": request_id, "decision": decision},
-            context=f"approval_{decision}",
-        )
-
     def poll_events(self, after: int, timeout: int = 15) -> str | None:
         # Normalize caller values before claiming the single event slot so an
         # invalid value cannot leave polling permanently marked active.

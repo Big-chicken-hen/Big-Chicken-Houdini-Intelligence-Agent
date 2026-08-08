@@ -188,7 +188,7 @@ class _AdvancingClock:
         self.value += float(seconds)
 
 
-class _StopRecoveryClient(_RecordingClient):
+class _InterruptClient(_RecordingClient):
     def __init__(
         self,
         *,
@@ -204,9 +204,6 @@ class _StopRecoveryClient(_RecordingClient):
         self.timeout_during_resume = timeout_during_resume
         self.resume_gate = resume_gate
         self.clock = clock
-        self.restart_count = 0
-        self.restart_deadlines: list[float | None] = []
-        self.initialize_timeouts: list[float] = []
         self.timed_requests: list[tuple[str, dict[str, Any], float]] = []
         self.resume_entered = threading.Event()
         self.resume_finished = threading.Event()
@@ -268,19 +265,6 @@ class _StopRecoveryClient(_RecordingClient):
                 self.resume_finished.set()
         raise AssertionError(f"Unexpected timed request: {method}")
 
-    def restart(
-        self,
-        grace_seconds: float = 1.0,
-        *,
-        deadline: float | None = None,
-    ) -> None:
-        self.restart_count += 1
-        self.restart_deadlines.append(deadline)
-
-    def initialize_with_timeout(self, timeout_seconds: float) -> dict[str, Any]:
-        self.initialize_timeouts.append(timeout_seconds)
-        return {"userAgent": "fake-codex/0.144.3"}
-
 
 class _GoalClient(_RecordingClient):
     def __init__(self) -> None:
@@ -314,46 +298,6 @@ class _GoalClient(_RecordingClient):
             self.goal = None
             return {"cleared": cleared}
         return super().request(method, params)
-
-
-class _ApprovalClient(_RecordingClient):
-    def __init__(self, *, fail_response: bool = False) -> None:
-        super().__init__()
-        self.pending: dict[Any, dict[str, Any]] = {}
-        self.approval_responses: list[tuple[Any, dict[str, Any]]] = []
-        self.fail_response = fail_response
-
-    def emit_approval(
-        self,
-        request_id: str,
-        method: str,
-        params: dict[str, Any],
-    ) -> None:
-        request = {"method": method, "params": dict(params)}
-        self.pending[request_id] = request
-        assert self._event_sink is not None
-        self._event_sink(
-            {
-                "type": "server_request",
-                "request_id": request_id,
-                **request,
-            }
-        )
-
-    def pending_server_request(self, request_id: Any) -> dict[str, Any] | None:
-        request = self.pending.get(request_id)
-        return dict(request) if request is not None else None
-
-    def respond_to_server_request(
-        self,
-        request_id: Any,
-        response: dict[str, Any],
-    ) -> str:
-        if self.fail_response:
-            raise BridgeError("TEST_RESPONSE_FAILED", "test response failed")
-        request = self.pending.pop(request_id)
-        self.approval_responses.append((request_id, dict(response)))
-        return request["method"]
 
 
 class _SteerClient(_RecordingClient):
@@ -445,102 +389,6 @@ def _model_entry(
         "defaultReasoningEffort": "low",
     }
 
-
-class BridgeSessionApprovalRoutingTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.system_drive = os.environ.get("SystemDrive") or "C:"
-
-    def make_session(
-        self,
-        *,
-        fail_response: bool = False,
-        project_root: Path = REPOSITORY_ROOT,
-    ) -> tuple[BridgeSession, _ApprovalClient, EventBuffer]:
-        client = _ApprovalClient(fail_response=fail_response)
-        events = EventBuffer()
-        return BridgeSession(project_root, client, events), client, events
-
-    @staticmethod
-    def command_params(command: str, *, cwd: str | None = None) -> dict[str, Any]:
-        return {
-            "command": command,
-            "cwd": cwd or str(REPOSITORY_ROOT),
-            "itemId": "item-approval",
-            "startedAtMs": 1,
-            "threadId": "thread-approval",
-            "turnId": "turn-approval",
-        }
-
-    def test_native_approval_is_published_and_never_auto_resolved(self) -> None:
-        session, client, events = self.make_session()
-        client.emit_approval(
-            "approval-pending",
-            "item/commandExecution/requestApproval",
-            self.command_params("Get-ChildItem -LiteralPath ."),
-        )
-
-        self.assertEqual([], client.approval_responses)
-        self.assertIn("approval-pending", client.pending)
-        published = events.poll(0, timeout=0)["events"]
-        self.assertTrue(
-            any(
-                event.get("type") == "server_request"
-                and event.get("request_id") == "approval-pending"
-                for event in published
-            )
-        )
-
-    def test_persistent_rule_is_only_sent_when_the_protocol_offers_it(self) -> None:
-        session, client, _events = self.make_session()
-        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
-        params = self.command_params(
-            f"Set-Content -LiteralPath '{system_file}' -Value test"
-        )
-        params["proposedExecpolicyAmendment"] = [
-            "Set-Content",
-            "-LiteralPath",
-        ]
-        client.emit_approval(
-            "approval-rule",
-            "item/commandExecution/requestApproval",
-            params,
-        )
-
-        session.resolve_approval("approval-rule", "allow_rule")
-
-        self.assertEqual(
-            [
-                (
-                    "approval-rule",
-                    {
-                        "decision": {
-                            "acceptWithExecpolicyAmendment": {
-                                "execpolicy_amendment": [
-                                    "Set-Content",
-                                    "-LiteralPath",
-                                ]
-                            }
-                        }
-                    },
-                )
-            ],
-            client.approval_responses,
-        )
-
-        params_without_rule = self.command_params(
-            f"Remove-Item -LiteralPath '{system_file}'"
-        )
-        params_without_rule["proposedExecpolicyAmendment"] = ["Remove-Item"]
-        params_without_rule["availableDecisions"] = ["accept", "decline"]
-        client.emit_approval(
-            "approval-no-rule",
-            "item/commandExecution/requestApproval",
-            params_without_rule,
-        )
-        with self.assertRaises(BridgeError) as raised:
-            session.resolve_approval("approval-no-rule", "allow_rule")
-        self.assertEqual("INVALID_APPROVAL_DECISION", raised.exception.code)
-        self.assertIn("approval-no-rule", client.pending)
 
 class _BlockingTurnClient(_ClientStub):
     def __init__(self) -> None:
@@ -2113,8 +1961,8 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertEqual("hia_execute_hom", snapshot["last_tool_name"])
         self.assertEqual("inProgress", snapshot["last_tool_status"])
 
-    def test_interrupt_completion_within_grace_does_not_restart_codex(self) -> None:
-        client = _StopRecoveryClient(complete_during_interrupt=True)
+    def test_interrupt_completion_within_grace_is_terminal(self) -> None:
+        client = _InterruptClient(complete_during_interrupt=True)
         events = EventBuffer()
         session = BridgeSession(REPOSITORY_ROOT, client, events)
         session.start_thread()
@@ -2122,15 +1970,14 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
 
         result = session.interrupt_turn()
 
-        self.assertEqual(0, client.restart_count)
         self.assertEqual("thread-test", result["thread_id"])
         self.assertEqual(turn_id, result["turn_id"])
         self.assertFalse(result["session"]["turn_active"])
         self.assertEqual("interrupted", result["session"]["turn_status"])
         self.assertEqual(STOP_INTERRUPT_GRACE_SECONDS, client.timed_requests[0][2])
 
-    def test_interrupt_timeout_is_explicit_and_never_restarts_codex(self) -> None:
-        client = _StopRecoveryClient(complete_during_interrupt=False)
+    def test_interrupt_timeout_preserves_the_active_turn(self) -> None:
+        client = _InterruptClient(complete_during_interrupt=False)
         session = self.make_session(client)
         turn_id = session.start_turn("stop without confirmation")["turn_id"]
 
@@ -2139,7 +1986,6 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
                 session.interrupt_turn()
 
         self.assertEqual("INTERRUPT_NOT_CONFIRMED", raised.exception.code)
-        self.assertEqual(0, client.restart_count)
         self.assertEqual(
             ["turn/interrupt"],
             [method for method, _params, _timeout in client.timed_requests],
@@ -2286,7 +2132,9 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
     def test_project_execution_blocks_ordinary_then_release_allows_next_writer(self) -> None:
         writer = SceneWriterOwnership()
         project_reservation = writer.reserve("project", "project-active")
-        project_owner = writer.bind(project_reservation, "turn-project")
+        project_owner = writer.bind(
+            project_reservation, "thread-project", "turn-project"
+        )
         client = _RecordingClient()
         session = BridgeSession(
             REPOSITORY_ROOT,
@@ -2307,6 +2155,51 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertTrue(writer.turn_terminal(project_owner))
         result = session.start_turn("ordinary after release")
         self.assertEqual("turn-recorded", result["turn_id"])
+
+    def test_missing_hia_item_id_retains_ordinary_writer_and_emits_diagnostic(self) -> None:
+        writer = SceneWriterOwnership()
+        events = EventBuffer()
+        client = _RecordingClient()
+        session = BridgeSession(
+            REPOSITORY_ROOT,
+            client,
+            events,
+            scene_writer=writer,
+        )
+        session.start_thread()
+        turn_id = session.start_turn("write the scene")["turn_id"]
+        owner = writer.snapshot()["owner"]
+
+        client.emit_notification(
+            "item/started",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "hia_mcp_v2",
+                    "tool": "hia_execute_hom",
+                },
+            },
+        )
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-test",
+                "turn": {"id": turn_id, "status": "completed"},
+            },
+        )
+
+        snapshot = writer.snapshot()
+        self.assertEqual(owner, snapshot["owner"])
+        self.assertTrue(snapshot["turn_terminal"])
+        self.assertTrue(snapshot["identity_error"])
+        warnings = [
+            event
+            for event in events.poll(0, timeout=0)["events"]
+            if event.get("type") == "protocol_warning"
+        ]
+        self.assertEqual("INVALID_HIA_ITEM_ID", warnings[-1]["code"])
 
     def test_only_explicit_rpc_rejection_releases_an_uncreated_turn(self) -> None:
         rpc_client = _FailingTurnClient("rpc")
@@ -2370,7 +2263,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         method, params = client.requests[0]
         self.assertEqual("thread/start", method)
         self.assertEqual("workspace-write", params["sandbox"])
-        self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual("never", params["approvalPolicy"])
         self.assertIsNone(params["serviceTier"])
         instructions = params["developerInstructions"]
         self.assertLessEqual(len(instructions), 1_000)
@@ -2399,8 +2292,8 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "不要调用 request_user_input",
             "信息不足时采用合理默认值",
             "无法执行才报告原因",
-            "安全已保存 HIP 的自动截图优先写同级 .hia/screenshots",
-            "否则回退 HIA_CACHE_DIR/screenshots",
+            "HIA 截图只能用 SceneViewer.flipbook 写入 HIA_CACHE_DIR/screenshots",
+            "不可用时明确失败",
             "预览写 previews",
             "中间图写 tmp",
             "附件/知识/模型/索引仍留项目 .runtime",
@@ -2464,8 +2357,8 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "主任务只保留原生 Goal、决定和子任务短摘要",
             "子任务详情按需查看",
             "不塞入主上下文",
-            "安全已存 HIP 截图写同级 .hia/screenshots",
-            "否则用 HIA_CACHE_DIR/screenshots",
+            "HIA 截图只能用 SceneViewer.flipbook 写入 HIA_CACHE_DIR/screenshots",
+            "不可用时明确失败",
             "附件/知识/模型/索引留 .runtime",
         ):
             self.assertIn(required_text, instructions)
@@ -2494,8 +2387,13 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                     "一次相关",
                     "批量检索并复用结果",
                     "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务",
-                    "必须先用原生 web/search",
+                    (
+                        "发现来源时明确用原生 web search"
+                        if backend == "fxhoudini"
+                        else "发现来源明确用原生 web search"
+                    ),
                     "当前 SideFX 官方与原始来源",
+                    "openPage",
                     "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究",
                 ):
                     self.assertIn(required_text, instructions)
@@ -2520,7 +2418,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                         instructions,
                     )
 
-    def test_thread_resume_enables_workspace_write_with_on_request_approval(self) -> None:
+    def test_thread_resume_enables_workspace_write_without_runtime_approval(self) -> None:
         session, client = self.make_session()
 
         session.resume_thread("thread-existing", service_tier="priority")
@@ -2529,13 +2427,13 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         method, params = client.requests[1]
         self.assertEqual("thread/resume", method)
         self.assertEqual("workspace-write", params["sandbox"])
-        self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual("never", params["approvalPolicy"])
         self.assertEqual("priority", params["serviceTier"])
         self.assertIn("FXHoudini MCP 与 HOM", params["developerInstructions"])
         self.assertNotIn("baseInstructions", params)
         self.assertNotIn("config", params)
 
-    def test_turn_start_reasserts_workspace_write_and_on_request(self) -> None:
+    def test_turn_start_reasserts_workspace_write_without_runtime_approval(self) -> None:
         session, client = self.make_session()
         session.start_thread()
         client.requests.clear()
@@ -2544,7 +2442,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
 
         method, params = client.requests[0]
         self.assertEqual("turn/start", method)
-        self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual("never", params["approvalPolicy"])
         self.assertEqual("priority", params["serviceTier"])
         self.assertEqual(
             {"type": "workspaceWrite", "networkAccess": False},

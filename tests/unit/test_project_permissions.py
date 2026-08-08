@@ -83,7 +83,7 @@ class ProjectPermissionTests(unittest.TestCase):
                 writer = role is Role.EXECUTION
                 self.assertEqual(writer, profile.scene_write)
                 self.assertEqual("workspace-write" if writer else "read-only", profile.sandbox)
-                self.assertEqual("on-request" if writer else "never", profile.approval_policy)
+                self.assertEqual("never", profile.approval_policy)
                 self.assertEqual(writer, profile.config[HIA_SERVER_KEYS[0]])
                 self.assertFalse(profile.config[HIA_SERVER_KEYS[1]])
 
@@ -142,6 +142,8 @@ class ProjectPermissionTests(unittest.TestCase):
         self.assertEqual(set(Role), set(state.roles))
         starts = [params for method, params in client.calls if method == "thread/start"]
         self.assertEqual(5, len(starts))
+        self.assertTrue(all(params["approvalPolicy"] == "never" for params in starts))
+        self.assertTrue(all("approvalsReviewer" not in params for params in starts))
         self.assertEqual(
             [
                 Role.SUPERVISOR,

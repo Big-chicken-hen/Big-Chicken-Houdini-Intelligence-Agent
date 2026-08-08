@@ -8,8 +8,14 @@ import threading
 import unittest
 
 from services.bridge.hia_bridge.errors import BridgeError
-from services.bridge.hia_bridge.project_contracts import ProjectStatus, Role, StageState
+from services.bridge.hia_bridge.project_contracts import (
+    ProjectStatus,
+    Requirement,
+    Role,
+    StageState,
+)
 from services.bridge.hia_bridge.project_effects import CompletedTurn
+from services.bridge.hia_bridge.project_guidance import RequirementDelta
 from services.bridge.hia_bridge.project_lifecycle import LifecycleEvent, ProjectEvent
 from services.bridge.hia_bridge.project_registry import ProjectRecord, ProjectRegistry
 from services.bridge.hia_bridge.project_runner import ProjectActionResult, ProjectRunner
@@ -34,6 +40,7 @@ class _Client:
         }
         self.guidance_wait_entered: threading.Event | None = None
         self.guidance_wait_release: threading.Event | None = None
+        self.histories: dict[str, list[dict]] = {}
 
     def request(self, method: str, params: dict):
         self.calls.append((method, dict(params)))
@@ -49,9 +56,11 @@ class _Client:
                 "thread": {
                     "id": params["threadId"],
                     "threadSource": self.sources[params["threadId"]],
-                    "turns": [],
+                    "turns": self.histories.get(params["threadId"], []),
                 }
             }
+        if method == "thread/delete":
+            return {}
         raise AssertionError(f"unexpected RPC: {method}")
 
     def wait_for_turn(self, thread_id: str, turn_id: str, timeout_seconds: float):
@@ -71,10 +80,12 @@ class _Workflow:
         self.started: list[str] = []
         self.stopped: list[str] = []
         self.resumed: list[tuple[str, dict[str, object]]] = []
+        self.accept_start = True
+        self.inflight = False
 
     def start(self, project_id: str) -> bool:
         self.started.append(project_id)
-        return True
+        return self.accept_start
 
     def stop(self, project_id: str) -> bool:
         self.stopped.append(project_id)
@@ -83,6 +94,9 @@ class _Workflow:
     def resume(self, project_id: str, continuation: dict[str, object]) -> bool:
         self.resumed.append((project_id, continuation))
         return True
+
+    def is_inflight(self, project_id: str) -> bool:
+        return self.inflight
 
 
 def _catalog():
@@ -96,6 +110,26 @@ def _catalog():
                 "serviceTiers": [{"id": "priority"}],
             }
         ]
+    }
+
+
+def _turn(turn_id: str, *items: dict) -> dict:
+    return {"id": turn_id, "items": list(items)}
+
+
+def _agent(payload: dict) -> dict:
+    return {"type": "agentMessage", "text": json.dumps(payload)}
+
+
+def _request(guidance_revision: int) -> dict:
+    return {
+        "type": "userMessage",
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps({"guidance_revision": guidance_revision}),
+            }
+        ],
     }
 
 
@@ -162,6 +196,36 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertNotIn("goal/create", methods)
         self.assertNotIn("goal/update", methods)
         self.assertNotIn("thread/delete", methods)
+
+    def test_rotation_rebind_changes_only_one_project_role_identity(self) -> None:
+        project_id = self.start()
+        before = self.registry.require(project_id)
+        binding = before.state.roles[Role.PLANNING]
+        profile = self.service.rotation_profile(binding.thread_id, "turn-3")
+        self.assertIsNotNone(profile)
+        self.assertEqual("gpt-test", profile.model)
+        self.assertTrue(self.service.rotation_is_idle(binding.thread_id))
+
+        self.service.rotation_rebind(binding.thread_id, "thread-planning-rotated")
+
+        after = self.registry.require(project_id)
+        self.assertTrue(
+            self.service.rotation_readback(
+                binding.thread_id,
+                "thread-planning-rotated",
+            )
+        )
+        self.assertEqual(
+            "thread-planning-rotated",
+            after.state.roles[Role.PLANNING].thread_id,
+        )
+        for role in set(Role) - {Role.PLANNING}:
+            self.assertEqual(
+                before.state.roles[role],
+                after.state.roles[role],
+            )
+        self.assertEqual(before.authoritative_task_text, after.authoritative_task_text)
+        self.assertEqual(before.state.stage, after.state.stage)
 
     def test_guidance_is_confirmed_in_native_supervisor_history_before_revision_changes(self) -> None:
         project_id = self.start()
@@ -237,6 +301,174 @@ class ProjectServiceTests(unittest.TestCase):
         self.service.continue_project(project_id=project_id)
         self.assertEqual([(project_id, {})], self.workflow.resumed)
         self.assertNotIn("turn/start", [method for method, _ in self.client.calls])
+
+    def test_continue_rejects_stale_plan_authorization_and_stage_decision(self) -> None:
+        project_id = self.start()
+        record = self.registry.require(project_id)
+        stopped = replace(
+            record.state,
+            status=ProjectStatus.STOPPED,
+            stage=StageState(stage_id="stage-1"),
+            revision=record.state.revision + 1,
+        )
+        self.registry.put(
+            ProjectRecord(stopped, record.authoritative_task_text),
+            expected_revision=record.state.revision,
+        )
+        plan = {"schema": "hia-project-plan/1", "stages": [{"stage_id": "stage-1"}]}
+        self.client.histories["thread-planning"] = [
+            _turn("plan-turn", _request(0), _agent(plan))
+        ]
+        project_start = {
+            "schema": "hia-project-start/1",
+            "route": "planning",
+            "reply": "accepted",
+        }
+        stale_authorization = {
+            "schema": "hia-project-authorization/1",
+            "authorized": True,
+            "planning_thread_id": "thread-planning",
+            "planning_turn_id": "older-plan-turn",
+            "guidance_revision": 0,
+        }
+        self.client.histories["thread-supervisor"] = [
+            _turn("start-turn", _agent(project_start)),
+            _turn("authorization-turn", _agent(stale_authorization)),
+        ]
+        self.service.continue_project(project_id=project_id)
+        self.assertEqual(
+            {"command": "request_authorization"},
+            self.workflow.resumed[-1][1],
+        )
+
+        matching_authorization = {
+            **stale_authorization,
+            "planning_turn_id": "plan-turn",
+        }
+        stale_decision = {
+            "schema": "hia-project-stage-decision/1",
+            "stage_id": "stage-1",
+            "execution_thread_id": "thread-execution",
+            "execution_turn_id": "older-execution-turn",
+            "decision": "repair",
+        }
+        self.client.histories["thread-supervisor"] = [
+            _turn("start-turn", _agent(project_start)),
+            _turn("authorization-turn", _agent(matching_authorization)),
+            _turn("decision-turn", _agent(stale_decision)),
+        ]
+        self.client.histories["thread-execution"] = [
+            _turn(
+                "execution-turn",
+                _agent(
+                    {
+                        "schema": "hia-project-execution/1",
+                        "stage_id": "stage-1",
+                    }
+                ),
+            )
+        ]
+        self.service.continue_project(project_id=project_id)
+        self.assertEqual(
+            {"command": "start_reviews"},
+            self.workflow.resumed[-1][1],
+        )
+
+    def test_material_requirement_change_requires_stop_and_invalidates_plan(self) -> None:
+        project_id = self.start()
+        delta = RequirementDelta(
+            add=(Requirement("REQ-new", "structure", source_ref="guidance"),)
+        )
+        starts_before = len(
+            [method for method, _ in self.client.calls if method == "turn/start"]
+        )
+        with self.assertRaises(BridgeError) as raised:
+            self.service.append_guidance(
+                project_id=project_id,
+                text="add the new requirement",
+                requirement_delta=delta,
+            )
+        self.assertEqual(
+            "PROJECT_REQUIREMENT_CHANGE_REQUIRES_STOP", raised.exception.code
+        )
+        self.assertEqual(
+            starts_before,
+            len([method for method, _ in self.client.calls if method == "turn/start"]),
+        )
+        record = self.registry.require(project_id)
+        self.assertEqual(0, record.state.guidance_revision)
+
+        stopped = replace(
+            record.state,
+            status=ProjectStatus.STOPPED,
+            revision=record.state.revision + 1,
+        )
+        self.registry.put(
+            ProjectRecord(stopped, record.authoritative_task_text),
+            expected_revision=record.state.revision,
+        )
+        self.service.append_guidance(
+            project_id=project_id,
+            text="add the new requirement",
+            requirement_delta=delta,
+        )
+        project_start = {
+            "schema": "hia-project-start/1",
+            "route": "planning",
+            "reply": "accepted",
+        }
+        self.client.histories["thread-supervisor"] = [
+            _turn("start-turn", _agent(project_start))
+        ]
+        self.client.histories["thread-planning"] = [
+            _turn(
+                "old-plan-turn",
+                _request(0),
+                _agent(
+                    {
+                        "schema": "hia-project-plan/1",
+                        "stages": [{"stage_id": "stage-1"}],
+                    }
+                ),
+            )
+        ]
+        self.service.continue_project(project_id=project_id)
+        self.assertEqual(
+            {"command": "request_plan"},
+            self.workflow.resumed[-1][1],
+        )
+
+    def test_rejected_workflow_start_removes_only_new_project_resources(self) -> None:
+        draft_id = "failed-project"
+        draft = (
+            self.root
+            / ".runtime"
+            / "project-attachments"
+            / "drafts"
+            / draft_id
+        )
+        draft.mkdir(parents=True)
+        source = draft / "reference.png"
+        source.write_bytes(b"project-reference")
+        self.workflow.accept_start = False
+        with self.assertRaises(BridgeError) as raised:
+            self.service.start_team_project(
+                task_text="build a Houdini asset",
+                model="gpt-test",
+                local_image_paths=[str(source)],
+                attachment_draft_id=draft_id,
+            )
+        self.assertEqual("PROJECT_WORKFLOW_NOT_STARTED", raised.exception.code)
+        project_id = self.workflow.started[-1]
+        self.assertEqual((), self.registry.list())
+        self.assertFalse(self.runner.has_pending(project_id))
+        self.assertFalse(
+            (self.root / ".runtime" / "project-attachments" / project_id).exists()
+        )
+        self.assertEqual(
+            5,
+            len([method for method, _ in self.client.calls if method == "thread/delete"]),
+        )
 
     def test_image_only_project_owns_its_attachment_without_an_ordinary_thread(self) -> None:
         draft_id = "draft-image-only"

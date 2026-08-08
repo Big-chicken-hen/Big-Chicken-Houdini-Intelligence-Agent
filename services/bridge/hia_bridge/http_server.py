@@ -1108,14 +1108,6 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/interrupt":
             result = application.session.interrupt_turn()
             return {"ok": True, **result}, HTTPStatus.OK
-        if path == "/v1/approval":
-            if "request_id" not in body:
-                raise BridgeError("MISSING_REQUEST_ID", "request_id is required")
-            result = application.session.resolve_approval(
-                body["request_id"],
-                body.get("decision"),
-            )
-            return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/scene/requests":
             return self._submit_scene_request(body)
         matched = _SCENE_APPROVAL_PATH.fullmatch(path)

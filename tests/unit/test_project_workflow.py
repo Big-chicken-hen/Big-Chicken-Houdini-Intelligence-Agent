@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 
+from services.bridge.hia_bridge.errors import BridgeError
 from services.bridge.hia_bridge.project_contracts import (
     ProjectState,
     ProjectStatus,
@@ -77,6 +78,26 @@ class ProjectWorkflowTests(unittest.TestCase):
         finally:
             host.close()
 
+    def test_terminal_workflow_publishes_one_exact_idle_callback(self) -> None:
+        self.registry.put(_record("p1"))
+        runner = ProjectRunner(self.registry)
+        runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
+        idle: list[str] = []
+        host = ProjectWorkflowHost(
+            registry=self.registry,
+            runner=runner,
+            executor_factory=lambda _: _Executor(
+                event=LifecycleEvent(ProjectEvent.PROJECT_ANSWERED)
+            ),
+            on_idle=idle.append,
+        )
+        try:
+            self.assertTrue(host.start("p1"))
+            self.assertTrue(_wait(lambda: idle == ["p1"]))
+            self.assertFalse(host.is_inflight("p1"))
+        finally:
+            host.close()
+
     def test_stop_interrupts_once_and_marks_project_stopped_after_turn_returns(self) -> None:
         self.registry.put(_record("p1"))
         runner = ProjectRunner(self.registry)
@@ -115,6 +136,50 @@ class ProjectWorkflowTests(unittest.TestCase):
             self.assertEqual({}, dict(executor.actions[0].data))
             self.assertEqual("stage-current", self.registry.require("p1").state.stage.stage_id)
         finally:
+            host.close()
+
+    def test_resume_while_stopped_turn_is_finishing_is_409_without_mutation(self) -> None:
+        self.registry.put(_record("p1"))
+        runner = ProjectRunner(self.registry)
+        runner.dispatch("p1", LifecycleEvent(ProjectEvent.PROJECT_STARTED))
+        entered = threading.Event()
+        release = threading.Event()
+        executor = _Executor(entered=entered, release=release)
+        snapshots = []
+        host = ProjectWorkflowHost(
+            registry=self.registry,
+            runner=runner,
+            executor_factory=lambda _: executor,
+            on_snapshot=snapshots.append,
+        )
+        try:
+            self.assertTrue(host.start("p1"))
+            self.assertTrue(entered.wait(0.5))
+            self.assertTrue(host.stop("p1"))
+            stopped = self.registry.require("p1")
+            self.assertEqual(ProjectStatus.STOPPED, stopped.state.status)
+            self.assertFalse(runner.has_pending("p1"))
+
+            with self.assertRaises(BridgeError) as raised:
+                host.resume("p1", {"command": "request_plan"})
+            self.assertEqual("PROJECT_TURN_STILL_STOPPING", raised.exception.code)
+            self.assertEqual(409, raised.exception.http_status)
+            self.assertEqual(stopped, self.registry.require("p1"))
+            self.assertFalse(runner.has_pending("p1"))
+
+            release.set()
+            self.assertTrue(_wait(lambda: not host.is_inflight("p1")))
+            self.assertEqual(
+                ProjectStatus.STOPPED,
+                self.registry.require("p1").state.status,
+            )
+            self.assertEqual(ProjectStatus.STOPPED, snapshots[-1].state.status)
+            self.assertTrue(
+                host.resume("p1", {"command": "request_plan"})
+            )
+            self.assertTrue(_wait(lambda: len(executor.actions) == 2))
+        finally:
+            release.set()
             host.close()
 
     def test_bridge_restart_does_not_auto_resume_or_recreate_queue(self) -> None:

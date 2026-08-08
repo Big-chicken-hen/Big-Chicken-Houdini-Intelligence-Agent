@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
-from .codex_stdio import CodexStdioClient, RequestId
+from .codex_stdio import CodexStdioClient
 from .errors import BridgeError, CodexRPCError
 from .events import EventBuffer
 from .project_identity import (
@@ -23,6 +24,7 @@ from .project_identity import (
     parse_project_thread_source,
 )
 from .scene_writer import SceneWriterOwnership, SceneWriterReservation
+from .thread_rotation import ThreadRotationProfile
 
 
 MODEL_LIST_PAGE_SIZE = 100
@@ -97,25 +99,6 @@ def _thread_cwd_filters(value: str) -> list[str]:
     return list(dict.fromkeys((ordinary, extended)))
 
 
-def _offered_execpolicy_amendment(params: Any) -> list[str] | None:
-    if not isinstance(params, dict):
-        return None
-    amendment = params.get("proposedExecpolicyAmendment")
-    if (
-        not isinstance(amendment, list)
-        or not amendment
-        or not all(isinstance(part, str) and part.strip() for part in amendment)
-    ):
-        return None
-    available = params.get("availableDecisions")
-    if available is not None and (
-        not isinstance(available, list)
-        or "acceptWithExecpolicyAmendment" not in available
-    ):
-        return None
-    return list(amendment)
-
-
 class BridgeSession:
     """Own the Codex child and only the connection identifiers needed by UI."""
 
@@ -149,6 +132,7 @@ class BridgeSession:
         self._account_error: dict[str, Any] | None = None
         self._thread_id: str | None = None
         self._ordinary_thread_ids: set[str] = set()
+        self._ordinary_thread_profiles: dict[str, ThreadRotationProfile] = {}
         self._project_thread_identities: dict[str, ProjectThreadIdentity] = {}
         self._turn_id: str | None = None
         self._turn_status: str | None = None
@@ -177,6 +161,7 @@ class BridgeSession:
                 self._connected = True
                 self._thread_id = None
                 self._ordinary_thread_ids.clear()
+                self._ordinary_thread_profiles.clear()
                 self._project_thread_identities.clear()
                 self._write_focus_state_locked()
             try:
@@ -382,8 +367,9 @@ class BridgeSession:
             )
         common_instructions = (
             "复杂创建、修改或修复在首次场景写入前先做一次相关本地知识批量检索并复用结果；"
-            "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务还必须先用原生 web/search "
-            "查当前 SideFX 官方与原始来源；没有网页工具时才批量只读抓取公开页。"
+            "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务还必须研究当前 SideFX 官方与原始来源；"
+            "需要发现来源时明确用原生 web search，需要读取用户给定公开 URL 时明确用 openPage；"
+            "两者失败均直接报告，不得互相作为隐藏 fallback。"
             "本地检索不可用时明确说明，禁止静默跳过；"
             "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
@@ -394,7 +380,7 @@ class BridgeSession:
             "上下文仅用 app-server 自动整理，不手动 compact，不创建本地摘要或记忆。"
             "实时代码禁止 hou.hipFile.clear/load/save，不替换当前场景；新资产放入唯一新根。"
             "不要调用 request_user_input；信息不足时采用合理默认值，无法执行才报告原因。"
-            "安全已保存 HIP 的自动截图优先写同级 .hia/screenshots，否则回退 HIA_CACHE_DIR/screenshots；"
+            "HIA 截图只能用 SceneViewer.flipbook 写入 HIA_CACHE_DIR/screenshots；不可用时明确失败；"
             "预览写 previews，中间图写 tmp，附件/知识/模型/索引仍留项目 .runtime；文件名加时间戳和短随机后缀。"
             "用户明确指定的最终渲染、EXR、视频、USD、模拟缓存或导出是用户交付物，"
             "可写所选普通本地项目外目录；未指定才用 HIA_RENDER_OUTPUT_DIR，并始终报告最终路径。"
@@ -403,8 +389,8 @@ class BridgeSession:
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             common_instructions = (
                 "复杂创建、修改或修复在首次场景写入前先用 hia_local_help_search 做一次相关批量检索并复用结果；"
-                "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务必须先用原生 web/search "
-                "查当前 SideFX 官方与原始来源；"
+                "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务必须研究当前 SideFX 官方与原始来源；"
+                "发现来源明确用原生 web search，读取给定公开 URL 明确用 openPage；失败不得互相隐藏切换；"
                 "检索不可用时明确说明，禁止静默跳过；"
                 "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
                 "MCP 不可用就说明，不转离线 HIP；hython 仅用于用户明确的离线/独立 HIP/批处理/后台渲染。"
@@ -412,7 +398,7 @@ class BridgeSession:
                 "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，不塞入主上下文；主任务公开采纳。"
                 "禁止 hou.hipFile.clear/load/save 和替换当前场景；新资产置于唯一新根。"
                 "不调用 request_user_input；信息不足用默认，无法执行才报告。"
-                "安全已存 HIP 截图写同级 .hia/screenshots，否则用 HIA_CACHE_DIR/screenshots；"
+                "HIA 截图只能用 SceneViewer.flipbook 写入 HIA_CACHE_DIR/screenshots；不可用时明确失败；"
                 "预览写 previews，中间图写 tmp，附件/知识/模型/索引留 .runtime。"
                 "用户指定的最终渲染/EXR/视频/USD/模拟缓存/导出可写所选普通项目外目录；"
                 "否则用 HIA_RENDER_OUTPUT_DIR；始终报告最终路径。禁止屏幕接管。"
@@ -469,18 +455,22 @@ class BridgeSession:
             self._require_no_active_turn_locked()
         params: dict[str, Any] = {
             "cwd": str(self._project_root),
-            "approvalPolicy": "on-request",
+            "approvalPolicy": "never",
             "sandbox": "workspace-write",
             "ephemeral": False,
             "developerInstructions": self._developer_instructions(),
             "serviceTier": service_tier,
+            "threadSource": "appServer",
         }
         if model is not None:
             params["model"] = model
         result = self._client.request("thread/start", params)
         thread_id = self._extract_thread_id(result)
+        rotation_profile = self._rotation_profile_from_response(result)
         with self._lock:
             self._ordinary_thread_ids.add(thread_id)
+            if rotation_profile is not None:
+                self._ordinary_thread_profiles[thread_id] = rotation_profile
             self._project_thread_identities.pop(thread_id, None)
             self._thread_id = thread_id
             self._reset_turn_locked()
@@ -511,7 +501,7 @@ class BridgeSession:
             {
                 "threadId": thread_id,
                 "cwd": str(self._project_root),
-                "approvalPolicy": "on-request",
+                "approvalPolicy": "never",
                 "sandbox": "workspace-write",
                 "developerInstructions": self._developer_instructions(),
                 "serviceTier": service_tier,
@@ -519,9 +509,14 @@ class BridgeSession:
         )
         resolved_id = self._extract_thread_id(resumed)
         self._require_ordinary_thread_result(resumed, resolved_id)
+        rotation_profile = self._rotation_profile_from_response(resumed)
         read_result = self._project_thread_messages(resumed, resolved_id)
         with self._lock:
             self._thread_id = resolved_id
+            if rotation_profile is not None:
+                self._ordinary_thread_profiles[resolved_id] = rotation_profile
+            else:
+                self._ordinary_thread_profiles.pop(resolved_id, None)
             self._reset_turn_locked()
             self._write_focus_state_locked()
         self._events.publish("thread_selected", action="resume", thread_id=resolved_id)
@@ -715,6 +710,7 @@ class BridgeSession:
             self._focus_enabled_threads.discard(thread_id)
             self._focus_goal_bindings.pop(thread_id, None)
             self._ordinary_thread_ids.discard(thread_id)
+            self._ordinary_thread_profiles.pop(thread_id, None)
             self._project_thread_identities.pop(thread_id, None)
             if was_selected:
                 self._thread_id = None
@@ -1039,7 +1035,7 @@ class BridgeSession:
                 "threadId": thread_id,
                 "input": turn_input,
                 "cwd": str(self._project_root),
-                "approvalPolicy": "on-request",
+                "approvalPolicy": "never",
                 "sandboxPolicy": {
                     "type": "workspaceWrite",
                     "networkAccess": False,
@@ -1117,8 +1113,22 @@ class BridgeSession:
                     )
                 self._turn_created = True
                 self._turn_id = turn_id
-                owner = self._scene_writer.bind(reservation, turn_id)
+                owner = self._scene_writer.bind(reservation, thread_id, turn_id)
                 self._scene_writer_owner = owner
+                profile = self._ordinary_thread_profiles.get(thread_id)
+                if profile is not None:
+                    runtime_changes: dict[str, Any] = {}
+                    if model is not None:
+                        runtime_changes["model"] = model
+                    if effort is not None:
+                        runtime_changes["reasoning_effort"] = effort
+                    if service_tier is not None:
+                        runtime_changes["service_tier"] = service_tier
+                    if runtime_changes:
+                        self._ordinary_thread_profiles[thread_id] = replace(
+                            profile,
+                            **runtime_changes,
+                        )
                 writer_items = tuple(self._active_hia_item_ids)
                 writer_terminal = not self._turn_active
                 self._start_source_turn_id = None
@@ -1483,66 +1493,6 @@ class BridgeSession:
             and bool(self._last_tool_name)
             and self._last_tool_status not in {"completed", "failed"}
         )
-
-    def resolve_approval(self, request_id: RequestId, decision: str) -> dict[str, Any]:
-        if decision not in {"allow", "deny", "allow_rule"}:
-            raise BridgeError(
-                "INVALID_APPROVAL_DECISION",
-                "Approval decision must be 'allow', 'deny', or 'allow_rule'",
-            )
-        request = self._client.pending_server_request(request_id)
-        if request is None:
-            raise BridgeError(
-                "APPROVAL_NOT_FOUND",
-                "The approval request is no longer pending",
-                http_status=404,
-            )
-        method = request["method"]
-        params = request.get("params", {})
-        if decision == "allow_rule":
-            amendment = _offered_execpolicy_amendment(params)
-            if (
-                method != "item/commandExecution/requestApproval"
-                or amendment is None
-            ):
-                raise BridgeError(
-                    "INVALID_APPROVAL_DECISION",
-                    "This approval request does not offer a persistent command rule",
-                )
-            response = {
-                "decision": {
-                    "acceptWithExecpolicyAmendment": {
-                        "execpolicy_amendment": list(amendment),
-                    }
-                }
-            }
-        elif method in {
-            "item/commandExecution/requestApproval",
-            "item/fileChange/requestApproval",
-        }:
-            response = {"decision": "accept" if decision == "allow" else "decline"}
-        elif method == "item/permissions/requestApproval":
-            response = {
-                "permissions": params.get("permissions", {}) if decision == "allow" else {},
-                "scope": "turn",
-            }
-        else:
-            raise BridgeError(
-                "UNSUPPORTED_APPROVAL",
-                f"Unsupported approval method: {method}",
-            )
-        resolved_method = self._client.respond_to_server_request(request_id, response)
-        self._events.publish(
-            "approval_resolved",
-            request_id=request_id,
-            method=resolved_method,
-            decision=decision,
-        )
-        return {
-            "request_id": request_id,
-            "method": resolved_method,
-            "decision": decision,
-        }
 
     @staticmethod
     def _validated_optional_selection(
@@ -1970,6 +1920,152 @@ class BridgeSession:
         thread_id = result["thread"].get("id")
         return BridgeSession._validated_identifier(thread_id, "thread_id")
 
+    def _rotation_profile_from_response(
+        self, result: Any
+    ) -> ThreadRotationProfile | None:
+        if not isinstance(result, Mapping):
+            return None
+        thread = result.get("thread")
+        model = result.get("model")
+        sandbox = result.get("sandbox")
+        if (
+            not isinstance(thread, Mapping)
+            or not isinstance(model, str)
+            or not model
+            or not isinstance(sandbox, Mapping)
+        ):
+            return None
+        reasoning_effort = result.get("reasoningEffort")
+        service_tier = result.get("serviceTier")
+        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+            return None
+        if service_tier is not None and not isinstance(service_tier, str):
+            return None
+        thread_source = thread.get("threadSource")
+        if not isinstance(thread_source, str) or not thread_source:
+            return None
+        cwd = result.get("cwd")
+        return ThreadRotationProfile(
+            cwd=cwd if isinstance(cwd, str) and cwd else str(self._project_root),
+            developer_instructions=self._developer_instructions(),
+            ephemeral=False,
+            thread_source=thread_source,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
+            fork_sandbox="workspace-write",
+            response_sandbox=copy.deepcopy(dict(sandbox)),
+            config={},
+        )
+
+    def owns_ordinary_thread(self, thread_id: str) -> bool:
+        with self._lock:
+            return thread_id in self._ordinary_thread_ids
+
+    def rotation_profile(
+        self, thread_id: str, last_turn_id: str
+    ) -> ThreadRotationProfile | None:
+        if not self._identifier_is_valid(last_turn_id):
+            return None
+        with self._lock:
+            if thread_id not in self._ordinary_thread_ids:
+                return None
+            profile = self._ordinary_thread_profiles.get(thread_id)
+            return copy.deepcopy(profile) if profile is not None else None
+
+    def rotation_is_idle(self, thread_id: str) -> bool:
+        with self._lock:
+            if thread_id not in self._ordinary_thread_ids or self._closed:
+                return False
+            if thread_id == self._thread_id and (
+                self._turn_active
+                or self._active_hia_item_ids
+                or self._scene_writer_reservation is not None
+                or self._scene_writer_owner is not None
+            ):
+                return False
+        writer = self._scene_writer.snapshot()
+        return writer.get("thread_id") != thread_id
+
+    def rotation_rebind(self, old_thread_id: str, new_thread_id: str) -> None:
+        with self._lock:
+            if (
+                old_thread_id not in self._ordinary_thread_ids
+                or new_thread_id in self._ordinary_thread_ids
+                or new_thread_id in self._project_thread_identities
+            ):
+                raise ValueError("ordinary Thread rotation identity is stale")
+            profile = self._ordinary_thread_profiles.get(old_thread_id)
+            if profile is None:
+                raise ValueError("ordinary Thread rotation profile is missing")
+            old_ids = set(self._ordinary_thread_ids)
+            old_profiles = dict(self._ordinary_thread_profiles)
+            old_selected = self._thread_id
+            old_focus = set(self._focus_enabled_threads)
+            old_bindings = dict(self._focus_goal_bindings)
+            attachments_root = (
+                self._project_root / ".runtime" / "attachments"
+            ).resolve()
+            old_cache = (attachments_root / old_thread_id).resolve()
+            new_cache = (attachments_root / new_thread_id).resolve()
+            if old_cache.parent != attachments_root or new_cache.parent != attachments_root:
+                raise ValueError("ordinary Thread attachment cache identity is unsafe")
+            if new_cache.exists() or new_cache.is_symlink():
+                raise ValueError("replacement Thread attachment cache already exists")
+            moved_cache = False
+            if old_cache.is_symlink():
+                raise ValueError("ordinary Thread attachment cache is unsafe")
+            if old_cache.exists():
+                if not old_cache.is_dir():
+                    raise ValueError("ordinary Thread attachment cache is unsafe")
+                old_cache.rename(new_cache)
+                moved_cache = True
+            try:
+                self._ordinary_thread_ids.remove(old_thread_id)
+                self._ordinary_thread_ids.add(new_thread_id)
+                self._ordinary_thread_profiles.pop(old_thread_id, None)
+                self._ordinary_thread_profiles[new_thread_id] = profile
+                if self._thread_id == old_thread_id:
+                    self._thread_id = new_thread_id
+                if old_thread_id in self._focus_enabled_threads:
+                    self._focus_enabled_threads.remove(old_thread_id)
+                    self._focus_enabled_threads.add(new_thread_id)
+                binding = self._focus_goal_bindings.pop(old_thread_id, None)
+                if binding is not None:
+                    self._focus_goal_bindings[new_thread_id] = binding
+                self._write_focus_state_locked()
+            except Exception:
+                self._ordinary_thread_ids = old_ids
+                self._ordinary_thread_profiles = old_profiles
+                self._thread_id = old_selected
+                self._focus_enabled_threads = old_focus
+                self._focus_goal_bindings = old_bindings
+                if moved_cache:
+                    if old_cache.exists() or not new_cache.is_dir():
+                        raise RuntimeError(
+                            "ordinary Thread attachment cache rollback is unsafe"
+                        )
+                    new_cache.rename(old_cache)
+                raise
+
+    def rotation_readback(self, old_thread_id: str, new_thread_id: str) -> bool:
+        with self._lock:
+            return (
+                old_thread_id not in self._ordinary_thread_ids
+                and new_thread_id in self._ordinary_thread_ids
+                and old_thread_id not in self._ordinary_thread_profiles
+                and new_thread_id in self._ordinary_thread_profiles
+                and self._thread_id != old_thread_id
+                and old_thread_id not in self._focus_enabled_threads
+                and old_thread_id not in self._focus_goal_bindings
+                and not (
+                    self._project_root
+                    / ".runtime"
+                    / "attachments"
+                    / old_thread_id
+                ).exists()
+            )
+
     def _require_ordinary_thread(self, thread_id: str) -> None:
         with self._lock:
             identity = self._project_thread_identities.get(thread_id)
@@ -2229,6 +2325,7 @@ class BridgeSession:
         return identifiers[0], identifiers[1]
 
     def _on_client_event(self, event: dict[str, Any]) -> None:
+        scene_writer_identity_error: tuple[str, str] | None = None
         event_type = event.get("type")
         if event_type == "codex_notification":
             method = event.get("method")
@@ -2290,18 +2387,28 @@ class BridgeSession:
                     ):
                         owner = self._scene_writer_owner
                         item_id = item.get("id")
-                        if not isinstance(item_id, str) or not item_id:
-                            item_id = str(item.get("tool") or "hia-tool")
                         is_hia_item = self._is_hia_item(item)
-                        if method == "item/started" and is_hia_item:
-                            self._active_hia_item_ids.add(item_id)
+                        exact_item_id = (
+                            item_id
+                            if isinstance(item_id, str) and bool(item_id)
+                            else None
+                        )
+                        if is_hia_item and exact_item_id is None:
                             if isinstance(owner, str):
-                                self._scene_writer.hia_started(owner, item_id)
+                                self._scene_writer.fail_closed(owner)
+                            scene_writer_identity_error = (thread_id, turn_id)
+                            self._last_tool_status = "failed"
+                        elif method == "item/started" and is_hia_item:
+                            self._active_hia_item_ids.add(exact_item_id)
+                            if isinstance(owner, str):
+                                self._scene_writer.hia_started(owner, exact_item_id)
                         elif method == "item/completed" and is_hia_item:
-                            self._active_hia_item_ids.discard(item_id)
+                            self._active_hia_item_ids.discard(exact_item_id)
                             if (
                                 isinstance(owner, str)
-                                and self._scene_writer.hia_finished(owner, item_id)
+                                and self._scene_writer.hia_finished(
+                                    owner, exact_item_id
+                                )
                             ):
                                 self._scene_writer_owner = None
                                 self._scene_writer_reservation = None
@@ -2350,6 +2457,8 @@ class BridgeSession:
                 elif method == "thread/deleted":
                     thread_id = params.get("threadId")
                     if isinstance(thread_id, str):
+                        self._ordinary_thread_ids.discard(thread_id)
+                        self._ordinary_thread_profiles.pop(thread_id, None)
                         self._focus_enabled_threads.discard(thread_id)
                         self._focus_goal_bindings.pop(thread_id, None)
                         if self._thread_id == thread_id:
@@ -2363,5 +2472,14 @@ class BridgeSession:
             with self._turn_condition:
                 self._connected = False
                 self._turn_condition.notify_all()
+        if scene_writer_identity_error is not None:
+            thread_id, turn_id = scene_writer_identity_error
+            self._events.publish(
+                "protocol_warning",
+                code="INVALID_HIA_ITEM_ID",
+                message="Retained scene writer ownership after an HIA item omitted its exact id",
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
         fields = {key: value for key, value in event.items() if key != "type"}
         self._events.publish(str(event_type), **fields)

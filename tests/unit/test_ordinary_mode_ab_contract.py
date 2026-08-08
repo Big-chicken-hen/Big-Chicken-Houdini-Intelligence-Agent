@@ -122,7 +122,7 @@ class OrdinaryModeABContractTests(unittest.TestCase):
         self.run_case("tests.unit.test_bridge_session", "BridgeSessionNativeToolPolicyTests", "test_thread_start_enables_workspace_write_with_native_hython_instructions")
 
     def test_02_open_ordinary_thread(self) -> None:
-        self.run_case("tests.unit.test_bridge_session", "BridgeSessionNativeToolPolicyTests", "test_thread_resume_enables_workspace_write_with_on_request_approval")
+        self.run_case("tests.unit.test_bridge_session", "BridgeSessionNativeToolPolicyTests", "test_thread_resume_enables_workspace_write_without_runtime_approval")
 
     def test_03_text_turn(self) -> None:
         self.run_case("tests.unit.test_bridge_http", "BridgeHTTPTests", "test_unicode_model_effort_and_service_tier_are_forwarded_without_loss")
@@ -137,7 +137,7 @@ class OrdinaryModeABContractTests(unittest.TestCase):
         self.run_case("tests.unit.test_bridge_session", "BridgeSessionSteerTests", "test_steer_uses_expected_turn_and_does_not_change_lifecycle")
 
     def test_07_stop(self) -> None:
-        self.run_case("tests.unit.test_bridge_session", "BridgeSessionTurnStateTests", "test_interrupt_completion_within_grace_does_not_restart_codex")
+        self.run_case("tests.unit.test_bridge_session", "BridgeSessionTurnStateTests", "test_interrupt_completion_within_grace_is_terminal")
 
     def test_08_goal(self) -> None:
         self.run_case("tests.unit.test_bridge_session", "BridgeSessionGoalTests", "test_goal_round_trip_uses_selected_native_thread")

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import threading
 from typing import Any, Callable, Mapping
 from typing import Protocol
@@ -35,6 +36,7 @@ from .project_thread_factory import (
     ProjectThreadFactory,
     ROLE_TITLES,
 )
+from .thread_rotation import ThreadRotationProfile
 
 
 PROJECT_TEAM_SCHEMA = "hia-project-team/2"
@@ -44,7 +46,7 @@ _TERMINAL = frozenset(
     {ProjectStatus.COMPLETED, ProjectStatus.FAILED}
 )
 _GUIDANCE_INACTIVE = frozenset(
-    {*_TERMINAL, ProjectStatus.STOPPED}
+    _TERMINAL
 )
 
 
@@ -85,6 +87,8 @@ class ProjectWorkflowControl(Protocol):
     def stop(self, project_id: str) -> bool: ...
 
     def resume(self, project_id: str) -> bool: ...
+
+    def is_inflight(self, project_id: str) -> bool: ...
 
 
 class ProjectServiceClient(AppServerClient, Protocol):
@@ -209,6 +213,78 @@ class ProjectTeamService:
                     return record.state.project_id, matches[0]
         return None
 
+    def rotation_profile(
+        self, thread_id: str, last_turn_id: str
+    ) -> ThreadRotationProfile | None:
+        if not isinstance(last_turn_id, str) or not last_turn_id:
+            return None
+        identity = self.role_identity_for_thread(thread_id)
+        if identity is None:
+            return None
+        project_id, role = identity
+        with self._lock:
+            binding = self._registry.require(project_id).state.roles.get(role)
+            if binding is None or binding.thread_id != thread_id:
+                return None
+            return self._factory.rotation_profile(project_id, binding)
+
+    def rotation_is_idle(self, thread_id: str) -> bool:
+        identity = self.role_identity_for_thread(thread_id)
+        if identity is None:
+            return False
+        project_id, _ = identity
+        return (
+            not self._client.has_active_thread(thread_id)
+            and not self._workflow.is_inflight(project_id)
+        )
+
+    def rotation_validate_role_tools(
+        self, thread_id: str, result: Mapping[str, Any]
+    ) -> bool:
+        identity = self.role_identity_for_thread(thread_id)
+        if identity is None:
+            return False
+        project_id, role = identity
+        with self._lock:
+            binding = self._registry.require(project_id).state.roles.get(role)
+            if binding is None or binding.thread_id != thread_id:
+                return False
+            self._factory.validate_rotation_response(project_id, binding, result)
+        return True
+
+    def rotation_rebind(self, old_thread_id: str, new_thread_id: str) -> None:
+        identity = self.role_identity_for_thread(old_thread_id)
+        if identity is None:
+            raise ValueError("project role rotation identity is stale")
+        project_id, role = identity
+        with self._lock:
+            record = self._registry.require(project_id)
+            binding = record.state.roles.get(role)
+            if binding is None or binding.thread_id != old_thread_id:
+                raise ValueError("project role changed before rotation rebind")
+            roles = dict(record.state.roles)
+            roles[role] = replace(binding, thread_id=new_thread_id)
+            state = replace(
+                record.state,
+                roles=roles,
+                revision=record.state.revision + 1,
+            )
+            self._registry.put(
+                ProjectRecord(
+                    state,
+                    record.authoritative_task_text,
+                    record.attachments,
+                ),
+                expected_revision=record.state.revision,
+            )
+
+    def rotation_readback(self, old_thread_id: str, new_thread_id: str) -> bool:
+        new_identity = self.role_identity_for_thread(new_thread_id)
+        return (
+            new_identity is not None
+            and self.role_identity_for_thread(old_thread_id) is None
+        )
+
     def read_role_thread(self, thread_id: str) -> dict[str, Any]:
         """Read one project role without a resume call or ordinary Session mutation."""
 
@@ -276,49 +352,69 @@ class ProjectTeamService:
                 500,
                 {"orphan_thread_ids": list(exc.orphan_thread_ids)},
             ) from exc
+        attachment_directory = (
+            self._project_root
+            / ".runtime"
+            / "project-attachments"
+            / project_id
+        ).resolve()
+        failed_step = "attachments"
         try:
             attachments = finalize_project_attachments(
                 self._project_root,
                 project_id,
                 candidates,
             )
-        except Exception as exc:
-            orphan_thread_ids = self._factory.cleanup_roles(state)
-            raise BridgeError(
-                "PROJECT_ATTACHMENT_FINALIZE_FAILED",
-                str(exc),
-                500,
-                {"orphan_thread_ids": list(orphan_thread_ids)},
-            ) from exc
-        image_paths = tuple(
-            str(
-                self._project_root
-                / ".runtime"
-                / "project-attachments"
-                / project_id
-                / item.file_name
+            image_paths = tuple(
+                str(attachment_directory / item.file_name)
+                for item in attachments
             )
-            for item in attachments
-        )
-        supervisor_id = state.supervisor_thread_id
-        record = ProjectRecord(state, task_text, attachments)
-        self._registry.put(record)
-        record = self._runner.dispatch(
-            project_id,
-            LifecycleEvent(
-                ProjectEvent.PROJECT_STARTED,
-                {"local_image_paths": list(image_paths)},
-            ),
-        )
-        if not self._workflow.start(project_id):
-            self._runner.cancel_and_dispatch(
+            supervisor_id = state.supervisor_thread_id
+            record = ProjectRecord(state, task_text, attachments)
+            failed_step = "registry"
+            self._registry.put(record)
+            failed_step = "lifecycle"
+            record = self._runner.dispatch(
                 project_id,
                 LifecycleEvent(
-                    ProjectEvent.PROJECT_FAILED,
-                    {"error": "project workflow did not start"},
+                    ProjectEvent.PROJECT_STARTED,
+                    {"local_image_paths": list(image_paths)},
                 ),
             )
-            raise RuntimeError("project workflow did not start")
+            failed_step = "workflow"
+            if not self._workflow.start(project_id):
+                raise RuntimeError("project workflow did not start")
+        except Exception as exc:
+            self._runner.discard(project_id)
+            orphan_project_id: str | None = None
+            if self._registry.get(project_id) is not None:
+                try:
+                    self._registry.delete(project_id)
+                except Exception:
+                    orphan_project_id = project_id
+            orphan_attachment_path: str | None = None
+            if attachment_directory.exists():
+                try:
+                    shutil.rmtree(attachment_directory)
+                except OSError:
+                    orphan_attachment_path = str(attachment_directory)
+            orphan_thread_ids = self._factory.cleanup_roles(state)
+            error_codes = {
+                "attachments": "PROJECT_ATTACHMENT_FINALIZE_FAILED",
+                "registry": "PROJECT_REGISTRY_CREATE_FAILED",
+                "lifecycle": "PROJECT_LIFECYCLE_CREATE_FAILED",
+                "workflow": "PROJECT_WORKFLOW_NOT_STARTED",
+            }
+            raise BridgeError(
+                error_codes[failed_step],
+                str(exc),
+                500,
+                {
+                    "orphan_thread_ids": list(orphan_thread_ids),
+                    "orphan_attachment_path": orphan_attachment_path,
+                    "orphan_project_id": orphan_project_id,
+                },
+            ) from exc
         return {
             "project_id": project_id,
             "root_thread_id": supervisor_id,
@@ -345,6 +441,16 @@ class ProjectTeamService:
             record = self._registry.require(project_id)
             if record.state.status in _GUIDANCE_INACTIVE:
                 raise ProjectGuidanceUnavailable(project_id, record.state.status)
+            delta = requirement_delta or RequirementDelta()
+            if delta.is_material and record.state.status not in {
+                ProjectStatus.STOPPED,
+                ProjectStatus.WAITING_USER,
+            }:
+                raise BridgeError(
+                    "PROJECT_REQUIREMENT_CHANGE_REQUIRES_STOP",
+                    "Stop the active project before changing its requirements",
+                    409,
+                )
             target_role = None
             if thread_id is not None:
                 matches = [
@@ -721,12 +827,26 @@ class ProjectTeamService:
         )
         if plan is None:
             return {"command": "request_plan"}
+        if plan.get("guidance_revision") != record.state.guidance_revision:
+            return {"command": "request_plan"}
         authorization = self._latest_role_payload(
             record,
             Role.SUPERVISOR,
             "hia-project-authorization/1",
         )
-        if authorization is None or authorization.get("authorized") is not True:
+        plan_identity = {
+            "planning_thread_id": plan.get("planning_thread_id"),
+            "planning_turn_id": plan.get("planning_turn_id"),
+            "guidance_revision": plan.get("guidance_revision"),
+        }
+        if (
+            authorization is None
+            or authorization.get("authorized") is not True
+            or any(
+                authorization.get(key) != value
+                for key, value in plan_identity.items()
+            )
+        ):
             return {"command": "request_authorization"}
         stage_id = record.state.stage.stage_id
         stages = plan.get("stages")
@@ -757,6 +877,14 @@ class ProjectTeamService:
             stage_id=stage_id,
         )
         if decision is None:
+            return {"command": "start_reviews"}
+        if (
+            decision.get("execution_thread_id")
+            != execution.get("execution_thread_id")
+            or decision.get("execution_turn_id")
+            != execution.get("execution_turn_id")
+            or decision.get("stage_id") != execution.get("stage_id")
+        ):
             return {"command": "start_reviews"}
         if decision.get("decision") == "repair":
             return {
@@ -807,7 +935,63 @@ class ProjectTeamService:
                     continue
                 if stage_id is not None and payload.get("stage_id") != stage_id:
                     continue
-                return payload
+                result = dict(payload)
+                turn_id = turn.get("id")
+                if schema in {
+                    "hia-project-plan/1",
+                    "hia-project-execution/1",
+                } and (not isinstance(turn_id, str) or not turn_id):
+                    raise ValueError("native role output has no exact Turn ID")
+                if schema == "hia-project-plan/1":
+                    revisions: set[int] = set()
+                    for request_item in items:
+                        if (
+                            not isinstance(request_item, Mapping)
+                            or request_item.get("type") != "userMessage"
+                            or not isinstance(request_item.get("content"), list)
+                        ):
+                            continue
+                        for content in request_item["content"]:
+                            if (
+                                not isinstance(content, Mapping)
+                                or content.get("type") != "text"
+                                or not isinstance(content.get("text"), str)
+                            ):
+                                continue
+                            try:
+                                request_payload = json.loads(content["text"])
+                            except ValueError:
+                                continue
+                            revision = (
+                                request_payload.get("guidance_revision")
+                                if isinstance(request_payload, Mapping)
+                                else None
+                            )
+                            if (
+                                isinstance(revision, int)
+                                and not isinstance(revision, bool)
+                                and revision >= 0
+                            ):
+                                revisions.add(revision)
+                    if len(revisions) != 1:
+                        raise ValueError(
+                            "native Planning Turn has no exact guidance revision"
+                        )
+                    result.update(
+                        {
+                            "planning_thread_id": binding.thread_id,
+                            "planning_turn_id": turn_id,
+                            "guidance_revision": next(iter(revisions)),
+                        }
+                    )
+                elif schema == "hia-project-execution/1":
+                    result.update(
+                        {
+                            "execution_thread_id": binding.thread_id,
+                            "execution_turn_id": turn_id,
+                        }
+                    )
+                return result
         return None
 
     @staticmethod
@@ -859,5 +1043,8 @@ class ProjectTeamService:
                     projected_items.append(
                         {"type": "agentMessage", "text": item["text"]}
                     )
-            projected_turns.append({"items": projected_items})
+            projected_turn = {"items": projected_items}
+            if isinstance(turn.get("id"), str) and turn["id"]:
+                projected_turn["id"] = turn["id"]
+            projected_turns.append(projected_turn)
         return {"thread": {"id": expected_thread_id, "turns": projected_turns}}

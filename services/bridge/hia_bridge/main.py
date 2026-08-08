@@ -13,7 +13,7 @@ import signal
 import sys
 import threading
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from hia_core.houdini_contract import B2_SCHEMA_VERSION, SchemaRegistry
 from hia_core.path_policy import PROJECT_ROOT, PathPolicyError, validate_project_subpath
@@ -33,6 +33,11 @@ from .project_workflow import ProjectWorkflowHost
 from .scene_writer import SceneWriterOwnership
 from .scene_queue import B2_READ_ONLY_PROFILE, SceneQueue
 from .session import BridgeSession
+from .thread_rotation import (
+    ThreadRotationAdapters,
+    ThreadRotationProfile,
+    ThreadRotationService,
+)
 
 
 PINNED_CODEX_RELATIVE_PATH = Path(
@@ -250,12 +255,13 @@ def _build_project_runtime(
     allowed_evidence_roots: Sequence[Path],
     model_catalog: Callable[[], Mapping[str, object]],
     scene_writer: SceneWriterOwnership,
+    on_project_idle: Callable[[str], None] | None = None,
 ) -> ProjectRuntime:
     """Compose the project runtime once around the owned app-server client."""
 
     registry = ProjectRegistry(project_root / PROJECT_REGISTRY_RELATIVE_PATH)
     runner = ProjectRunner(registry)
-    role_client = ProjectRoleClient(client, events)
+    role_client = ProjectRoleClient(client, events, scene_writer=scene_writer)
     thread_factory = ProjectThreadFactory(
         role_client,
         project_root,
@@ -285,6 +291,15 @@ def _build_project_runtime(
             ],
         )
 
+    def notify_project_idle(project_id: str) -> None:
+        if on_project_idle is None:
+            return
+        record = registry.get(project_id)
+        if record is None:
+            return
+        for binding in record.state.roles.values():
+            on_project_idle(binding.thread_id)
+
     def executor_factory(_: str) -> ProjectRoleExecutor:
         return ProjectRoleExecutor(
             client=role_client,
@@ -300,6 +315,7 @@ def _build_project_runtime(
         executor_factory=executor_factory,
         interrupt_hook=interrupt_project,
         on_snapshot=publish_snapshot,
+        on_idle=notify_project_idle,
     )
     service = ProjectTeamService(
         client=role_client,
@@ -648,6 +664,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     server: LoopbackHTTPServer | None = None
     scene_queue: SceneQueue | None = None
     project_runtime: ProjectRuntime | None = None
+    thread_rotation: ThreadRotationService | None = None
     sensitive_values: list[str] = []
     try:
         project_root, codex_exe, codex_home, temp_directory = _validated_paths(args)
@@ -808,6 +825,102 @@ def run(argv: Sequence[str] | None = None) -> int:
             focus_state_path=focus_state_path,
             scene_writer=scene_writer,
         )
+
+        def rotation_profile(
+            thread_id: str, last_turn_id: str
+        ) -> ThreadRotationProfile | None:
+            profile = session.rotation_profile(thread_id, last_turn_id)
+            if profile is not None:
+                return profile
+            runtime = project_runtime
+            return (
+                runtime.service.rotation_profile(thread_id, last_turn_id)
+                if runtime is not None
+                else None
+            )
+
+        def rotation_is_idle(thread_id: str) -> bool:
+            if session.owns_ordinary_thread(thread_id):
+                return session.rotation_is_idle(thread_id)
+            runtime = project_runtime
+            return (
+                runtime.service.rotation_is_idle(thread_id)
+                if runtime is not None
+                else False
+            )
+
+        def rotation_rebind(old_thread_id: str, new_thread_id: str) -> None:
+            if session.owns_ordinary_thread(old_thread_id):
+                session.rotation_rebind(old_thread_id, new_thread_id)
+                return
+            runtime = project_runtime
+            if (
+                runtime is not None
+                and runtime.service.role_identity_for_thread(old_thread_id) is not None
+            ):
+                runtime.service.rotation_rebind(old_thread_id, new_thread_id)
+                return
+            raise ValueError("rotation target is no longer authoritative")
+
+        def rotation_readback(old_thread_id: str, new_thread_id: str) -> bool:
+            if session.owns_ordinary_thread(new_thread_id):
+                return session.rotation_readback(old_thread_id, new_thread_id)
+            runtime = project_runtime
+            return (
+                runtime.service.rotation_readback(old_thread_id, new_thread_id)
+                if runtime is not None
+                and runtime.service.role_identity_for_thread(new_thread_id) is not None
+                else False
+            )
+
+        def rotation_validate_role_tools(
+            thread_id: str, result: Mapping[str, Any]
+        ) -> bool:
+            if session.owns_ordinary_thread(thread_id):
+                return True
+            runtime = project_runtime
+            return (
+                runtime.service.rotation_validate_role_tools(thread_id, result)
+                if runtime is not None
+                else False
+            )
+
+        def publish_rotation(payload: Mapping[str, Any]) -> None:
+            event_type = payload.get("type")
+            if not isinstance(event_type, str) or not event_type:
+                raise ValueError("rotation event type is required")
+            fields = {key: value for key, value in payload.items() if key != "type"}
+            events.publish(event_type, **fields)
+            if event_type != "thread_rotated":
+                return
+            new_thread_id = payload.get("newThreadId")
+            if not isinstance(new_thread_id, str):
+                return
+            if session.owns_ordinary_thread(new_thread_id):
+                events.publish("session_state", session=session.snapshot())
+                return
+            runtime = project_runtime
+            if (
+                runtime is not None
+                and runtime.service.role_identity_for_thread(new_thread_id) is not None
+            ):
+                events.publish(
+                    "project_team_updated",
+                    project_team=runtime.service.snapshot(),
+                )
+
+        thread_rotation = ThreadRotationService(
+            client,
+            ThreadRotationAdapters(
+                expected_profile=rotation_profile,
+                is_idle=rotation_is_idle,
+                rebind=rotation_rebind,
+                readback=rotation_readback,
+                publish=publish_rotation,
+                validate_role_tools=rotation_validate_role_tools,
+            ),
+        )
+        client.add_notification_observer(thread_rotation.observe)
         project_runtime_arguments = dict(
             client=client,
             events=events,
@@ -826,15 +939,18 @@ def run(argv: Sequence[str] | None = None) -> int:
                 project_root, render_output_directory
             ),
             scene_writer=scene_writer,
+            on_project_idle=thread_rotation.notify_idle,
         )
         session_model_catalog = getattr(session, "list_models", None)
         if callable(session_model_catalog):
             project_runtime_arguments["model_catalog"] = session_model_catalog
+
         def build_project_team() -> ProjectTeamService:
             nonlocal project_runtime
             if project_runtime is None:
                 project_runtime = _build_project_runtime(**project_runtime_arguments)
             return project_runtime.service
+
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
         houdini_process_nonce = f"houdini-{secrets.token_hex(16)}"
@@ -954,15 +1070,19 @@ def run(argv: Sequence[str] | None = None) -> int:
                 server.server_close()
         finally:
             try:
-                if project_runtime is not None:
-                    project_runtime.close()
+                if thread_rotation is not None:
+                    thread_rotation.close()
             finally:
                 try:
-                    if scene_queue is not None:
-                        scene_queue.shutdown()
+                    if project_runtime is not None:
+                        project_runtime.close()
                 finally:
-                    if session is not None:
-                        session.close()
+                    try:
+                        if scene_queue is not None:
+                            scene_queue.shutdown()
+                    finally:
+                        if session is not None:
+                            session.close()
 
 
 def main() -> None:

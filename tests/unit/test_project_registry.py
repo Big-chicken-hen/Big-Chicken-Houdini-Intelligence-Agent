@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from services.bridge.hia_bridge.project_contracts import (
     ProjectState,
@@ -134,6 +135,22 @@ class ProjectRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "revision mismatch"):
             self.registry.put(changed, expected_revision=9)
         self.registry.put(changed, expected_revision=0)
+
+    def test_failed_registry_write_does_not_change_in_memory_record(self) -> None:
+        record = _record()
+        self.registry.put(record)
+        changed = ProjectRecord(
+            replace(record.state, revision=1),
+            record.authoritative_task_text,
+        )
+        with mock.patch.object(
+            self.registry,
+            "_write_all",
+            side_effect=OSError("disk unavailable"),
+        ):
+            with self.assertRaisesRegex(OSError, "disk unavailable"):
+                self.registry.put(changed, expected_revision=0)
+        self.assertEqual(record, self.registry.require("project-1"))
 
     def test_corrupt_or_legacy_schema_fails_closed_on_load(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

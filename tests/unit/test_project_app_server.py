@@ -9,6 +9,7 @@ from services.bridge.hia_bridge.project_app_server import (
     ProjectRoleClient,
     ProjectTurnTimeout,
 )
+from services.bridge.hia_bridge.scene_writer import SceneWriterOwnership
 
 
 class _Client:
@@ -18,10 +19,19 @@ class _Client:
         self.before_ack = None
         self.next_turn = "turn-1"
         self.requests: list[tuple[str, dict]] = []
+        self.notification_observers = []
+
+    def add_notification_observer(self, observer) -> None:
+        self.notification_observers.append(observer)
+
+    def emit_notification(self, method: str, params: dict) -> None:
+        for observer in tuple(self.notification_observers):
+            observer(method, params)
+        _publish(self.events, method, params)
 
     def request(self, method, params):
         self.requests.append((method, dict(params)))
-        if self.before_ack is not None:
+        if method == "turn/start" and self.before_ack is not None:
             self.before_ack()
         if method == "turn/start":
             return {"turn": {"id": self.next_turn}}
@@ -185,18 +195,123 @@ class ProjectAppServerTests(unittest.TestCase):
         with self.assertRaises(ProjectAppServerError) as raised:
             adapter.wait_for_turn("thread-a", "turn-a", 0.2)
         self.assertEqual("PROJECT_EVENT_GAP", raised.exception.code)
+        self.assertTrue(adapter.has_active_thread("thread-a"))
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-a",
+                "turn": {"id": "turn-a", "status": "failed"},
+            },
+        )
+        self.assertFalse(adapter.has_active_thread("thread-a"))
 
-    def test_timeout_is_bounded_and_removes_turn_registration(self) -> None:
+    def test_timeout_retains_exact_turn_until_late_terminal_and_hia_completion(self) -> None:
         events = EventBuffer()
         client = _Client(events)
-        adapter = ProjectRoleClient(client, events, poll_interval_seconds=0.002)
+        writer = SceneWriterOwnership()
+        adapter = ProjectRoleClient(
+            client,
+            events,
+            scene_writer=writer,
+            poll_interval_seconds=0.002,
+        )
+
+        def before_ack() -> None:
+            client.emit_notification(
+                "item/started",
+                {
+                    "threadId": "thread-a",
+                    "turnId": "turn-a",
+                    "item": {
+                        "id": "hia-item-a",
+                        "type": "mcpToolCall",
+                        "server": "hia_mcp_v2",
+                        "tool": "hia_execute_hom",
+                    },
+                },
+            )
+
+        client.before_ack = before_ack
         _start(adapter, client, "thread-a", "turn-a")
+        reservation = writer.reserve("project", "project-a")
+        owner = writer.bind(reservation, "thread-a", "turn-a")
+        adapter.bind_scene_writer("thread-a", "turn-a", owner)
 
         with self.assertRaises(ProjectTurnTimeout):
             adapter.wait_for_turn("thread-a", "turn-a", 0.01)
+        self.assertTrue(adapter.has_active_thread("thread-a"))
+        self.assertEqual(
+            (("thread-a", "turn-a"),),
+            adapter.interrupt_threads(("thread-a",)),
+        )
+        self.assertEqual((), adapter.interrupt_threads(("thread-a",)))
+
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-a",
+                "turn": {"id": "turn-a", "status": "interrupted"},
+            },
+        )
+        self.assertTrue(writer.retained_after_terminal(owner))
+        client.emit_notification(
+            "item/completed",
+            {
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "item": {
+                    "id": "hia-item-a",
+                    "type": "mcpToolCall",
+                    "server": "hia_mcp_v2",
+                    "tool": "hia_execute_hom",
+                },
+            },
+        )
+        self.assertIsNone(writer.snapshot()["owner"])
+        self.assertFalse(adapter.has_active_thread("thread-a"))
+
+    def test_missing_hia_item_id_before_binding_fails_closed(self) -> None:
+        events = EventBuffer()
+        client = _Client(events)
+        writer = SceneWriterOwnership()
+        adapter = ProjectRoleClient(client, events, scene_writer=writer)
+        _start(adapter, client, "thread-execution", "turn-execution")
+        client.emit_notification(
+            "item/started",
+            {
+                "threadId": "thread-execution",
+                "turnId": "turn-execution",
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "hia_mcp_v2",
+                    "tool": "hia_execute_hom",
+                },
+            },
+        )
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-execution",
+                "turn": {"id": "turn-execution", "status": "completed"},
+            },
+        )
+        reservation = writer.reserve("project", "project-a")
+        owner = writer.bind(
+            reservation, "thread-execution", "turn-execution"
+        )
+        adapter.bind_scene_writer(
+            "thread-execution", "turn-execution", owner
+        )
+
+        snapshot = writer.snapshot()
+        self.assertEqual(owner, snapshot["owner"])
+        self.assertTrue(snapshot["turn_terminal"])
+        self.assertTrue(snapshot["identity_error"])
         with self.assertRaises(ProjectAppServerError) as raised:
-            adapter.wait_for_turn("thread-a", "turn-a", 0.01)
-        self.assertEqual("UNACKNOWLEDGED_TURN", raised.exception.code)
+            adapter.wait_for_turn(
+                "thread-execution", "turn-execution", 0.2
+            )
+        self.assertEqual("INVALID_HIA_ITEM_ID", raised.exception.code)
 
     def test_returns_terminal_receipt_for_invalid_or_non_object_agent_json(self) -> None:
         for body, code in (("not json", "INVALID_AGENT_JSON"), ("[]", "INVALID_AGENT_PAYLOAD")):

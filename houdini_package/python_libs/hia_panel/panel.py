@@ -9,7 +9,6 @@ import re
 import sys
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +17,6 @@ from typing import Any
 import PySide6
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .approval_card import format_approval_card
 from .attachment_store import AttachmentStore
 from .bridge_client import BridgeClient
 from .houdini_read_adapter import HoudiniReadAdapter, HoudiniReadAdapterError
@@ -236,9 +234,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._reconnecting = False
         self._reconnect_exhausted_notice_shown = False
         self._app_server_exit_notice_shown = False
-        self._pending_approvals: deque[dict[str, Any]] = deque()
-        self._current_approval: dict[str, Any] | None = None
-        self._current_approval_offers_persistent_rule = False
         self._houdini_adapter: HoudiniReadAdapter | None = None
         self._houdini_polling_enabled = False
         self._local_houdini_polling_enabled = False
@@ -620,42 +615,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if hasattr(self.conversation, "newThreadRequested"):
             self.conversation.newThreadRequested.connect(self._new_thread)
         center_layout.addWidget(self.conversation, 1)
-
-        self.approval_group = QtWidgets.QGroupBox("审批请求")
-        approval_layout = QtWidgets.QVBoxLayout(self.approval_group)
-        self.approval_text = QtWidgets.QPlainTextEdit()
-        self.approval_text.setReadOnly(True)
-        self.approval_text.setMaximumHeight(150)
-        approval_layout.addWidget(self.approval_text)
-        self.approval_details_button = QtWidgets.QPushButton("高级详情")
-        self.approval_details_button.setCheckable(True)
-        self.approval_details_button.setChecked(False)
-        self.approval_details_button.setVisible(False)
-        approval_layout.addWidget(self.approval_details_button)
-        self.approval_details_text = QtWidgets.QPlainTextEdit()
-        self.approval_details_text.setReadOnly(True)
-        self.approval_details_text.setMaximumHeight(220)
-        self.approval_details_text.setVisible(False)
-        approval_layout.addWidget(self.approval_details_text)
-        self.persistent_allow_note = QtWidgets.QLabel(
-            "持续授权：以后允许协议提供的相同命令规则。"
-        )
-        self.persistent_allow_note.setVisible(False)
-        approval_layout.addWidget(self.persistent_allow_note)
-        self.persistent_allow_button = QtWidgets.QPushButton(
-            "以后允许相同命令规则"
-        )
-        self.persistent_allow_button.setVisible(False)
-        approval_layout.addWidget(self.persistent_allow_button)
-        approval_buttons = QtWidgets.QHBoxLayout()
-        self.allow_button = QtWidgets.QPushButton("允许一次")
-        self.deny_button = QtWidgets.QPushButton("拒绝")
-        approval_buttons.addStretch(1)
-        approval_buttons.addWidget(self.allow_button)
-        approval_buttons.addWidget(self.deny_button)
-        approval_layout.addLayout(approval_buttons)
-        self.approval_group.setVisible(False)
-        center_layout.addWidget(self.approval_group)
 
         selection_row = QtWidgets.QHBoxLayout()
         self.selection_label = QtWidgets.QLabel("当前选择：无")
@@ -1338,12 +1297,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.runtime_settings_group.toggled.connect(
             self._toggle_runtime_settings
         )
-        self.approval_details_button.toggled.connect(self._toggle_approval_details)
-        self.persistent_allow_button.clicked.connect(
-            lambda: self._resolve_approval("allow_rule")
-        )
-        self.allow_button.clicked.connect(lambda: self._resolve_approval("allow"))
-        self.deny_button.clicked.connect(lambda: self._resolve_approval("deny"))
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.service_tier_combo.currentIndexChanged.connect(
             self._on_service_tier_changed
@@ -4652,6 +4605,100 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._apply_threads(self._thread_history)
         return was_listed or was_current
 
+    def _apply_thread_rotation(self, old_thread_id: Any, new_thread_id: Any) -> bool:
+        if (
+            not isinstance(old_thread_id, str)
+            or not old_thread_id
+            or not isinstance(new_thread_id, str)
+            or not new_thread_id
+            or old_thread_id == new_thread_id
+        ):
+            return False
+        old_record = next(
+            (
+                record
+                for record in self._thread_history
+                if record.get("thread_id") == old_thread_id
+            ),
+            None,
+        )
+        if old_record is not None:
+            records: list[dict[str, Any]] = []
+            for record in self._thread_history:
+                record_id = record.get("thread_id")
+                if record_id == old_thread_id:
+                    replacement = dict(record)
+                    replacement["thread_id"] = new_thread_id
+                    records.append(replacement)
+                elif record_id != new_thread_id:
+                    records.append(record)
+            self._thread_history = records
+
+        was_selected = self._selected_thread_id == old_thread_id
+        if was_selected:
+            self._selected_thread_id = new_thread_id
+            attachment_paths = self.attachment_strip.paths()
+            if attachment_paths:
+                self.attachment_strip.set_paths(
+                    self._attachment_store.rebind_thread_paths(
+                        old_thread_id,
+                        new_thread_id,
+                        attachment_paths,
+                    )
+                )
+            if (
+                self._turn_state.thread_id == old_thread_id
+                and not self._turn_state.busy
+            ):
+                self._turn_state = PanelTurnState()
+            if self._stream_thread_id == old_thread_id:
+                self._stream_thread_id = new_thread_id
+            if self._goal_continue_after_open_thread_id == old_thread_id:
+                self._goal_continue_after_open_thread_id = new_thread_id
+            if (
+                isinstance(self._stopped_source_turn, tuple)
+                and self._stopped_source_turn[0] == old_thread_id
+            ):
+                self._stopped_source_turn = (
+                    new_thread_id,
+                    self._stopped_source_turn[1],
+                )
+            if (
+                isinstance(self._goal_continuation_boundary, tuple)
+                and self._goal_continuation_boundary[0] == old_thread_id
+            ):
+                self._goal_continuation_boundary = (
+                    new_thread_id,
+                    self._goal_continuation_boundary[1],
+                )
+            if self._goal_stage_snapshot.get("thread_id") == old_thread_id:
+                self._goal_stage_snapshot["thread_id"] = new_thread_id
+            if self._diagnostic_snapshot.get("thread_id") == old_thread_id:
+                self._diagnostic_snapshot["thread_id"] = new_thread_id
+            if self._build_brief_thread_id == old_thread_id:
+                self._build_brief_thread_id = new_thread_id
+            self.thread_id_edit.setText(new_thread_id)
+            self.thread_status_label.setText(
+                f"Thread：{self._history_title(new_thread_id)}"
+            )
+            self.thread_status_label.setToolTip(
+                f"{self._history_title(new_thread_id, full=True)}\n"
+                f"Codex Thread ID：{new_thread_id}"
+            )
+            controller = self._project_team_controller
+            if old_record is not None and controller is not None:
+                select_ordinary = getattr(
+                    controller,
+                    "select_ordinary_thread_when_available",
+                    None,
+                )
+                if callable(select_ordinary):
+                    select_ordinary(new_thread_id)
+        if old_record is not None:
+            self._apply_threads(self._thread_history)
+        self._refresh_controls()
+        return old_record is not None or was_selected
+
     def _update_history_name(self, thread_id: Any, name: Any) -> None:
         if not isinstance(thread_id, str):
             return
@@ -5624,8 +5671,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and not self._interrupt_pending
             and not self._is_stopping_turn()
             and self._goal_action_context is None
-            and self._current_approval is None
-            and not self._pending_approvals
             and not self._scene_capability_pending
             and not self._scene_work_pending
             and not self._goal_houdini_busy()
@@ -7819,20 +7864,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     token=self._turn_state.capture_token(),
                     allow_followup=True,
                 )
-        elif context.startswith("approval_"):
-            self._current_approval = None
-            self._current_approval_offers_persistent_rule = False
-            self.approval_group.setVisible(False)
-            self.approval_details_button.setChecked(False)
-            self.approval_details_button.setVisible(False)
-            self.approval_details_text.setVisible(False)
-            self.persistent_allow_note.setVisible(False)
-            self.persistent_allow_button.setVisible(False)
-            self.allow_button.setEnabled(True)
-            self.deny_button.setEnabled(True)
-            self.persistent_allow_button.setEnabled(True)
-            self._show_next_approval()
-            self._maybe_start_goal_continuation()
         self._refresh_controls()
 
     @QtCore.Slot(dict)
@@ -8033,6 +8064,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _render_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+        if event_type == "thread_rotated":
+            self._apply_thread_rotation(
+                event.get("oldThreadId"),
+                event.get("newThreadId"),
+            )
+            return
         if event_type == "project_team_updated":
             controller = self._project_team_controller
             if controller is not None:
@@ -8378,9 +8415,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 pass
             elif method in {"error", "warning", "guardianWarning", "configWarning"}:
                 self._show_codex_notice(method, params)
-        elif event_type == "server_request":
-            self._pending_approvals.append(event)
-            self._show_next_approval()
         elif event_type == "protocol_warning":
             self._show_protocol_notice(event)
         elif event_type == "process_exit":
@@ -8427,46 +8461,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         "不会自动重放状态不明的 Turn 或 Houdini 操作。"
                     )
             self._refresh_controls()
-
-    def _show_next_approval(self) -> None:
-        if self._current_approval is not None or not self._pending_approvals:
-            return
-        self._current_approval = self._pending_approvals.popleft()
-        card = format_approval_card(self._current_approval)
-        self._current_approval_offers_persistent_rule = (
-            card.offers_persistent_rule
-        )
-        self.approval_text.setPlainText(card.summary)
-        self.approval_details_text.setPlainText(card.advanced_details)
-        self.approval_details_button.setChecked(False)
-        self.approval_details_button.setText("高级详情")
-        self.approval_details_button.setVisible(True)
-        self.approval_details_text.setVisible(False)
-        self.persistent_allow_note.setVisible(False)
-        self.persistent_allow_button.setVisible(False)
-        self.approval_group.setVisible(True)
-
-    def _toggle_approval_details(self, checked: bool) -> None:
-        self.approval_details_button.setText(
-            "收起高级详情" if checked else "高级详情"
-        )
-        self.approval_details_text.setVisible(bool(checked))
-        show_persistent = bool(checked) and bool(
-            self._current_approval_offers_persistent_rule
-        )
-        self.persistent_allow_note.setVisible(show_persistent)
-        self.persistent_allow_button.setVisible(show_persistent)
-
-    def _resolve_approval(self, decision: str) -> None:
-        if self._current_approval is None or self._client is None:
-            return
-        self.allow_button.setEnabled(False)
-        self.deny_button.setEnabled(False)
-        self.persistent_allow_button.setEnabled(False)
-        self._client.resolve_approval(
-            self._current_approval.get("request_id"),
-            decision,
-        )
 
     @QtCore.Slot(str, dict)
     def _on_request_failed(self, context: str, payload: dict[str, Any]) -> None:
@@ -8664,12 +8658,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         "停止请求未获确认；当前 Turn 可能仍在运行，未执行自动重启或恢复。"
                     )
                 self._request_session_reconciliation("interrupt_failed")
-                self.allow_button.setEnabled(True)
-                self.deny_button.setEnabled(True)
                 self._refresh_controls()
                 return
-            self.allow_button.setEnabled(True)
-            self.deny_button.setEnabled(True)
             self._refresh_controls()
             return
 
@@ -8710,8 +8700,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self._append_system(
                         "当前 Turn 状态已变化；输入和附件已保留，未自动重试。"
                     )
-                self.allow_button.setEnabled(True)
-                self.deny_button.setEnabled(True)
                 self._refresh_controls()
                 return
 
@@ -8730,8 +8718,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     formatted_error,
                     slug="turn-steer-failure",
                 )
-            self.allow_button.setEnabled(True)
-            self.deny_button.setEnabled(True)
             self._refresh_controls()
             return
 
@@ -8901,9 +8887,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         self.turn_status_label.setText("Turn：状态待确认")
             if not state_reconciled:
                 self._request_session_reconciliation("turn_start_failure")
-        self.allow_button.setEnabled(True)
-        self.deny_button.setEnabled(True)
-        self.persistent_allow_button.setEnabled(True)
         self._refresh_controls()
 
     def _request_session_reconciliation(self, reason: str) -> str | None:

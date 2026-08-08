@@ -165,7 +165,7 @@ class CodexStdioClientTests(unittest.TestCase):
             notification["params"],
         )
 
-    def test_streaming_reply_plan_and_approval(self) -> None:
+    def test_streaming_reply_rejects_unexpected_approval_without_input(self) -> None:
         self.initialize()
         thread = self.client.request("thread/start", {})
         self.assertEqual("thread-fake", thread["thread"]["id"])
@@ -181,19 +181,17 @@ class CodexStdioClientTests(unittest.TestCase):
             lambda event: event.get("method") == "turn/plan/updated"
         )
         approval = self.wait_for(
-            lambda event: event.get("type") == "server_request"
+            lambda event: event.get("code")
+            == "UNEXPECTED_RUNTIME_APPROVAL_REQUEST"
         )
         self.assertEqual(
             "item/commandExecution/requestApproval",
             approval["method"],
         )
-        self.client.respond_to_server_request(
-            approval["request_id"],
-            {"decision": "accept"},
-        )
         self.wait_for(
             lambda event: event.get("method") == "turn/completed"
         )
+        self.assertFalse(any(event.get("type") == "server_request" for event in self.events))
         deltas = [
             event["params"]["delta"]
             for event in self.events
@@ -239,31 +237,6 @@ class CodexStdioClientTests(unittest.TestCase):
         self.assertIsNotNone(process)
         self.client.close()
         self.assertIsNotNone(process.poll())
-
-    def test_restart_reaps_old_process_clears_approvals_and_reinitializes(self) -> None:
-        self.initialize()
-        self.client._handle_server_request(
-            {
-                "id": "approval-before-restart",
-                "method": "item/commandExecution/requestApproval",
-                "params": {"command": "Get-Date"},
-            }
-        )
-        old_process = self.client.process
-        self.assertIsNotNone(old_process)
-        self.assertIsNotNone(
-            self.client.pending_server_request("approval-before-restart")
-        )
-
-        self.client.restart(grace_seconds=0.1)
-
-        self.assertIsNotNone(old_process.poll())
-        self.assertIsNot(old_process, self.client.process)
-        self.assertIsNone(
-            self.client.pending_server_request("approval-before-restart")
-        )
-        response = self.client.initialize_with_timeout(2.0)
-        self.assertEqual("fake-codex/0.144.3", response["userAgent"])
 
     def test_request_specific_timeout_does_not_change_default_timeout(self) -> None:
         with mock.patch.object(self.client, "_send_json"):
@@ -408,7 +381,7 @@ class CodexStdioClientTests(unittest.TestCase):
         self.assertNotIn("http://127.0.0.1:54321", serialized)
         self.assertIn("[REDACTED]", serialized)
 
-    def test_response_results_and_server_request_params_are_redacted_on_entry(
+    def test_response_results_are_redacted_on_entry(
         self,
     ) -> None:
         secret = "bridge_" + "q" * 40
@@ -439,80 +412,34 @@ class CodexStdioClientTests(unittest.TestCase):
         self.assertNotIn(url, response_encoded)
         self.assertIn("[REDACTED]", response_encoded)
 
-        client._handle_server_request(
-            {
-                "id": "approval-secret-echo",
-                "method": "item/commandExecution/requestApproval",
-                "params": {
-                    "reason": f"{secret} at {url}",
-                    secret: url,
-                },
-            }
-        )
-        request = client.pending_server_request("approval-secret-echo")
-        request_encoded = repr(request)
-        self.assertNotIn(secret, request_encoded)
-        self.assertNotIn(url, request_encoded)
-        self.assertIn("[REDACTED]", request_encoded)
-
-    def test_arbitrary_request_credentials_are_redacted_before_storage_and_emit(
-        self,
-    ) -> None:
-        secrets = {
-            "authorization": "authorization-secret-123456",
-            "bearer": "bearer-secret-123456",
-            "cookie": "cookie-secret-123456",
-            "api_key": "api-key-secret-123456",
-            "query": "query-secret-123456",
-            "password": "password-secret-123456",
-            "userinfo": "userinfo-secret-123456",
+    def test_all_runtime_approval_requests_are_immediately_refused(self) -> None:
+        expected = {
+            "item/commandExecution/requestApproval": {"decision": "decline"},
+            "item/fileChange/requestApproval": {"decision": "decline"},
+            "item/permissions/requestApproval": {"permissions": {}, "scope": "turn"},
         }
-        request_id = "approval-arbitrary-credentials"
-        self.client._handle_server_request(
-            {
-                "id": request_id,
-                "method": "item/commandExecution/requestApproval",
-                "params": {
-                    "Authorization": f"Bearer {secrets['authorization']}",
-                    "nested": {
-                        "sessionCookie": f"session={secrets['cookie']}",
-                        "openai_api_key": secrets["api_key"],
-                        "databasePassword": secrets["password"],
-                        "totalTokens": 123,
-                    },
-                    "commandActions": [
-                        {
-                            "command": (
-                                "curl -H \"Authorization: Bearer "
-                                f"{secrets['bearer']}\" --cookie \"session="
-                                f"{secrets['cookie']}\" \"https://user:"
-                                f"{secrets['userinfo']}@example.com/data?access_token="
-                                f"{secrets['query']}\""
-                            )
-                        },
-                        {
-                            "command": (
-                                "curl -b \"sid="
-                                f"{secrets['cookie']}\" -H \"X-API-Key: "
-                                f"{secrets['api_key']}\" https://example.com"
-                            )
-                        },
-                    ],
-                },
-            }
-        )
-
-        pending = self.client.pending_server_request(request_id)
-        emitted = self.wait_for(
-            lambda event: event.get("type") == "server_request"
-            and event.get("request_id") == request_id
-        )
-        for serialized in (repr(pending), repr(emitted)):
-            for secret in secrets.values():
-                self.assertNotIn(secret, serialized)
-            self.assertIn("[REDACTED]", serialized)
-
-        self.assertEqual(123, pending["params"]["nested"]["totalTokens"])
+        for index, (method, response) in enumerate(expected.items(), start=1):
+            with self.subTest(method=method), mock.patch.object(
+                self.client, "_send_json"
+            ) as send:
+                request_id = f"approval-{index}"
+                self.client._handle_server_request(
+                    {
+                        "id": request_id,
+                        "method": method,
+                        "params": {"authorization": "Bearer runtime-secret-token"},
+                    }
+                )
+                send.assert_called_once_with({"id": request_id, "result": response})
+                diagnostic = self.events[-1]
+                self.assertEqual("protocol_warning", diagnostic["type"])
+                self.assertEqual(
+                    "UNEXPECTED_RUNTIME_APPROVAL_REQUEST", diagnostic["code"]
+                )
+                self.assertEqual(method, diagnostic["method"])
+                self.assertNotIn("params", diagnostic)
+        self.assertFalse(any(event.get("type") == "server_request" for event in self.events))
+        self.assertFalse(hasattr(self.client, "pending_server_request"))
 
 
 if __name__ == "__main__":

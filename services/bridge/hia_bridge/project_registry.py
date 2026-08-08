@@ -118,9 +118,30 @@ class ProjectRegistry:
                     raise ValueError(
                         f"project revision mismatch: expected {expected_revision}, got {actual}"
                     )
-            self._records[record.state.project_id] = record
-            self._validate_thread_uniqueness(self._records)
-            self._write_all()
+            records = dict(self._records)
+            records[record.state.project_id] = record
+            self._validate_thread_uniqueness(records)
+            self._write_all(records)
+            self._records = records
+
+    def delete(self, project_id: str, *, expected_revision: int | None = None) -> bool:
+        with self._lock:
+            existing = self._records.get(project_id)
+            if existing is None:
+                return False
+            if (
+                expected_revision is not None
+                and existing.state.revision != expected_revision
+            ):
+                raise ValueError(
+                    "project revision mismatch: "
+                    f"expected {expected_revision}, got {existing.state.revision}"
+                )
+            records = dict(self._records)
+            del records[project_id]
+            self._write_all(records)
+            self._records = records
+            return True
 
     def _load_once(self) -> dict[str, ProjectRecord]:
         if not self._path.exists():
@@ -248,12 +269,12 @@ class ProjectRegistry:
         if len(thread_ids) != len(set(thread_ids)):
             raise ValueError("project registry reuses a Thread across projects")
 
-    def _write_all(self) -> None:
+    def _write_all(self, records: Mapping[str, ProjectRecord]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
             "schema": REGISTRY_SCHEMA,
             "projects": [
-                _record_to_entry(self._records[key]) for key in sorted(self._records)
+                _record_to_entry(records[key]) for key in sorted(records)
             ],
         }
         encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(

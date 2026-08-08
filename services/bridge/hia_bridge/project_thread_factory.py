@@ -11,7 +11,9 @@ from .project_permissions import (
     permission_profile,
     require_complete_project_roles,
     validate_observable_role_response,
+    validate_role_permissions,
 )
+from .thread_rotation import ThreadRotationProfile
 
 
 class AppServerClient(Protocol):
@@ -91,6 +93,63 @@ class ProjectThreadFactory:
             server_transports,
         )
 
+    def rotation_profile(
+        self, project_id: str, binding: RoleThread
+    ) -> ThreadRotationProfile | None:
+        if not isinstance(binding.model, str) or not binding.model:
+            return None
+        permissions = permission_profile(
+            binding.role,
+            self._selected_backend,
+            self._server_transports,
+        )
+        read_only = permissions.sandbox == "read-only"
+        return ThreadRotationProfile(
+            cwd=str(self._project_root),
+            developer_instructions=ROLE_INSTRUCTIONS[binding.role],
+            ephemeral=False,
+            thread_source=f"hia-project/{project_id}/{binding.role.value}",
+            model=binding.model,
+            reasoning_effort=binding.effort,
+            service_tier=binding.service_tier,
+            fork_sandbox=permissions.sandbox,
+            response_sandbox={
+                "type": "readOnly" if read_only else "workspaceWrite",
+                "networkAccess": bool(
+                    permissions.config.get(
+                        "sandbox_workspace_write.network_access", False
+                    )
+                ),
+            },
+            config=dict(permissions.config),
+        )
+
+    def validate_rotation_response(
+        self,
+        project_id: str,
+        binding: RoleThread,
+        result: Mapping[str, Any],
+    ) -> None:
+        stored = self.rotation_profile(project_id, binding)
+        if stored is None:
+            raise ValueError("project role rotation profile is missing")
+        validate_role_permissions(
+            binding.role,
+            {
+                "sandbox": stored.fork_sandbox,
+                "approvalPolicy": "never",
+                "config": stored.config,
+            },
+            self._selected_backend,
+            self._server_transports,
+        )
+        validate_observable_role_response(
+            binding.role,
+            result,
+            expected_source=f"hia-project/{project_id}/{binding.role.value}",
+            expected_model=binding.model,
+        )
+
     def _start_role(
         self,
         state: ProjectState,
@@ -111,7 +170,6 @@ class ProjectThreadFactory:
         params: dict[str, Any] = {
             "cwd": str(self._project_root),
             "approvalPolicy": profile.approval_policy,
-            "approvalsReviewer": "user",
             "sandbox": profile.sandbox,
             "ephemeral": False,
             "developerInstructions": ROLE_INSTRUCTIONS[role],

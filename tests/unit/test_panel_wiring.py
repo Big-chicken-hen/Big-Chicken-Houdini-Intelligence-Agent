@@ -8,7 +8,6 @@ import re
 import sys
 import types
 import unittest
-from collections import deque
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -18,6 +17,7 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 PANEL_LIB_ROOT = REPOSITORY_ROOT / "houdini_package" / "python_libs"
 sys.path.insert(0, str(PANEL_LIB_ROOT))
 
+from hia_panel.attachment_store import AttachmentStore  # noqa: E402
 from hia_panel.turn_state import PanelTurnState, TurnPhase, TurnStateToken  # noqa: E402
 
 
@@ -492,6 +492,9 @@ class _AttachmentStripShim:
         self._paths.append(path)
         return True
 
+    def set_paths(self, paths: list[str]) -> None:
+        self._paths = list(paths)
+
     def remove(self, path: str) -> bool:
         if path not in self._paths:
             return False
@@ -547,7 +550,6 @@ class _BridgeClientShim:
         self.capability_reports: list[dict[str, Any]] = []
         self.scene_polls: list[int] = []
         self.scene_results: list[tuple[str, str, dict[str, Any]]] = []
-        self.approval_decisions: list[tuple[Any, str]] = []
         self.start_turn_result: str | None = "turn-request"
         self.steer_turn_result: str | None = "steer-request"
 
@@ -659,10 +661,6 @@ class _BridgeClientShim:
 
     def interrupt(self, *, context: str) -> None:
         self.interrupt_contexts.append(context)
-
-    def resolve_approval(self, request_id: Any, decision: str) -> str:
-        self.approval_decisions.append((request_id, decision))
-        return f"approval_{decision}"
 
     def get_session(self, *, context: str = "session") -> None:
         self.session_contexts.append(context)
@@ -880,9 +878,6 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._reconnecting = False
     panel._reconnect_exhausted_notice_shown = False
     panel._app_server_exit_notice_shown = False
-    panel._pending_approvals = deque()
-    panel._current_approval = None
-    panel._current_approval_offers_persistent_rule = False
     panel._houdini_adapter = None
     panel._houdini_polling_enabled = False
     panel._local_houdini_polling_enabled = False
@@ -1010,20 +1005,6 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.effort_label = _Widget("推理")
     panel.conversation = _ConversationShim()
     panel.welcome_group = _Widget()
-    panel.approval_group = _Widget()
-    panel.approval_text = _Widget()
-    panel.approval_details_button = _Widget("高级详情")
-    panel.approval_details_text = _Widget()
-    panel.persistent_allow_note = _Widget(
-        "持续授权：以后允许协议提供的相同命令规则。"
-    )
-    panel.persistent_allow_button = _Widget("以后允许相同命令规则")
-    panel.approval_details_button.setVisible(False)
-    panel.approval_details_text.setVisible(False)
-    panel.persistent_allow_note.setVisible(False)
-    panel.persistent_allow_button.setVisible(False)
-    panel.allow_button = _Widget("允许一次")
-    panel.deny_button = _Widget("拒绝")
     panel.input_edit = _Widget()
     panel.add_image_button = _Widget()
     panel.report_issue_button = _Widget()
@@ -4029,211 +4010,35 @@ class PanelWiringTests(unittest.TestCase):
         self.assertEqual(4, len(panel._client.turn_requests))
         self.assertEqual([], panel._client.session_contexts)
 
-    def test_system_drive_approval_is_readable_redacted_and_collapsed(self) -> None:
+    def test_runtime_approval_ui_is_absent(self) -> None:
         panel = _make_panel()
-        system_drive = os.environ.get("SystemDrive") or "C:"
-        target = system_drive + "\\Users\\Public\\HIA-Approval-Test.txt"
-        event = {
-            "type": "server_request",
-            "request_id": "approval-readable-1",
-            "method": "item/commandExecution/requestApproval",
-            "params": {
-                "cwd": str(REPOSITORY_ROOT),
-                "command": "serialized command with broken PowerShell quoting",
-                "commandActions": [
-                    {
-                        "type": "unknown",
-                        "command": (
-                            f"Set-Content -LiteralPath '{target}' -Value test; "
-                            "$headers = @{ Authorization = 'Bearer approval-secret-token'; "
-                            "Cookie = 'session=approval-cookie-secret'; "
-                            "'X-Api-Key' = 'approval-api-key-secret' }; "
-                            "curl.exe --cookie \"session=curl-cookie-secret\" "
-                            "-H \"Authorization: Bearer curl-auth-secret\" "
-                            "https://example.com"
-                        ),
-                    }
-                ],
-                "availableDecisions": [
-                    "accept",
-                    "decline",
-                    "acceptWithExecpolicyAmendment",
-                ],
-                "proposedExecpolicyAmendment": ["Set-Content", "-LiteralPath"],
-                "authorization": "Bearer approval-secret-token",
-                "cookie": "session=approval-cookie-secret",
-                "api_key": "approval-api-key-secret",
-                "tailMarker": "kept-in-complete-json",
-            },
-        }
-
-        panel._render_event(event)
-
-        summary = panel.approval_text.toPlainText()
-        details = panel.approval_details_text.toPlainText()
-        self.assertIn("目的：修改系统盘文件", summary)
-        self.assertIn("操作类型：文件写入", summary)
-        self.assertIn(target, summary)
-        self.assertIn("可能在系统盘创建、修改、移动或删除文件", summary)
-        self.assertEqual("允许一次", panel.allow_button.text())
-        self.assertEqual("拒绝", panel.deny_button.text())
-        self.assertTrue(panel.approval_group.isVisible())
-        self.assertTrue(panel.approval_details_button.isVisible())
-        self.assertFalse(panel.approval_details_button.isChecked())
-        self.assertFalse(panel.approval_details_text.isVisible())
-        self.assertFalse(panel.persistent_allow_note.isVisible())
-        self.assertFalse(panel.persistent_allow_button.isVisible())
-        self.assertTrue(
-            details.startswith(
-                "原始 command：\nSet-Content -LiteralPath"
-            )
+        removed_symbols = (
+            "_pending_approvals",
+            "_current_approval",
+            "approval_group",
+            "allow_button",
+            "deny_button",
+            "persistent_allow_button",
+            "format_approval_card",
+            "_resolve_approval",
         )
-        self.assertIn("availableDecisions", details)
-        self.assertIn("以后允许相同命令规则", details)
-        self.assertIn("持续授权", details)
-        self.assertIn("kept-in-complete-json", details)
-        for secret in (
-            "approval-secret-token",
-            "approval-cookie-secret",
-            "approval-api-key-secret",
-            "curl-cookie-secret",
-            "curl-auth-secret",
-        ):
-            self.assertNotIn(secret, summary + details)
-        self.assertIn("[REDACTED]", details)
-
-        panel._toggle_approval_details(True)
-        self.assertTrue(panel.approval_details_text.isVisible())
-        self.assertTrue(panel.persistent_allow_note.isVisible())
-        self.assertTrue(panel.persistent_allow_button.isVisible())
-        self.assertIn("持续授权", panel.persistent_allow_note.text())
-        self.assertEqual("收起高级详情", panel.approval_details_button.text())
-        panel._resolve_approval("allow")
-        self.assertEqual(
-            [("approval-readable-1", "allow")],
-            panel._client.approval_decisions,
+        for name in removed_symbols:
+            self.assertFalse(hasattr(panel, name), name)
+        panel_source = (PANEL_LIB_ROOT / "hia_panel" / "panel.py").read_text(
+            encoding="utf-8"
         )
-
-    def test_persistent_command_rule_is_an_explicit_advanced_choice(self) -> None:
-        panel = _make_panel()
-        system_drive = os.environ.get("SystemDrive") or "C:"
-        target = system_drive + "\\Users\\Public\\HIA-Approval-Test.txt"
+        for name in removed_symbols:
+            self.assertNotIn(name, panel_source)
         panel._render_event(
             {
                 "type": "server_request",
-                "request_id": "approval-rule-choice",
+                "request_id": "unexpected-approval",
                 "method": "item/commandExecution/requestApproval",
-                "params": {
-                    "commandActions": [
-                        {
-                            "command": (
-                                f"Set-Content -LiteralPath '{target}' -Value test"
-                            )
-                        }
-                    ],
-                    "proposedExecpolicyAmendment": [
-                        "Set-Content",
-                        "-LiteralPath",
-                    ],
-                },
+                "params": {},
             }
         )
-
-        self.assertFalse(panel.persistent_allow_button.isVisible())
-        panel._toggle_approval_details(True)
-        self.assertTrue(panel.persistent_allow_button.isVisible())
-        panel._resolve_approval("allow_rule")
-        self.assertEqual(
-            [("approval-rule-choice", "allow_rule")],
-            panel._client.approval_decisions,
-        )
-
-        panel = _make_panel()
-        panel._render_event(
-            {
-                "type": "server_request",
-                "request_id": "approval-rule-not-offered",
-                "method": "item/commandExecution/requestApproval",
-                "params": {
-                    "command": f"Remove-Item -LiteralPath '{target}'",
-                    "availableDecisions": ["accept", "decline"],
-                    "proposedExecpolicyAmendment": ["Remove-Item"],
-                },
-            }
-        )
-        panel._toggle_approval_details(True)
-        self.assertFalse(panel.persistent_allow_button.isVisible())
-
-    def test_approval_purpose_prefers_the_actual_system_target(self) -> None:
-        panel = _make_panel()
-        system_drive = os.environ.get("SystemDrive") or "C:"
-        source = str(REPOSITORY_ROOT / "source.txt")
-        target = system_drive + "\\Users\\Public\\copied.txt"
-        panel._render_event(
-            {
-                "type": "server_request",
-                "request_id": "approval-copy-target",
-                "method": "item/commandExecution/requestApproval",
-                "params": {
-                    "commandActions": [
-                        {
-                            "command": (
-                                f"Copy-Item -LiteralPath '{source}' "
-                                f"-Destination '{target}'"
-                            )
-                        }
-                    ]
-                },
-            }
-        )
-        self.assertIn(
-            f"目的：修改系统盘文件：{target}",
-            panel.approval_text.toPlainText(),
-        )
-
-        panel = _make_panel()
-        panel._render_event(
-            {
-                "type": "server_request",
-                "request_id": "approval-env-target",
-                "method": "item/commandExecution/requestApproval",
-                "params": {
-                    "command": (
-                        "Set-Content -LiteralPath "
-                        "'${env:SystemDrive}\\HIA-Test.txt' -Value test"
-                    )
-                },
-            }
-        )
-        self.assertIn(
-            "目标路径：${env:SystemDrive}\\HIA-Test.txt",
-            panel.approval_text.toPlainText(),
-        )
-
-    def test_approval_deny_value_and_optional_persistent_note_are_unchanged(self) -> None:
-        panel = _make_panel()
-        panel._render_event(
-            {
-                "type": "server_request",
-                "request_id": "approval-readable-2",
-                "method": "item/fileChange/requestApproval",
-                "params": {
-                    "grantRoot": "C:\\ProgramData\\HIA",
-                    "reason": "write requested",
-                },
-            }
-        )
-
-        details = panel.approval_details_text.toPlainText()
-        self.assertIn("允许修改系统盘目录", panel.approval_text.toPlainText())
-        self.assertNotIn("以后允许相同命令规则", details)
-        panel._toggle_approval_details(True)
-        self.assertFalse(panel.persistent_allow_note.isVisible())
-        self.assertFalse(panel.persistent_allow_button.isVisible())
-        panel._resolve_approval("deny")
-        self.assertEqual(
-            [("approval-readable-2", "deny")],
-            panel._client.approval_decisions,
+        self.assertFalse(
+            (PANEL_LIB_ROOT / "hia_panel" / "approval_card.py").exists()
         )
 
     def test_passive_and_unknown_notifications_are_silent(self) -> None:
@@ -7181,7 +6986,6 @@ class PanelWiringTests(unittest.TestCase):
             "goal-cleared",
             "goal-completes-same-batch",
             "disconnected",
-            "approval",
             "goal-action",
             "session-action",
             "steer",
@@ -7210,8 +7014,6 @@ class PanelWiringTests(unittest.TestCase):
                     panel._apply_goal("thread-1", None)
                 elif case == "disconnected":
                     panel._connected = False
-                elif case == "approval":
-                    panel._current_approval = {"request_id": "approval-1"}
                 elif case == "goal-action":
                     panel._goal_action_context = "goal_get"
                 elif case == "session-action":
@@ -8097,6 +7899,54 @@ class PanelWiringTests(unittest.TestCase):
             "发送 → ACK：2.00s\nACK → 首个文本：3.00s\n首个文本 → 完成：5.00s",
             panel.performance_label.text(),
         )
+
+
+class ThreadRotationPanelTests(unittest.TestCase):
+    def test_rotation_rebinds_in_place_and_old_delete_preserves_draft(self) -> None:
+        panel = _make_panel(selected_thread_id="thread-1")
+        panel._attachment_store = AttachmentStore(REPOSITORY_ROOT)
+        panel.input_edit.setPlainText("keep this draft")
+        attachment = str(
+            REPOSITORY_ROOT
+            / ".runtime"
+            / "attachments"
+            / "thread-1"
+            / "reference.png"
+        )
+        rotated_attachment = str(
+            REPOSITORY_ROOT
+            / ".runtime"
+            / "attachments"
+            / "thread-rotated"
+            / "reference.png"
+        )
+        panel.attachment_strip.add_path(attachment)
+        panel.conversation.add_user_message("existing conversation", ())
+
+        panel._render_event(
+            {
+                "type": "thread_rotated",
+                "oldThreadId": "thread-1",
+                "newThreadId": "thread-rotated",
+            }
+        )
+        panel._render_event(
+            {
+                "type": "codex_notification",
+                "method": "thread/deleted",
+                "params": {"threadId": "thread-1"},
+            }
+        )
+
+        self.assertEqual("thread-rotated", panel._selected_thread_id)
+        self.assertEqual(
+            ["thread-rotated"],
+            [record["thread_id"] for record in panel._thread_history],
+        )
+        self.assertEqual("keep this draft", panel.input_edit.toPlainText())
+        self.assertEqual([rotated_attachment], panel.attachment_strip.paths())
+        self.assertIn("existing conversation", panel.conversation.toPlainText())
+        self.assertIn("thread-rotated", panel.thread_status_label.toolTip())
 
 
 if __name__ == "__main__":

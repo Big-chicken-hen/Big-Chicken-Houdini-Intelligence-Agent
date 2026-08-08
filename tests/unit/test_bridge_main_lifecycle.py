@@ -41,10 +41,14 @@ class _Client:
     def __init__(self, order: list[str]) -> None:
         self.order = order
         self.overlays: list[dict[str, str]] = []
+        self.notification_observers = []
 
     def set_environment_overlay(self, values: dict[str, str]) -> None:
         self.order.append("environment_overlay")
         self.overlays.append(dict(values))
+
+    def add_notification_observer(self, observer) -> None:
+        self.notification_observers.append(observer)
 
 
 class _Session:

@@ -23,8 +23,11 @@ class SceneWriterOwnership:
         self._lock = threading.Lock()
         self._reservation: SceneWriterReservation | None = None
         self._owner: str | None = None
+        self._owner_thread_id: str | None = None
+        self._owner_turn_id: str | None = None
         self._turn_terminal = False
         self._active_hia_items: set[str] = set()
+        self._identity_error = False
 
     def reserve(self, kind: str, scope: str) -> SceneWriterReservation:
         if kind not in {"ordinary", "project"} or not scope:
@@ -45,22 +48,30 @@ class SceneWriterOwnership:
             self._reservation = reservation
             self._turn_terminal = False
             self._active_hia_items.clear()
+            self._identity_error = False
             return reservation
 
     def bind(
         self,
         reservation: SceneWriterReservation,
+        thread_id: str,
         turn_id: str,
     ) -> str:
-        if not turn_id:
-            raise ValueError("turn_id is required")
+        if not thread_id or not turn_id:
+            raise ValueError("thread_id and turn_id are required")
         with self._lock:
             self._require_reservation(reservation)
             if reservation.kind == "ordinary":
-                owner = f"ordinary:{reservation.scope}:{turn_id}"
+                if reservation.scope != thread_id:
+                    raise ValueError("ordinary scene writer scope must match thread_id")
+                owner = f"ordinary:{thread_id}:{turn_id}"
             else:
-                owner = f"project:{reservation.scope}:execution:{turn_id}"
+                owner = (
+                    f"project:{reservation.scope}:execution:{thread_id}:{turn_id}"
+                )
             self._owner = owner
+            self._owner_thread_id = thread_id
+            self._owner_turn_id = turn_id
             return owner
 
     def abandon_uncreated(self, reservation: SceneWriterReservation) -> None:
@@ -92,25 +103,41 @@ class SceneWriterOwnership:
             self._turn_terminal = True
             return self._release_if_safe_locked()
 
+    def fail_closed(self, owner: str) -> None:
+        with self._lock:
+            if owner == self._owner:
+                self._identity_error = True
+
     def retained_after_terminal(self, owner: str) -> bool:
         with self._lock:
             return (
                 owner == self._owner
                 and self._turn_terminal
-                and bool(self._active_hia_items)
+                and (bool(self._active_hia_items) or self._identity_error)
             )
+
+    def is_current(self, owner: str) -> bool:
+        with self._lock:
+            return owner == self._owner
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return {
                 "owner": self._owner,
+                "thread_id": self._owner_thread_id,
+                "turn_id": self._owner_turn_id,
                 "starting": self._reservation is not None and self._owner is None,
                 "turn_terminal": self._turn_terminal,
                 "active_hia_items": len(self._active_hia_items),
+                "identity_error": self._identity_error,
             }
 
     def _release_if_safe_locked(self) -> bool:
-        if not self._turn_terminal or self._active_hia_items:
+        if (
+            not self._turn_terminal
+            or self._active_hia_items
+            or self._identity_error
+        ):
             return False
         self._clear_locked()
         return True
@@ -118,8 +145,11 @@ class SceneWriterOwnership:
     def _clear_locked(self) -> None:
         self._reservation = None
         self._owner = None
+        self._owner_thread_id = None
+        self._owner_turn_id = None
         self._turn_terminal = False
         self._active_hia_items.clear()
+        self._identity_error = False
 
     def _require_reservation(self, reservation: SceneWriterReservation) -> None:
         if (

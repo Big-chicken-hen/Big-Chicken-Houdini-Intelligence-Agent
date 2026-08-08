@@ -11,11 +11,12 @@ import json
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from .events import EventBuffer
 from .project_effects import CompletedTurn
+from .scene_writer import SceneWriterOwnership
 
 if TYPE_CHECKING:
     from .codex_stdio import CodexStdioClient
@@ -42,10 +43,17 @@ class ProjectTurnTimeout(TimeoutError):
     """The acknowledged native Turn did not terminate within its budget."""
 
 
-@dataclass(frozen=True)
+@dataclass
 class _TurnCursor:
     cursor: int
     started_at: float
+    wait_started: bool = False
+    wait_finished: bool = False
+    terminal_status: str | None = None
+    active_hia_items: set[str] = field(default_factory=set)
+    scene_owner: str | None = None
+    invalid_hia_item_id: bool = False
+    interrupt_requested: bool = False
 
 
 class ProjectRoleClient:
@@ -61,6 +69,7 @@ class ProjectRoleClient:
         client: CodexStdioClient,
         events: EventBuffer,
         *,
+        scene_writer: SceneWriterOwnership | None = None,
         max_agent_message_bytes: int = 1_048_576,
         poll_interval_seconds: float = 0.25,
         clock: Callable[[], float] = time.monotonic,
@@ -71,17 +80,82 @@ class ProjectRoleClient:
             raise ValueError("poll_interval_seconds must be positive")
         self._client = client
         self._events = events
+        self._scene_writer = scene_writer
         self._max_message_bytes = int(max_agent_message_bytes)
         self._poll_interval = float(poll_interval_seconds)
         self._clock = clock
         self._lock = threading.Lock()
         self._starting_threads: set[str] = set()
+        self._starting_notifications: dict[
+            str, list[tuple[str, dict[str, Any], str]]
+        ] = {}
         self._turns: dict[tuple[str, str], _TurnCursor] = {}
+        add_observer = getattr(client, "add_notification_observer", None)
+        if callable(add_observer):
+            add_observer(self.observe_notification)
 
     def request(self, method: str, params: Mapping[str, Any]) -> Any:
         if method != "turn/start":
             return self._client.request(method, params)
         return self._start_turn(params)
+
+    def bind_scene_writer(self, thread_id: str, turn_id: str, owner: str) -> None:
+        """Bind one exact Execution Turn to synchronous native notifications."""
+
+        if not all(_identifier(value) for value in (thread_id, turn_id, owner)):
+            raise ProjectAppServerError(
+                "INVALID_SCENE_WRITER_IDENTITY",
+                "scene writer binding requires exact non-empty identities",
+            )
+        if self._scene_writer is None:
+            raise ProjectAppServerError(
+                "SCENE_WRITER_TRACKING_UNAVAILABLE",
+                "project Execution has no synchronous scene writer tracker",
+            )
+        key = (thread_id, turn_id)
+        with self._lock:
+            tracked = self._turns.get(key)
+            if tracked is None:
+                raise ProjectAppServerError(
+                    "UNACKNOWLEDGED_TURN",
+                    "scene writer binding requires an acknowledged project Turn",
+                )
+            tracked.scene_owner = owner
+            active_items = tuple(tracked.active_hia_items)
+            invalid_item_id = tracked.invalid_hia_item_id
+            terminal = tracked.terminal_status is not None
+        for item_id in active_items:
+            self._scene_writer.hia_started(owner, item_id)
+        if invalid_item_id:
+            self._scene_writer.fail_closed(owner)
+        if terminal:
+            self._scene_writer.turn_terminal(owner)
+
+    def observe_notification(
+        self, method: str, params: Mapping[str, Any]
+    ) -> None:
+        """Synchronously retain exact Turn/HIA lifecycle independent of the ring."""
+
+        if method == "turn/completed":
+            turn = params.get("turn")
+            thread_id = params.get("threadId")
+            turn_id = turn.get("id") if isinstance(turn, Mapping) else None
+        elif method in {"item/started", "item/completed"}:
+            thread_id = params.get("threadId")
+            turn_id = params.get("turnId")
+        else:
+            return
+        if not _identifier(thread_id) or not _identifier(turn_id):
+            return
+        thread_id = str(thread_id)
+        turn_id = str(turn_id)
+        with self._lock:
+            if thread_id in self._starting_threads:
+                self._starting_notifications[thread_id].append(
+                    (method, dict(params), turn_id)
+                )
+                return
+        self._observe_exact_event(method, params, thread_id, turn_id)
 
     def _start_turn(
         self,
@@ -105,6 +179,7 @@ class ProjectRoleClient:
                     turn_created=False,
                 )
             self._starting_threads.add(thread_id)
+            self._starting_notifications[thread_id] = []
         try:
             cursor = self._events.cursor()
             started_at = self._clock()
@@ -127,10 +202,31 @@ class ProjectRoleClient:
                         "DUPLICATE_TURN_ACK", "the acknowledged Turn is already tracked"
                     )
                 self._turns[key] = _TurnCursor(cursor=cursor, started_at=started_at)
+            self._replay_starting_notifications(thread_id, str(turn_id))
         finally:
             with self._lock:
                 self._starting_threads.discard(thread_id)
+                self._starting_notifications.pop(thread_id, None)
         return result
+
+    def _replay_starting_notifications(
+        self, thread_id: str, turn_id: str
+    ) -> None:
+        while True:
+            with self._lock:
+                notifications = tuple(
+                    self._starting_notifications.get(thread_id, ())
+                )
+                self._starting_notifications[thread_id] = []
+                if not notifications:
+                    self._starting_threads.discard(thread_id)
+                    self._starting_notifications.pop(thread_id, None)
+                    return
+            for method, params, notification_turn_id in notifications:
+                if notification_turn_id == turn_id:
+                    self._observe_exact_event(
+                        method, params, thread_id, turn_id
+                    )
 
     def interrupt_threads(
         self, thread_ids: Iterable[str]
@@ -149,13 +245,27 @@ class ProjectRoleClient:
         }
         with self._lock:
             active = tuple(
-                sorted(key for key in self._turns if key[0] in allowed)
+                sorted(
+                    key
+                    for key, tracked in self._turns.items()
+                    if key[0] in allowed
+                    and tracked.terminal_status is None
+                    and not tracked.interrupt_requested
+                )
             )
+            for key in active:
+                self._turns[key].interrupt_requested = True
+        first_error: Exception | None = None
         for thread_id, turn_id in active:
-            self._client.request(
-                "turn/interrupt",
-                {"threadId": thread_id, "turnId": turn_id},
-            )
+            try:
+                self._client.request(
+                    "turn/interrupt",
+                    {"threadId": thread_id, "turnId": turn_id},
+                )
+            except Exception as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
         return active
 
     def has_active_thread(self, thread_id: str) -> bool:
@@ -178,10 +288,17 @@ class ProjectRoleClient:
         key = (thread_id, turn_id)
         with self._lock:
             tracked = self._turns.get(key)
-        if tracked is None:
-            raise ProjectAppServerError(
-                "UNACKNOWLEDGED_TURN", "the project Turn was not acknowledged by this adapter"
-            )
+            if tracked is None:
+                raise ProjectAppServerError(
+                    "UNACKNOWLEDGED_TURN",
+                    "the project Turn was not acknowledged by this adapter",
+                )
+            if tracked.wait_started:
+                raise ProjectAppServerError(
+                    "PROJECT_TURN_WAIT_CLOSED",
+                    "the project Turn already used its single bounded wait",
+                )
+            tracked.wait_started = True
 
         deadline = self._clock() + float(timeout_seconds)
         cursor = tracked.cursor
@@ -195,6 +312,12 @@ class ProjectRoleClient:
 
         try:
             while True:
+                with self._lock:
+                    if tracked.invalid_hia_item_id:
+                        raise ProjectAppServerError(
+                            "INVALID_HIA_ITEM_ID",
+                            "an HIA item notification omitted its exact item id",
+                        )
                 remaining = deadline - self._clock()
                 if remaining <= 0:
                     raise ProjectTurnTimeout(
@@ -252,6 +375,9 @@ class ProjectRoleClient:
                         event_turn_id = turn.get("id") if isinstance(turn, Mapping) else None
                         if params.get("threadId") != thread_id or event_turn_id != turn_id:
                             continue
+                        self._observe_exact_event(
+                            method_name, params, thread_id, turn_id
+                        )
                         status = turn.get("status") if isinstance(turn, Mapping) else None
                         terminal_status = status if isinstance(status, str) else "completed"
                         continue
@@ -282,7 +408,16 @@ class ProjectRoleClient:
                         if _is_hia_item(item):
                             item_id = item.get("id")
                             if not isinstance(item_id, str) or not item_id:
-                                item_id = str(item.get("tool") or "hia-tool")
+                                self._observe_exact_event(
+                                    method_name, params, thread_id, turn_id
+                                )
+                                raise ProjectAppServerError(
+                                    "INVALID_HIA_ITEM_ID",
+                                    "an HIA item notification omitted its exact item id",
+                                )
+                            self._observe_exact_event(
+                                method_name, params, thread_id, turn_id
+                            )
                             if method_name == "item/started":
                                 active_hia_items.add(item_id)
                             else:
@@ -350,7 +485,73 @@ class ProjectRoleClient:
                     )
         finally:
             with self._lock:
-                self._turns.pop(key, None)
+                current = self._turns.get(key)
+                if current is tracked:
+                    tracked.wait_finished = True
+                    self._drop_terminal_turn_locked(key, tracked)
+
+    def _observe_exact_event(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        key = (thread_id, turn_id)
+        scene_action: tuple[str, str] | None = None
+        owner: str | None = None
+        invalid_identity = False
+        with self._lock:
+            tracked = self._turns.get(key)
+            if tracked is None:
+                return
+            owner = tracked.scene_owner
+            if method == "turn/completed":
+                turn = params.get("turn")
+                status = turn.get("status") if isinstance(turn, Mapping) else None
+                tracked.terminal_status = (
+                    status if isinstance(status, str) else "completed"
+                )
+                scene_action = ("terminal", "")
+            elif method in {"item/started", "item/completed"}:
+                item = params.get("item")
+                if not isinstance(item, Mapping) or not _is_hia_item(item):
+                    return
+                item_id = item.get("id")
+                if not isinstance(item_id, str) or not item_id:
+                    tracked.invalid_hia_item_id = True
+                    invalid_identity = True
+                elif method == "item/started":
+                    tracked.active_hia_items.add(item_id)
+                    scene_action = ("started", item_id)
+                else:
+                    tracked.active_hia_items.discard(item_id)
+                    scene_action = ("finished", item_id)
+            self._drop_terminal_turn_locked(key, tracked)
+        if owner is not None and self._scene_writer is not None and invalid_identity:
+            self._scene_writer.fail_closed(owner)
+            return
+        if owner is None or self._scene_writer is None or scene_action is None:
+            return
+        action, item_id = scene_action
+        if action == "started":
+            self._scene_writer.hia_started(owner, item_id)
+        elif action == "finished":
+            self._scene_writer.hia_finished(owner, item_id)
+        else:
+            self._scene_writer.turn_terminal(owner)
+
+    def _drop_terminal_turn_locked(
+        self, key: tuple[str, str], tracked: _TurnCursor
+    ) -> None:
+        if (
+            tracked.wait_finished
+            and tracked.terminal_status is not None
+            and not tracked.active_hia_items
+            and not tracked.invalid_hia_item_id
+            and self._turns.get(key) is tracked
+        ):
+            self._turns.pop(key, None)
 
     def _parse_payload(
         self,

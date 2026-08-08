@@ -6,6 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 import threading
 from typing import Callable
 
+from .errors import BridgeError
 from .project_contracts import ProjectStatus
 from .project_lifecycle import LifecycleEvent, ProjectEvent
 from .project_registry import ProjectRecord, ProjectRegistry
@@ -15,6 +16,7 @@ from .project_runner import ActionExecutor, ProjectRunner
 ExecutorFactory = Callable[[str], ActionExecutor]
 SnapshotCallback = Callable[[ProjectRecord], None]
 InterruptHook = Callable[[str], None]
+IdleCallback = Callable[[str], None]
 _INACTIVE = frozenset(
     {
         ProjectStatus.WAITING_USER,
@@ -35,6 +37,7 @@ class ProjectWorkflowHost:
         max_workers: int = 4,
         interrupt_hook: InterruptHook | None = None,
         on_snapshot: SnapshotCallback | None = None,
+        on_idle: IdleCallback | None = None,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be positive")
@@ -43,6 +46,7 @@ class ProjectWorkflowHost:
         self._executor_factory = executor_factory
         self._interrupt_hook = interrupt_hook
         self._on_snapshot = on_snapshot
+        self._on_idle = on_idle
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hia-project")
         self._lock = threading.RLock()
         self._inflight: dict[str, Future[ProjectRecord]] = {}
@@ -53,7 +57,7 @@ class ProjectWorkflowHost:
             if self._closed:
                 return False
             current = self._inflight.get(project_id)
-            if current is not None and not current.done():
+            if current is not None:
                 return False
             record = self._registry.require(project_id)
             if record.state.status in _INACTIVE or not self._runner.has_pending(project_id):
@@ -78,22 +82,29 @@ class ProjectWorkflowHost:
         with self._lock:
             if self._closed:
                 return False
-        if self._registry.require(project_id).state.status in {
-            ProjectStatus.STOPPED,
-            ProjectStatus.WAITING_USER,
-        }:
-            resumed = self._runner.cancel_and_dispatch(
-                project_id,
-                LifecycleEvent(ProjectEvent.USER_CONTINUE, continuation),
-            )
-            if resumed.state.status is ProjectStatus.WAITING_USER:
-                return True
-        return self.start(project_id)
+            current = self._inflight.get(project_id)
+            if current is not None:
+                raise BridgeError(
+                    "PROJECT_TURN_STILL_STOPPING",
+                    "The previous project Turn is still stopping",
+                    http_status=409,
+                    details={"project_id": project_id},
+                )
+            if self._registry.require(project_id).state.status in {
+                ProjectStatus.STOPPED,
+                ProjectStatus.WAITING_USER,
+            }:
+                resumed = self._runner.cancel_and_dispatch(
+                    project_id,
+                    LifecycleEvent(ProjectEvent.USER_CONTINUE, continuation),
+                )
+                if resumed.state.status is ProjectStatus.WAITING_USER:
+                    return True
+            return self.start(project_id)
 
     def is_inflight(self, project_id: str) -> bool:
         with self._lock:
-            future = self._inflight.get(project_id)
-            return future is not None and not future.done()
+            return project_id in self._inflight
 
     def close(self, timeout_seconds: float = 5.0) -> bool:
         if timeout_seconds < 0:
@@ -116,6 +127,9 @@ class ProjectWorkflowHost:
         return self._runner.execute_next(project_id, self._executor_factory(project_id))
 
     def _done(self, project_id: str, future: Future[ProjectRecord]) -> None:
+        with self._lock:
+            if self._inflight.get(project_id) is not future:
+                return
         try:
             record = future.result()
         except BaseException as error:
@@ -130,12 +144,20 @@ class ProjectWorkflowHost:
                 with self._lock:
                     self._inflight.pop(project_id, None)
                 return
+        try:
+            current = self._registry.require(project_id)
+            if current.state.status is ProjectStatus.STOPPED:
+                record = current
+        except BaseException:
+            pass
         if self._on_snapshot is not None:
             try:
                 self._on_snapshot(record)
             except BaseException:
                 pass
         with self._lock:
+            if self._inflight.get(project_id) is not future:
+                return
             self._inflight.pop(project_id, None)
             should_continue = (
                 not self._closed
@@ -144,6 +166,11 @@ class ProjectWorkflowHost:
             )
         if should_continue:
             self.start(project_id)
+        elif self._on_idle is not None:
+            try:
+                self._on_idle(project_id)
+            except BaseException:
+                pass
 
     def _mark_stopped(self, project_id: str) -> None:
         record = self._registry.require(project_id)
