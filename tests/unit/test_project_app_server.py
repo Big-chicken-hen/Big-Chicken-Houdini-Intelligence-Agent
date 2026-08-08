@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import unittest
 
 from services.bridge.hia_bridge.events import EventBuffer
@@ -36,6 +37,16 @@ class _Client:
         if method == "turn/start":
             return {"turn": {"id": self.next_turn}}
         return {"ok": True}
+
+
+class _WaitAwareEventBuffer(EventBuffer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.poll_entered = threading.Event()
+
+    def poll(self, *args, **kwargs):
+        self.poll_entered.set()
+        return super().poll(*args, **kwargs)
 
 
 def _publish(events: EventBuffer, method: str, params: dict) -> None:
@@ -131,7 +142,13 @@ class ProjectAppServerTests(unittest.TestCase):
         self.assertIs(False, busy.exception.turn_created)
 
         _agent(events, "thread-supervisor", "turn-first", '{"schema":"first/1"}')
-        _terminal(events, "thread-supervisor", "turn-first")
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-supervisor",
+                "turn": {"id": "turn-first", "status": "completed"},
+            },
+        )
         adapter.wait_for_turn("thread-supervisor", "turn-first", 0.2)
 
         client.next_turn = "turn-second"
@@ -270,12 +287,32 @@ class ProjectAppServerTests(unittest.TestCase):
         self.assertIsNone(writer.snapshot()["owner"])
         self.assertFalse(adapter.has_active_thread("thread-a"))
 
-    def test_missing_hia_item_id_before_binding_fails_closed(self) -> None:
-        events = EventBuffer()
+    def test_missing_hia_item_id_releases_after_matching_anonymous_completion(self) -> None:
+        events = _WaitAwareEventBuffer()
         client = _Client(events)
         writer = SceneWriterOwnership()
         adapter = ProjectRoleClient(client, events, scene_writer=writer)
         _start(adapter, client, "thread-execution", "turn-execution")
+        reservation = writer.reserve("project", "project-a")
+        owner = writer.bind(
+            reservation, "thread-execution", "turn-execution"
+        )
+        adapter.bind_scene_writer(
+            "thread-execution", "turn-execution", owner
+        )
+        outcome = {}
+
+        def wait_for_turn() -> None:
+            try:
+                adapter.wait_for_turn(
+                    "thread-execution", "turn-execution", 0.5
+                )
+            except Exception as exc:
+                outcome["error"] = exc
+
+        waiter = threading.Thread(target=wait_for_turn)
+        waiter.start()
+        self.assertTrue(events.poll_entered.wait(0.2))
         client.emit_notification(
             "item/started",
             {
@@ -288,6 +325,10 @@ class ProjectAppServerTests(unittest.TestCase):
                 },
             },
         )
+        waiter.join(1.0)
+        self.assertFalse(waiter.is_alive())
+        self.assertIsInstance(outcome.get("error"), ProjectAppServerError)
+        self.assertEqual("INVALID_HIA_ITEM_ID", outcome["error"].code)
         client.emit_notification(
             "turn/completed",
             {
@@ -295,23 +336,24 @@ class ProjectAppServerTests(unittest.TestCase):
                 "turn": {"id": "turn-execution", "status": "completed"},
             },
         )
-        reservation = writer.reserve("project", "project-a")
-        owner = writer.bind(
-            reservation, "thread-execution", "turn-execution"
-        )
-        adapter.bind_scene_writer(
-            "thread-execution", "turn-execution", owner
-        )
-
         snapshot = writer.snapshot()
         self.assertEqual(owner, snapshot["owner"])
         self.assertTrue(snapshot["turn_terminal"])
-        self.assertTrue(snapshot["identity_error"])
-        with self.assertRaises(ProjectAppServerError) as raised:
-            adapter.wait_for_turn(
-                "thread-execution", "turn-execution", 0.2
-            )
-        self.assertEqual("INVALID_HIA_ITEM_ID", raised.exception.code)
+        self.assertEqual(1, snapshot["anonymous_hia_items"])
+        client.emit_notification(
+            "item/completed",
+            {
+                "threadId": "thread-execution",
+                "turnId": "turn-execution",
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "hia_mcp_v2",
+                    "tool": "hia_execute_hom",
+                },
+            },
+        )
+        self.assertIsNone(writer.snapshot()["owner"])
+        self.assertFalse(adapter.has_active_thread("thread-execution"))
 
     def test_returns_terminal_receipt_for_invalid_or_non_object_agent_json(self) -> None:
         for body, code in (("not json", "INVALID_AGENT_JSON"), ("[]", "INVALID_AGENT_PAYLOAD")):

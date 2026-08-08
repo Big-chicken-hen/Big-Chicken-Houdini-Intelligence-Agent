@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -7903,50 +7904,61 @@ class PanelWiringTests(unittest.TestCase):
 
 class ThreadRotationPanelTests(unittest.TestCase):
     def test_rotation_rebinds_in_place_and_old_delete_preserves_draft(self) -> None:
-        panel = _make_panel(selected_thread_id="thread-1")
-        panel._attachment_store = AttachmentStore(REPOSITORY_ROOT)
-        panel.input_edit.setPlainText("keep this draft")
-        attachment = str(
-            REPOSITORY_ROOT
-            / ".runtime"
-            / "attachments"
-            / "thread-1"
-            / "reference.png"
-        )
-        rotated_attachment = str(
-            REPOSITORY_ROOT
-            / ".runtime"
-            / "attachments"
-            / "thread-rotated"
-            / "reference.png"
-        )
-        panel.attachment_strip.add_path(attachment)
-        panel.conversation.add_user_message("existing conversation", ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            panel = _make_panel(selected_thread_id="thread-1")
+            panel._attachment_store = AttachmentStore(root)
+            panel.input_edit.setPlainText("keep this draft")
+            attachment = (
+                root
+                / ".runtime"
+                / "attachments"
+                / "thread-1"
+                / "reference.png"
+            )
+            attachment.parent.mkdir(parents=True)
+            attachment.write_bytes(b"image")
+            rotated_attachment = (
+                root
+                / ".runtime"
+                / "attachments"
+                / "thread-rotated"
+                / "reference.png"
+            )
+            panel.attachment_strip.add_path(str(attachment))
+            panel.conversation.add_user_message("existing conversation", ())
 
-        panel._render_event(
-            {
-                "type": "thread_rotated",
-                "oldThreadId": "thread-1",
-                "newThreadId": "thread-rotated",
-            }
-        )
-        panel._render_event(
-            {
-                "type": "codex_notification",
-                "method": "thread/deleted",
-                "params": {"threadId": "thread-1"},
-            }
-        )
+            panel._render_event(
+                {
+                    "type": "thread_rotated",
+                    "oldThreadId": "thread-1",
+                    "newThreadId": "thread-rotated",
+                }
+            )
+            panel._render_event(
+                {
+                    "type": "codex_notification",
+                    "method": "thread/deleted",
+                    "params": {"threadId": "thread-1"},
+                }
+            )
 
-        self.assertEqual("thread-rotated", panel._selected_thread_id)
-        self.assertEqual(
-            ["thread-rotated"],
-            [record["thread_id"] for record in panel._thread_history],
-        )
-        self.assertEqual("keep this draft", panel.input_edit.toPlainText())
-        self.assertEqual([rotated_attachment], panel.attachment_strip.paths())
-        self.assertIn("existing conversation", panel.conversation.toPlainText())
-        self.assertIn("thread-rotated", panel.thread_status_label.toolTip())
+            self.assertEqual("thread-rotated", panel._selected_thread_id)
+            self.assertEqual(
+                ["thread-rotated"],
+                [record["thread_id"] for record in panel._thread_history],
+            )
+            self.assertEqual("keep this draft", panel.input_edit.toPlainText())
+            self.assertEqual(
+                [str(rotated_attachment)], panel.attachment_strip.paths()
+            )
+            self.assertTrue(attachment.is_file())
+            self.assertTrue(rotated_attachment.is_file())
+            self.assertIn("existing conversation", panel.conversation.toPlainText())
+            self.assertIn("thread-rotated", panel.thread_status_label.toolTip())
+            self.assertEqual(
+                ["thread-rotated"], panel._client.goal_get_requests
+            )
 
 
 if __name__ == "__main__":

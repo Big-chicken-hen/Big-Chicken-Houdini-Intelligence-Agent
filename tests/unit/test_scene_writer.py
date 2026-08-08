@@ -21,6 +21,26 @@ class SceneWriterOwnershipTests(unittest.TestCase):
         self.assertTrue(writer.hia_finished(owner, "hia-item-a"))
         self.assertIsNone(writer.snapshot()["owner"])
 
+    def test_anonymous_hia_item_releases_after_matching_completion(self) -> None:
+        writer = SceneWriterOwnership()
+        reservation = writer.reserve("ordinary", "thread-a")
+        owner = writer.bind(reservation, "thread-a", "turn-a")
+
+        writer.hia_anonymous_started(owner)
+        self.assertFalse(writer.turn_terminal(owner))
+        self.assertEqual(1, writer.snapshot()["anonymous_hia_items"])
+        self.assertTrue(writer.hia_anonymous_finished(owner))
+        self.assertIsNone(writer.snapshot()["owner"])
+
+    def test_unmatched_anonymous_completion_never_goes_negative(self) -> None:
+        writer = SceneWriterOwnership()
+        reservation = writer.reserve("ordinary", "thread-a")
+        owner = writer.bind(reservation, "thread-a", "turn-a")
+
+        self.assertFalse(writer.hia_anonymous_finished(owner))
+        self.assertEqual(0, writer.snapshot()["anonymous_hia_items"])
+        self.assertTrue(writer.turn_terminal(owner))
+
 
 if __name__ == "__main__":
     unittest.main()

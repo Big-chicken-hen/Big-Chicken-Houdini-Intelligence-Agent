@@ -209,11 +209,10 @@ class ProjectServiceTests(unittest.TestCase):
         self.service.rotation_rebind(binding.thread_id, "thread-planning-rotated")
 
         after = self.registry.require(project_id)
-        self.assertTrue(
-            self.service.rotation_readback(
-                binding.thread_id,
-                "thread-planning-rotated",
-            )
+        self.assertIsNone(self.service.role_identity_for_thread(binding.thread_id))
+        self.assertEqual(
+            (project_id, Role.PLANNING),
+            self.service.role_identity_for_thread("thread-planning-rotated"),
         )
         self.assertEqual(
             "thread-planning-rotated",

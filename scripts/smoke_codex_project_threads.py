@@ -1,7 +1,10 @@
-"""Fork one existing terminal smoke Thread with the pinned real app-server.
+"""Exercise ThreadRotationService against the pinned real app-server.
 
-The source Thread is read-only and preserved.  Only the fork created by this
-process is deleted.
+The script forks one existing project-local smoke Thread to create a disposable
+source without modifying that fixture.  Its three compaction notifications are
+synthetic service inputs, so this smoke validates the real service
+fork/read/rebind/delete path but deliberately does not claim that automatic
+compaction was produced or observed.
 """
 
 from __future__ import annotations
@@ -21,6 +24,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "services" / "bridge"))
 
 from hia_bridge.codex_stdio import CodexStdioClient  # noqa: E402
 from hia_bridge.protocol import ProtocolPolicy  # noqa: E402
+from hia_bridge.thread_rotation import (  # noqa: E402
+    ThreadRotationAdapters,
+    ThreadRotationProfile,
+    ThreadRotationService,
+)
 
 
 def _codex_executable() -> Path:
@@ -47,19 +55,71 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _create_disposable_source(
+    client: CodexStdioClient,
+    fixture_id: str,
+    run_root: Path,
+    requested_model: str | None,
+    service_tier: str,
+) -> tuple[str, str, str, dict[str, object]]:
+    read = client.request(
+        "thread/read", {"threadId": fixture_id, "includeTurns": True}
+    )
+    thread = read.get("thread") if isinstance(read, dict) else None
+    turns = thread.get("turns") if isinstance(thread, dict) else None
+    terminal = next(
+        (
+            turn
+            for turn in reversed(turns if isinstance(turns, list) else [])
+            if isinstance(turn, dict)
+            and turn.get("status") in {"completed", "interrupted", "failed"}
+        ),
+        None,
+    )
+    terminal_turn_id = terminal.get("id") if isinstance(terminal, dict) else None
+    thread_source = thread.get("threadSource") if isinstance(thread, dict) else None
+    if not isinstance(terminal_turn_id, str) or not terminal_turn_id:
+        raise RuntimeError("the app-server smoke fixture has no terminal Turn")
+    if not isinstance(thread_source, str) or not thread_source:
+        raise RuntimeError("the app-server smoke fixture has no native source")
+    fork_params: dict[str, object] = {
+        "threadId": fixture_id,
+        "lastTurnId": terminal_turn_id,
+        "cwd": str(run_root),
+        "approvalPolicy": "never",
+        "developerInstructions": "Run one disposable Thread rotation smoke.",
+        "ephemeral": False,
+        "threadSource": thread_source,
+        "serviceTier": service_tier,
+        "sandbox": "workspace-write",
+        "config": {},
+    }
+    if requested_model is not None:
+        fork_params["model"] = requested_model
+    result = client.request("thread/fork", fork_params)
+    forked = result.get("thread") if isinstance(result, dict) else None
+    source_thread_id = forked.get("id") if isinstance(forked, dict) else None
+    if (
+        not isinstance(source_thread_id, str)
+        or not source_thread_id
+        or forked.get("forkedFromId") != fixture_id
+    ):
+        raise RuntimeError("fixture fork did not create one disposable source")
+    return fixture_id, source_thread_id, terminal_turn_id, dict(result)
+
+
 def main() -> int:
     codex_exe = _codex_executable()
-    source_thread_id = os.environ.get("HIA_SMOKE_SOURCE_THREAD_ID", "").strip()
-    model = os.environ.get("HIA_SMOKE_MODEL", "").strip()
-    reasoning_effort = os.environ.get("HIA_SMOKE_REASONING_EFFORT", "").strip()
+    fixture_thread_id = os.environ.get("HIA_SMOKE_FIXTURE_THREAD_ID", "").strip()
+    if not fixture_thread_id:
+        raise ValueError("HIA_SMOKE_FIXTURE_THREAD_ID is required")
+    requested_model = os.environ.get("HIA_SMOKE_MODEL", "").strip() or None
     service_tier = os.environ.get("HIA_SMOKE_SERVICE_TIER", "default").strip()
-    if not source_thread_id or not model or not service_tier:
-        raise ValueError(
-            "HIA_SMOKE_SOURCE_THREAD_ID, HIA_SMOKE_MODEL, and "
-            "HIA_SMOKE_SERVICE_TIER must identify one existing terminal smoke Thread"
-        )
+    if not service_tier:
+        raise ValueError("HIA_SMOKE_SERVICE_TIER is required")
+
     run_id = uuid.uuid4().hex
-    run_root = PROJECT_ROOT / ".runtime" / "smoke" / "codex-project-threads" / run_id
+    run_root = PROJECT_ROOT / ".runtime" / "smoke" / "thread-rotation" / run_id
     codex_home = PROJECT_ROOT / ".runtime" / "codex-home"
     temp_directory = run_root / "tmp"
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -90,7 +150,6 @@ def main() -> int:
         text=True,
         timeout=15,
     ).strip()
-    policy = ProtocolPolicy.from_project_root(PROJECT_ROOT)
     client = CodexStdioClient(
         [
             str(codex_exe),
@@ -106,201 +165,210 @@ def main() -> int:
         ],
         cwd=run_root,
         environment=environment,
-        policy=policy,
+        policy=ProtocolPolicy.from_project_root(PROJECT_ROOT),
         request_timeout=45.0,
     )
+    rotation: ThreadRotationService | None = None
+    rotation_events: list[dict[str, object]] = []
     owned_thread_ids: set[str] = set()
-    initialize_result = None
-    read_result = None
-    fork_result = None
-    completed_turn: dict[str, object] | None = None
-    new_delete_acknowledged = False
-    cleanup_error: str | None = None
+    cleanup_errors: list[str] = []
+    source_thread_id: str | None = None
+    replacement_thread_id: str | None = None
+    terminal_turn_id: str | None = None
+    initialize_result: object = None
 
     try:
         client.start()
         initialize_result = client.initialize()
-        resumed = client.request(
-            "thread/resume",
+        (
+            fixture_thread_id,
+            source_thread_id,
+            terminal_turn_id,
+            start_result,
+        ) = _create_disposable_source(
+            client,
+            fixture_thread_id,
+            run_root,
+            requested_model,
+            service_tier,
+        )
+        started_thread = start_result.get("thread")
+        model = start_result.get("model") if isinstance(start_result, dict) else None
+        sandbox = start_result.get("sandbox") if isinstance(start_result, dict) else None
+        if not isinstance(model, str) or not model:
+            raise RuntimeError("real thread/start did not return an effective model")
+        if not isinstance(sandbox, dict):
+            raise RuntimeError("real thread/start did not return an effective sandbox")
+        thread_source = (
+            started_thread.get("threadSource")
+            if isinstance(started_thread, dict)
+            else None
+        )
+        if not isinstance(thread_source, str) or not thread_source:
+            raise RuntimeError("real thread/start did not return a Thread source")
+        owned_thread_ids.add(source_thread_id)
+        client.request(
+            "thread/goal/set",
             {
                 "threadId": source_thread_id,
-                "cwd": str(run_root),
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-                "developerInstructions": (
-                    "Protocol smoke only. Never call tools or request approval."
-                ),
-                "model": model,
-                "reasoningEffort": reasoning_effort or None,
-                "serviceTier": service_tier,
-                "config": {},
+                "objective": "Verify native Thread rotation readback",
+                "status": "paused",
+                "tokenBudget": 2_000,
             },
         )
-        if (
-            not isinstance(resumed, dict)
-            or resumed.get("approvalPolicy") != "never"
-            or resumed.get("model") != model
-            or resumed.get("reasoningEffort") != (reasoning_effort or None)
-            or resumed.get("serviceTier") != service_tier
-            or resumed.get("sandbox")
-            != {"type": "readOnly", "networkAccess": False}
+
+        profile = ThreadRotationProfile(
+            cwd=str(run_root),
+            developer_instructions="Run one disposable Thread rotation smoke.",
+            ephemeral=False,
+            thread_source=thread_source,
+            model=model,
+            reasoning_effort=(
+                start_result.get("reasoningEffort")
+                if isinstance(start_result, dict)
+                else None
+            ),
+            service_tier=(
+                start_result.get("serviceTier")
+                if isinstance(start_result, dict)
+                else None
+            ),
+            fork_sandbox="workspace-write",
+            response_sandbox=dict(sandbox),
+            config={},
+        )
+        authority = {"thread_id": source_thread_id}
+
+        def expected_profile(thread_id: str, _last_turn_id: str):
+            return profile if authority["thread_id"] == thread_id else None
+
+        def rebind(old_thread_id: str, new_thread_id: str) -> None:
+            if authority["thread_id"] != old_thread_id:
+                raise RuntimeError("smoke authority changed before rebind")
+            authority["thread_id"] = new_thread_id
+
+        def publish(payload: object) -> None:
+            if isinstance(payload, dict):
+                rotation_events.append(dict(payload))
+
+        rotation = ThreadRotationService(
+            client,
+            ThreadRotationAdapters(
+                expected_profile=expected_profile,
+                is_idle=lambda thread_id: authority["thread_id"] == thread_id,
+                rebind=rebind,
+                publish=publish,
+                validate_role_tools=lambda _thread_id, _result: True,
+                supports_goal=lambda thread_id: authority["thread_id"] == thread_id,
+            ),
+        )
+        client.add_notification_observer(rotation.observe)
+        source_read = client.request(
+            "thread/read", {"threadId": source_thread_id, "includeTurns": True}
+        )
+        source_native = (
+            source_read.get("thread") if isinstance(source_read, dict) else None
+        )
+        source_turns = (
+            source_native.get("turns") if isinstance(source_native, dict) else None
+        )
+        source_readback = {
+            "id": source_native.get("id") if isinstance(source_native, dict) else None,
+            "threadSource": (
+                source_native.get("threadSource")
+                if isinstance(source_native, dict)
+                else None
+            ),
+            "forkedFromId": (
+                source_native.get("forkedFromId")
+                if isinstance(source_native, dict)
+                else None
+            ),
+            "turns": [
+                {
+                    "id": turn.get("id"),
+                    "status": turn.get("status"),
+                    "items_is_list": isinstance(turn.get("items"), list),
+                    "itemsView": turn.get("itemsView"),
+                }
+                for turn in (source_turns if isinstance(source_turns, list) else [])
+                if isinstance(turn, dict)
+            ],
+        }
+        for turn_id, item_id in (
+            ("synthetic-compaction-turn-1", "synthetic-compaction-item-1"),
+            ("synthetic-compaction-turn-2", "synthetic-compaction-item-2"),
+            (terminal_turn_id, "synthetic-compaction-item-3"),
         ):
-            profile = {
-                key: resumed.get(key) if isinstance(resumed, dict) else None
-                for key in (
-                    "model",
-                    "reasoningEffort",
-                    "serviceTier",
-                    "approvalPolicy",
-                    "sandbox",
-                )
-            }
+            rotation.observe(
+                "item/completed",
+                {
+                    "threadId": source_thread_id,
+                    "turnId": turn_id,
+                    "item": {"id": item_id, "type": "contextCompaction"},
+                },
+            )
+
+        try:
+            replacement_thread_id = rotation.rotate_before_turn(source_thread_id)
+        except Exception as exc:
             raise RuntimeError(
-                "real thread/resume did not apply the smoke profile: "
-                + json.dumps(profile, ensure_ascii=False, sort_keys=True)
-            )
-        read_result = client.request(
-            "thread/read",
-            {"threadId": source_thread_id, "includeTurns": True},
-        )
-        read_thread = (
-            read_result.get("thread") if isinstance(read_result, dict) else None
-        )
-        if (
-            not isinstance(read_thread, dict)
-            or read_thread.get("id") != source_thread_id
-        ):
-            raise RuntimeError("real thread/read did not return the source Thread")
-        turns = read_thread.get("turns") if isinstance(read_thread, dict) else None
-        if isinstance(turns, list):
-            completed_turn = next(
-                (
-                    candidate
-                    for candidate in reversed(turns)
-                    if isinstance(candidate, dict)
-                    and candidate.get("status")
-                    in {"completed", "interrupted", "failed"}
-                ),
-                None,
-            )
-        if completed_turn is None:
-            raise RuntimeError("source smoke Thread has no terminal Turn")
-        turn_id = completed_turn.get("id")
-        if not isinstance(turn_id, str) or not turn_id:
-            raise RuntimeError("source smoke Thread terminal Turn has no identity")
-        thread_id = source_thread_id
-        source = read_thread.get("threadSource")
-        fork_result = client.request(
-            "thread/fork",
-            {
-                "threadId": thread_id,
-                "lastTurnId": turn_id,
-                "cwd": str(run_root),
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-                "ephemeral": False,
-                "developerInstructions": (
-                    "Protocol smoke only. Never call tools or request approval."
-                ),
-                "threadSource": source,
-                "model": model,
-                "reasoningEffort": reasoning_effort or None,
-                "serviceTier": service_tier,
-                "config": {},
-            },
-        )
-        forked_thread = (
-            fork_result.get("thread") if isinstance(fork_result, dict) else None
-        )
-        forked_id = (
-            forked_thread.get("id") if isinstance(forked_thread, dict) else None
+                "ThreadRotationService failed: "
+                f"profile_source={thread_source!r}, "
+                f"readback={source_readback!r}, events={rotation_events!r}"
+            ) from exc
+        owned_thread_ids.add(replacement_thread_id)
+        rotated = next(
+            (
+                event
+                for event in rotation_events
+                if event.get("type") == "thread_rotated"
+            ),
+            None,
         )
         if (
-            not isinstance(forked_id, str)
-            or not forked_id
-            or forked_id == thread_id
-            or forked_thread.get("forkedFromId") != thread_id
-            or forked_thread.get("threadSource") != source
-            or fork_result.get("approvalPolicy") != "never"
-            or fork_result.get("model") != model
-            or fork_result.get("reasoningEffort") != (reasoning_effort or None)
-            or fork_result.get("serviceTier") != service_tier
-            or fork_result.get("sandbox")
-            != {"type": "readOnly", "networkAccess": False}
+            rotated is None
+            or rotated.get("oldThreadId") != source_thread_id
+            or rotated.get("newThreadId") != replacement_thread_id
+            or rotated.get("old_thread_orphaned") is not False
         ):
-            raise RuntimeError("real thread/fork did not preserve direct profile fields")
-        owned_thread_ids.add(forked_id)
-        active_thread_id = forked_id
-        rebound = client.request(
-            "thread/read",
-            {"threadId": active_thread_id, "includeTurns": False},
+            raise RuntimeError("ThreadRotationService did not publish one clean result")
+        owned_thread_ids.discard(source_thread_id)
+        goal_result = client.request(
+            "thread/goal/get", {"threadId": replacement_thread_id}
         )
-        rebound_thread = (
-            rebound.get("thread") if isinstance(rebound, dict) else None
-        )
-        if (
-            not isinstance(rebound_thread, dict)
-            or rebound_thread.get("id") != active_thread_id
-            or rebound_thread.get("forkedFromId") != thread_id
-        ):
-            raise RuntimeError("real forked Thread identity readback failed")
-        client.request("thread/delete", {"threadId": active_thread_id})
-        owned_thread_ids.discard(active_thread_id)
-        new_delete_acknowledged = True
+        goal = goal_result.get("goal") if isinstance(goal_result, dict) else None
+        if not isinstance(goal, dict) or (
+            goal.get("objective"), goal.get("status"), goal.get("tokenBudget")
+        ) != ("Verify native Thread rotation readback", "paused", 2_000):
+            raise RuntimeError("replacement Thread Goal did not survive rotation")
+
+        client.request("thread/delete", {"threadId": replacement_thread_id})
+        owned_thread_ids.discard(replacement_thread_id)
     finally:
+        if rotation is not None:
+            rotation.close()
         if client.is_running:
-            for owned_thread_id in tuple(owned_thread_ids):
+            for thread_id in tuple(owned_thread_ids):
                 try:
-                    client.request("thread/delete", {"threadId": owned_thread_id})
-                    owned_thread_ids.discard(owned_thread_id)
-                except Exception as exc:  # report exact owned-Thread cleanup failure
-                    detail = f"{type(exc).__name__}: {exc}"
-                    cleanup_error = (
-                        f"{cleanup_error}; {detail}" if cleanup_error else detail
-                    )
-        if client.is_running:
-            try:
-                residual = client.request(
-                    "thread/list",
-                    {
-                        "cwd": [str(run_root)],
-                        "archived": False,
-                        "limit": 20,
-                        "modelProviders": [],
-                        "useStateDbOnly": True,
-                        "sortKey": "recency_at",
-                        "sortDirection": "desc",
-                    },
-                )
-                entries = residual.get("data") if isinstance(residual, dict) else None
-                if not isinstance(entries, list):
-                    raise RuntimeError("cleanup thread/list response is malformed")
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    residual_id = entry.get("id")
-                    residual_cwd = entry.get("cwd")
-                    if (
-                        isinstance(residual_id, str)
-                        and residual_id
-                        and isinstance(residual_cwd, str)
-                        and Path(residual_cwd).resolve() == run_root.resolve()
-                    ):
-                        client.request("thread/delete", {"threadId": residual_id})
-            except Exception as exc:
-                detail = f"{type(exc).__name__}: {exc}"
-                cleanup_error = (
-                    f"{cleanup_error}; {detail}" if cleanup_error else detail
-                )
+                    client.request("thread/delete", {"threadId": thread_id})
+                    owned_thread_ids.discard(thread_id)
+                except Exception as exc:
+                    cleanup_errors.append(f"{thread_id}: {type(exc).__name__}: {exc}")
         process_id = client.process_id
         client.close()
 
     initialize = initialize_result if isinstance(initialize_result, dict) else {}
-    read_thread = read_result.get("thread") if isinstance(read_result, dict) else {}
-    forked_thread = fork_result.get("thread") if isinstance(fork_result, dict) else {}
     output = {
-        "ok": cleanup_error is None and not client.is_running,
+        "ok": not cleanup_errors and not client.is_running,
         "real_app_server": True,
+        "thread_rotation_service_path_verified": True,
+        "automatic_compaction_verified": False,
+        "automatic_compaction_note": (
+            "The service received three synthetic contextCompaction notifications; "
+            "no real automatic compaction was produced or claimed."
+        ),
+        "embedded_houdini_verified": False,
         "executable": str(codex_exe),
         "executable_sha256": _sha256(codex_exe),
         "version": version,
@@ -310,34 +378,28 @@ def main() -> int:
             "platformFamily": initialize.get("platformFamily"),
         },
         "thread": {
-            "source_id": read_thread.get("id") if isinstance(read_thread, dict) else None,
-            "forked_id": forked_thread.get("id")
-            if isinstance(forked_thread, dict)
-            else None,
-            "forked_from_id": forked_thread.get("forkedFromId")
-            if isinstance(forked_thread, dict)
-            else None,
-            "read_turn_count": len(read_thread.get("turns", []))
-            if isinstance(read_thread, dict) and isinstance(read_thread.get("turns"), list)
-            else None,
-            "source_preserved": True,
-            "new_delete_acknowledged": new_delete_acknowledged,
-            "terminal_turn_id": completed_turn.get("id")
-            if isinstance(completed_turn, dict)
-            else None,
+            "source_id": source_thread_id,
+            "replacement_id": replacement_thread_id,
+            "fixture_id": fixture_thread_id,
+            "terminal_turn_id": terminal_turn_id,
+            "goal_preserved": True,
+            "replacement_deleted": replacement_thread_id not in owned_thread_ids,
         },
+        "rotation_events": rotation_events,
+        "cleanup_errors": cleanup_errors,
         "process_reaped": not client.is_running,
-        "cleanup_error": cleanup_error,
         "runtime_root": str(run_root),
         "methods_exercised": [
-            "initialize",
-            "initialized",
-            "thread/resume",
-            "thread/read",
+            "thread/read fixture",
+            "thread/fork fixture",
+            "thread/goal/set paused",
+            "ThreadRotationService.observe",
+            "thread/read(includeTurns=true)",
+            "thread/goal/get",
             "thread/fork",
-            "identity readback",
+            "thread/goal/set",
+            "atomic local rebind",
             "thread/delete",
-            "stdin close/process reap",
         ],
     }
     result_path = run_root / "result.json"

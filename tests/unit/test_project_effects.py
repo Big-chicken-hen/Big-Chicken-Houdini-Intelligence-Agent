@@ -96,6 +96,7 @@ class ProjectRoleExecutorTests(unittest.TestCase):
         client: _Client,
         *,
         writer: SceneWriterOwnership | None = None,
+        before_role_turn=None,
     ) -> ProjectRoleExecutor:
         return ProjectRoleExecutor(
             client=client,
@@ -103,7 +104,58 @@ class ProjectRoleExecutorTests(unittest.TestCase):
             scene_writer=writer or SceneWriterOwnership(),
             project_root=Path(self.temp.name),
             allowed_evidence_roots=(Path(self.temp.name),),
+            before_role_turn=before_role_turn,
             total_timeout_seconds=2.0,
+        )
+
+    def test_pending_rotation_commits_before_turn_or_blocks_without_starting(self) -> None:
+        order: list[str] = []
+        client = _Client(
+            ({"schema": "hia-project-start/1", "route": "answered", "reply": "ok"},)
+        )
+
+        def rotate(thread_id: str) -> str:
+            order.append(f"rotate:{thread_id}")
+            record = self.registry.require("p1")
+            roles = dict(record.state.roles)
+            roles[Role.SUPERVISOR] = replace(
+                roles[Role.SUPERVISOR], thread_id="thread-supervisor-rotated"
+            )
+            updated = replace(
+                record.state,
+                roles=roles,
+                revision=record.state.revision + 1,
+            )
+            self.registry.put(
+                ProjectRecord(updated, record.authoritative_task_text),
+                expected_revision=record.state.revision,
+            )
+            return "thread-supervisor-rotated"
+
+        result = self.executor(client, before_role_turn=rotate).execute(
+            self.state, ProjectAction("start_supervisor", {})
+        )
+        starts = [params for method, params in client.calls if method == "turn/start"]
+        self.assertEqual(ProjectEvent.PROJECT_ANSWERED, result.event.kind)
+        self.assertEqual("thread-supervisor-rotated", starts[0]["threadId"])
+        self.assertEqual(["rotate:thread-supervisor"], order)
+
+        blocked_client = _Client()
+
+        def fail_rotation(_thread_id: str) -> str:
+            raise BridgeError(
+                "THREAD_ROTATION_FAILED",
+                "native validation failed",
+                409,
+            )
+
+        blocked = self.executor(
+            blocked_client, before_role_turn=fail_rotation
+        ).execute(self.registry.require("p1").state, ProjectAction("start_supervisor", {}))
+        self.assertEqual(ProjectEvent.PROJECT_BLOCKED, blocked.event.kind)
+        self.assertEqual("THREAD_ROTATION_FAILED", blocked.event.data["reason"])
+        self.assertFalse(
+            any(method == "turn/start" for method, _ in blocked_client.calls)
         )
 
     def test_non_houdini_supervisor_answer_is_natural_and_completes(self) -> None:
@@ -129,6 +181,46 @@ class ProjectRoleExecutorTests(unittest.TestCase):
         )
         self.assertEqual(ProjectEvent.PROJECT_BLOCKED, result.event.kind)
         self.assertEqual(2, len([call for call in client.calls if call[0] == "turn/start"]))
+
+    def test_correction_turn_uses_rotation_completed_after_first_turn(self) -> None:
+        valid = {"schema": "hia-project-start/1", "route": "answered", "reply": "done"}
+        client = _Client(({"schema": "wrong"}, valid))
+        boundary_calls = 0
+
+        def rotate_on_second_use(thread_id: str) -> str:
+            nonlocal boundary_calls
+            boundary_calls += 1
+            if boundary_calls == 1:
+                return thread_id
+            record = self.registry.require("p1")
+            roles = dict(record.state.roles)
+            roles[Role.SUPERVISOR] = replace(
+                roles[Role.SUPERVISOR], thread_id="thread-supervisor-rotated"
+            )
+            updated = replace(
+                record.state,
+                roles=roles,
+                revision=record.state.revision + 1,
+            )
+            self.registry.put(
+                ProjectRecord(updated, record.authoritative_task_text),
+                expected_revision=record.state.revision,
+            )
+            return "thread-supervisor-rotated"
+
+        result = self.executor(
+            client, before_role_turn=rotate_on_second_use
+        ).execute(self.state, ProjectAction("start_supervisor", {}))
+
+        self.assertEqual(ProjectEvent.PROJECT_ANSWERED, result.event.kind)
+        self.assertEqual(
+            ["thread-supervisor", "thread-supervisor-rotated"],
+            [
+                params["threadId"]
+                for method, params in client.calls
+                if method == "turn/start"
+            ],
+        )
 
     def test_guidance_is_read_from_supervisor_native_history(self) -> None:
         envelope = {
@@ -367,6 +459,37 @@ class ProjectRoleExecutorTests(unittest.TestCase):
                 time.monotonic() + 1.0,
             )
         self.assertLess(time.monotonic() - started, 0.25)
+        self.assertIsNone(writer.snapshot()["owner"])
+        self.assertFalse(writer.snapshot()["starting"])
+
+    def test_execution_rotation_failure_releases_uncreated_writer(self) -> None:
+        writer = SceneWriterOwnership()
+        client = _Client()
+
+        def fail_rotation(_thread_id: str) -> str:
+            raise BridgeError(
+                "THREAD_ROTATION_FAILED",
+                "native validation failed",
+                409,
+            )
+
+        executor = self.executor(
+            client,
+            writer=writer,
+            before_role_turn=fail_rotation,
+        )
+        executor._action_plan = lambda *_args: {"stages": []}
+        executor._current_stage = lambda *_args: {"stage_id": "stage-1"}
+        state = replace(self.state, status=ProjectStatus.EXECUTING)
+
+        result = executor.execute(
+            state,
+            ProjectAction("start_execution", {}),
+        )
+
+        self.assertEqual(ProjectEvent.PROJECT_BLOCKED, result.event.kind)
+        self.assertEqual("THREAD_ROTATION_FAILED", result.event.data["reason"])
+        self.assertFalse(any(method == "turn/start" for method, _ in client.calls))
         self.assertIsNone(writer.snapshot()["owner"])
         self.assertFalse(writer.snapshot()["starting"])
 

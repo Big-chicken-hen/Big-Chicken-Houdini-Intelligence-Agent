@@ -2193,13 +2193,29 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         snapshot = writer.snapshot()
         self.assertEqual(owner, snapshot["owner"])
         self.assertTrue(snapshot["turn_terminal"])
-        self.assertTrue(snapshot["identity_error"])
+        self.assertEqual(1, snapshot["anonymous_hia_items"])
+        with self.assertRaises(BridgeError) as blocked:
+            session.start_thread()
+        self.assertEqual("SCENE_WRITER_STILL_ACTIVE", blocked.exception.code)
         warnings = [
             event
             for event in events.poll(0, timeout=0)["events"]
             if event.get("type") == "protocol_warning"
         ]
         self.assertEqual("INVALID_HIA_ITEM_ID", warnings[-1]["code"])
+        client.emit_notification(
+            "item/completed",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "hia_mcp_v2",
+                    "tool": "hia_execute_hom",
+                },
+            },
+        )
+        self.assertIsNone(writer.snapshot()["owner"])
 
     def test_only_explicit_rpc_rejection_releases_an_uncreated_turn(self) -> None:
         rpc_client = _FailingTurnClient("rpc")
