@@ -2,6 +2,13 @@
 
 All notable user-facing changes to Big-Chicken Houdini Intelligence Agent are recorded here.
 
+## Unreleased
+
+### Changed
+
+- The experimental fixed five-role project-team mode was removed before v0.2.0 because it destabilized ordinary operation and had not completed embedded Houdini acceptance.
+- Third-compaction Thread rotation retains the old attachment directory so historical native `localImage.path` references remain valid; newly staged images use the replacement Thread's directory.
+
 ## 0.1.1-preview - 2026-07-24
 
 ### Added

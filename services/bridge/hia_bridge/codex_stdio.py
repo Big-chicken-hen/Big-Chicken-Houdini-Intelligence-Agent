@@ -18,6 +18,7 @@ from .protocol import ProtocolPolicy
 
 
 EventSink = Callable[[dict[str, Any]], None]
+NotificationObserver = Callable[[str, Mapping[str, Any]], None]
 RequestId = int | str
 
 
@@ -109,6 +110,7 @@ class CodexStdioClient:
         self._sensitive_values = self._collect_sensitive_values(self._environment)
         self._policy = policy
         self._event_sink = event_sink
+        self._notification_observers: list[NotificationObserver] = []
         self._request_timeout = request_timeout
 
         self._process: subprocess.Popen[str] | None = None
@@ -122,13 +124,19 @@ class CodexStdioClient:
         self._late_response_tombstones: deque[RequestId] = deque(
             maxlen=_MAX_LATE_RESPONSE_TOMBSTONES
         )
-        self._server_requests: dict[RequestId, dict[str, Any]] = {}
         self._next_request_id = 1
         self._closing = False
 
     def set_event_sink(self, event_sink: EventSink) -> None:
         with self._state_lock:
             self._event_sink = event_sink
+
+    def add_notification_observer(self, observer: NotificationObserver) -> None:
+        if not callable(observer):
+            raise TypeError("notification observer must be callable")
+        with self._state_lock:
+            if observer not in self._notification_observers:
+                self._notification_observers.append(observer)
 
     def set_environment_overlay(self, values: Mapping[str, str]) -> None:
         """Apply child-only environment values before process creation.
@@ -317,30 +325,6 @@ class CodexStdioClient:
             message["params"] = dict(params)
         self._send_json(message)
 
-    def pending_server_request(self, request_id: RequestId) -> dict[str, Any] | None:
-        with self._pending_lock:
-            request = self._server_requests.get(request_id)
-            return dict(request) if request is not None else None
-
-    def respond_to_server_request(
-        self,
-        request_id: RequestId,
-        result: Mapping[str, Any],
-    ) -> str:
-        with self._pending_lock:
-            request = self._server_requests.get(request_id)
-        if request is None:
-            raise BridgeError(
-                "APPROVAL_NOT_FOUND",
-                "The approval request is no longer pending",
-                http_status=404,
-                details={"request_id": request_id},
-            )
-        self._send_json({"id": request_id, "result": dict(result)})
-        with self._pending_lock:
-            self._server_requests.pop(request_id, None)
-        return request["method"]
-
     def close(
         self,
         grace_seconds: float = 5.0,
@@ -387,8 +371,6 @@ class CodexStdioClient:
                     http_status=503,
                 )
             )
-            with self._pending_lock:
-                self._server_requests.clear()
             for thread in (self._stdout_thread, self._stderr_thread):
                 if thread is not None and thread is not threading.current_thread():
                     thread.join(timeout=remaining(1.0))
@@ -407,27 +389,9 @@ class CodexStdioClient:
             if not stopped:
                 raise BridgeError(
                     "CODEX_PROCESS_CLOSE_TIMEOUT",
-                    "Codex app-server did not stop before the recovery deadline",
+                    "Codex app-server did not stop before the shutdown deadline",
                     http_status=504,
                 )
-
-    def restart(
-        self,
-        grace_seconds: float = 1.0,
-        *,
-        deadline: float | None = None,
-    ) -> None:
-        """Replace only the owned app-server process; Houdini is untouched."""
-
-        with self._lifecycle_lock:
-            self.close(grace_seconds=grace_seconds, deadline=deadline)
-            if deadline is not None and time.monotonic() >= deadline:
-                raise BridgeError(
-                    "CODEX_STOP_RECOVERY_TIMEOUT",
-                    "Codex app-server restart exceeded the recovery deadline",
-                    http_status=504,
-                )
-            self.start()
 
     def _send_json(self, message: Mapping[str, Any]) -> None:
         encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
@@ -561,29 +525,23 @@ class CodexStdioClient:
                     request_id=request_id,
                 )
             return
-        params = message.get("params")
-        request = {
-            "method": method,
-            "params": self._redact_value(
-                params if isinstance(params, dict) else {}
-            ),
-        }
-        with self._pending_lock:
-            if request_id in self._server_requests:
-                self._emit(
-                    "protocol_warning",
-                    code="DUPLICATE_SERVER_REQUEST_ID",
-                    message="Ignored duplicate server request id",
-                    request_id=request_id,
-                )
-                return
-            self._server_requests[request_id] = request
-        self._emit(
-            "server_request",
-            request_id=request_id,
-            method=method,
-            params=request["params"],
-        )
+        if method in {
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+        }:
+            response: dict[str, Any] = {"decision": "decline"}
+        else:
+            response = {"permissions": {}, "scope": "turn"}
+        try:
+            self._send_json({"id": request_id, "result": response})
+        finally:
+            self._emit(
+                "protocol_warning",
+                code="UNEXPECTED_RUNTIME_APPROVAL_REQUEST",
+                message="Rejected an unexpected runtime approval request",
+                method=method,
+                request_id=request_id,
+            )
 
     def _handle_notification(self, message: dict[str, Any]) -> None:
         method = message["method"]
@@ -596,10 +554,23 @@ class CodexStdioClient:
             )
             return
         params = message.get("params")
+        normalized_params = params if isinstance(params, dict) else {}
+        with self._state_lock:
+            observers = tuple(self._notification_observers)
+        for observer in observers:
+            try:
+                observer(method, normalized_params)
+            except Exception:
+                self._emit(
+                    "protocol_warning",
+                    code="NOTIFICATION_OBSERVER_FAILED",
+                    message="A synchronous notification observer failed",
+                    method=method,
+                )
         self._emit(
             "codex_notification",
             method=method,
-            params=params if isinstance(params, dict) else {},
+            params=normalized_params,
         )
 
     def _fail_pending(self, error: BridgeError) -> None:

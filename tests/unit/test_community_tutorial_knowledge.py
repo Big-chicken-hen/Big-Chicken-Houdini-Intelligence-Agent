@@ -183,7 +183,6 @@ class FakeEmbedder:
             "dim": self.dim,
             "normalized": True,
             "status": "ready",
-            "fallback_reason": "",
             "repair": {},
         }
 
@@ -198,10 +197,19 @@ class FakeEmbedder:
             "requested_profile": self.requested_profile,
             "dim": self.dim,
             "normalized": True,
-            "fallback_reason": "",
             "repair": {},
             "device": "fake-cpu",
         }
+
+
+class ConfiguredFakeEmbedder(FakeEmbedder):
+    """Installed encoder whose worker has not been loaded by this process."""
+
+    def status(self) -> Mapping[str, Any]:
+        value = dict(super().status())
+        value["status"] = "configured"
+        value["ready"] = False
+        return value
 
 
 def _fake_vector(text: str, dim: int) -> list[float]:
@@ -263,6 +271,36 @@ def _load_release_checker() -> Any:
 
 
 class CommunityTutorialKnowledgeTests(unittest.TestCase):
+    def test_status_uses_configured_signature_without_loading_encoder(self) -> None:
+        _copy_pack(COMMUNITY_PACK, self.project_root)
+        index = LocalKnowledgeIndex(self.project_root)
+        _refresh(index, force=True)
+        embedder = ConfiguredFakeEmbedder()
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=embedder,
+        )
+
+        before = store.status()
+
+        self.assertEqual("configured", before["status"])
+        self.assertTrue(before["available"])
+        self.assertFalse(before["current_model_signature_match"])
+        self.assertEqual("", before["database_signature"])
+        self.assertEqual([], embedder.calls)
+
+        built = _build_all_vectors(store)
+        after = store.status()
+
+        self.assertTrue(built["complete"])
+        self.assertTrue(after["current_model_signature_match"])
+        self.assertEqual(
+            "qwen3-embedding-0.6b|Qwen/Qwen3-Embedding-0.6B|"
+            "community-fixture-1|32|normalized=1",
+            after["database_signature"],
+        )
+
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory(prefix="hia-community-knowledge-")
         self.project_root = Path(self._temporary.name) / "project"
@@ -559,7 +597,7 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=5,
-            mode="hybrid",
+            mode="lexical",
             source_kinds={COMMUNITY_TUTORIAL_SOURCE},
         )
         for mode, results in (
@@ -668,7 +706,7 @@ class CommunityTutorialKnowledgeTests(unittest.TestCase):
             current_houdini_version="21.0",
             offset=0,
             limit=10,
-            mode="hybrid",
+            mode="lexical",
             allow_index_updates=False,
             source_kinds={COMMUNITY_TUTORIAL_SOURCE},
         )[0]

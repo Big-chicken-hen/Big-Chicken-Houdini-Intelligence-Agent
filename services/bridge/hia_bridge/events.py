@@ -31,6 +31,12 @@ class EventBuffer:
             self._condition.notify_all()
             return dict(event)
 
+    def cursor(self) -> int:
+        """Return the latest sequence under the same lock used by publish."""
+
+        with self._condition:
+            return self._next_sequence - 1
+
     def poll(
         self,
         after: int,

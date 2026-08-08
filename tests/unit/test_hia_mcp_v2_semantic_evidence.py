@@ -643,12 +643,12 @@ class HiaMcpV2SemanticEvidenceTests(unittest.TestCase):
         self.assertEqual("hia-runtime-capabilities/1", result["schema"])
         self.assertEqual("21.0.440", result["houdini_build"])
         self.assertEqual(
-            "observed",
+            "unavailable",
             by_name["hou.OpNode.needsToCook"]["probe_status"],
         )
         self.assertTrue(by_name["hou.OpNode.needsToCook"]["documented"])
         self.assertEqual(
-            "callable_not_invoked",
+            "unavailable",
             by_name["hou.OpNode.cook"]["probe_status"],
         )
         self.assertEqual(
@@ -657,43 +657,6 @@ class HiaMcpV2SemanticEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(0, node.cook_calls)
         self.assertEqual(0, node.geometry_calls)
-
-    def test_execute_envelope_reuses_semantic_contract_and_stays_bounded(self) -> None:
-        node = FakeSemanticNode(
-            "/obj/output",
-            FakeSemanticGeometry(point_attributes={"id": [1.0]}),
-        )
-        self.install(node)
-        checks = [
-            {
-                "id": f"id-{index}",
-                "type": "presence",
-                "path": node.path(),
-                "data_kind": "attribute",
-                "owner": "point",
-                "name": "id",
-            }
-            for index in range(32)
-        ]
-
-        response = self.executor.dispatch(
-            "hia_execute_hom",
-            {
-                "script": "hia_result = 'validated'",
-                "capture_diff": False,
-                "semantic_checks": checks,
-            },
-        )
-        validation = response["execution_evidence"]["validation"]
-        self.assertTrue(validation["valid"])
-        self.assertEqual(
-            32,
-            response["execution_evidence"]["envelope"]["semantic_check_count"],
-        )
-        self.assertLess(
-            len(json.dumps(validation, ensure_ascii=False).encode("utf-8")),
-            65_536,
-        )
 
     def test_runtime_rejects_ambiguous_semantic_union_fields(self) -> None:
         with self.assertRaises(HiaRuntimeError) as raised:

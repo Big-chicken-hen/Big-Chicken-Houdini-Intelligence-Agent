@@ -41,10 +41,14 @@ class _Client:
     def __init__(self, order: list[str]) -> None:
         self.order = order
         self.overlays: list[dict[str, str]] = []
+        self.notification_observers = []
 
     def set_environment_overlay(self, values: dict[str, str]) -> None:
         self.order.append("environment_overlay")
         self.overlays.append(dict(values))
+
+    def add_notification_observer(self, observer) -> None:
+        self.notification_observers.append(observer)
 
 
 class _Session:
@@ -248,6 +252,8 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual(
             [
+                'web_search="live"',
+                "sandbox_workspace_write.network_access=true",
                 "mcp_servers.houdini_intelligence.command="
                 + bridge_main._toml_basic_string(
                     str(
@@ -444,6 +450,20 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             "HIA_LAUNCHER_SESSION_ID",
             bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT,
         )
+        for embedding_name in (
+            "HIA_EMBEDDING_PROFILE",
+            "HIA_EMBEDDING_PYTHON",
+            "HIA_EMBEDDING_DIM",
+            "HIA_EMBEDDING_DEVICE",
+            "HIA_EMBEDDING_MODEL_DIR_QWEN3_0_6B",
+            "HIA_EMBEDDING_MODEL_REVISION_QWEN3_0_6B",
+            "HIA_EMBEDDING_MODEL_DIR_QWEN3_8B",
+            "HIA_EMBEDDING_MODEL_REVISION_QWEN3_8B",
+        ):
+            self.assertIn(
+                embedding_name,
+                bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT,
+            )
         self.assertIn(
             f'{hia_server}.env_vars='
             + json.dumps(list(bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT)),
@@ -483,6 +503,45 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
         self.assertEqual("hia_v2", json.loads(stdout.getvalue())["mcp_backend"])
 
+    def test_ordinary_server_lifecycle_has_no_project_runtime_dependency(self) -> None:
+        order: list[str] = []
+        client = _Client(order)
+        session = _Session(order)
+        registry = SimpleNamespace(
+            manifest_digest="a" * 64,
+            schema_version="0.2.0",
+        )
+        scene_queue = SimpleNamespace(
+            shutdown=lambda: order.append("scene_queue_shutdown")
+        )
+        server = _Server(order)
+        stack, _ = self._common_patches(session, client)
+
+        with stack, mock.patch.object(
+            bridge_main.SchemaRegistry,
+            "b2_read_only",
+            return_value=registry,
+        ), mock.patch.object(
+            bridge_main,
+            "SceneQueue",
+            return_value=scene_queue,
+        ), mock.patch.object(
+            bridge_main,
+            "BridgeApplication",
+            return_value=object(),
+        ) as application_builder, mock.patch.object(
+            bridge_main,
+            "LoopbackHTTPServer",
+            return_value=server,
+        ), contextlib.redirect_stdout(io.StringIO()):
+            exit_code = bridge_main.run([])
+
+        self.assertEqual(0, exit_code)
+        self.assertLess(order.index("session_start"), order.index("serve_forever"))
+        self.assertLess(order.index("server_close"), order.index("session_close"))
+        self.assertNotIn("project_team", application_builder.call_args.kwargs)
+        self.assertNotIn("project_team_factory", application_builder.call_args.kwargs)
+
     def test_http_provider_command_is_escaped_process_local_and_secret_free(self) -> None:
         mcp_python = 'E:\\runtime\\quoted "python"\\python.exe'
         with mock.patch.object(
@@ -502,7 +561,12 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             for index, value in enumerate(command[:-1])
             if value == "-c"
         ]
-        self.assertEqual(9, len(overrides))
+        self.assertEqual(11, len(overrides))
+        self.assertEqual('web_search="live"', overrides[0])
+        self.assertEqual(
+            "sandbox_workspace_write.network_access=true",
+            overrides[1],
+        )
         self.assertEqual(
             1,
             overrides.count(
@@ -512,7 +576,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertEqual(
             "mcp_servers.houdini_intelligence.command="
             + json.dumps(mcp_python, ensure_ascii=True),
-            overrides[0],
+            overrides[2],
         )
         self.assertEqual(
             [
@@ -525,7 +589,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             ],
             [call.args[0] for call in encoder.call_args_list],
         )
-        provider_overrides = overrides[3:]
+        provider_overrides = overrides[5:]
         self.assertEqual(6, len(provider_overrides))
         self.assertEqual(
             {

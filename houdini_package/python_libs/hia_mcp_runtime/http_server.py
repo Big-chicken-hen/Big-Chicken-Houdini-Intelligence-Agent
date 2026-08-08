@@ -31,9 +31,7 @@ _RUNTIME_BINDING_FIELDS = (
     "houdini_pid",
     "executor_module_path",
 )
-_SCENE_WRITE_TOOLS = frozenset(
-    {"hia_execute_hom", "hia_run_effect_experiment"}
-)
+_SCENE_WRITE_TOOLS = frozenset({"hia_execute_hom"})
 
 
 class _RuntimeHTTPServer(ThreadingHTTPServer):

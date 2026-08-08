@@ -28,9 +28,7 @@ ENV_PREFIX = "HIA_MCP_V2_"
 MAX_REQUEST_BYTES = 1_048_576
 MAX_RESPONSE_BYTES = 4_194_304
 DEFAULT_TIMEOUT_SECONDS = 60.0
-_SCENE_WRITE_TOOLS = frozenset(
-    {"hia_execute_hom", "hia_run_effect_experiment"}
-)
+_SCENE_WRITE_TOOLS = frozenset({"hia_execute_hom"})
 
 
 class CancellationToken:
@@ -411,7 +409,6 @@ class LoopbackTransport:
                     {
                         "restart_required": True,
                         "request_submitted": True,
-                        "automatic_retry_safe": False,
                     },
                 )
             if scene_write:
@@ -435,36 +432,19 @@ class LoopbackTransport:
                     result["restart_required"] = True
                     result["identity_warning"] = warning
             if tool_name == "hia_execute_hom":
-                result = dict(result)
-                phase_timings = result.get("phase_timings")
-                runtime_timings = (
-                    phase_timings
-                    if isinstance(phase_timings, Mapping)
-                    else {}
+                allowed = (
+                    "ok",
+                    "result",
+                    "stdout",
+                    "warnings",
+                    "errors",
+                    "revision",
+                    "dirty",
+                    "elapsed_seconds",
+                    "script_sha256",
+                    "scene_change_status",
                 )
-                runtime_queue = float(
-                    runtime_timings.get("queue_seconds") or 0.0
-                )
-                runtime_total = float(
-                    runtime_timings.get("total_seconds") or 0.0
-                )
-                result["phase_timings"] = {
-                    "queue_seconds": _rounded_seconds(
-                        queue_seconds + runtime_queue
-                    ),
-                    "hom_seconds": _rounded_seconds(
-                        float(runtime_timings.get("hom_seconds") or 0.0)
-                    ),
-                    "validation_seconds": _rounded_seconds(
-                        float(runtime_timings.get("validation_seconds") or 0.0)
-                    ),
-                    "total_seconds": _rounded_seconds(
-                        max(
-                            queue_seconds + (time.monotonic() - call_started),
-                            queue_seconds + runtime_total,
-                        )
-                    ),
-                }
+                result = {name: result.get(name) for name in allowed}
             return result
         finally:
             with self._active_lock:
@@ -528,7 +508,6 @@ class LoopbackTransport:
                         "runtime_identity": identity,
                         "restart_required": True,
                         "request_submitted": request_submitted,
-                        "automatic_retry_safe": not request_submitted,
                     },
                 )
             self._latched_identity = dict(identity)
@@ -630,7 +609,6 @@ def _validated_identity(
             {
                 "restart_required": True,
                 "request_submitted": request_submitted,
-                "automatic_retry_safe": not request_submitted,
             },
         )
     identity_version = value.get("identity_version")
@@ -652,7 +630,6 @@ def _validated_identity(
                 "actual_identity_version": identity_version,
                 "restart_required": True,
                 "request_submitted": request_submitted,
-                "automatic_retry_safe": not request_submitted,
             },
         )
     if not _valid_launcher_session_id(launcher_session_id):
@@ -751,7 +728,6 @@ def _validated_identity(
                 "runtime_identity": identity,
                 "restart_required": True,
                 "request_submitted": request_submitted,
-                "automatic_retry_safe": not request_submitted,
             },
         )
     if (
@@ -768,7 +744,6 @@ def _validated_identity(
                 "runtime_identity": identity,
                 "restart_required": True,
                 "request_submitted": request_submitted,
-                "automatic_retry_safe": not request_submitted,
             },
         )
     if enforce_expected and source_status != "current":
@@ -779,7 +754,6 @@ def _validated_identity(
                 "runtime_identity": identity,
                 "restart_required": True,
                 "request_submitted": request_submitted,
-                "automatic_retry_safe": not request_submitted,
             },
         )
     return identity
@@ -811,7 +785,6 @@ def _before_submission_details(
         "submission_state": "not_submitted",
         "request_submitted": False,
         "hom_may_still_execute": False,
-        "automatic_retry_safe": True,
         "interruptible_after_submission": False,
     }
     if timeout_seconds is not None:
@@ -861,7 +834,6 @@ def _runtime_timeout(
             "submission_state": submission_state,
             "request_submitted": request_submitted,
             "hom_may_still_execute": hom_may_still_execute,
-            "automatic_retry_safe": False,
             "interruptible_after_submission": False,
         },
     )

@@ -9,7 +9,6 @@ import re
 import sys
 import time
 import uuid
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,6 @@ from typing import Any
 import PySide6
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .approval_card import format_approval_card
 from .attachment_store import AttachmentStore
 from .bridge_client import BridgeClient
 from .houdini_read_adapter import HoudiniReadAdapter, HoudiniReadAdapterError
@@ -48,11 +46,8 @@ _SESSION_RECONCILE_CONTEXT_PREFIX = "session_reconcile:"
 _MODELS_CONTEXT = "models"
 _THREADS_CONTEXT = "threads"
 _THREAD_READ_CONTEXT_PREFIX = "thread_read:"
-_CRASH_RECOVERY_READ_CONTEXT = "thread_read:crash_recovery"
-_CRASH_RECOVERY_RECHECK_CONTEXT = "thread_read:crash_recovery_recheck"
 _THREAD_RENAME_CONTEXT_PREFIX = "thread_rename:"
 _THREAD_DELETE_CONTEXT_PREFIX = "thread_delete:"
-_THREAD_DELETE_CONFIRM_MIN_SECONDS = 0.75
 _PROJECT_MEMORY_CONTEXT_PREFIX = "project_memory:"
 _PROJECT_MEMORY_CONFIRM_MIN_SECONDS = 0.75
 _KNOWLEDGE_CONTEXT_PREFIX = "knowledge:"
@@ -127,12 +122,8 @@ _STAGE_STATUS_LABELS = {
     "blocked": ("!", "受阻"),
     "failed": ("×", "失败"),
 }
-_CRASH_RECOVERY_THREAD_ENV = "HIA_CRASH_RECOVERY_THREAD_ID"
-_CRASH_RECOVERY_GOAL_BINDING_ENV = "HIA_CRASH_RECOVERY_GOAL_BINDING"
-_CRASH_RECOVERY_PROMPT_ENV = "HIA_CRASH_RECOVERY_PROMPT_ID"
-_CRASH_RECOVERY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
-_CRASH_RECOVERY_PROMPT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_CRASH_RECOVERY_GOAL_BINDING = re.compile(r"[0-9a-f]{64}\Z")
+
+
 _MCP_BACKEND_PRESENTATION = {
     "hia_v2": ("HIA MCP V2", "HIA MCP V2 当前 Houdini 会话状态"),
     "fxhoudini": (
@@ -144,25 +135,6 @@ _MCP_BACKEND_PRESENTATION = {
 
 class HoudiniIntelligencePanel(QtWidgets.QWidget):
     """Conversation UI with current-session Houdini and MCP status."""
-
-    @staticmethod
-    def _take_crash_recovery_marker() -> dict[str, str] | None:
-        values = {
-            "thread_id": os.environ.pop(_CRASH_RECOVERY_THREAD_ENV, ""),
-            "goal_binding": os.environ.pop(
-                _CRASH_RECOVERY_GOAL_BINDING_ENV, ""
-            ),
-            "prompt_id": os.environ.pop(_CRASH_RECOVERY_PROMPT_ENV, ""),
-        }
-        if (
-            _CRASH_RECOVERY_ID.fullmatch(values["thread_id"]) is None
-            or _CRASH_RECOVERY_GOAL_BINDING.fullmatch(values["goal_binding"])
-            is None
-            or _CRASH_RECOVERY_PROMPT_ID.fullmatch(values["prompt_id"])
-            is None
-        ):
-            return None
-        return values
 
     def __init__(
         self,
@@ -182,11 +154,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         self._authenticated = False
         self._selected_thread_id: str | None = None
-        self._crash_recovery_marker = self._take_crash_recovery_marker()
-        self._crash_recovery_health_session: dict[str, Any] | None = None
-        self._crash_recovery_goal_payload: dict[str, Any] | None = None
-        self._crash_recovery_thread_payload: dict[str, Any] | None = None
-        self._crash_recovery_observation: dict[str, Any] | None = None
         self._session_action_pending = False
         self._turn_start_request_pending = False
         self._interrupt_pending = False
@@ -203,15 +170,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._interrupt_tokens: dict[str, TurnStateToken] = {}
         self._active_interrupt_context: str | None = None
         self._stopping_turn_token: TurnStateToken | None = None
-        self._stop_recovery_state: str | None = None
         self._stopped_source_turn: tuple[str, str] | None = None
         self._reconciliation_tokens: dict[str, TurnStateToken] = {}
         self._models_requested = False
         self._models_resolved = False
         self._threads_requested = False
         self._thread_history: list[dict[str, Any]] = []
+        self._ordinary_thread_drafts: dict[str, dict[str, Any]] = {}
         self._thread_delete_confirm_id: str | None = None
-        self._thread_delete_confirm_not_before: float | None = None
         self._thread_delete_pending: dict[str, Any] | None = None
         self._project_memory_loaded = False
         self._project_memory_pending: dict[str, Any] | None = None
@@ -251,9 +217,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._reconnecting = False
         self._reconnect_exhausted_notice_shown = False
         self._app_server_exit_notice_shown = False
-        self._pending_approvals: deque[dict[str, Any]] = deque()
-        self._current_approval: dict[str, Any] | None = None
-        self._current_approval_offers_persistent_rule = False
         self._houdini_adapter: HoudiniReadAdapter | None = None
         self._houdini_polling_enabled = False
         self._local_houdini_polling_enabled = False
@@ -269,6 +232,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._selected_node_paths: tuple[str, ...] = ()
         self._attachment_store = AttachmentStore()
         self._attachment_dialog: Any | None = None
+        self._attachment_dialog_owner: tuple[str, str] | None = None
         self._diagnostic_turn_key: str | None = None
         self._diagnostic_draft_key: str | None = None
         self._diagnostic_snapshot: dict[str, Any] = {}
@@ -406,12 +370,14 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         session_row.addWidget(self.thread_status_label)
         session_row.addWidget(self.turn_status_label)
         self.history_sidebar_button = QtWidgets.QToolButton()
+        self.history_sidebar_button.setMinimumWidth(56)
         self.history_sidebar_button.setText("历史")
         self.history_sidebar_button.setCheckable(True)
         self.history_sidebar_button.setChecked(True)
         self.history_sidebar_button.setToolTip("显示或收起历史任务栏")
         session_row.addWidget(self.history_sidebar_button)
         self.task_sidebar_button = QtWidgets.QToolButton()
+        self.task_sidebar_button.setMinimumWidth(56)
         self.task_sidebar_button.setText("任务")
         self.task_sidebar_button.setCheckable(True)
         self.task_sidebar_button.setChecked(True)
@@ -501,43 +467,60 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         left_layout = QtWidgets.QVBoxLayout(self.left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(QtWidgets.QLabel("历史任务"))
-        self.history_combo = QtWidgets.QComboBox()
-        self.history_combo.addItem("暂无历史会话", None)
-        self.history_combo.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        left_layout.setSpacing(6)
+        self.history_title_label = QtWidgets.QLabel("普通任务")
+        self.history_title_label.setStyleSheet("font-weight: 600;")
+        left_layout.addWidget(self.history_title_label)
+
+        self.new_thread_button = QtWidgets.QPushButton("新建普通任务")
+        self.new_thread_button.setToolTip("创建并选中一个普通 Codex Thread")
+        left_layout.addWidget(self.new_thread_button)
+
+        self.task_creation_feedback_label = QtWidgets.QLabel(
+            "Bridge 连接后可新建或打开普通任务。"
         )
-        self.history_combo.setMinimumContentsLength(0)
-        self.history_combo.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
-            QtWidgets.QSizePolicy.Policy.Fixed,
+        self.task_creation_feedback_label.setObjectName("taskCreationFeedback")
+        self.task_creation_feedback_label.setAccessibleName("任务创建状态")
+        self.task_creation_feedback_label.setWordWrap(True)
+        self.task_creation_feedback_label.setStyleSheet(
+            "color: #9aa6ba; padding: 2px 1px;"
         )
-        self.history_combo.setToolTip("当前项目最近 20 条未归档 Codex 会话")
-        left_layout.addWidget(self.history_combo)
-        history_action_row = QtWidgets.QHBoxLayout()
-        self.refresh_threads_button = QtWidgets.QPushButton("刷新")
-        self.new_thread_button = QtWidgets.QPushButton("新建")
-        self.resume_thread_button = QtWidgets.QPushButton("打开")
-        history_action_row.addWidget(self.refresh_threads_button)
-        history_action_row.addWidget(self.new_thread_button)
-        history_action_row.addWidget(self.resume_thread_button)
-        left_layout.addLayout(history_action_row)
+        left_layout.addWidget(self.task_creation_feedback_label)
+
+        self.history_tree = QtWidgets.QTreeWidget()
+        self.history_tree.setHeaderHidden(True)
+        self.history_tree.setRootIsDecorated(False)
+        self.history_tree.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.history_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        self.history_tree.setUniformRowHeights(True)
+        self.history_tree.setMinimumHeight(150)
+        self.history_tree.setToolTip("选择任务后可打开、重命名、复制 ID 或删除")
+        left_layout.addWidget(self.history_tree, 1)
+
         self.thread_name_edit = QtWidgets.QLineEdit()
-        self.thread_name_edit.setPlaceholderText("会话名称")
+        self.thread_name_edit.setPlaceholderText("任务名称")
         left_layout.addWidget(self.thread_name_edit)
-        history_name_row = QtWidgets.QHBoxLayout()
+
+        history_actions = QtWidgets.QGridLayout()
+        history_actions.setHorizontalSpacing(6)
+        history_actions.setVerticalSpacing(4)
+        self.open_thread_button = QtWidgets.QPushButton("打开所选任务")
+        self.open_thread_button.setToolTip("打开所选任务；也可以双击任务行")
         self.rename_thread_button = QtWidgets.QPushButton("重命名")
         self.copy_thread_id_button = QtWidgets.QPushButton("复制 ID")
-        self.delete_thread_button = QtWidgets.QPushButton("删除")
-        self.delete_thread_button.setToolTip("永久删除当前明确选中的 Codex Thread")
-        history_name_row.addWidget(self.rename_thread_button)
-        history_name_row.addWidget(self.copy_thread_id_button)
-        history_name_row.addWidget(self.delete_thread_button)
-        left_layout.addLayout(history_name_row)
-        self.thread_id_edit = QtWidgets.QLineEdit()
-        self.thread_id_edit.setVisible(False)
-        left_layout.addWidget(self.thread_id_edit)
-        left_layout.addStretch(1)
+        self.refresh_threads_button = QtWidgets.QPushButton("刷新")
+        self.delete_thread_button = QtWidgets.QPushButton("删除所选任务")
+        self.delete_thread_button.setToolTip(
+            "永久删除所选普通任务、原生聊天记录和该任务的本地附件缓存"
+        )
+        history_actions.addWidget(self.open_thread_button, 0, 0, 1, 2)
+        history_actions.addWidget(self.rename_thread_button, 1, 0)
+        history_actions.addWidget(self.copy_thread_id_button, 1, 1)
+        history_actions.addWidget(self.refresh_threads_button, 2, 0)
+        history_actions.addWidget(self.delete_thread_button, 2, 1)
+        left_layout.addLayout(history_actions)
 
         self.center_column = QtWidgets.QWidget(self.main_splitter)
         self.center_column.setMinimumWidth(360)
@@ -594,6 +577,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         center_layout.addWidget(self.welcome_group)
 
         self.goal_stage_summary_group = QtWidgets.QGroupBox("当前任务")
+        self.goal_stage_summary_group.setObjectName("goalStageSummary")
+        self.goal_stage_summary_group.setStyleSheet(
+            "QGroupBox#goalStageSummary { background-color: #171a22; "
+            "color: #e5e9f0; border: 1px solid #3a414d; "
+            "border-radius: 4px; margin-top: 7px; } "
+            "QGroupBox#goalStageSummary::title { subcontrol-origin: margin; "
+            "left: 8px; padding: 0 3px; background-color: #171a22; } "
+            "QGroupBox#goalStageSummary QLabel { background-color: transparent; "
+            "color: #e5e9f0; }"
+        )
         self.goal_stage_summary_group.setMinimumWidth(0)
         self.goal_stage_summary_group.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
@@ -639,42 +632,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if hasattr(self.conversation, "newThreadRequested"):
             self.conversation.newThreadRequested.connect(self._new_thread)
         center_layout.addWidget(self.conversation, 1)
-
-        self.approval_group = QtWidgets.QGroupBox("审批请求")
-        approval_layout = QtWidgets.QVBoxLayout(self.approval_group)
-        self.approval_text = QtWidgets.QPlainTextEdit()
-        self.approval_text.setReadOnly(True)
-        self.approval_text.setMaximumHeight(150)
-        approval_layout.addWidget(self.approval_text)
-        self.approval_details_button = QtWidgets.QPushButton("高级详情")
-        self.approval_details_button.setCheckable(True)
-        self.approval_details_button.setChecked(False)
-        self.approval_details_button.setVisible(False)
-        approval_layout.addWidget(self.approval_details_button)
-        self.approval_details_text = QtWidgets.QPlainTextEdit()
-        self.approval_details_text.setReadOnly(True)
-        self.approval_details_text.setMaximumHeight(220)
-        self.approval_details_text.setVisible(False)
-        approval_layout.addWidget(self.approval_details_text)
-        self.persistent_allow_note = QtWidgets.QLabel(
-            "持续授权：以后允许协议提供的相同命令规则。"
-        )
-        self.persistent_allow_note.setVisible(False)
-        approval_layout.addWidget(self.persistent_allow_note)
-        self.persistent_allow_button = QtWidgets.QPushButton(
-            "以后允许相同命令规则"
-        )
-        self.persistent_allow_button.setVisible(False)
-        approval_layout.addWidget(self.persistent_allow_button)
-        approval_buttons = QtWidgets.QHBoxLayout()
-        self.allow_button = QtWidgets.QPushButton("允许一次")
-        self.deny_button = QtWidgets.QPushButton("拒绝")
-        approval_buttons.addStretch(1)
-        approval_buttons.addWidget(self.allow_button)
-        approval_buttons.addWidget(self.deny_button)
-        approval_layout.addLayout(approval_buttons)
-        self.approval_group.setVisible(False)
-        center_layout.addWidget(self.approval_group)
 
         selection_row = QtWidgets.QHBoxLayout()
         self.selection_label = QtWidgets.QLabel("当前选择：无")
@@ -755,7 +712,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         goal_layout.addWidget(goal_help)
         self.goal_focus_checkbox = QtWidgets.QCheckBox("目标专注模式")
         self.goal_focus_checkbox.setToolTip(
-            "开启后，仅在重要阶段完成时保留恢复点；Houdini 异常退出才自动恢复并继续当前 Goal。"
+            "开启后，Codex 会在当前 Thread 的每轮完成后继续推进同一个 Goal。"
         )
         goal_layout.addWidget(self.goal_focus_checkbox)
         self.goal_focus_hint_label = QtWidgets.QLabel(
@@ -870,7 +827,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         team_page_layout.setContentsMargins(4, 4, 4, 4)
         team_page_layout.setSpacing(6)
 
-        self.team_group = QtWidgets.QGroupBox("团队活动")
+        self.team_group = QtWidgets.QGroupBox("原生子任务活动")
         team_layout = QtWidgets.QVBoxLayout(self.team_group)
         self.team_combo = QtWidgets.QComboBox()
         self.team_combo.addItem("暂无子任务", None)
@@ -900,7 +857,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.performance_label.setWordWrap(True)
         performance_layout.addWidget(self.performance_label)
         team_page_layout.addWidget(self.performance_group)
-        self.task_tabs.addTab(team_page, "团队")
+        self.task_tabs.addTab(team_page, "活动")
 
         self.project_memory_page = QtWidgets.QScrollArea()
         self.project_memory_page.setWidgetResizable(True)
@@ -1328,13 +1285,24 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.main_splitter.setSizes([210, 720, 300])
         root.addWidget(self.main_splitter, 1)
 
-        self.new_thread_button.clicked.connect(self._new_thread)
-        self.resume_thread_button.clicked.connect(self._resume_thread)
         self.add_image_button.clicked.connect(self._choose_images)
         self.report_issue_button.clicked.connect(self._record_manual_issue)
         self.copy_report_path_button.clicked.connect(self._copy_report_path)
         self.input_edit.sendRequested.connect(self._send)
         self.input_edit.imagePasted.connect(self._add_clipboard_image)
+        self.new_thread_button.clicked.connect(self._new_thread)
+        self.history_tree.itemSelectionChanged.connect(
+            self._on_history_selection_changed
+        )
+        self.history_tree.itemDoubleClicked.connect(
+            lambda _item, _column: self._resume_thread()
+        )
+        self.open_thread_button.clicked.connect(self._resume_thread)
+        self.thread_name_edit.returnPressed.connect(self._rename_thread)
+        self.rename_thread_button.clicked.connect(self._rename_thread)
+        self.copy_thread_id_button.clicked.connect(self._copy_thread_id)
+        self.refresh_threads_button.clicked.connect(self._refresh_threads)
+        self.delete_thread_button.clicked.connect(self._delete_thread)
         self.send_button.clicked.connect(self._send)
         self.stop_button.clicked.connect(self._stop)
         self.goal_continue_button.clicked.connect(self._continue_goal)
@@ -1344,28 +1312,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.runtime_settings_group.toggled.connect(
             self._toggle_runtime_settings
         )
-        self.approval_details_button.toggled.connect(self._toggle_approval_details)
-        self.persistent_allow_button.clicked.connect(
-            lambda: self._resolve_approval("allow_rule")
-        )
-        self.allow_button.clicked.connect(lambda: self._resolve_approval("allow"))
-        self.deny_button.clicked.connect(lambda: self._resolve_approval("deny"))
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.service_tier_combo.currentIndexChanged.connect(
             self._on_service_tier_changed
-        )
-        self.history_combo.currentIndexChanged.connect(
-            self._on_history_index_changed
         )
         self.goal_refresh_button.clicked.connect(self._request_goal)
         self.goal_save_button.clicked.connect(self._save_goal)
         self.goal_clear_button.clicked.connect(self._clear_goal)
         self.goal_focus_checkbox.toggled.connect(self._set_focus_mode)
         self.team_combo.currentIndexChanged.connect(self._on_team_selected)
-        self.refresh_threads_button.clicked.connect(self._refresh_threads)
-        self.rename_thread_button.clicked.connect(self._rename_thread)
-        self.copy_thread_id_button.clicked.connect(self._copy_thread_id)
-        self.delete_thread_button.clicked.connect(self._delete_thread)
         self.project_memory_search_edit.returnPressed.connect(
             self._search_project_memories
         )
@@ -2190,7 +2145,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "scope": scope,
         }
         source_thread_id = getattr(self, "_selected_thread_id", None)
-        if isinstance(source_thread_id, str) and source_thread_id:
+        if (
+            isinstance(source_thread_id, str)
+            and source_thread_id
+        ):
             values["source_thread_id"] = source_thread_id
             source_turn_id = getattr(self, "_stream_turn_id", None)
             stream_thread_id = getattr(self, "_stream_thread_id", None)
@@ -2896,7 +2854,25 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return True
         return False
 
+    def _set_task_creation_feedback(
+        self,
+        text: str,
+        *,
+        tone: str = "info",
+    ) -> None:
+        label = getattr(self, "task_creation_feedback_label", None)
+        if label is None:
+            return
+        color = {
+            "error": "#ff8f8f",
+            "success": "#8bd49c",
+            "busy": "#f1c56b",
+        }.get(tone, "#9aa6ba")
+        label.setText(text)
+        label.setStyleSheet(f"color: {color}; padding: 2px 1px;")
+
     def _set_connection(self, text: str, connected: bool) -> None:
+        was_connected = self._connected
         self._connected = connected
         self._set_status_indicator(
             self.connection_label,
@@ -2905,6 +2881,78 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             connected,
             text,
         )
+        if not connected:
+            self._set_task_creation_feedback(
+                "Bridge 未连接，暂不能创建任务。",
+                tone="error",
+            )
+        elif not was_connected:
+            if self._session_action_pending:
+                message = "任务请求正在处理，请稍候。"
+                tone = "busy"
+            else:
+                message = "可新建普通任务，或从历史中打开已有任务。"
+                tone = "info"
+            self._set_task_creation_feedback(message, tone=tone)
+
+    def _refresh_task_creation_controls(self) -> None:
+        new_button = getattr(self, "new_thread_button", None)
+        if new_button is None:
+            return
+        common_ready = bool(
+            getattr(self, "_client", None) is not None
+            and self._connected
+            and self._authenticated
+            and not self._turn_state.busy
+            and not self._goal_houdini_busy()
+            and self._goal_action_context is None
+            and not self._session_action_pending
+            and not self._turn_start_request_pending
+            and not self._turn_steer_request_pending
+            and not self._reconciliation_tokens
+        )
+        new_button.setText(
+            "正在新建普通任务…"
+            if self._session_action_pending
+            else "新建普通任务"
+        )
+        new_button.setEnabled(common_ready)
+        new_button.setToolTip(
+            "创建并选中一个普通 Codex Thread"
+            if common_ready
+            else "当前操作结束并连接 Bridge 后才能创建任务"
+        )
+
+        selected = self._selected_history_record()
+        has_selection = selected is not None
+        switch_ready = bool(
+            has_selection
+            and common_ready
+            and not self._turn_steer_request_pending
+        )
+        for name in ("open_thread_button", "rename_thread_button"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(switch_ready)
+        copy_button = getattr(self, "copy_thread_id_button", None)
+        if copy_button is not None:
+            copy_button.setEnabled(has_selection)
+        delete_button = getattr(self, "delete_thread_button", None)
+        if delete_button is not None:
+            delete_button.setEnabled(
+                has_selection
+                and self._connected
+                and not self._turn_state.busy
+                and not self._session_action_pending
+            )
+        name_edit = getattr(self, "thread_name_edit", None)
+        if name_edit is not None:
+            name_edit.setEnabled(has_selection)
+        refresh_button = getattr(self, "refresh_threads_button", None)
+        if refresh_button is not None:
+            refresh_button.setEnabled(
+                getattr(self, "_client", None) is not None and self._connected
+            )
 
     def _refresh_controls(self) -> None:
         controls = self._turn_state.derive_controls(
@@ -2929,33 +2977,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         )
         stopping = self._is_stopping_turn()
         steer_available = controls.stop and not stopping
-        history_record = self._selected_history_record()
-        history_available = history_record is not None
-        self.new_thread_button.setEnabled(
-            controls.new_thread and thread_switch_enabled
-        )
-        self.resume_thread_button.setEnabled(
-            controls.resume_thread and thread_switch_enabled and history_available
-        )
-        self.history_combo.setEnabled(
-            self._connected
-            and not self._turn_state.busy
-            and thread_switch_enabled
-        )
-        self.refresh_threads_button.setEnabled(
-            self._connected and not self._session_action_pending
-        )
-        self.thread_name_edit.setEnabled(
-            history_available and not self._turn_state.busy and session_enabled
-        )
-        self.rename_thread_button.setEnabled(
-            history_available and not self._turn_state.busy and session_enabled
-        )
-        self.copy_thread_id_button.setEnabled(history_available)
-        self.delete_thread_button.setEnabled(
-            self._connected
-            and history_available
-            and not self._session_action_pending
+        ordinary_context = isinstance(self._selected_thread_id, str) and bool(
+            self._selected_thread_id
         )
         project_memory_ready = (
             getattr(self, "_client", None) is not None
@@ -3006,8 +3029,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         selected_thread_ready = (
             knowledge_idle
             and ready_environment
-            and isinstance(self._selected_thread_id, str)
-            and bool(self._selected_thread_id)
+            and ordinary_context
             and not self._turn_state.busy
         )
         self.knowledge_import_thread_button.setEnabled(
@@ -3031,33 +3053,28 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             knowledge_idle and selected_source is not None
         )
         self.send_button.setEnabled(
-            (controls.send or steer_available) and request_submission_ready
+            (controls.send or steer_available)
+            and request_submission_ready
+            and ordinary_context
         )
         self.stop_button.setEnabled(
             controls.stop and not stopping and not self._interrupt_pending
         )
-        self.send_button.setText(
-            "发送中…"
-            if self._turn_start_request_pending
-            else (
-                "追加中…"
-                if self._turn_steer_request_pending
-                else (
-                    "追加指令"
-                    if steer_available
-                    else (
-                        "已停止"
-                        if stopping
-                        else ("Codex 回复中…" if self._turn_state.busy else "发送")
-                    )
-                )
-            )
-        )
-        self.thread_id_edit.setEnabled(
-            not self._turn_state.busy and thread_switch_enabled
-        )
+        if self._turn_start_request_pending:
+            send_text = "发送中…"
+        elif self._turn_steer_request_pending:
+            send_text = "追加中…"
+        elif steer_available:
+            send_text = "追加指令"
+        elif stopping:
+            send_text = "已停止"
+        elif self._turn_state.busy:
+            send_text = "Codex 回复中…"
+        else:
+            send_text = "发送"
+        self.send_button.setText(send_text)
         selection_enabled = (
-            (self._connected or self._stop_recovery_state in {"recovering", "failed"})
+            self._connected
             and session_enabled
         )
         self.model_combo.setEnabled(selection_enabled)
@@ -3065,8 +3082,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self.service_tier_combo.setEnabled(
             selection_enabled and self.service_tier_combo.count() > 1
         )
-        composer_enabled = stopping or (
-            (not self._turn_state.busy or steer_available) and request_ready
+        composer_enabled = (
+            ordinary_context
+            and (
+                stopping
+                or ((not self._turn_state.busy or steer_available) and request_ready)
+            )
         )
         editor_enabled = composer_enabled or bool(
             self._turn_start_request_pending
@@ -3076,11 +3097,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         input_edit = getattr(self, "input_edit", None)
         if input_edit is not None:
             input_edit.setEnabled(editor_enabled)
+            if hasattr(input_edit, "setPlaceholderText"):
+                input_edit.setPlaceholderText(
+                    "输入自然语言请求；Enter 换行，Ctrl+Enter 发送。"
+                )
         add_image_button = getattr(self, "add_image_button", None)
         if add_image_button is not None:
             add_image_button.setEnabled(
                 composer_enabled
-                and isinstance(self._selected_thread_id, str)
+                and ordinary_context
                 and self._selected_model_supports_images()
             )
         include_selection = getattr(self, "include_selection_checkbox", None)
@@ -3090,8 +3115,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if attachment_strip is not None:
             attachment_strip.setEnabled(composer_enabled)
         goal_editor_enabled = (
-            self._connected
-            and isinstance(self._selected_thread_id, str)
+            ordinary_context
+            and self._connected
             and self._goal_action_context is None
             and not self._session_action_pending
             and not self._turn_state.busy
@@ -3101,18 +3126,25 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         for name in (
             "goal_objective_edit",
             "goal_budget_edit",
-            "goal_refresh_button",
             "goal_save_button",
             "goal_clear_button",
         ):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.setEnabled(goal_editor_enabled)
+        goal_refresh_button = getattr(self, "goal_refresh_button", None)
+        if goal_refresh_button is not None:
+            goal_refresh_button.setEnabled(
+                self._connected
+                and isinstance(self._selected_thread_id, str)
+                and self._goal_action_context is None
+                and not self._session_action_pending
+            )
         goal_focus_checkbox = getattr(self, "goal_focus_checkbox", None)
         if goal_focus_checkbox is not None:
             goal_focus_checkbox.setEnabled(
                 self._connected
-                and isinstance(self._selected_thread_id, str)
+                and ordinary_context
                 and self._goal_action_context is None
                 and not self._session_action_pending
                 and not self._goal_houdini_busy()
@@ -3125,7 +3157,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
             continue_button.setEnabled(
                 self._connected
-                and isinstance(self._selected_thread_id, str)
+                and ordinary_context
                 and goal_status in {"active", "blocked", "complete"}
                 and not self._turn_state.busy
                 and not self._goal_houdini_busy()
@@ -3135,6 +3167,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 and not self._turn_steer_request_pending
                 and not self._reconciliation_tokens
             )
+        self._refresh_task_creation_controls()
         self._refresh_goal_stage_summary()
 
     @QtCore.Slot(dict)
@@ -3168,11 +3201,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             allow_followup=True,
         )
         if not self._connected:
-            if self._stop_recovery_state == "recovering":
-                self._polling_enabled = True
-                self._schedule_poll(0)
-                self._refresh_controls()
-                return
             self._polling_enabled = False
             if not self._app_server_exit_notice_shown:
                 self._app_server_exit_notice_shown = True
@@ -3183,7 +3211,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     )
             self._refresh_controls()
             return
-        self._maybe_request_crash_recovery_goal(session)
         self._app_server_exit_notice_shown = False
         self._polling_enabled = True
         self._schedule_poll(0)
@@ -3210,8 +3237,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             token=self._turn_state.capture_token(),
             allow_followup=True,
         )
-        if isinstance(session, dict):
-            self._reconcile_crash_recovery_session(session)
         self._maybe_start_goal_continuation()
 
     def _apply_session(
@@ -3245,19 +3270,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             # A repeated idle snapshot for the completed source Turn cannot
             # roll back the continuation that has already reserved a new Turn.
             turn_active = None
-        previous_recovery_state = self._stop_recovery_state
-        if turn_status == "stopRecovering":
-            self._stop_recovery_state = "recovering"
-        elif turn_status == "stopRecoveryFailed":
-            self._stop_recovery_state = "failed"
-        elif (
-            previous_recovery_state == "recovering"
-            and turn_active is True
-            and turn_status in {"stopping", "stopRequested"}
-        ):
-            self._stop_recovery_state = "recovering"
-        elif session.get("connected") is True:
-            self._stop_recovery_state = None
         adopting_active_session = (
             self._selected_thread_id is None
             and turn_active is True
@@ -3272,13 +3284,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         previous_thread_id = self._selected_thread_id
         selected_thread_changed = False
         state_applied = True
-        suppress_active_stop_snapshot = (
-            self._stop_recovery_state == "recovering"
-            and session_is_selected
-            and turn_active is True
-            and turn_status in {"stopping", "stopRequested"}
-        )
-        if isinstance(turn_active, bool) and not suppress_active_stop_snapshot:
+        if isinstance(turn_active, bool):
             if (
                 isinstance(thread_id, str)
                 and thread_id
@@ -3304,7 +3310,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
         if (
             state_applied
-            and not suppress_active_stop_snapshot
             and turn_active is True
             and turn_status in {"stopping", "stopRequested"}
             and session_is_selected
@@ -3320,37 +3325,17 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     )
             stopping = True
 
-        if self._stop_recovery_state in {"recovering", "failed"}:
-            active_interrupt_context = self._active_interrupt_context
-            if active_interrupt_context is not None:
-                self._interrupt_tokens.pop(active_interrupt_context, None)
-            self._active_interrupt_context = None
-            self._interrupt_pending = False
-            self._stopping_turn_token = None
-
-        self._connected = bool(session.get("connected")) and (
-            self._stop_recovery_state is None
-        )
-        connection_state = (
-            "恢复中"
-            if self._stop_recovery_state == "recovering"
-            else ("未连接" if not self._connected else "已连接")
-        )
+        self._connected = bool(session.get("connected"))
+        connection_state = "未连接" if not self._connected else "已连接"
         self._set_status_indicator(
             self.connection_label,
             "Codex",
             connection_state,
             self._connected,
-            (
-                "Codex app-server 正在恢复同一 Thread"
-                if self._stop_recovery_state == "recovering"
-                else "Codex app-server 会话状态"
-            ),
+            "Codex app-server 会话状态",
         )
         authentication = session.get("authentication")
-        if self._stop_recovery_state == "recovering":
-            self.auth_label.setText("认证：恢复中")
-        elif authentication == "authenticated":
+        if authentication == "authenticated":
             self._authenticated = True
             account = session.get("account") or {}
             account_data = account.get("account") or {}
@@ -3386,7 +3371,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._clear_turn_performance()
             self._selected_thread_id = thread_id
             self._apply_focus_mode(thread_id, session.get("focus_mode", False))
-            self.thread_id_edit.setText(thread_id)
             self.thread_status_label.setText(
                 f"Thread：{self._history_title(thread_id)}"
             )
@@ -3416,7 +3400,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._team_records.clear()
             self._refresh_team_combo()
             self._clear_task_insights()
-            self.thread_id_edit.setText("")
             self.thread_status_label.setText("Thread：未选择")
             self.thread_status_label.setToolTip("当前未选择 Codex Thread")
             self._clear_diagnostic_context()
@@ -3425,7 +3408,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
         if (
             state_applied
-            and not suppress_active_stop_snapshot
             and turn_active is True
             and isinstance(thread_id, str)
             and isinstance(turn_id, str)
@@ -3454,9 +3436,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._stream_turn_id = None
 
         if state_applied and session_is_selected and isinstance(turn_active, bool):
-            if suppress_active_stop_snapshot:
-                self.turn_status_label.setText("Turn：已停止")
-            elif stopping and turn_active:
+            if stopping and turn_active:
                 self.turn_status_label.setText("Turn：已停止")
             elif stopping:
                 self._mark_turn_terminal("interrupted")
@@ -3481,26 +3461,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._request_session_reconciliation("session_conflict")
         if selected_thread_changed and isinstance(self._selected_thread_id, str):
             self._request_goal()
-        if self._stop_recovery_state == "failed":
-            self._polling_enabled = False
-            self._poll_timer.stop()
-            if previous_recovery_state != "failed" and isinstance(
-                self._selected_thread_id, str
-            ):
-                self._append_system(
-                    "Codex 自动恢复未成功；草稿和附件已保留，请重启 launcher。"
-                )
-        elif (
-            previous_recovery_state == "recovering"
-            and self._stop_recovery_state is None
-            and self._connected
-            and isinstance(self._selected_thread_id, str)
-        ):
-            self._append_system(
-                "Codex 已恢复并重新连接当前会话；未重放已停止的 Turn。"
-            )
-        if previous_recovery_state != self._stop_recovery_state:
-            self.goal_activity_label.setText(self._goal_waiting_activity_text())
         self._reconcile_goal_houdini_from_session(session)
         self._refresh_goal_stage_summary()
         self._refresh_controls()
@@ -3560,6 +3520,42 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return ()
         return tuple(path for path in values if isinstance(path, str) and path)
 
+    def _attachment_owner(self) -> tuple[str, str] | None:
+        thread_id = self._selected_thread_id
+        if isinstance(thread_id, str) and thread_id:
+            return "ordinary", thread_id
+        return None
+
+    def _capture_ordinary_thread_draft(
+        self,
+        thread_id: str | None = None,
+    ) -> None:
+        owner_thread_id = thread_id or self._selected_thread_id
+        if not isinstance(owner_thread_id, str) or not owner_thread_id:
+            return
+        text = self.input_edit.toPlainText()
+        attachment_paths = self._attachment_paths()
+        if text or attachment_paths:
+            self._ordinary_thread_drafts[owner_thread_id] = {
+                "text": text,
+                "attachment_paths": attachment_paths,
+            }
+        else:
+            self._ordinary_thread_drafts.pop(owner_thread_id, None)
+
+    def _restore_ordinary_thread_draft(self, thread_id: str) -> None:
+        self.input_edit.clear()
+        self.attachment_strip.clear()
+        draft = self._ordinary_thread_drafts.get(thread_id)
+        if not isinstance(draft, dict):
+            return
+        text = draft.get("text")
+        if isinstance(text, str):
+            self.input_edit.setPlainText(text)
+        for path in tuple(draft.get("attachment_paths") or ()):
+            if isinstance(path, str) and path:
+                self.attachment_strip.add_path(path)
+
     def _add_attachment_path(self, path: str) -> None:
         if len(self._attachment_paths()) >= _MAX_TURN_IMAGES:
             self._append_system(
@@ -3571,8 +3567,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             strip.add_path(path)
 
     def _choose_images(self) -> None:
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
+        owner = self._attachment_owner()
+        if owner is None:
             self._append_system("请先新建或恢复 Thread，再添加图片。")
             return
         if not self._selected_model_supports_images():
@@ -3597,12 +3593,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         dialog.finished.connect(self._attachment_dialog_finished)
         dialog.destroyed.connect(self._attachment_dialog_destroyed)
         self._attachment_dialog = dialog
+        self._attachment_dialog_owner = owner
         dialog.show()
 
     @QtCore.Slot(list)
     def _accept_chosen_images(self, paths: list[str]) -> None:
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
+        owner = self._attachment_dialog_owner
+        if owner is None:
             return
         remaining = max(0, _MAX_TURN_IMAGES - len(self._attachment_paths()))
         if len(paths) > remaining:
@@ -3611,7 +3608,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
         for source in paths[:remaining]:
             try:
-                stored = self._attachment_store.copy_file(thread_id, source)
+                if owner[0] == "project":
+                    stored = self._attachment_store.copy_project_file(owner[1], source)
+                else:
+                    stored = self._attachment_store.copy_file(owner[1], source)
             except (OSError, TypeError, ValueError) as exc:
                 self._append_system(f"图片添加失败：{exc}")
                 self._record_pre_turn_issue(
@@ -3627,6 +3627,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _attachment_dialog_finished(self, _result: int) -> None:
         dialog = self._attachment_dialog
         self._attachment_dialog = None
+        self._attachment_dialog_owner = None
         if dialog is not None:
             dialog.deleteLater()
 
@@ -3634,11 +3635,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     def _attachment_dialog_destroyed(self, dialog: Any = None) -> None:
         if self._attachment_dialog is dialog:
             self._attachment_dialog = None
+            self._attachment_dialog_owner = None
 
     @QtCore.Slot(object)
     def _add_clipboard_image(self, image: Any) -> None:
-        thread_id = self._selected_thread_id
-        if not isinstance(thread_id, str) or not thread_id:
+        owner = self._attachment_owner()
+        if owner is None:
             self._append_system("请先新建或恢复 Thread，再粘贴图片。")
             return
         if not self._selected_model_supports_images():
@@ -3648,7 +3650,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._append_system(f"每轮最多添加 {_MAX_TURN_IMAGES} 张图片。")
             return
         try:
-            path = self._attachment_store.clipboard_path(thread_id)
+            path = (
+                self._attachment_store.project_clipboard_path(owner[1])
+                if owner[0] == "project"
+                else self._attachment_store.clipboard_path(owner[1])
+            )
             if hasattr(image, "toImage"):
                 image = image.toImage()
             if not hasattr(image, "save") or image.save(path, "PNG") is not True:
@@ -3769,15 +3775,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and isinstance(self._goal_auto_turn_token, TurnStateToken)
         ):
             return True
-        context = self._active_turn_start_context
-        draft = self._pending_turn_drafts.get(context) if context else None
-        if (
-            isinstance(draft, dict)
-            and draft.get("steer_fallback") is True
-            and thread_id == draft.get("steer_source_thread_id")
-            and turn_id == draft.get("steer_source_turn_id")
-        ):
-            return True
         for pending in self._pending_steer_drafts.values():
             source_token = pending.get("source_token")
             if (
@@ -3824,6 +3821,15 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         paths = tuple(draft.get("attachment_paths") or ())
         if paths and paths == self._attachment_paths():
             self.attachment_strip.clear()
+        thread_id = draft.get("thread_id")
+        saved = self._ordinary_thread_drafts.get(thread_id)
+        if (
+            isinstance(thread_id, str)
+            and isinstance(saved, dict)
+            and saved.get("text") == text
+            and tuple(saved.get("attachment_paths") or ()) == paths
+        ):
+            self._ordinary_thread_drafts.pop(thread_id, None)
         return draft
 
     def _accept_steered_draft(self, context: str) -> None:
@@ -3841,10 +3847,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self.attachment_strip.clear()
 
     def _restore_steer_draft_to_composer(self, draft: Any) -> None:
-        if (
-            not isinstance(draft, dict)
-            or draft.get("fallback_cancelled") is True
-        ):
+        if not isinstance(draft, dict):
             return
         text = draft.get("text")
         current_text = self.input_edit.toPlainText()
@@ -3892,13 +3895,13 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         return cls._bounded_goal_summary(value, 2_000) if value is not None else ""
 
     @staticmethod
-    def _diagnostic_error_code(value: Any, fallback: str) -> str:
+    def _diagnostic_error_code(value: Any, default: str) -> str:
         if isinstance(value, dict):
             for key in ("code", "error_code", "errorCode"):
                 code = value.get(key)
                 if isinstance(code, (str, int)) and str(code):
                     return str(code)
-        return fallback
+        return default
 
     def _diagnostic_scene_fields(self) -> dict[str, Any]:
         report = (
@@ -4411,9 +4414,39 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._append_system("问题报告路径已复制。")
 
     def _selected_history_record(self) -> dict[str, Any] | None:
-        combo = getattr(self, "history_combo", None)
-        record = combo.currentData() if combo is not None else None
-        return record if isinstance(record, dict) else None
+        selected_thread_id = self._history_selected_thread_id()
+        if selected_thread_id is None:
+            selected_thread_id = self._selected_thread_id
+        if not isinstance(selected_thread_id, str):
+            return None
+        return next(
+            (
+                record
+                for record in self._thread_history
+                if record.get("thread_id") == selected_thread_id
+            ),
+            None,
+        )
+
+    def _history_selected_thread_id(self) -> str | None:
+        tree = getattr(self, "history_tree", None)
+        item = tree.currentItem() if tree is not None else None
+        if item is None:
+            return None
+        value = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        return value if isinstance(value, str) and value else None
+
+    def _on_history_selection_changed(self) -> None:
+        self._reset_thread_delete_confirmation()
+        record = self._selected_history_record()
+        name_edit = getattr(self, "thread_name_edit", None)
+        if name_edit is not None:
+            name_edit.setText(
+                str(record.get("name") or record.get("preview") or "")
+                if record is not None
+                else ""
+            )
+        self._refresh_task_creation_controls()
 
     def _history_title(self, thread_id: str, *, full: bool = False) -> str:
         for record in self._thread_history:
@@ -4456,17 +4489,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             updated_text = "时间未知"
         return f"{title}  ·  {updated_text}"
 
-    def _apply_threads(self, raw_threads: Any) -> None:
-        previous_record = self._selected_history_record()
-        previous_choice = (
-            previous_record.get("thread_id")
-            if previous_record is not None
-            else self._selected_thread_id
-        )
+    def _apply_threads(
+        self,
+        raw_threads: Any,
+        *,
+        preferred_thread_id: str | None = None,
+    ) -> None:
         threads = raw_threads if isinstance(raw_threads, list) else []
         records: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for raw_record in threads[:20]:
+        for raw_record in threads[:4096]:
             if not isinstance(raw_record, dict):
                 continue
             thread_id = raw_record.get("thread_id")
@@ -4475,39 +4507,37 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             seen.add(thread_id)
             records.append(dict(raw_record))
         self._thread_history = records
-
-        self.history_combo.blockSignals(True)
-        self.history_combo.clear()
-        selected_index = 0
-        self.history_combo.addItem(
-            "未选择历史会话" if records else "暂无历史会话",
-            None,
+        tree = getattr(self, "history_tree", None)
+        if tree is None:
+            return
+        selected_thread_id = (
+            preferred_thread_id
+            or self._history_selected_thread_id()
+            or self._selected_thread_id
         )
-        if records:
-            for record in records:
-                self.history_combo.addItem(self._history_label(record), record)
-                index = self.history_combo.count() - 1
-                thread_id = record["thread_id"]
-                self.history_combo.setItemData(
-                    index,
-                    f"{self._history_title(thread_id, full=True)}\n"
-                    f"Codex Thread ID：{thread_id}",
-                    QtCore.Qt.ItemDataRole.ToolTipRole,
-                )
-                if thread_id == previous_choice:
-                    selected_index = index
-        self.history_combo.setCurrentIndex(selected_index)
-        self.history_combo.blockSignals(False)
-        self._on_history_index_changed(selected_index)
-
-    def _on_history_index_changed(self, _index: int = -1) -> None:
-        self._reset_thread_delete_confirmation()
-        record = self._selected_history_record()
-        thread_id = record.get("thread_id") if record is not None else None
-        name = record.get("name") if record is not None else None
-        self.thread_id_edit.setText(thread_id if isinstance(thread_id, str) else "")
-        self.thread_name_edit.setText(name if isinstance(name, str) else "")
-        self._refresh_controls()
+        blocked = tree.blockSignals(True)
+        tree.clear()
+        selected_item = None
+        for record in records:
+            thread_id = record["thread_id"]
+            item = QtWidgets.QTreeWidgetItem([self._history_label(record)])
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, thread_id)
+            preview = record.get("preview")
+            item.setToolTip(
+                0,
+                (
+                    f"{preview}\nThread ID：{thread_id}"
+                    if isinstance(preview, str) and preview.strip()
+                    else f"Thread ID：{thread_id}"
+                ),
+            )
+            tree.addTopLevelItem(item)
+            if thread_id == selected_thread_id:
+                selected_item = item
+        if selected_item is not None:
+            tree.setCurrentItem(selected_item)
+        tree.blockSignals(blocked)
+        self._on_history_selection_changed()
 
     def _refresh_threads(self) -> None:
         if self._client is None or not self._connected:
@@ -4515,8 +4545,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._threads_requested = True
         self._client.get_threads()
 
-    def _request_thread_resume(self, thread_id: str, *, context: str) -> None:
-        if (
+    def _request_thread_resume(self, thread_id: str, *, context: str) -> bool:
+        if not (
             self._client is not None
             and not self._turn_state.busy
             and self._goal_action_context is None
@@ -4524,17 +4554,25 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and not self._turn_start_request_pending
             and not self._reconciliation_tokens
         ):
-            self._session_action_pending = True
+            return False
+        self._capture_ordinary_thread_draft()
+        self._session_action_pending = True
+        self._refresh_controls()
+        request_id = self._client.resume_thread(
+            thread_id,
+            service_tier=self._selected_service_tier(),
+            context=context,
+        )
+        if request_id is None:
+            self._session_action_pending = False
             self._refresh_controls()
-            self._client.resume_thread(
-                thread_id,
-                service_tier=self._selected_service_tier(),
-                context=context,
-            )
+            return False
+        return True
 
     def _rename_thread(self) -> None:
         record = self._selected_history_record()
-        name = self.thread_name_edit.text().strip()
+        name_edit = getattr(self, "thread_name_edit", None)
+        name = name_edit.text().strip() if name_edit is not None else ""
         thread_id = record.get("thread_id") if record is not None else None
         if not isinstance(thread_id, str) or not name:
             self._append_system("请选择历史会话并输入名称。")
@@ -4563,18 +4601,22 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _reset_thread_delete_confirmation(self) -> None:
         self._thread_delete_confirm_id = None
-        self._thread_delete_confirm_not_before = None
         timer = getattr(self, "_thread_delete_confirm_timer", None)
         if timer is not None:
             timer.stop()
         button = getattr(self, "delete_thread_button", None)
         if button is not None:
-            button.setText("删除")
-            button.setToolTip("永久删除当前明确选中的 Codex Thread")
+            button.setText("删除所选任务")
+            button.setToolTip(
+                "永久删除所选普通任务、原生聊天记录和该任务的本地附件缓存"
+            )
 
     def _delete_thread(self) -> None:
         record = self._selected_history_record()
         thread_id = record.get("thread_id") if record is not None else None
+        self._request_thread_deletion(thread_id)
+
+    def _request_thread_deletion(self, thread_id: Any) -> None:
         if not isinstance(thread_id, str):
             self._reset_thread_delete_confirmation()
             return
@@ -4586,23 +4628,17 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._client is None
             or not self._connected
             or self._session_action_pending
-            or self._stop_recovery_state is not None
         ):
             return
-        now = time.monotonic()
         if self._thread_delete_confirm_id != thread_id:
             self._thread_delete_confirm_id = thread_id
-            self._thread_delete_confirm_not_before = (
-                now + _THREAD_DELETE_CONFIRM_MIN_SECONDS
-            )
-            self.delete_thread_button.setText("再次点击删除")
-            self.delete_thread_button.setToolTip(
-                f"再次点击将永久删除：{self._history_title(thread_id, full=True)}"
-            )
+            button = getattr(self, "delete_thread_button", None)
+            if button is not None:
+                button.setText("再次点击确认删除")
+                button.setToolTip(
+                    "再次点击将永久删除该普通任务和本地附件缓存"
+                )
             self._thread_delete_confirm_timer.start()
-            return
-        not_before = self._thread_delete_confirm_not_before
-        if not isinstance(not_before, (int, float)) or now < not_before:
             return
 
         self._reset_thread_delete_confirmation()
@@ -4625,6 +4661,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
     ) -> bool:
         if not isinstance(thread_id, str):
             return False
+        self._ordinary_thread_drafts.pop(thread_id, None)
         was_listed = any(
             record.get("thread_id") == thread_id
             for record in self._thread_history
@@ -4635,12 +4672,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             for record in self._thread_history
             if record.get("thread_id") != thread_id
         ]
-        marker = self._crash_recovery_marker
-        if isinstance(marker, dict) and marker.get("thread_id") == thread_id:
-            self._discard_crash_recovery_candidate()
-        observation = self._crash_recovery_observation
-        if isinstance(observation, dict) and observation.get("thread_id") == thread_id:
-            self._crash_recovery_observation = None
         if was_current:
             self._selected_thread_id = None
             self._turn_state = PanelTurnState()
@@ -4658,7 +4689,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._active_interrupt_context = None
             self._interrupt_pending = False
             self._stopping_turn_token = None
-            self._stop_recovery_state = None
             self._stopped_source_turn = None
             self._reconciliation_tokens.clear()
             self._goal_action_context = None
@@ -4677,17 +4707,121 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._clear_task_insights()
             self._clear_turn_performance()
             self._clear_diagnostic_context()
-            self._discard_crash_recovery_candidate()
             self.attachment_strip.clear()
             self.input_edit.clear()
             if hasattr(self.conversation, "clear_messages"):
                 self.conversation.clear_messages()
             self.welcome_group.setVisible(True)
-            self.thread_id_edit.setText("")
             self.thread_status_label.setText("Thread：未选择")
             self.thread_status_label.setToolTip("当前未选择 Codex Thread")
         self._apply_threads(self._thread_history)
         return was_listed or was_current
+
+    def _apply_thread_rotation(self, old_thread_id: Any, new_thread_id: Any) -> bool:
+        if (
+            not isinstance(old_thread_id, str)
+            or not old_thread_id
+            or not isinstance(new_thread_id, str)
+            or not new_thread_id
+            or old_thread_id == new_thread_id
+        ):
+            return False
+        old_record = next(
+            (
+                record
+                for record in self._thread_history
+                if record.get("thread_id") == old_thread_id
+            ),
+            None,
+        )
+        if old_record is not None:
+            records: list[dict[str, Any]] = []
+            for record in self._thread_history:
+                record_id = record.get("thread_id")
+                if record_id == old_thread_id:
+                    replacement = dict(record)
+                    replacement["thread_id"] = new_thread_id
+                    records.append(replacement)
+                elif record_id != new_thread_id:
+                    records.append(record)
+            self._thread_history = records
+
+        ordinary_draft = self._ordinary_thread_drafts.pop(
+            old_thread_id,
+            None,
+        )
+        if isinstance(ordinary_draft, dict):
+            self._ordinary_thread_drafts[new_thread_id] = ordinary_draft
+
+        was_selected = self._selected_thread_id == old_thread_id
+        if was_selected:
+            self._selected_thread_id = new_thread_id
+            attachment_paths = self.attachment_strip.paths()
+            if attachment_paths:
+                self.attachment_strip.set_paths(
+                    self._attachment_store.rebind_thread_paths(
+                        old_thread_id,
+                        new_thread_id,
+                        attachment_paths,
+                    )
+                )
+            if (
+                self._turn_state.thread_id == old_thread_id
+                and not self._turn_state.busy
+            ):
+                self._turn_state = PanelTurnState()
+            if self._stream_thread_id == old_thread_id:
+                self._stream_thread_id = new_thread_id
+            if self._goal_continue_after_open_thread_id == old_thread_id:
+                self._goal_continue_after_open_thread_id = new_thread_id
+            if (
+                isinstance(self._stopped_source_turn, tuple)
+                and self._stopped_source_turn[0] == old_thread_id
+            ):
+                self._stopped_source_turn = (
+                    new_thread_id,
+                    self._stopped_source_turn[1],
+                )
+            if (
+                isinstance(self._goal_continuation_boundary, tuple)
+                and self._goal_continuation_boundary[0] == old_thread_id
+            ):
+                self._goal_continuation_boundary = (
+                    new_thread_id,
+                    self._goal_continuation_boundary[1],
+                )
+            if self._goal_stage_snapshot.get("thread_id") == old_thread_id:
+                self._goal_stage_snapshot["thread_id"] = new_thread_id
+            if (
+                isinstance(self._current_goal, dict)
+                and self._current_goal.get("threadId") == old_thread_id
+            ):
+                self._current_goal["threadId"] = new_thread_id
+            if self._diagnostic_snapshot.get("thread_id") == old_thread_id:
+                self._diagnostic_snapshot["thread_id"] = new_thread_id
+            if self._build_brief_thread_id == old_thread_id:
+                self._build_brief_thread_id = new_thread_id
+            self.thread_status_label.setText(
+                f"Thread：{self._history_title(new_thread_id)}"
+            )
+            self.thread_status_label.setToolTip(
+                f"{self._history_title(new_thread_id, full=True)}\n"
+                f"Codex Thread ID：{new_thread_id}"
+            )
+        if old_record is not None:
+            self._apply_threads(
+                self._thread_history,
+                preferred_thread_id=(
+                    new_thread_id
+                    if was_selected
+                    or self._history_selected_thread_id() == old_thread_id
+                    else None
+                ),
+            )
+        self._refresh_controls()
+        if was_selected:
+            self._request_goal()
+        return old_record is not None or was_selected
 
     def _update_history_name(self, thread_id: Any, name: Any) -> None:
         if not isinstance(thread_id, str):
@@ -4708,212 +4842,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 f"{self._history_title(thread_id, full=True)}\n"
                 f"Codex Thread ID：{thread_id}"
             )
-
-    def _discard_crash_recovery_candidate(self) -> None:
-        self._crash_recovery_marker = None
-        self._crash_recovery_health_session = None
-        self._crash_recovery_goal_payload = None
-        self._crash_recovery_thread_payload = None
-
-    def _maybe_request_crash_recovery_goal(
-        self,
-        session: dict[str, Any],
-    ) -> bool:
-        marker = self._crash_recovery_marker
-        if not isinstance(marker, dict):
-            return False
-        if isinstance(self._selected_thread_id, str):
-            self._discard_crash_recovery_candidate()
-            return False
-        if not self._connected or session.get("authentication") != "authenticated":
-            return False
-        if (
-            session.get("thread_id") != marker["thread_id"]
-            or session.get("focus_mode") is not True
-        ):
-            self._discard_crash_recovery_candidate()
-            return False
-        if (
-            self._client is None
-            or self._goal_action_context is not None
-            or self._crash_recovery_goal_payload is not None
-        ):
-            return False
-        self._crash_recovery_health_session = dict(session)
-        self._goal_action_context = _GOAL_GET_CONTEXT
-        self._refresh_controls()
-        self._client.get_goal(marker["thread_id"])
-        return True
-
-    def _crash_recovery_goal_matches(self, payload: dict[str, Any]) -> bool:
-        marker = self._crash_recovery_marker
-        goal = payload.get("goal")
-        return bool(
-            isinstance(marker, dict)
-            and isinstance(goal, dict)
-            and payload.get("thread_id") == marker["thread_id"]
-            and payload.get("focus_mode") is True
-            and payload.get("goal_binding") == marker["goal_binding"]
-            and goal.get("threadId") == marker["thread_id"]
-            and goal.get("status") == "active"
-        )
-
-    @staticmethod
-    def _thread_read_has_recovery_prompt(
-        payload: dict[str, Any],
-        prompt_id: str,
-    ) -> bool:
-        raw_result = payload.get("read", payload.get("result"))
-        thread = raw_result.get("thread") if isinstance(raw_result, dict) else None
-        turns = thread.get("turns") if isinstance(thread, dict) else None
-        prefix = f"[HIA launcher recovery {prompt_id}]"
-        for turn in turns if isinstance(turns, list) else ():
-            items = turn.get("items") if isinstance(turn, dict) else None
-            for item in items if isinstance(items, list) else ():
-                if not isinstance(item, dict) or item.get("type") != "userMessage":
-                    continue
-                content = item.get("content")
-                for entry in content if isinstance(content, list) else ():
-                    if (
-                        isinstance(entry, dict)
-                        and entry.get("type") == "text"
-                        and isinstance(entry.get("text"), str)
-                        and entry["text"].startswith(prefix)
-                    ):
-                        return True
-        return False
-
-    def _complete_crash_recovery_bind(self, payload: dict[str, Any]) -> bool:
-        marker = self._crash_recovery_marker
-        goal_payload = self._crash_recovery_goal_payload
-        initial_session = self._crash_recovery_health_session
-        raw_result = payload.get("read", payload.get("result"))
-        thread = raw_result.get("thread") if isinstance(raw_result, dict) else None
-        if (
-            not isinstance(marker, dict)
-            or not isinstance(goal_payload, dict)
-            or not isinstance(initial_session, dict)
-            or not isinstance(thread, dict)
-            or thread.get("id") != marker["thread_id"]
-            or not self._crash_recovery_goal_matches(goal_payload)
-            or self._selected_thread_id is not None
-        ):
-            self._discard_crash_recovery_candidate()
-            return False
-
-        thread_id = marker["thread_id"]
-        prompt_seen = self._thread_read_has_recovery_prompt(
-            payload,
-            marker["prompt_id"],
-        )
-        self._selected_thread_id = thread_id
-        self._clear_goal_display()
-        self._team_records.clear()
-        self._refresh_team_combo()
-        self._clear_task_insights()
-        self._clear_turn_performance()
-        self.thread_id_edit.setText(thread_id)
-        for index in range(self.history_combo.count()):
-            record = self.history_combo.itemData(index)
-            if isinstance(record, dict) and record.get("thread_id") == thread_id:
-                self.history_combo.setCurrentIndex(index)
-                self._on_history_index_changed(index)
-                break
-        self.thread_status_label.setText(
-            f"Thread：{self._history_title(thread_id)}"
-        )
-        self.thread_status_label.setToolTip(
-            f"{self._history_title(thread_id, full=True)}\n"
-            f"Codex Thread ID：{thread_id}"
-        )
-        if not self._render_thread_read(
-            payload,
-            allow_active=True,
-            hidden_user_prefix=(
-                f"[HIA launcher recovery {marker['prompt_id']}]"
-            ),
-        ):
-            self._selected_thread_id = None
-            self._discard_crash_recovery_candidate()
-            return False
-        self._apply_goal(thread_id, goal_payload.get("goal"))
-        self._apply_focus_mode(thread_id, True)
-        self._crash_recovery_observation = {
-            "thread_id": thread_id,
-            "prompt_id": marker["prompt_id"],
-            "prompt_seen": prompt_seen,
-            "initial_turn_id": initial_session.get("turn_id"),
-            "reread_requested": False,
-            "terminal_turn_id": None,
-            "terminal_status": None,
-        }
-        self._discard_crash_recovery_candidate()
-        if self._client is not None:
-            self._client.get_session()
-        self._refresh_controls()
-        return True
-
-    def _reconcile_crash_recovery_session(
-        self,
-        session: dict[str, Any],
-    ) -> None:
-        observation = self._crash_recovery_observation
-        if not isinstance(observation, dict):
-            return
-        thread_id = observation.get("thread_id")
-        if (
-            session.get("thread_id") != thread_id
-            or session.get("focus_mode") is not True
-            or session.get("connected") is not True
-        ):
-            self._crash_recovery_observation = None
-            return
-        if session.get("turn_active") is not False:
-            return
-        turn_id = session.get("turn_id")
-        status = session.get("turn_status")
-        if not isinstance(turn_id, str):
-            return
-        if observation.get("prompt_seen") is True:
-            self._crash_recovery_observation = None
-            self._queue_goal_continuation(thread_id, turn_id, status)
-            return
-        if (
-            turn_id == observation.get("initial_turn_id")
-            or observation.get("reread_requested") is True
-            or self._client is None
-        ):
-            return
-        observation["reread_requested"] = True
-        observation["terminal_turn_id"] = turn_id
-        observation["terminal_status"] = status
-        self._client.read_thread(
-            thread_id,
-            context=_CRASH_RECOVERY_RECHECK_CONTEXT,
-        )
-
-    def _complete_crash_recovery_recheck(self, payload: dict[str, Any]) -> None:
-        observation = self._crash_recovery_observation
-        if not isinstance(observation, dict):
-            return
-        thread_id = observation.get("thread_id")
-        raw_result = payload.get("read", payload.get("result"))
-        thread = raw_result.get("thread") if isinstance(raw_result, dict) else None
-        marker_prompt = observation.get("prompt_id")
-        valid = (
-            isinstance(thread, dict)
-            and thread.get("id") == thread_id
-            and self._selected_thread_id == thread_id
-            and isinstance(marker_prompt, str)
-            and bool(marker_prompt)
-            and self._thread_read_has_recovery_prompt(payload, marker_prompt)
-        )
-        turn_id = observation.get("terminal_turn_id")
-        status = observation.get("terminal_status")
-        self._crash_recovery_observation = None
-        if valid and isinstance(turn_id, str) and not self._turn_state.busy:
-            self._queue_goal_continuation(thread_id, turn_id, status)
-            self._maybe_start_goal_continuation()
 
     def _request_goal(self) -> None:
         thread_id = self._selected_thread_id
@@ -5190,7 +5118,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "paths",
             "diff_paths",
             "expected_outputs",
-            "protected_paths",
         ):
             raw = value.get(name)
             candidates.extend(raw if isinstance(raw, list) else [raw])
@@ -5599,6 +5526,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         return "\n".join(lines)
 
     def _continue_goal(self) -> None:
+        thread_id = self._selected_thread_id
+        if not isinstance(thread_id, str):
+            return
         if self._goal_houdini_busy():
             self._append_system(
                 "Houdini 操作仍在执行；当前 Goal 暂不能继续提交修改。"
@@ -5756,7 +5686,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 )
             else:
                 hint.setText(
-                    "已开启：Houdini 异常退出后会尝试恢复，并继续当前 Goal。"
+                    "已开启：当前 Thread 每轮完成后会继续推进同一个 Goal。"
                     if enabled
                     else "已关闭：普通聊天，不自动恢复或续做。"
                 )
@@ -5803,16 +5733,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         *,
         auto_turn: bool = False,
     ) -> None:
-        observation = self._crash_recovery_observation
-        if (
-            isinstance(observation, dict)
-            and observation.get("thread_id") == thread_id
-            and (
-                observation.get("prompt_seen") is True
-                or turn_id != observation.get("initial_turn_id")
-            )
-        ):
-            self._crash_recovery_observation = None
         was_auto_turn = auto_turn or self._goal_auto_turn_is_current(thread_id)
         auto_turn_had_progress = self._goal_auto_turn_has_progress
         if was_auto_turn:
@@ -5863,10 +5783,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and not self._reconciliation_tokens
             and not self._interrupt_pending
             and not self._is_stopping_turn()
-            and self._stop_recovery_state is None
             and self._goal_action_context is None
-            and self._current_approval is None
-            and not self._pending_approvals
             and not self._scene_capability_pending
             and not self._scene_work_pending
             and not self._goal_houdini_busy()
@@ -6155,11 +6072,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             if isinstance(self._current_goal, dict)
             else None
         )
-        if status == "active" and self._stop_recovery_state == "recovering":
-            return "当前跟进：Codex 正在恢复，Goal 已暂停"
-        if status == "active" and (
-            self._stop_recovery_state == "failed" or not self._connected
-        ):
+        if status == "active" and not self._connected:
             return "当前跟进：已暂停，等待重连"
         if status == "active" and self._goal_continuation_paused:
             return "当前跟进：已暂停；点击“保存（继续跟进）”后恢复"
@@ -6725,6 +6638,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         *,
         allow_active: bool = False,
         hidden_user_prefix: str | None = None,
+        expected_thread_id: str | None = None,
     ) -> bool:
         if self._turn_state.busy and not allow_active:
             return False
@@ -6735,7 +6649,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if not isinstance(thread, dict):
             return False
         thread_id = thread.get("id")
-        if thread_id != self._selected_thread_id:
+        target_thread_id = expected_thread_id or self._selected_thread_id
+        if thread_id != target_thread_id:
             return False
         turns = thread.get("turns")
         if not isinstance(turns, list):
@@ -6807,9 +6722,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self.welcome_group.setVisible(False)
         return True
 
-    def _new_thread(self) -> None:
-        if (
+    def _new_thread(self) -> bool:
+        if not (
             self._client is not None
+            and self._connected
+            and self._authenticated
             and not self._turn_state.busy
             and not self._goal_houdini_busy()
             and self._goal_action_context is None
@@ -6817,12 +6734,33 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             and not self._turn_start_request_pending
             and not self._reconciliation_tokens
         ):
-            self._session_action_pending = True
-            self._refresh_controls()
-            self._client.start_thread(
-                model=self._selected_model_id(),
-                service_tier=self._selected_service_tier(),
+            self._set_task_creation_feedback(
+                "当前操作尚未结束，或 Bridge 尚未连接，不能新建普通任务。",
+                tone="error",
             )
+            self._refresh_controls()
+            return False
+
+        self._capture_ordinary_thread_draft()
+        self._session_action_pending = True
+        self._set_task_creation_feedback(
+            "正在新建普通任务，请稍候。",
+            tone="busy",
+        )
+        self._refresh_controls()
+        request_id = self._client.start_thread(
+            model=self._selected_model_id(),
+            service_tier=self._selected_service_tier(),
+        )
+        if request_id is None:
+            self._session_action_pending = False
+            self._set_task_creation_feedback(
+                "普通任务创建请求未能发出，请检查 Bridge 连接后重试。",
+                tone="error",
+            )
+            self._refresh_controls()
+            return False
+        return True
 
     def _resume_thread(self) -> None:
         if self._goal_houdini_busy():
@@ -6893,9 +6831,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         thread_id: str,
         *,
         request_text: str | None = None,
-        steer_fallback: bool = False,
-        steer_source_thread_id: str | None = None,
-        steer_source_turn_id: str | None = None,
         goal_auto_continue: bool = False,
     ) -> bool:
         if (
@@ -6929,9 +6864,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._pending_turn_drafts[context] = {
             "text": text,
             "attachment_paths": attachment_paths,
-            "steer_fallback": steer_fallback,
-            "steer_source_thread_id": steer_source_thread_id,
-            "steer_source_turn_id": steer_source_turn_id,
+            "thread_id": thread_id,
             "goal_auto_continue": goal_auto_continue,
             "runtime_settings": runtime_settings,
         }
@@ -6983,7 +6916,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             "request_text": request_text,
             "source_token": token,
             "state_sync_attempted": False,
-            "retry_attempted": False,
         }
         self._active_turn_steer_context = context
         self._turn_steer_request_pending = True
@@ -6993,79 +6925,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             local_image_paths=list(attachment_paths),
             context=context,
         )
-
-    def _fallback_no_active_steer(
-        self,
-        context: str,
-        token: TurnStateToken,
-        details: dict[str, Any],
-    ) -> bool:
-        draft = self._pending_steer_drafts.get(context)
-        if (
-            not isinstance(draft, dict)
-            or self._client is None
-            or not self._turn_state.token_generation_is_current(token)
-            or token.thread_id != self._selected_thread_id
-            or details.get("turn_active") is not False
-            or details.get("thread_id") != token.thread_id
-            or details.get("turn_id") != token.turn_id
-        ):
-            self._pending_steer_drafts.pop(context, None)
-            return False
-        if (
-            draft.get("fallback_cancelled") is True
-            or self._is_stopping_turn()
-            or self._interrupt_pending
-        ):
-            self._pending_steer_drafts.pop(context, None)
-            return True
-        reconciled = self._turn_state.reconcile_no_active_error(token, details)
-        terminal = reconciled
-        if not reconciled:
-            terminal = (
-                not self._turn_state.busy
-                and self._turn_state.token_generation_is_current(token)
-                and token.thread_id == self._selected_thread_id
-            )
-        if not terminal:
-            self._pending_steer_drafts.pop(context, None)
-            self._append_system(
-                "上一轮状态已变化；追加文字和图片已保留，未自动重试。"
-            )
-            return True
-        if reconciled:
-            self._mark_turn_terminal(
-                details.get("turn_status")
-                if isinstance(details.get("turn_status"), str)
-                else "completed"
-            )
-
-        text = draft.get("text")
-        attachment_paths = tuple(draft.get("attachment_paths") or ())
-        if not isinstance(text, str) or not isinstance(token.thread_id, str):
-            self._pending_steer_drafts.pop(context, None)
-            return True
-        started = self._start_new_turn(
-            text,
-            attachment_paths,
-            token.thread_id,
-            request_text=(
-                draft.get("request_text")
-                if isinstance(draft.get("request_text"), str)
-                else None
-            ),
-            steer_fallback=True,
-            steer_source_thread_id=token.thread_id,
-            steer_source_turn_id=token.turn_id,
-        )
-        if started:
-            self._pending_steer_drafts.pop(context, None)
-            return True
-
-        self._restore_steer_draft_to_composer(draft)
-        self._pending_steer_drafts.pop(context, None)
-        self._append_system("上一轮已结束；追加文字和图片已保留，可再次发送。")
-        return True
 
     def _begin_steer_state_sync(
         self,
@@ -7078,8 +6937,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if (
             not isinstance(draft, dict)
             or draft.get("state_sync_attempted") is True
-            or draft.get("retry_attempted") is True
-            or draft.get("fallback_cancelled") is True
             or self._is_stopping_turn()
             or self._interrupt_pending
             or token.thread_id != self._selected_thread_id
@@ -7131,11 +6988,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         source_token = draft.get("source_token")
         draft.pop("reconciliation_context", None)
         session = payload.get("session")
-        if (
-            draft.get("fallback_cancelled") is True
-            or self._is_stopping_turn()
-            or self._interrupt_pending
-        ):
+        if self._is_stopping_turn() or self._interrupt_pending:
             self._pending_steer_drafts.pop(steer_context, None)
             return True
         if (
@@ -7201,11 +7054,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             return True
 
         if turn_active:
-            if not isinstance(turn_id, str) or draft.get("retry_attempted") is True:
+            if not isinstance(turn_id, str):
                 self._restore_steer_draft_to_composer(draft)
                 self._pending_steer_drafts.pop(steer_context, None)
                 self._append_system(
-                    "当前 Turn 再次变化；追加文字和图片已保留，未自动重试。"
+                    "当前 Turn 标识不完整；追加文字和图片已保留，请确认后再次发送。"
                 )
                 return True
             if previous_stream_turn_id != turn_id:
@@ -7213,24 +7066,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._stream_thread_id = thread_id
                 self._stream_turn_id = turn_id
                 self._begin_codex_message()
-            retry_token = self._turn_state.capture_token()
-            retry_context = (
-                f"{_TURN_STEER_CONTEXT_PREFIX}{retry_token.generation}:"
-                f"{retry_token.revision}:{uuid.uuid4().hex}"
-            )
-            draft["retry_attempted"] = True
+            self._restore_steer_draft_to_composer(draft)
             self._pending_steer_drafts.pop(steer_context, None)
-            self._pending_steer_drafts[retry_context] = draft
-            self._turn_steer_tokens[retry_context] = retry_token
-            self._active_turn_steer_context = retry_context
-            self._turn_steer_request_pending = True
-            self._refresh_controls()
-            self._client.steer_turn(
-                draft.get("request_text")
-                if isinstance(draft.get("request_text"), str)
-                else "",
-                local_image_paths=list(draft.get("attachment_paths") or ()),
-                context=retry_context,
+            self._append_system(
+                "当前 Turn 已变化；追加文字和图片已保留，请确认后再次发送。"
             )
             return True
 
@@ -7239,15 +7078,10 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             if isinstance(session.get("turn_status"), str)
             else "completed"
         )
-        self._fallback_no_active_steer(
-            steer_context,
-            source_token,
-            {
-                "thread_id": source_token.thread_id,
-                "turn_id": source_token.turn_id,
-                "turn_active": False,
-                "turn_status": session.get("turn_status") or "completed",
-            },
+        self._restore_steer_draft_to_composer(draft)
+        self._pending_steer_drafts.pop(steer_context, None)
+        self._append_system(
+            "上一轮已结束；追加文字和图片已保留，请再次点击发送。"
         )
         return True
 
@@ -7269,57 +7103,26 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._stopping_turn_token = token
             self._interrupt_pending = True
             self._pause_goal_continuation("", notify=False)
-            for draft in self._pending_steer_drafts.values():
-                if isinstance(draft, dict):
-                    draft["fallback_cancelled"] = True
+            for pending_context in tuple(self._pending_steer_drafts):
+                self._pending_steer_drafts.pop(pending_context, None)
+                self._turn_steer_tokens.pop(pending_context, None)
             self._active_turn_steer_context = None
             self._turn_steer_request_pending = False
             self._reconciliation_tokens.clear()
-            self._stop_recovery_state = "recovering"
             self._stopped_source_turn = (
                 (token.thread_id, token.turn_id)
                 if isinstance(token.thread_id, str)
                 and isinstance(token.turn_id, str)
                 else None
             )
-            self._connected = False
-            self._set_status_indicator(
-                self.connection_label,
-                "Codex",
-                "恢复中",
-                False,
-                "已停止当前 Turn，Codex app-server 正在收口或恢复",
-            )
-            self.auth_label.setText("认证：恢复中")
             self._goal_turn_id = None
             self._goal_turn_has_text = False
             self._stream_thread_id = None
             self._stream_turn_id = None
             self._freeze_codex_message()
-            if isinstance(token.thread_id, str) and isinstance(token.turn_id, str):
-                self._turn_state.observe_completed(token.thread_id, token.turn_id)
-            self._record_turn_performance("completed")
-            self._finalize_diagnostic_turn("interrupted")
-            self._turn_start_request_pending = False
-            self._active_turn_start_context = None
-            self._stopping_turn_token = None
             self._goal_codex_stopped = True
-            self.turn_status_label.setText("Turn：已停止")
-            self.turn_status_label.setToolTip(
-                (
-                    "Codex 已停止；Houdini 操作仍在执行，结束前禁止继续提交修改"
-                    if self._goal_houdini_busy()
-                    else "Codex 已停止；当前没有已知的 in-flight Houdini 操作"
-                )
-            )
-            self._append_system(
-                (
-                    "Codex 已停止；Houdini 操作仍在执行。"
-                    "操作结束前不能继续提交当前 Goal 的修改。"
-                    if self._goal_houdini_busy()
-                    else "Codex 已停止；当前没有已知的 in-flight Houdini 操作。"
-                )
-            )
+            self.turn_status_label.setText("Turn：正在停止")
+            self.turn_status_label.setToolTip("等待 Codex 确认 turn/interrupt")
             self.goal_activity_label.setText(self._goal_waiting_activity_text())
             self._refresh_goal_stage_summary()
             self._refresh_controls()
@@ -7469,32 +7272,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             )
             self._request_project_memories(query="")
             return
-        if (
-            context == _GOAL_GET_CONTEXT
-            and isinstance(self._crash_recovery_marker, dict)
-            and isinstance(self._crash_recovery_health_session, dict)
-        ):
-            if context != self._goal_action_context:
-                return
-            self._goal_action_context = None
-            if (
-                self._selected_thread_id is not None
-                or not self._crash_recovery_goal_matches(payload)
-                or self._client is None
-            ):
-                self._discard_crash_recovery_candidate()
-            elif self._crash_recovery_thread_payload is None:
-                self._crash_recovery_goal_payload = dict(payload)
-                self._client.read_thread(
-                    self._crash_recovery_marker["thread_id"],
-                    context=_CRASH_RECOVERY_READ_CONTEXT,
-                )
-            else:
-                thread_payload = self._crash_recovery_thread_payload
-                self._crash_recovery_goal_payload = dict(payload)
-                self._complete_crash_recovery_bind(thread_payload)
-            self._refresh_controls()
-            return
         if context in {
             _GOAL_GET_CONTEXT,
             _GOAL_SET_CONTEXT,
@@ -7538,30 +7315,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._maybe_start_goal_continuation(
                 explicit_source=explicit_continue,
             )
-            return
-        if context == _CRASH_RECOVERY_READ_CONTEXT:
-            marker = self._crash_recovery_marker
-            raw_result = payload.get("read", payload.get("result"))
-            thread = (
-                raw_result.get("thread") if isinstance(raw_result, dict) else None
-            )
-            if (
-                isinstance(marker, dict)
-                and isinstance(thread, dict)
-                and thread.get("id") == marker["thread_id"]
-                and self._selected_thread_id is None
-                and self._client is not None
-            ):
-                self._crash_recovery_thread_payload = dict(payload)
-                self._goal_action_context = _GOAL_GET_CONTEXT
-                self._client.get_goal(marker["thread_id"])
-            else:
-                self._discard_crash_recovery_candidate()
-            self._refresh_controls()
-            return
-        if context == _CRASH_RECOVERY_RECHECK_CONTEXT:
-            self._complete_crash_recovery_recheck(payload)
-            self._refresh_controls()
             return
         if context.startswith(_THREAD_READ_CONTEXT_PREFIX):
             self._render_thread_read(payload)
@@ -7676,20 +7429,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self._clear_task_insights()
                     self._clear_turn_performance()
                 self._selected_thread_id = thread_id
+                self._restore_ordinary_thread_draft(thread_id)
                 self._apply_focus_mode(
                     thread_id,
                     payload.get("focus_mode", False),
                 )
-                self.thread_id_edit.setText(thread_id)
-                for index in range(self.history_combo.count()):
-                    record = self.history_combo.itemData(index)
-                    if (
-                        isinstance(record, dict)
-                        and record.get("thread_id") == thread_id
-                    ):
-                        self.history_combo.setCurrentIndex(index)
-                        self._on_history_index_changed(index)
-                        break
                 self.thread_status_label.setText(
                     f"Thread：{self._history_title(thread_id)}"
                 )
@@ -7703,11 +7447,20 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self._append_system("已新建会话。")
                     if self._client is not None:
                         self._client.get_threads()
+                    self._set_task_creation_feedback(
+                        "普通任务已创建并选中。",
+                        tone="success",
+                    )
                 else:
                     self._render_thread_read(payload)
                     self._append_system("已恢复会话。")
                     self._goal_continue_after_open_thread_id = thread_id
                 self._request_goal()
+            elif context == "session_start":
+                self._set_task_creation_feedback(
+                    "普通任务创建响应缺少 Thread ID，请重试。",
+                    tone="error",
+                )
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
             token = self._turn_start_tokens.pop(context, None)
             if context == self._active_turn_start_context:
@@ -7758,13 +7511,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self._record_turn_performance("ack", token=token)
             if state_changed:
                 self._bind_diagnostic_turn(thread_id, turn_id)
-                if (
-                    isinstance(accepted_draft, dict)
-                    and accepted_draft.get("steer_fallback") is True
-                ):
-                    self._append_system(
-                        "上一轮已结束，已作为新消息发送。"
-                    )
                 if self._turn_state.busy:
                     self.turn_status_label.setText("Turn：运行中")
                     self.turn_status_label.setToolTip(
@@ -7804,13 +7550,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             turn_id = payload.get("turn_id")
             pending_draft = self._pending_steer_drafts.get(context)
             if (
-                isinstance(pending_draft, dict)
-                and pending_draft.get("fallback_cancelled") is True
-            ):
-                self._pending_steer_drafts.pop(context, None)
-                self._refresh_controls()
-                return
-            if (
                 self._turn_state.token_generation_is_current(token)
                 and thread_id == token.thread_id
                 and turn_id == token.turn_id
@@ -7835,20 +7574,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     token=self._turn_state.capture_token(),
                     allow_followup=True,
                 )
-        elif context.startswith("approval_"):
-            self._current_approval = None
-            self._current_approval_offers_persistent_rule = False
-            self.approval_group.setVisible(False)
-            self.approval_details_button.setChecked(False)
-            self.approval_details_button.setVisible(False)
-            self.approval_details_text.setVisible(False)
-            self.persistent_allow_note.setVisible(False)
-            self.persistent_allow_button.setVisible(False)
-            self.allow_button.setEnabled(True)
-            self.deny_button.setEnabled(True)
-            self.persistent_allow_button.setEnabled(True)
-            self._show_next_approval()
-            self._maybe_start_goal_continuation()
         self._refresh_controls()
 
     @QtCore.Slot(dict)
@@ -8049,6 +7774,12 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
 
     def _render_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+        if event_type == "thread_rotated":
+            self._apply_thread_rotation(
+                event.get("oldThreadId"),
+                event.get("newThreadId"),
+            )
+            return
         if event_type == "session_state":
             session = event.get("session")
             if isinstance(session, dict):
@@ -8308,7 +8039,17 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 thread_id = params.get("threadId")
                 turn_id = turn.get("id")
                 if isinstance(thread_id, str) and isinstance(turn_id, str):
-                    if self._event_is_stale_source_turn(thread_id, turn_id):
+                    stopping_token = self._stopping_turn_token
+                    confirms_stop = (
+                        isinstance(stopping_token, TurnStateToken)
+                        and stopping_token.thread_id == thread_id
+                        and stopping_token.turn_id == turn_id
+                        and self._turn_state.token_is_current(stopping_token)
+                    )
+                    if (
+                        self._event_is_stale_source_turn(thread_id, turn_id)
+                        and not confirms_stop
+                    ):
                         return
                     if self._goal_turn_matches(thread_id, turn_id):
                         turn_status = (
@@ -8379,26 +8120,9 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 pass
             elif method in {"error", "warning", "guardianWarning", "configWarning"}:
                 self._show_codex_notice(method, params)
-        elif event_type == "server_request":
-            self._pending_approvals.append(event)
-            self._show_next_approval()
         elif event_type == "protocol_warning":
             self._show_protocol_notice(event)
         elif event_type == "process_exit":
-            if self._stop_recovery_state == "recovering":
-                self._connected = False
-                self._set_status_indicator(
-                    self.connection_label,
-                    "Codex",
-                    "恢复中",
-                    False,
-                    "旧 app-server 已退出，正在恢复同一 Thread",
-                )
-                self.goal_activity_label.setText(
-                    self._goal_waiting_activity_text()
-                )
-                self._refresh_controls()
-                return
             self._polling_enabled = False
             self._reconnecting = False
             self._reconnect_timer.stop()
@@ -8442,46 +8166,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         "不会自动重放状态不明的 Turn 或 Houdini 操作。"
                     )
             self._refresh_controls()
-
-    def _show_next_approval(self) -> None:
-        if self._current_approval is not None or not self._pending_approvals:
-            return
-        self._current_approval = self._pending_approvals.popleft()
-        card = format_approval_card(self._current_approval)
-        self._current_approval_offers_persistent_rule = (
-            card.offers_persistent_rule
-        )
-        self.approval_text.setPlainText(card.summary)
-        self.approval_details_text.setPlainText(card.advanced_details)
-        self.approval_details_button.setChecked(False)
-        self.approval_details_button.setText("高级详情")
-        self.approval_details_button.setVisible(True)
-        self.approval_details_text.setVisible(False)
-        self.persistent_allow_note.setVisible(False)
-        self.persistent_allow_button.setVisible(False)
-        self.approval_group.setVisible(True)
-
-    def _toggle_approval_details(self, checked: bool) -> None:
-        self.approval_details_button.setText(
-            "收起高级详情" if checked else "高级详情"
-        )
-        self.approval_details_text.setVisible(bool(checked))
-        show_persistent = bool(checked) and bool(
-            self._current_approval_offers_persistent_rule
-        )
-        self.persistent_allow_note.setVisible(show_persistent)
-        self.persistent_allow_button.setVisible(show_persistent)
-
-    def _resolve_approval(self, decision: str) -> None:
-        if self._current_approval is None or self._client is None:
-            return
-        self.allow_button.setEnabled(False)
-        self.deny_button.setEnabled(False)
-        self.persistent_allow_button.setEnabled(False)
-        self._client.resolve_approval(
-            self._current_approval.get("request_id"),
-            decision,
-        )
 
     @QtCore.Slot(str, dict)
     def _on_request_failed(self, context: str, payload: dict[str, Any]) -> None:
@@ -8595,35 +8279,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._refresh_controls()
             return
 
-        if (
-            context == _GOAL_GET_CONTEXT
-            and isinstance(self._crash_recovery_marker, dict)
-            and isinstance(self._crash_recovery_health_session, dict)
-            and self._selected_thread_id is None
-        ):
-            if context == self._goal_action_context:
-                self._goal_action_context = None
-            self._discard_crash_recovery_candidate()
-            self._refresh_controls()
-            return
-        if context == _CRASH_RECOVERY_READ_CONTEXT:
-            self._discard_crash_recovery_candidate()
-            self._refresh_controls()
-            return
-        if context == _CRASH_RECOVERY_RECHECK_CONTEXT:
-            self._crash_recovery_observation = None
-            self._refresh_controls()
-            return
-
         if context.startswith(_SESSION_RECONCILE_CONTEXT_PREFIX):
             pending = self._pending_steer_reconciliation(context)
             if pending is not None:
                 steer_context, draft = pending
                 self._reconciliation_tokens.pop(context, None)
-                if draft.get("fallback_cancelled") is True:
-                    self._pending_steer_drafts.pop(steer_context, None)
-                    self._refresh_controls()
-                    return
                 self._restore_steer_draft_to_composer(draft)
                 self._pending_steer_drafts.pop(steer_context, None)
                 self._append_system(
@@ -8676,53 +8336,16 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             valid_stop = (
                 isinstance(token, TurnStateToken)
                 and token.thread_id == self._selected_thread_id
-                and self._stop_recovery_state == "recovering"
             )
-            if (
-                valid_stop
-                and error_code == "NO_ACTIVE_TURN"
-                and details.get("turn_active") is False
-                and details.get("thread_id") == token.thread_id
-            ):
-                self._stop_recovery_state = None
-                self._connected = True
-                self._set_status_indicator(
-                    self.connection_label,
-                    "Codex",
-                    "已连接",
-                    True,
-                    "Codex app-server 会话状态",
-                )
-                self.goal_activity_label.setText(
-                    self._goal_waiting_activity_text()
-                )
-                self.allow_button.setEnabled(True)
-                self.deny_button.setEnabled(True)
-                self._refresh_controls()
-                return
             if valid_stop:
-                if details.get("turn_status") == "stopRecoveryFailed":
-                    self._apply_session(
-                        {
-                            "connected": False,
-                            "authentication": "unavailable",
-                            "thread_id": token.thread_id,
-                            "turn_id": None,
-                            "turn_status": "stopRecoveryFailed",
-                            "turn_active": False,
-                            "focus_mode": self._focus_mode,
-                        },
-                        token=self._turn_state.capture_token(),
-                        allow_followup=True,
+                self._stopping_turn_token = None
+                if error_code == "INTERRUPT_NOT_CONFIRMED":
+                    self._append_system(
+                        "停止请求未获确认；当前 Turn 可能仍在运行，未执行自动重启或恢复。"
                     )
-                else:
-                    self._schedule_bridge_reconnect()
-                self.allow_button.setEnabled(True)
-                self.deny_button.setEnabled(True)
+                self._request_session_reconciliation("interrupt_failed")
                 self._refresh_controls()
                 return
-            self.allow_button.setEnabled(True)
-            self.deny_button.setEnabled(True)
             self._refresh_controls()
             return
 
@@ -8751,26 +8374,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 self._refresh_controls()
                 return
             pending_draft = self._pending_steer_drafts.get(context)
-            if (
-                isinstance(pending_draft, dict)
-                and pending_draft.get("fallback_cancelled") is True
-            ):
-                self._pending_steer_drafts.pop(context, None)
-                self._refresh_controls()
-                return
-            if (
-                isinstance(pending_draft, dict)
-                and pending_draft.get("retry_attempted") is True
-            ):
-                self._restore_steer_draft_to_composer(pending_draft)
-                self._pending_steer_drafts.pop(context, None)
-                self._append_system(
-                    "当前 Turn 在同步后再次变化；追加文字和图片已保留，未再次重试。"
-                )
-                self.allow_button.setEnabled(True)
-                self.deny_button.setEnabled(True)
-                self._refresh_controls()
-                return
             if error_code in {"NO_ACTIVE_TURN", "STALE_ACTIVE_TURN"}:
                 if not self._begin_steer_state_sync(
                     context,
@@ -8783,8 +8386,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     self._append_system(
                         "当前 Turn 状态已变化；输入和附件已保留，未自动重试。"
                     )
-                self.allow_button.setEnabled(True)
-                self.deny_button.setEnabled(True)
                 self._refresh_controls()
                 return
 
@@ -8803,8 +8404,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                     formatted_error,
                     slug="turn-steer-failure",
                 )
-            self.allow_button.setEnabled(True)
-            self.deny_button.setEnabled(True)
             self._refresh_controls()
             return
 
@@ -8874,6 +8473,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                 f"{action_label}超时（{error_code}）：会话服务暂未完成；可稍后重试。"
             )
             self._refresh_controls()
+            if context == "session_start":
+                self._set_task_creation_feedback(
+                    "普通任务创建超时，请稍后重试。",
+                    tone="error",
+                )
             return
 
         if (
@@ -8888,6 +8492,11 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             self._schedule_poll(1500)
         elif context in {"session_start", "session_resume"}:
             self._session_action_pending = False
+            if context == "session_start":
+                self._set_task_creation_feedback(
+                    "普通任务创建失败；请检查错误信息后重试。",
+                    tone="error",
+                )
         elif context.startswith(_TURN_START_CONTEXT_PREFIX):
             token = self._turn_start_tokens.pop(context, None)
             failed_draft = self._pending_turn_drafts.get(context)
@@ -8974,9 +8583,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
                         self.turn_status_label.setText("Turn：状态待确认")
             if not state_reconciled:
                 self._request_session_reconciliation("turn_start_failure")
-        self.allow_button.setEnabled(True)
-        self.deny_button.setEnabled(True)
-        self.persistent_allow_button.setEnabled(True)
         self._refresh_controls()
 
     def _request_session_reconciliation(self, reason: str) -> str | None:
@@ -9235,13 +8841,6 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
             for context, token in tuple(self._reconciliation_tokens.items()):
                 if token == stopping_token:
                     self._reconciliation_tokens.pop(context, None)
-            for context, draft in tuple(self._pending_steer_drafts.items()):
-                if (
-                    isinstance(draft, dict)
-                    and draft.get("fallback_cancelled") is True
-                ):
-                    self._pending_steer_drafts.pop(context, None)
-                    self._turn_steer_tokens.pop(context, None)
         self._stopping_turn_token = None
         self.turn_status_label.setText(
             "Turn：已停止"
@@ -9288,17 +8887,7 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         self._scene_work_timer.stop()
         self._scene_capability_pending = False
         self._scene_work_pending = False
-        if self._stop_recovery_state == "recovering":
-            self._connected = False
-            self._set_status_indicator(
-                self.connection_label,
-                "Codex",
-                "恢复中",
-                False,
-                "Stop 响应未确认，正在通过 Bridge health 同步恢复状态",
-            )
-        else:
-            self._set_connection("Bridge 连接中断，正在重连", False)
+        self._set_connection("Bridge 连接中断，正在重连", False)
         self._set_mcp_status(self._mcp_backend, False)
         if first_attempt:
             if isinstance(self._selected_thread_id, str):

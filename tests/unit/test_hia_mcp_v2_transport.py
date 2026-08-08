@@ -63,12 +63,16 @@ class FakeExecutor:
             "errors": [],
         }
         if tool_name == "hia_execute_hom":
-            result["phase_timings"] = {
-                "queue_seconds": 0.005,
-                "hom_seconds": 0.02,
-                "validation_seconds": 0.003,
-                "total_seconds": 0.04,
-            }
+            result.update(
+                {
+                    "stdout": "",
+                    "revision": self.scene_revision,
+                    "dirty": False,
+                    "elapsed_seconds": 0.02,
+                    "script_sha256": "0" * 64,
+                    "scene_change_status": "unchanged",
+                }
+            )
         return result
 
 
@@ -231,20 +235,22 @@ class HiaMcpV2TransportTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertEqual([("hia_execute_hom", {"script": "pass"})], executor.calls)
-        timings = result["phase_timings"]
         self.assertEqual(
             {
-                "queue_seconds",
-                "hom_seconds",
-                "validation_seconds",
-                "total_seconds",
+                "ok",
+                "result",
+                "stdout",
+                "warnings",
+                "errors",
+                "revision",
+                "dirty",
+                "elapsed_seconds",
+                "script_sha256",
+                "scene_change_status",
             },
-            set(timings),
+            set(result),
         )
-        self.assertEqual(0.03, timings["queue_seconds"])
-        self.assertEqual(0.02, timings["hom_seconds"])
-        self.assertEqual(0.003, timings["validation_seconds"])
-        self.assertGreaterEqual(timings["total_seconds"], timings["queue_seconds"])
+        self.assertEqual(0.02, result["elapsed_seconds"])
         self.assertTrue(cancellation.accepted)
         self.assertEqual(".runtime\\hia-mcp-v2", str(session.runtime_directory.relative_to(REPOSITORY_ROOT)))
 
@@ -303,29 +309,16 @@ class HiaMcpV2TransportTests(unittest.TestCase):
             }
         )
 
-        for request_id, tool_name, arguments in (
-            (22, "hia_execute_hom", {"script": "pass"}),
-            (
-                23,
-                "hia_run_effect_experiment",
-                {"target_network": "/obj/test"},
-            ),
-        ):
-            with self.subTest(tool_name=tool_name), self.assertRaises(
-                TransportError
-            ) as raised:
-                transport.call(
-                    tool_name,
-                    arguments,
-                    request_id=request_id,
-                    cancellation=CancellationToken(),
-                )
-            self.assertEqual(
-                "HOUDINI_SESSION_CHANGED",
-                raised.exception.code,
+        with self.assertRaises(TransportError) as raised:
+            transport.call(
+                "hia_execute_hom",
+                {"script": "pass"},
+                request_id=22,
+                cancellation=CancellationToken(),
             )
-            self.assertFalse(raised.exception.details["request_submitted"])
-            self.assertTrue(raised.exception.details["restart_required"])
+        self.assertEqual("HOUDINI_SESSION_CHANGED", raised.exception.code)
+        self.assertFalse(raised.exception.details["request_submitted"])
+        self.assertTrue(raised.exception.details["restart_required"])
         self.assertEqual([], executor.calls)
 
         inspected = transport.call(
@@ -441,7 +434,6 @@ class HiaMcpV2TransportTests(unittest.TestCase):
 
         self.assertEqual("HOUDINI_SESSION_CHANGED", raised.exception.code)
         self.assertFalse(raised.exception.details["request_submitted"])
-        self.assertTrue(raised.exception.details["automatic_retry_safe"])
 
     def test_health_rejects_wrong_launcher_session_or_executor_source(self) -> None:
         cases = (
@@ -602,7 +594,6 @@ class HiaMcpV2TransportTests(unittest.TestCase):
         self.assertEqual("unknown", raised.exception.details["submission_state"])
         self.assertIsNone(raised.exception.details["request_submitted"])
         self.assertTrue(raised.exception.details["hom_may_still_execute"])
-        self.assertFalse(raised.exception.details["automatic_retry_safe"])
         self.assertFalse(raised.exception.details["interruptible_after_submission"])
         self.assertIn("do not automatically retry", raised.exception.message.casefold())
 
@@ -629,7 +620,7 @@ class HiaMcpV2TransportTests(unittest.TestCase):
         self.assertTrue(raised.exception.details["hom_may_still_execute"])
         self.assertFalse(cancellation.accepted)
 
-    def test_response_read_timeout_is_accepted_but_not_retry_safe(self) -> None:
+    def test_response_read_timeout_reports_runtime_acceptance(self) -> None:
         class ReadTimeoutResponse:
             headers: dict[str, str] = {}
 
@@ -662,7 +653,6 @@ class HiaMcpV2TransportTests(unittest.TestCase):
         self.assertEqual("accepted", raised.exception.details["submission_state"])
         self.assertTrue(raised.exception.details["request_submitted"])
         self.assertFalse(raised.exception.details["hom_may_still_execute"])
-        self.assertFalse(raised.exception.details["automatic_retry_safe"])
         self.assertTrue(cancellation.accepted)
 
     def test_oversized_runtime_response_is_a_stable_error(self) -> None:

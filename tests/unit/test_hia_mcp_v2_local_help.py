@@ -198,6 +198,7 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
 
     def _dispatch(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        arguments = {"mode": "lexical", **arguments}
         original_read_text = Path.read_text
 
         def tracked_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
@@ -366,25 +367,18 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
             / "knowledge.sqlite3"
         )
 
-        absent = self._dispatch(
-            {
-                "query": "Needle",
-                "sources": ["project"],
-                "mode": "lexical",
-            }
-        )
+        with self.assertRaises(HiaRuntimeError) as raised:
+            self._dispatch(
+                {
+                    "query": "Needle",
+                    "sources": ["project"],
+                    "mode": "lexical",
+                }
+            )
 
-        self.assertTrue(absent["ok"])
+        self.assertEqual("LOCAL_HELP_INDEX_UNAVAILABLE", raised.exception.code)
         self.assertFalse(database.exists())
         self.assertEqual([], self.file_read_states)
-        self.assertEqual(
-            "read_only",
-            absent["result"]["index"]["refresh_reason"],
-        )
-        self.assertFalse(
-            absent["result"]["index"]["corpus"]["available"]
-        )
-        self.assertTrue(absent["warnings"])
 
         self._dispatch(
             {
@@ -1183,7 +1177,22 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
             "UserPreservationToken must survive built-in upgrades.",
         )
         index.refresh({"user"}, {"houdini_version": "21.0"}, force=True)
-        store = HybridKnowledgeStore(root, index=index, embedder=object())
+        vector = [1.0, *([0.0] * 31)]
+        embedder = mock.Mock()
+        embedder.encode.side_effect = lambda *, documents, queries: {
+            "document_vectors": [vector for _ in documents],
+            "query_vectors": [vector for _ in queries],
+            "model_id": "test/local",
+            "model_revision": "test-revision",
+            "profile_id": "test-profile",
+            "active_profile": "test-profile",
+            "requested_profile": "test-profile",
+            "dim": 32,
+            "normalized": True,
+            "status": "ready",
+            "repair": {},
+        }
+        store = HybridKnowledgeStore(root, index=index, embedder=embedder)
         memory = store.project_memory(
             {
                 "action": "record",
@@ -1238,6 +1247,86 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
             )["items"][0]["id"],
         )
         store.close()
+
+    def test_builtin_pack_directory_publish_retries_transient_windows_denial(self) -> None:
+        root = self.project_root / "windows-pack-retry"
+        root.mkdir()
+        self._write_pack(
+            root,
+            version="1.0.0",
+            cards=[("cloth", "Cloth", "WindowsRetryToken")],
+        )
+        index = LocalKnowledgeIndex(root)
+        pack = knowledge_index._load_builtin_pack(  # noqa: SLF001
+            root / "knowledge" / "sidefx-official" / "manifest.json"
+        )
+        target = index.builtin_root / "test-official-workflows" / "retry-target"
+        target.parent.mkdir(parents=True)
+        real_rename = os.rename
+        attempts = 0
+
+        def transient_rename(source, destination):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                error = PermissionError(13, "transient directory denial")
+                error.winerror = 32
+                raise error
+            return real_rename(source, destination)
+
+        with (
+            mock.patch.object(knowledge_index.os, "name", "nt"),
+            mock.patch.object(knowledge_index.os, "rename", transient_rename),
+            mock.patch.object(
+                knowledge_index.os,
+                "replace",
+                side_effect=AssertionError("directory publication must not replace"),
+            ),
+            mock.patch.object(knowledge_index.time, "sleep") as sleep,
+        ):
+            index._copy_builtin_pack(pack, target)  # noqa: SLF001
+
+        self.assertEqual(3, attempts)
+        self.assertEqual(2, sleep.call_count)
+        self.assertTrue(knowledge_index._installed_pack_matches(target, pack))  # noqa: SLF001
+
+    def test_builtin_pack_directory_publish_reuses_matching_concurrent_winner(self) -> None:
+        root = self.project_root / "windows-pack-collision"
+        root.mkdir()
+        self._write_pack(
+            root,
+            version="1.0.0",
+            cards=[("cloth", "Cloth", "WindowsCollisionToken")],
+        )
+        index = LocalKnowledgeIndex(root)
+        pack = knowledge_index._load_builtin_pack(  # noqa: SLF001
+            root / "knowledge" / "sidefx-official" / "manifest.json"
+        )
+        target = index.builtin_root / "test-official-workflows" / "collision-target"
+        target.parent.mkdir(parents=True)
+        staged_paths = []
+
+        def concurrent_winner(source, destination):
+            staged_paths.append(Path(source))
+            shutil.copytree(source, destination)
+            error = PermissionError(13, "target appeared concurrently")
+            error.winerror = 5
+            raise error
+
+        with (
+            mock.patch.object(knowledge_index.os, "name", "nt"),
+            mock.patch.object(knowledge_index.os, "rename", concurrent_winner),
+            mock.patch.object(
+                knowledge_index.os,
+                "replace",
+                side_effect=AssertionError("directory publication must not replace"),
+            ),
+        ):
+            index._copy_builtin_pack(pack, target)  # noqa: SLF001
+
+        self.assertTrue(knowledge_index._installed_pack_matches(target, pack))  # noqa: SLF001
+        self.assertEqual(1, len(staged_paths))
+        self.assertFalse(staged_paths[0].exists())
 
     def test_deep_workflow_long_query_compact_and_full_card(self) -> None:
         long_body = (
@@ -1477,7 +1566,6 @@ class HiaMcpV2LocalHelpTests(unittest.TestCase):
                 "dim": 32,
                 "normalized": True,
                 "status": "ready",
-                "fallback_reason": "",
                 "repair": {},
             }
 

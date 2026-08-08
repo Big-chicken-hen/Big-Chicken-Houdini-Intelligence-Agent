@@ -1233,12 +1233,9 @@ def _environment_status(project_root: Path) -> dict[str, Any]:
         if stored_profile
         else "default"
     )
-    fallback_profile = str(public_contract["fallback_profile"])
     installed_profiles = list(models["installed_profiles"])
     if requested_profile in installed_profiles:
         active_profile = requested_profile
-    elif fallback_profile in installed_profiles:
-        active_profile = fallback_profile
     else:
         active_profile = ""
     environment_device = os.environ.get(
@@ -1258,30 +1255,30 @@ def _environment_status(project_root: Path) -> dict[str, Any]:
     )
     embedding_prerequisites = bool(
         portable
-        and active_profile
+        and active_profile == requested_profile
         and torch_installed
         and worker_version
     )
     if not embedding_prerequisites:
-        fallback = "fts5"
+        embedding_mode = "unavailable"
         active_device = ""
     elif requested_device == "cpu":
-        fallback = "cpu_embedding"
+        embedding_mode = "cpu_embedding"
         active_device = "cpu"
     elif requested_device == "cuda" and cuda_available:
-        fallback = "cuda"
+        embedding_mode = "cuda"
         active_device = "cuda"
     elif requested_device == "cuda":
-        fallback = "cpu_embedding"
-        active_device = "cpu"
+        embedding_mode = "unavailable"
+        active_device = ""
     elif cuda_available:
-        fallback = "cuda"
+        embedding_mode = "cuda"
         active_device = "cuda"
     else:
-        fallback = "cpu_embedding"
+        embedding_mode = "cpu_embedding"
         active_device = "cpu"
     embedding_environment: dict[str, str] = {}
-    if fallback != "fts5" and active_profile:
+    if embedding_mode != "unavailable" and active_profile == requested_profile:
         profile = contract.PROFILE_REGISTRY[active_profile]
         model = next(
             item
@@ -1341,16 +1338,13 @@ def _environment_status(project_root: Path) -> dict[str, Any]:
         "requested_profile": requested_profile,
         "active_profile": active_profile,
         "profile_source": profile_source,
-        "profile_fallback": bool(
-            active_profile and active_profile != requested_profile
-        ),
+        "selected_profile_available": active_profile == requested_profile,
         "requested_device": requested_device,
         "active_device": active_device,
         "device_source": device_source,
-        "embedding_mode": fallback,
+        "embedding_mode": embedding_mode,
         "embedding_runtime_environment": embedding_environment,
-        "fallback_non_blocking": fallback != "cuda",
-        "houdini_launch_blocked": False,
+        "houdini_launch_blocked": embedding_mode == "unavailable",
         "repair_actions": {
             "parser_only": "environment-repair",
             "embedding": "Use the explicit embedding installer only when embeddings are wanted.",
@@ -1492,10 +1486,12 @@ def _status(
                 "Deleting a managed copy never deletes the original file."
             ),
         },
-        "fallback": {
+        "retrieval": {
             "mode": environment["embedding_mode"],
             "fts5_available": bool(index_value.get("fts5_available")),
-            "houdini_launch_blocked": False,
+            "houdini_launch_blocked": bool(
+                environment.get("houdini_launch_blocked")
+            ),
         },
         "warning": " ".join(warnings),
     }

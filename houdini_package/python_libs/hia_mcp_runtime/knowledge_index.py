@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 if __package__:
@@ -291,27 +291,20 @@ class LocalKnowledgeIndex:
         try:
             source_pack = _load_builtin_pack(source_manifest)
         except FileNotFoundError:
-            active = self._active_builtin_pack()
-            if active is None:
-                return (
-                    {
-                        "available": False,
-                        "installed": False,
-                        "changed": False,
-                        "pack_id": "",
-                        "pack_version": "",
-                        "digest": "",
-                        "cards": 0,
-                        "runtime_path": "",
-                        "fallback_reason": "BUNDLED_PACK_NOT_FOUND",
-                    },
-                    [],
-                )
-            warnings.append(
-                "Bundled source pack was unavailable; the installed runtime "
-                "copy remains active."
+            return (
+                {
+                    "available": False,
+                    "installed": False,
+                    "changed": False,
+                    "pack_id": "",
+                    "pack_version": "",
+                    "digest": "",
+                    "cards": 0,
+                    "runtime_path": "",
+                    "error": "BUNDLED_PACK_NOT_FOUND",
+                },
+                [],
             )
-            return self._builtin_pack_result(active, changed=False), warnings
 
         self.builtin_root.mkdir(parents=True, exist_ok=True)
         target_parent = self.builtin_root / _safe_pack_component(source_pack.pack_id)
@@ -346,27 +339,20 @@ class LocalKnowledgeIndex:
         try:
             source_pack = _load_community_pack(source_manifest)
         except FileNotFoundError:
-            active = self._active_community_pack()
-            if active is None:
-                return (
-                    {
-                        "available": False,
-                        "installed": False,
-                        "changed": False,
-                        "pack_id": "",
-                        "pack_version": "",
-                        "digest": "",
-                        "cards": 0,
-                        "runtime_path": "",
-                        "fallback_reason": "COMMUNITY_PACK_NOT_FOUND",
-                    },
-                    [],
-                )
-            warnings.append(
-                "Bundled community tutorial pack was unavailable; the "
-                "installed runtime copy remains active."
+            return (
+                {
+                    "available": False,
+                    "installed": False,
+                    "changed": False,
+                    "pack_id": "",
+                    "pack_version": "",
+                    "digest": "",
+                    "cards": 0,
+                    "runtime_path": "",
+                    "error": "COMMUNITY_PACK_NOT_FOUND",
+                },
+                [],
             )
-            return self._builtin_pack_result(active, changed=False), warnings
 
         self.community_root.mkdir(parents=True, exist_ok=True)
         target_parent = (
@@ -834,7 +820,11 @@ class LocalKnowledgeIndex:
                 + "\n",
                 encoding="utf-8",
             )
-            os.replace(staging, target)
+            _publish_pack_directory(
+                staging,
+                target,
+                lambda: _installed_pack_matches(target, pack),
+            )
         except Exception:
             if staging.is_dir():
                 shutil.rmtree(staging)
@@ -883,7 +873,11 @@ class LocalKnowledgeIndex:
                 + "\n",
                 encoding="utf-8",
             )
-            os.replace(staging, target)
+            _publish_pack_directory(
+                staging,
+                target,
+                lambda: _installed_community_pack_matches(target, pack),
+            )
         except Exception:
             if staging.is_dir():
                 shutil.rmtree(staging)
@@ -905,7 +899,6 @@ class LocalKnowledgeIndex:
             "digest": pack.digest,
             "cards": len(pack.entries),
             "runtime_path": runtime_path,
-            "fallback_reason": "",
         }
 
     def _builtin_pack_active_payload(
@@ -2768,7 +2761,7 @@ def builtin_pack_status(
             "digest": "",
             "cards": 0,
             "runtime_path": "",
-            "fallback_reason": "BUILTIN_PACK_NOT_BOOTSTRAPPED",
+            "error": "BUILTIN_PACK_NOT_BOOTSTRAPPED",
         }
     target = (root / relative).resolve()
     if not _is_within(target, builtin_root.resolve()):
@@ -2779,7 +2772,7 @@ def builtin_pack_status(
             "digest": "",
             "cards": 0,
             "runtime_path": "",
-            "fallback_reason": "BUILTIN_PACK_PATH_INVALID",
+            "error": "BUILTIN_PACK_PATH_INVALID",
         }
     marker = _read_json_object(target / BUILTIN_PACK_MARKER)
     if str(marker.get("digest") or "") != str(state.get("digest") or ""):
@@ -2790,7 +2783,7 @@ def builtin_pack_status(
             "digest": str(state.get("digest") or ""),
             "cards": int(state.get("cards") or 0),
             "runtime_path": relative,
-            "fallback_reason": "BUILTIN_PACK_MARKER_INVALID",
+            "error": "BUILTIN_PACK_MARKER_INVALID",
         }
     return {
         "installed": True,
@@ -2799,7 +2792,7 @@ def builtin_pack_status(
         "digest": str(state.get("digest") or ""),
         "cards": int(state.get("cards") or 0),
         "runtime_path": relative,
-        "fallback_reason": "",
+        "error": "",
     }
 
 
@@ -3467,6 +3460,42 @@ def _installed_community_pack_matches(
     except (FileNotFoundError, KnowledgeIndexError):
         return False
     return installed.digest == source_pack.digest
+
+
+def _publish_pack_directory(
+    staging: Path,
+    target: Path,
+    target_matches: Callable[[], bool],
+) -> None:
+    """Publish one immutable pack directory with Windows-safe collision handling."""
+
+    retry_delays = (0.01, 0.025, 0.05, 0.1)
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            os.rename(staging, target)
+            return
+        except PermissionError as exc:
+            if target.is_dir():
+                if target_matches():
+                    shutil.rmtree(staging)
+                    return
+                raise KnowledgeIndexError(
+                    "The immutable knowledge pack target already exists with different content"
+                ) from exc
+            if (
+                os.name != "nt"
+                or getattr(exc, "winerror", None) not in {32, 33}
+                or attempt >= len(retry_delays)
+            ):
+                raise
+            time.sleep(retry_delays[attempt])
+        except FileExistsError as exc:
+            if target.is_dir() and target_matches():
+                shutil.rmtree(staging)
+                return
+            raise KnowledgeIndexError(
+                "The immutable knowledge pack target already exists with different content"
+            ) from exc
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:

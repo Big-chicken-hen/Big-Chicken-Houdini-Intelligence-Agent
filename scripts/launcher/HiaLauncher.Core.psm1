@@ -1269,18 +1269,24 @@ function Get-HiaEmbeddingCheckResult {
     if ($null -eq $EmbeddingData) {
         return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
             -Level 'red' `
-            -Message '无法读取项目 embedding contract；启动器无法安全构造或清除项目定义的子进程环境。' `
-            -Advice '先修复 Bridge Python 或从完整项目副本恢复 src\hia_core\embedding_contract.py。模型文件缺失仍只会降级 FTS5，不属于此阻断。'
+            -Message '无法读取项目 embedding contract；启动器无法验证所选知识向量模型。' `
+            -Advice '先修复 Bridge Python 或从完整项目副本恢复 src\hia_core\embedding_contract.py。'
     }
 
     try {
-        $selected = Resolve-HiaEmbeddingProfile -EmbeddingData $EmbeddingData -Profile $EmbeddingProfile
+        $selected = Resolve-HiaEmbeddingProfile `
+            -EmbeddingData $EmbeddingData `
+            -Profile $EmbeddingProfile
     } catch {
-        $selected = [string]$EmbeddingData.contract.default_profile
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'red' `
+            -Message '所选知识向量模型不受当前 embedding contract 支持。' `
+            -Advice '在启动器中重新选择一个受支持的模型。'
     }
-    $profile = Get-HiaEmbeddingProfileContract -EmbeddingData $EmbeddingData -Profile $selected
+    $profile = Get-HiaEmbeddingProfileContract `
+        -EmbeddingData $EmbeddingData `
+        -Profile $selected
     $selectedDevice = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
-    $fallbackProfile = [string]$EmbeddingData.contract.fallback_profile
     $size = ([double]$profile.repository_size_gb).ToString(
         '0.##',
         [System.Globalization.CultureInfo]::InvariantCulture
@@ -1293,79 +1299,46 @@ function Get-HiaEmbeddingCheckResult {
         -ProbeOverride $ProbeOverride
     $cudaProperty = $state.PSObject.Properties['cuda_available']
     $cudaReady = ($null -ne $cudaProperty -and [bool]$cudaProperty.Value)
-    $installed = @($state.installed_profiles)
-    $selectedInstalled = $selected -in $installed
-    $fallbackInstalled = (
-        $selected -ne $fallbackProfile -and
-        $fallbackProfile -in $installed
-    )
-
-    if (
-        $selectedDevice -eq 'cuda' -and
-        $selectedInstalled -and
-        [bool]$state.worker_ready -and
-        [bool]$state.probe_passed -and
-        -not $cudaReady
-    ) {
-        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
-            -Level 'yellow' `
-            -Message "$($profile.label) 已安装，但已选择 NVIDIA GPU（CUDA），项目本地 PyTorch 的 torch.cuda.is_available()=false；向量检索将降级到 FTS5。$spaceNote" `
-            -Advice '点击“安装/修复知识向量模型”准备项目本地 CUDA PyTorch；Houdini 仍可启动。'
-    }
-
-    if ($selectedInstalled -and [bool]$state.worker_ready -and [bool]$state.probe_passed) {
-        $deviceAdvice = switch ($selectedDevice) {
-            'cuda' { '已按选择使用 NVIDIA GPU（CUDA）；无需处理。' }
-            'cpu' { '已按选择使用 CPU；无需处理。' }
-            default {
-                if ($cudaReady) {
-                    '自动选择可使用 NVIDIA GPU（CUDA）；无需处理。'
-                } else {
-                    '自动选择当前使用 CPU。若电脑有 NVIDIA 显卡，可点击“安装/修复知识向量模型”安装官方 CUDA PyTorch；不会修改全局 Python。'
-                }
-            }
-        }
-        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
-            -Level 'green' `
-            -Message "$($profile.label) 已安装，$($state.probe_message) $spaceNote" `
-            -Advice "$deviceAdvice 真实模型加载若失败会给出降级原因并保留 FTS5。"
-    }
-
-    if (
-        -not $selectedInstalled -and
-        $fallbackInstalled -and
-        [bool]$state.worker_ready -and
-        [bool]$state.probe_passed
-    ) {
-        $fallback = Get-HiaEmbeddingProfileContract -EmbeddingData $EmbeddingData -Profile $fallbackProfile
-        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
-            -Level 'yellow' `
-            -Message "$($profile.label) 未完整安装；可降级到已安装的 $($fallback.label)，再失败则使用 FTS5。$spaceNote" `
-            -Advice '点击“安装/修复知识向量模型”准备当前选择；Houdini 仍可启动。'
-    }
+    $selectedInstalled = $selected -in @($state.installed_profiles)
 
     if (-not $selectedInstalled) {
-        $fallbackFailure = if ($fallbackInstalled) {
-            "轻量模型文件已安装，但 $($state.probe_message)"
-        } else {
-            '没有可用的已安装向量模型。'
-        }
         return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
-            -Level 'yellow' `
-            -Message "$($profile.label) 未安装或安装不完整；$fallbackFailure 知识检索将使用 FTS5。$spaceNote" `
-            -Advice '点击“安装/修复知识向量模型”准备当前选择；Houdini 仍可启动。'
+            -Level 'red' `
+            -Message "$($profile.label) 未安装或安装不完整。不会改用其他模型。$spaceNote" `
+            -Advice '点击“安装/修复知识向量模型”准备当前选择。'
     }
 
-    $fallbackText = if ($fallbackInstalled) {
-        '真实加载失败时将先尝试已安装的轻量模型，再降级 FTS5。'
-    } else {
-        '真实加载失败时将降级 FTS5。'
+    if (-not [bool]$state.worker_ready -or -not [bool]$state.probe_passed) {
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'red' `
+            -Message "$($profile.label) 已安装，但所选模型运行时不可用：$($state.probe_message) $spaceNote" `
+            -Advice '点击“安装/修复知识向量模型”修复项目本地独立 venv。'
+    }
+
+    if ($selectedDevice -eq 'cuda' -and -not $cudaReady) {
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'red' `
+            -Message "$($profile.label) 已安装，但所选 CUDA 设备不可用。不会自动改用 CPU。$spaceNote" `
+            -Advice '修复项目本地 CUDA PyTorch，或在启动器中明确选择 CPU。'
+    }
+
+    $deviceAdvice = switch ($selectedDevice) {
+        'cuda' { '已按选择使用 NVIDIA GPU（CUDA）；无需处理。' }
+        'cpu' { '已按选择使用 CPU；无需处理。' }
+        default {
+            if ($cudaReady) {
+                '自动设备选择将使用 NVIDIA GPU（CUDA）；无需处理。'
+            } else {
+                '自动设备选择将使用 CPU；无需处理。'
+            }
+        }
     }
     return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
-        -Level 'yellow' `
-        -Message "$($profile.label) 模型文件已安装，但 $($state.probe_message) $fallbackText $spaceNote" `
-        -Advice '点击“安装/修复知识向量模型”修复项目本地独立 venv；Houdini 仍可启动。'
+        -Level 'green' `
+        -Message "$($profile.label) 已安装，$($state.probe_message) $spaceNote" `
+        -Advice $deviceAdvice
 }
+
 
 function New-HiaCheckResult {
     param(
@@ -2562,13 +2535,20 @@ function Invoke-HiaProjectChecks {
     if ($McpBackend -eq 'hia_v2') {
         $hiaService = Join-Path $ProjectRoot 'services\hia_mcp_v2\hia_mcp_v2\__main__.py'
         $hiaRuntime = Join-Path $ProjectRoot 'houdini_package\python_libs\hia_mcp_runtime\http_server.py'
-        $hiaUiReady310 = Join-Path $ProjectRoot 'houdini_package\python3.10libs\uiready.py'
-        $hiaUiReady311 = Join-Path $ProjectRoot 'houdini_package\python3.11libs\uiready.py'
+        $hiaUiReadyVersions = @('3.10', '3.11', '3.13')
+        $hiaUiReadyFilesPresent = @(
+            $hiaUiReadyVersions | ForEach-Object {
+                Test-Path -LiteralPath (
+                    Join-Path $ProjectRoot (
+                        'houdini_package\python{0}libs\uiready.py' -f $_
+                    )
+                ) -PathType Leaf
+            }
+        ) -notcontains $false
         $hiaFilesPresent = (
             (Test-Path -LiteralPath $hiaService -PathType Leaf) -and
             (Test-Path -LiteralPath $hiaRuntime -PathType Leaf) -and
-            (Test-Path -LiteralPath $hiaUiReady310 -PathType Leaf) -and
-            (Test-Path -LiteralPath $hiaUiReady311 -PathType Leaf)
+            $hiaUiReadyFilesPresent
         )
         $checks += New-HiaCheckResult -Id 'hia_mcp_v2.runtime' -Name 'HIA MCP V2' `
             -Level $(if ($hiaFilesPresent) { 'green' } else { 'red' }) `
@@ -2880,579 +2860,6 @@ function Write-HiaPreflightReport {
     return $Result.report
 }
 
-function Get-HiaLatestLauncherCheckpoint {
-    param(
-        [Parameter(Mandatory = $true)][string]$CheckpointDirectory,
-        [AllowEmptyString()][string]$ThreadId = '',
-        [AllowEmptyString()][string]$GoalBinding = ''
-    )
-
-    if (-not (Test-Path -LiteralPath $CheckpointDirectory -PathType Container)) { return $null }
-    try {
-        $directory = Get-Item -LiteralPath $CheckpointDirectory -Force -ErrorAction Stop
-        if (
-            $directory -isnot [System.IO.DirectoryInfo] -or
-            $directory.Name -ne 'checkpoints' -or
-            $directory.Parent.Name -notmatch '^[0-9a-fA-F]{32}$' -or
-            $directory.Parent.Parent.Name -ne 'launcher-sessions' -or
-            ([int]$directory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            ([int]$directory.Parent.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            ([int]$directory.Parent.Parent.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            (($ThreadId -and -not $GoalBinding) -or ($GoalBinding -and -not $ThreadId))
-        ) {
-            return $null
-        }
-        if (
-            ($ThreadId -and $ThreadId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$') -or
-            ($GoalBinding -and $GoalBinding -notmatch '^[0-9a-f]{64}$')
-        ) {
-            return $null
-        }
-        $markerPath = Join-Path $directory.FullName '.hia-stage-checkpoint.json'
-        if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
-            $markerFile = Get-Item -LiteralPath $markerPath -Force -ErrorAction Stop
-            if (
-                ([int]$markerFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                [long]$markerFile.Length -le 0 -or
-                [long]$markerFile.Length -gt 65536
-            ) {
-                return $null
-            }
-            $marker = [System.IO.File]::ReadAllText($markerFile.FullName) | ConvertFrom-Json
-            $markerVersion = [int]$marker.version
-            $markerThread = [string]$marker.thread_id
-            $markerGoal = [string]$marker.goal_binding
-            $checkpointName = [string]$marker.checkpoint_file
-            if (
-                $markerThread -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$' -or
-                $markerGoal -notmatch '^[0-9a-f]{64}$' -or
-                ($ThreadId -and -not [System.StringComparer]::Ordinal.Equals($markerThread, $ThreadId)) -or
-                ($GoalBinding -and -not [System.StringComparer]::Ordinal.Equals($markerGoal, $GoalBinding)) -or
-                -not $checkpointName -or
-                $checkpointName -ne [System.IO.Path]::GetFileName($checkpointName) -or
-                $checkpointName -notmatch '(?i)\.hip(?:lc|nc)?(?:_bak\d*)?$'
-            ) {
-                return $null
-            }
-            $checkpointPath = $null
-            $storageScope = 'runtime_fallback'
-            $sourceHipPath = $null
-            if ($markerVersion -eq 2) {
-                $storageScope = [string]$marker.storage_scope
-                if (
-                    -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                        [string]$marker.launcher_session_id,
-                        $directory.Parent.Name
-                    ) -or
-                    $storageScope -notin @('hip', 'runtime_fallback')
-                ) {
-                    return $null
-                }
-                if ($storageScope -eq 'runtime_fallback') {
-                    if (-not [string]::IsNullOrWhiteSpace([string]$marker.source_hip_path)) {
-                        return $null
-                    }
-                    $checkpointPath = Join-Path $directory.FullName $checkpointName
-                } else {
-                    $rawSourceHip = [string]$marker.source_hip_path
-                    if (
-                        [string]::IsNullOrWhiteSpace($rawSourceHip) -or
-                        -not [System.IO.Path]::IsPathRooted($rawSourceHip)
-                    ) {
-                        return $null
-                    }
-                    $sourceHipPath = [System.IO.Path]::GetFullPath($rawSourceHip)
-                    if (
-                        [System.IO.Path]::GetPathRoot($sourceHipPath) -notmatch
-                            '^[A-Za-z]:\\$'
-                    ) {
-                        return $null
-                    }
-                    $sourceHip = Get-Item -LiteralPath $sourceHipPath -Force -ErrorAction Stop
-                    $sourceParent = $sourceHip.Directory
-                    if (
-                        $sourceHip -isnot [System.IO.FileInfo] -or
-                        [long]$sourceHip.Length -le 0 -or
-                        $null -eq $sourceParent.Parent -or
-                        $sourceHip.Name -match '(?i)^untitled(?:\d+)?\.hip(?:lc|nc)?$' -or
-                        $sourceHip.Name -notmatch '(?i)\.hip(?:lc|nc)?$' -or
-                        ([int]$sourceHip.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                        ([int]$sourceParent.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                            $sourceHip.FullName,
-                            $sourceHipPath
-                        ) -or
-                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                            $rawSourceHip,
-                            $sourceHipPath
-                        )
-                    ) {
-                        return $null
-                    }
-                    $hiaDirectory = Get-Item `
-                        -LiteralPath (Join-Path $sourceParent.FullName '.hia') `
-                        -Force `
-                        -ErrorAction Stop
-                    $externalCheckpointDirectory = Get-Item `
-                        -LiteralPath (Join-Path $hiaDirectory.FullName 'checkpoints') `
-                        -Force `
-                        -ErrorAction Stop
-                    if (
-                        $hiaDirectory -isnot [System.IO.DirectoryInfo] -or
-                        $externalCheckpointDirectory -isnot [System.IO.DirectoryInfo] -or
-                        ([int]$hiaDirectory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                        ([int]$externalCheckpointDirectory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                            $hiaDirectory.Parent.FullName,
-                            $sourceParent.FullName
-                        ) -or
-                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                            $externalCheckpointDirectory.Parent.FullName,
-                            $hiaDirectory.FullName
-                        )
-                    ) {
-                        return $null
-                    }
-                    $externalMarkerPath = Join-Path `
-                        $externalCheckpointDirectory.FullName `
-                        '.hia-stage-checkpoint.json'
-                    $externalMarkerFile = Get-Item `
-                        -LiteralPath $externalMarkerPath `
-                        -Force `
-                        -ErrorAction Stop
-                    if (
-                        $externalMarkerFile -isnot [System.IO.FileInfo] -or
-                        ([int]$externalMarkerFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                        [long]$externalMarkerFile.Length -le 0 -or
-                        [long]$externalMarkerFile.Length -gt 65536
-                    ) {
-                        return $null
-                    }
-                    $externalMarker = (
-                        [System.IO.File]::ReadAllText($externalMarkerFile.FullName) |
-                            ConvertFrom-Json
-                    )
-                    if (
-                        [int]$externalMarker.version -ne 2 -or
-                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                            [string]$externalMarker.launcher_session_id,
-                            [string]$marker.launcher_session_id
-                        ) -or
-                        -not [System.StringComparer]::Ordinal.Equals(
-                            [string]$externalMarker.thread_id,
-                            $markerThread
-                        ) -or
-                        -not [System.StringComparer]::Ordinal.Equals(
-                            [string]$externalMarker.goal_binding,
-                            $markerGoal
-                        ) -or
-                        -not [System.StringComparer]::Ordinal.Equals(
-                            [string]$externalMarker.storage_scope,
-                            'hip'
-                        ) -or
-                        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                            [string]$externalMarker.source_hip_path,
-                            $sourceHipPath
-                        ) -or
-                        -not [System.StringComparer]::Ordinal.Equals(
-                            [string]$externalMarker.checkpoint_file,
-                            $checkpointName
-                        )
-                    ) {
-                        return $null
-                    }
-                    $checkpointPath = Join-Path `
-                        $externalCheckpointDirectory.FullName `
-                        $checkpointName
-                }
-            } elseif ($markerVersion -eq 1 -and $ThreadId) {
-                $checkpointPath = Join-Path $directory.FullName $checkpointName
-            } elseif ($markerVersion -ne 1) {
-                return $null
-            }
-            if ($checkpointPath) {
-                $checkpoint = Get-Item -LiteralPath $checkpointPath -Force -ErrorAction Stop
-                if (
-                    $checkpoint -isnot [System.IO.FileInfo] -or
-                    ([int]$checkpoint.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                    [long]$checkpoint.Length -le 0
-                ) {
-                    return $null
-                }
-                return [pscustomobject]@{
-                    path = $checkpoint.FullName
-                    last_write_utc_ticks = [long]$checkpoint.LastWriteTimeUtc.Ticks
-                    thread_id = $markerThread
-                    goal_binding = $markerGoal
-                    launcher_session_id = $directory.Parent.Name
-                    storage_scope = $storageScope
-                    source_hip_path = $sourceHipPath
-                }
-            }
-        } elseif ($ThreadId) {
-            return $null
-        }
-        $candidates = [System.Collections.Generic.List[object]]::new()
-        foreach ($file in @($directory.GetFiles())) {
-            if (
-                ([int]$file.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                $file.Name -notmatch '(?i)\.hip(?:lc|nc)?(?:_bak\d*)?$'
-            ) {
-                continue
-            }
-            $candidates.Add([pscustomobject]@{
-                path = $file.FullName
-                last_write_utc_ticks = [long]$file.LastWriteTimeUtc.Ticks
-            })
-        }
-        return @($candidates | Sort-Object -Property last_write_utc_ticks -Descending | Select-Object -First 1)
-    } catch {
-        return $null
-    }
-}
-
-function Get-HiaCrashRecoveryDecision {
-    param(
-        [Parameter(Mandatory = $true)][int]$ExitCode,
-        [Parameter(Mandatory = $true)][bool]$FocusVerified,
-        [Parameter(Mandatory = $true)][bool]$ThreadIdle,
-        [ValidateRange(0, 1000)][int]$ConsecutiveCrashCount = 0,
-        [ValidateRange(0, 1000)][int]$AutomaticRestartCount = 0,
-        [ValidateRange(1, 1000)][int]$MaxConsecutiveCrashes = 3,
-        [ValidateRange(1, 1000)][int]$MaxAutomaticRestarts = 6
-    )
-
-    if ($ExitCode -eq 0) {
-        return [pscustomobject]@{ recover = $false; reason = 'normal_exit' }
-    }
-    if (-not $FocusVerified) {
-        return [pscustomobject]@{ recover = $false; reason = 'focus_not_verified' }
-    }
-    if (-not $ThreadIdle) {
-        return [pscustomobject]@{ recover = $false; reason = 'thread_not_idle' }
-    }
-    if (
-        $ConsecutiveCrashCount -gt $MaxConsecutiveCrashes -or
-        $AutomaticRestartCount -ge $MaxAutomaticRestarts
-    ) {
-        return [pscustomobject]@{ recover = $false; reason = 'bounded_limit' }
-    }
-    return [pscustomobject]@{ recover = $true; reason = 'recover' }
-}
-
-function Get-HiaLatestLauncherCrashHip {
-    param(
-        [Parameter(Mandatory = $true)][string]$TempDirectory,
-        [Parameter(Mandatory = $true)][int]$HoudiniProcessId,
-        [Parameter(Mandatory = $true)][long]$StartedAtUtcTicks,
-        [Parameter(Mandatory = $true)][long]$EndedAtUtcTicks
-    )
-
-    if (
-        $HoudiniProcessId -le 0 -or
-        $StartedAtUtcTicks -le 0 -or
-        $EndedAtUtcTicks -lt $StartedAtUtcTicks -or
-        -not (Test-Path -LiteralPath $TempDirectory -PathType Container)
-    ) {
-        return $null
-    }
-    try {
-        $directory = Get-Item -LiteralPath $TempDirectory -Force -ErrorAction Stop
-        if (
-            $directory.Name -ne 'tmp' -or
-            $directory.Parent.Name -notmatch '^[0-9a-fA-F]{32}$' -or
-            $directory.Parent.Parent.Name -ne 'launcher-sessions' -or
-            ([int]$directory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
-        ) {
-            return $null
-        }
-        $earliest = $StartedAtUtcTicks - [TimeSpan]::FromSeconds(5).Ticks
-        $latest = $EndedAtUtcTicks + [TimeSpan]::FromSeconds(60).Ticks
-        $namePattern = '(?i)^crash\..+_' + [regex]::Escape([string]$HoudiniProcessId) + '\.hip(?:lc|nc)?$'
-        $candidates = [System.Collections.Generic.List[object]]::new()
-        foreach ($file in @($directory.GetFiles())) {
-            $ticks = [long]$file.LastWriteTimeUtc.Ticks
-            if (
-                ([int]$file.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                [long]$file.Length -le 0 -or
-                $file.Name -notmatch $namePattern -or
-                $ticks -lt $earliest -or
-                $ticks -gt $latest
-            ) {
-                continue
-            }
-            $candidates.Add([pscustomobject]@{
-                path = $file.FullName
-                last_write_utc_ticks = $ticks
-                houdini_process_id = $HoudiniProcessId
-            })
-        }
-        return @(
-            $candidates |
-                Sort-Object -Property last_write_utc_ticks -Descending |
-                Select-Object -First 1
-        )
-    } catch {
-        return $null
-    }
-}
-
-function Copy-HiaLauncherRecoveryHip {
-    param(
-        [Parameter(Mandatory = $true)][string]$SessionRoot,
-        [Parameter(Mandatory = $true)][string]$SourcePath,
-        [Parameter(Mandatory = $true)][ValidateRange(1, 99)][int]$Attempt,
-        [AllowEmptyString()][string]$ThreadId = '',
-        [AllowEmptyString()][string]$GoalBinding = ''
-    )
-
-    $session = Get-Item -LiteralPath $SessionRoot -Force -ErrorAction Stop
-    if (
-        $session -isnot [System.IO.DirectoryInfo] -or
-        $session.Name -notmatch '^[0-9a-fA-F]{32}$' -or
-        $session.Parent.Name -ne 'launcher-sessions' -or
-        ([int]$session.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        ([int]$session.Parent.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
-    ) {
-        throw 'Recovery requires an ordinary launcher session directory.'
-    }
-    $source = Get-Item -LiteralPath $SourcePath -Force -ErrorAction Stop
-    $checkpoints = Join-Path $session.FullName 'checkpoints'
-    $temp = Join-Path $session.FullName 'tmp'
-    $sourceParent = $source.Directory.FullName.TrimEnd('\')
-    $sourceIsSessionLocal = (
-        [System.StringComparer]::OrdinalIgnoreCase.Equals(
-            $sourceParent,
-            $checkpoints.TrimEnd('\')
-        ) -or
-        [System.StringComparer]::OrdinalIgnoreCase.Equals(
-            $sourceParent,
-            $temp.TrimEnd('\')
-        )
-    )
-    if (-not $sourceIsSessionLocal) {
-        if (
-            $ThreadId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$' -or
-            $GoalBinding -notmatch '^[0-9a-f]{64}$'
-        ) {
-            throw 'External recovery requires the exact active Thread and Goal binding.'
-        }
-        $validatedCheckpoint = Get-HiaLatestLauncherCheckpoint `
-            -CheckpointDirectory $checkpoints `
-            -ThreadId $ThreadId `
-            -GoalBinding $GoalBinding
-        if (
-            $null -eq $validatedCheckpoint -or
-            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                [string]$validatedCheckpoint.path,
-                $source.FullName
-            ) -or
-            -not [System.StringComparer]::Ordinal.Equals(
-                [string]$validatedCheckpoint.storage_scope,
-                'hip'
-            )
-        ) {
-            throw 'External recovery source is not bound to this launcher session checkpoint marker.'
-        }
-    }
-    if (
-        $source -isnot [System.IO.FileInfo] -or
-        ([int]$source.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        [long]$source.Length -le 0 -or
-        (-not $sourceIsSessionLocal -and $null -eq $validatedCheckpoint)
-    ) {
-        throw 'Recovery source must be an ordinary session HIP or a validated HIP-local checkpoint.'
-    }
-    $suffixMatch = [regex]::Match(
-        $source.Name,
-        '(\.hip(?:lc|nc)?(?:_bak\d*)?)$',
-        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-    )
-    if (-not $suffixMatch.Success) {
-        throw 'Recovery source is not a supported Houdini HIP file.'
-    }
-    $recoveryDirectory = Join-Path $session.FullName 'recovery'
-    [System.IO.Directory]::CreateDirectory($recoveryDirectory) | Out-Null
-    $recoveryItem = Get-Item -LiteralPath $recoveryDirectory -Force -ErrorAction Stop
-    if (
-        ([int]$recoveryItem.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
-    ) {
-        throw 'Recovery destination is a reparse point.'
-    }
-    $destination = Join-Path $recoveryDirectory (
-        'recovery-{0}-{1}{2}' -f `
-            $Attempt,
-            [Guid]::NewGuid().ToString('N').Substring(0, 16),
-            [string]$suffixMatch.Groups[1].Value
-    )
-    [System.IO.File]::Copy($source.FullName, $destination, $false)
-    return [pscustomobject]@{
-        path = $destination
-        source_path = $source.FullName
-    }
-}
-
-function Get-HiaRecoverableLauncherSession {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
-
-    $suppliedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
-    $root = Get-HiaProjectRoot -StartingPath $suppliedRoot
-    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($suppliedRoot, $root)) {
-        throw 'Recovery discovery requires the exact launcher project root.'
-    }
-    $sessionsRoot = Join-Path $root '.runtime\launcher-sessions'
-    if (-not (Test-Path -LiteralPath $sessionsRoot -PathType Container)) { return $null }
-
-    try {
-        foreach ($pathToCheck in @($root, (Join-Path $root '.runtime'), $sessionsRoot)) {
-            $item = Get-Item -LiteralPath $pathToCheck -Force -ErrorAction Stop
-            if (([int]$item.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                return $null
-            }
-        }
-        $sessionsDirectory = Get-Item -LiteralPath $sessionsRoot -Force -ErrorAction Stop
-        $recoverable = [System.Collections.Generic.List[object]]::new()
-        foreach ($sessionDirectory in @($sessionsDirectory.GetDirectories())) {
-            if (
-                $sessionDirectory.Name -notmatch '^[0-9a-fA-F]{32}$' -or
-                ([int]$sessionDirectory.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0
-            ) {
-                continue
-            }
-            $manifestPath = Join-Path $sessionDirectory.FullName 'session.json'
-            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { continue }
-            $manifestFile = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
-            if (
-                $null -eq $manifestFile -or
-                ([int]$manifestFile.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                [long]$manifestFile.Length -gt 65536
-            ) {
-                continue
-            }
-            try {
-                $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
-            } catch {
-                continue
-            }
-            $idProperty = $manifest.PSObject.Properties['session_id']
-            if (
-                $null -eq $idProperty -or
-                -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
-                    [string]$idProperty.Value,
-                    $sessionDirectory.Name
-                )
-            ) {
-                continue
-            }
-            $decisionProperty = $manifest.PSObject.Properties['recovery_decision']
-            if ($null -ne $decisionProperty -and -not [string]::IsNullOrWhiteSpace([string]$decisionProperty.Value)) {
-                continue
-            }
-            $stateProperty = $manifest.PSObject.Properties['state']
-            $state = if ($null -eq $stateProperty) { '' } else { [string]$stateProperty.Value }
-            $exitProperty = $manifest.PSObject.Properties['process_exit_code']
-            $exitKnown = ($null -ne $exitProperty -and $null -ne $exitProperty.Value)
-            try { $exitCode = if ($exitKnown) { [int]$exitProperty.Value } else { $null } } catch { continue }
-            if ($state -eq 'completed' -or ($exitKnown -and $exitCode -eq 0)) { continue }
-            if ($state -notin @('starting', 'running', 'abnormal_exit', 'launch_failed') -and -not ($exitKnown -and $exitCode -ne 0)) {
-                continue
-            }
-            if ($state -in @('starting', 'running')) {
-                $recordedProcessIsActive = $false
-                foreach ($processField in @('launcher_process_id', 'houdini_process_id')) {
-                    $processProperty = $manifest.PSObject.Properties[$processField]
-                    if ($null -eq $processProperty -or $null -eq $processProperty.Value) { continue }
-                    try {
-                        $recordedProcess = Get-Process -Id ([int]$processProperty.Value) -ErrorAction Stop
-                        if (-not $recordedProcess.HasExited) {
-                            $recordedProcessIsActive = $true
-                            break
-                        }
-                    } catch { }
-                }
-                if ($recordedProcessIsActive) { continue }
-            }
-            $checkpoint = Get-HiaLatestLauncherCheckpoint `
-                -CheckpointDirectory (Join-Path $sessionDirectory.FullName 'checkpoints')
-            if ($null -eq $checkpoint) { continue }
-
-            $recoverable.Add([pscustomobject]@{
-                session_id = $sessionDirectory.Name
-                checkpoint_path = [string]$checkpoint.path
-                checkpoint_last_write_utc_ticks = [long]$checkpoint.last_write_utc_ticks
-            })
-        }
-        return @(
-            $recoverable |
-                Sort-Object -Property checkpoint_last_write_utc_ticks -Descending |
-                Select-Object -First 1
-        )
-    } catch {
-        return $null
-    }
-}
-
-function Set-HiaLauncherRecoveryDecision {
-    param(
-        [Parameter(Mandatory = $true)][string]$ProjectRoot,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{32}$')][string]$SessionId,
-        [Parameter(Mandatory = $true)][ValidateSet('recover', 'normal')][string]$Decision
-    )
-
-    $suppliedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
-    $root = Get-HiaProjectRoot -StartingPath $suppliedRoot
-    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($suppliedRoot, $root)) {
-        throw 'Recovery decision requires the exact launcher project root.'
-    }
-    $runtimeRoot = Join-Path $root '.runtime'
-    $sessionsRoot = Join-Path $runtimeRoot 'launcher-sessions'
-    $sessionRoot = Join-Path $sessionsRoot $SessionId
-    $manifestPath = Join-Path $sessionRoot 'session.json'
-    foreach ($pathToCheck in @($root, $runtimeRoot, $sessionsRoot, $sessionRoot, $manifestPath)) {
-        $item = Get-Item -LiteralPath $pathToCheck -Force -ErrorAction Stop
-        if (([int]$item.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'Recovery decision path contains a reparse point.'
-        }
-    }
-    $manifestFile = Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
-    if ([long]$manifestFile.Length -gt 65536) { throw 'Recovery session manifest is too large.' }
-    $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
-    $idProperty = $manifest.PSObject.Properties['session_id']
-    if (
-        $null -eq $idProperty -or
-        -not [System.StringComparer]::OrdinalIgnoreCase.Equals([string]$idProperty.Value, $SessionId)
-    ) {
-        throw 'Recovery session manifest identity does not match its directory.'
-    }
-
-    $allowedFields = @(
-        'schema_version',
-        'session_id',
-        'state',
-        'selected_houdini',
-        'hip_path',
-        'started_at_utc',
-        'ended_at_utc',
-        'process_exit_code',
-        'latest_checkpoint',
-        'launcher_process_id',
-        'houdini_process_id'
-    )
-    $updated = [ordered]@{}
-    foreach ($field in $allowedFields) {
-        $property = $manifest.PSObject.Properties[$field]
-        if ($null -ne $property) { $updated[$field] = $property.Value }
-    }
-    $updated['recovery_decision'] = $Decision
-    $json = ConvertTo-HiaRedactedJson -Value $updated -Depth 4
-    [System.IO.File]::WriteAllText(
-        $manifestPath,
-        $json + [Environment]::NewLine,
-        [System.Text.UTF8Encoding]::new($false)
-    )
-    return $manifestPath
-}
-
 function Read-HiaLauncherSettings {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
@@ -3749,10 +3156,8 @@ Export-ModuleMember -Function @(
     'ConvertTo-HiaProcessArgument',
     'ConvertTo-HiaRedactedJson',
     'ConvertTo-HiaRedactedText',
-    'Copy-HiaLauncherRecoveryHip',
     'Get-HiaBridgePythonCandidates',
     'Get-HiaCodexLoginCommand',
-    'Get-HiaCrashRecoveryDecision',
     'Get-HiaEmbeddingCheckResult',
     'Get-HiaEmbeddingContractData',
     'Get-HiaEmbeddingDeviceChoices',
@@ -3761,8 +3166,6 @@ Export-ModuleMember -Function @(
     'Get-HiaEmbeddingProfileContract',
     'Get-HiaEmbeddingRuntimeState',
     'Get-HiaHoudiniCandidates',
-    'Get-HiaLatestLauncherCheckpoint',
-    'Get-HiaLatestLauncherCrashHip',
     'Get-HiaManagedBridgePythonPath',
     'Get-HiaManagedBridgePythonState',
     'Get-HiaMcpBackendChoices',
@@ -3770,7 +3173,6 @@ Export-ModuleMember -Function @(
     'Get-HiaPinnedCodexExecutable',
     'Get-HiaProjectRoot',
     'Get-HiaProbePayload',
-    'Get-HiaRecoverableLauncherSession',
     'Invoke-HiaScreenshotCacheCleanup',
     'Invoke-HiaPreflight',
     'Invoke-HiaProcess',
@@ -3784,7 +3186,6 @@ Export-ModuleMember -Function @(
     'Resolve-HiaEmbeddingProfile',
     'Resolve-HiaManagedBridgePython',
     'Resolve-HiaMcpBackend',
-    'Set-HiaLauncherRecoveryDecision',
     'Test-HiaHoudiniProbeConsistency',
     'Test-HiaLoopbackPorts',
     'Test-HiaRuntimeWritable',

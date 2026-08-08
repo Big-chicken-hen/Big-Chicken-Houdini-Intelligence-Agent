@@ -4,6 +4,10 @@
 
 The product is a Codex client embedded in a Houdini Python Panel. Codex is the only reasoning, planning, and content-generation component; the surrounding code transports requests, displays state, executes deterministic Houdini operations, and may run an optional project-local Qwen text encoder for retrieval only.
 
+The runtime has one task path: an ordinary Codex Thread selected in the Panel, through the local Bridge, to the selected Houdini backend. It has no fixed role roster, project registry, project lifecycle, project attachments, or project-specific HTTP surface. Existing legacy project-team files under `.runtime` are ignored and are never migrated or deleted automatically.
+
+The experimental fixed five-role project-team mode was removed before v0.2.0 because it destabilized ordinary operation and had not completed embedded Houdini acceptance.
+
 ```text
 User → Houdini Panel → local Bridge → Codex app-server
      → one selected live backend
@@ -17,7 +21,7 @@ The Panel sends text, local reference images, and optional selection context. Th
 
 Local HTTP services bind only to `127.0.0.1` and use a fresh random token for each launcher session.
 
-HIA MCP V2 exposes 18 tools. `hia_run_effect_experiment` is the only bounded baseline/candidate comparison executor; it temporarily applies scalar parameter deltas, advances/captures a short sequence, and returns factual evidence without scoring or creating an EffectSpec. `hia_local_help_search` preserves its lexical call shape while adding optional `lexical`, `vector`, and default `hybrid` retrieval. `hia_project_memory` is the only durable memory tool: only explicit `record`, `supersede`, and `delete` actions mutate memory; `search` and `list` are read-only. Supported memory types are `decision`, `preference`, `asset`, `lesson`, and `workflow`. Chat history, compaction events, and diagnostics are never copied into memory automatically.
+HIA MCP V2 exposes 17 tools. `hia_execute_hom` accepts only a script and optional wait budget, runs once inside an ordinary Houdini Undo group, and returns direct execution facts. Diff, validation, and viewport evidence are requested independently. `hia_local_help_search` preserves its lexical call shape while adding explicit `lexical`, `vector`, and `hybrid` retrieval; vector-dependent modes report an unavailable encoder instead of silently changing modes. `hia_project_memory` is the only durable memory tool: only explicit `record`, `supersede`, and `delete` actions mutate memory; `search` and `list` are read-only. Supported memory types are `decision`, `preference`, `asset`, `lesson`, and `workflow`. Chat history, compaction events, and diagnostics are never copied into memory automatically.
 
 The Panel's Knowledge and Memory page uses two separate, thin control paths:
 
@@ -43,7 +47,7 @@ Creation and modification requests target the currently open scene by default. N
 
 ## Runtime cache and final outputs
 
-AI previews, attachments, temporary files, and diagnostics remain under the project-local `.runtime/cache`, `.runtime/attachments`, or `.runtime/diagnostics` directories. HIA viewport/flipbook captures and AI Goal stage checkpoints are the narrow exception: each call re-reads the current HIP and, when it is a real saved file under an ordinary writable parent, uses `<hip-parent>/.hia/screenshots` or `<hip-parent>/.hia/checkpoints`. Untitled or unsafe scenes fall back to `.runtime/cache/screenshots` and the current `.runtime/launcher-sessions/<id>/checkpoints`. The launcher passes `HIA_RENDER_OUTPUT_DIR` to the Bridge, Codex app-server, selected MCP child, and Houdini; it defaults to `<project-root>/.runtime/cache` when the user has not selected a final-output directory.
+AI previews, attachments, temporary files, diagnostics, and HIA viewport/flipbook captures remain under the project-local `.runtime/cache`, `.runtime/attachments`, or `.runtime/diagnostics` directories; captures use `.runtime/cache/screenshots`. HIA does not create or automatically open scene-recovery copies. The launcher passes `HIA_RENDER_OUTPUT_DIR` to the Bridge, Codex app-server, selected MCP child, and Houdini; it defaults to `<project-root>/.runtime/cache` when the user has not selected a final-output directory.
 
 The local knowledge database, indexed bodies, vectors, model files, managed
 CPython base, uv, and caches remain below `.runtime`. The one user-visible
@@ -51,7 +55,7 @@ Bridge/local-knowledge/encoder environment is `<project-root>/.venv`. Both
 `.runtime` and `.venv` are ignored by Git and excluded from every Release
 archive.
 
-A user-explicit final render, EXR, video, USD, simulation cache, or export may use an ordinary local directory outside the plugin repository. That output remains separate from both the HIP-local `.hia` automatic artifacts and project cache. The completed operation reports the actual final output path.
+A user-explicit final render, EXR, video, USD, simulation cache, or export may use an ordinary local directory outside the plugin repository. That output remains separate from the project cache. The completed operation reports the actual final output path.
 
 Cache deletion is implemented only by the project-relative
 `scripts/hia-cache.ps1` command. The WPF **清理缓存** page calls that command and
@@ -59,7 +63,7 @@ does not own another deletion path. The fixed category allowlist is:
 
 | Category | Exact project-relative root | Special boundary |
 |---|---|---|
-| `screenshots` | `.runtime/cache/screenshots` | unsaved/unsafe HIP fallback screenshots only |
+| `screenshots` | `.runtime/cache/screenshots` | all HIA viewport/flipbook captures |
 | `previews` | `.runtime/cache/previews` | managed previews only |
 | `tmp` | `.runtime/cache/tmp` | managed short-lived files only |
 | `embedding-runtime` | `.runtime/cache/embedding` | excludes child `huggingface` |
@@ -83,7 +87,7 @@ or wildcard deletion. Any reparse point, path escape, changed snapshot, unsafe
 entry, or project-external target is rejected. The allowlist cannot reach
 `.runtime/knowledge`, `.runtime/models`, `.runtime/toolchains`,
 `.runtime/attachments`, `.runtime/launcher-sessions`, Codex Home/Threads,
-checkpoints, HIP files, `.runtime/cache/renders`,
+HIP files, `.runtime/cache/renders`,
 `.runtime/cache/research`, or a user-selected final-output directory.
 It also never discovers or clears HIP-local `.hia` directories.
 
@@ -119,10 +123,10 @@ It is not an MCP tool or resident service.
 Search, source import, rescan, and index status never trigger a dependency or
 model download. Only an explicit environment or embedding installation action
 may download. Missing dependencies, missing or damaged weights, load failure,
-driver mismatch, and GPU/CPU memory failure cause an explicit fallback to an
-already installed compatible profile when allowed, then a hard fallback to
-FTS5. There is no quantization framework, reranker, third model, watcher,
-scheduler, or second Agent.
+driver mismatch, and GPU/CPU memory failure make the selected vector/hybrid
+request fail explicitly. Another installed profile or lexical mode is used only
+after an explicit user selection. There is no quantization framework, reranker,
+third model, watcher, scheduler, or second Agent.
 
 ## CLI-first local knowledge and environment
 
@@ -193,10 +197,10 @@ a model implicitly. First-time optional embedding installation remains an
 explicit action through `scripts/launcher/Install-HiaEmbedding.ps1`.
 `auto` does not mark a CUDA configuration usable until the installed
 project-local PyTorch probe succeeds and returns a device name. NVIDIA
-driver/runtime mismatch therefore falls back to CPU embedding or FTS5; AMD,
-integrated-graphics, no-discrete-GPU, and CPU-only hosts never become false
-CUDA-ready states. CPU embedding trades indexing/query speed for semantic
-retrieval; FTS5 remains the smallest, download-free lexical baseline.
+driver/runtime mismatch, AMD, integrated graphics, no discrete GPU, and CPU-only
+hosts never become false CUDA-ready states. The selected encoder/device remains
+unavailable until the user explicitly chooses a usable installed profile/device;
+lexical mode remains a separate download-free choice.
 
 Default paths are re-derived from the current script/repository location after a
 project move. Profile and device choices are portable project settings rather
@@ -245,9 +249,9 @@ Reserved launcher settings in `.runtime/launcher/settings.json` are `embedding_p
 - `HIA_EMBEDDING_MODEL_DIR_QWEN3_0_6B` and `HIA_EMBEDDING_MODEL_REVISION_QWEN3_0_6B`;
 - `HIA_EMBEDDING_MODEL_DIR_QWEN3_8B` and `HIA_EMBEDDING_MODEL_REVISION_QWEN3_8B`.
 
-The launcher derives these environment variables from its contract-backed selection; `HIA_EMBEDDING_DIM` remains the explicit advanced dimension override, and search/import remains download-free. The public health/degradation payload uses `contract_version`, `status`, `installed`, `ready`, `degraded`, `requested_profile`, `active_profile`, `model_id`, `model_revision`, `dim`, `normalized`, `initialized`, `loaded`, `fallback_reason`, and `repair`. Stable status values are `disabled`, `missing`, `installed`, `configured`, `loading`, `ready`, `degraded`, and `error`.
+The launcher derives these environment variables from its contract-backed selection; `HIA_EMBEDDING_DIM` remains the explicit advanced dimension override, and search/import remains download-free. The public health payload uses `contract_version`, `status`, `installed`, `ready`, `requested_profile`, `active_profile`, `model_id`, `model_revision`, `model_path`, `python_path`, `venv_path`, `device`, `cuda_available`, `dim`, `normalized`, `initialized`, `loaded`, and `repair`. Stable status values are `disabled`, `missing`, `installed`, `configured`, `loading`, `ready`, and `error`.
 
-`installed` describes the active profile's project-local toolchain/model artifacts, not whether the originally requested profile exists or whether a model has loaded. `ready` means the active worker has initialized and loaded the exact revision/dimension. `degraded` means the requested profile or vector path was not used; `fallback_reason` explains why. Runtime `repair` identifies the affected profile/model and its configuration environment names without downloading anything; the canonical `install`, `repair`, and `repair_toolchain` action mapping lives in `launcher_contract()["repair_actions"]`, while exact expected paths come from `runtime_layout(project_root)`. Runtime `model_id` is the revision-qualified vector identity `<repository_model_id>@<revision>` and `model_revision` is also returned separately; profile-registry `model_id` remains the plain Hugging Face repository ID. A launcher integration must show the requested profile separately from the active fallback and must never claim 8B ready merely because files exist.
+`installed` describes whether the selected profile's exact project-local toolchain/model artifacts exist, not whether a model has loaded. `ready` means the selected worker has initialized and loaded that exact revision/dimension. A missing, damaged, or unloadable selected profile is an explicit unavailable/error result: the runtime never switches to another profile and never reports a degraded success. Runtime `repair` identifies the selected profile/model and its configuration environment names without downloading anything; the canonical `install`, `repair`, and `repair_toolchain` action mapping lives in `launcher_contract()["repair_actions"]`, while exact expected paths come from `runtime_layout(project_root)`. Runtime `model_id` is the revision-qualified vector identity `<repository_model_id>@<revision>` and `model_revision` is also returned separately; profile-registry `model_id` remains the plain Hugging Face repository ID. A launcher integration must require the selected profile and must never claim 8B ready merely because some other model's files exist.
 
 Official sources: [Qwen3-Embedding-0.6B model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B), [0.6B files](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/tree/main), [Qwen3-Embedding-8B model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B), and [8B files](https://huggingface.co/Qwen/Qwen3-Embedding-8B/tree/main).
 

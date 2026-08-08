@@ -411,8 +411,7 @@ def _status_details(
             "model_revision": "",
             "dim": 0,
             "normalized": False,
-            "degraded": True,
-            "fallback_reason": "KNOWLEDGE_INDEX_NOT_INITIALIZED",
+            "error": "KNOWLEDGE_INDEX_NOT_INITIALIZED",
             "repair": {"action": "sources.refresh_or_build"},
             "complete": False,
             "partial": False,
@@ -506,7 +505,6 @@ def _status_details(
     )
     installed = raw_runtime.get("installed")
     ready = raw_runtime.get("ready")
-    degraded = raw_runtime.get("degraded")
     runtime_status = str(
         raw_runtime.get("status")
         or (index_status.get("status") if store is not None else "")
@@ -522,29 +520,15 @@ def _status_details(
         "status": runtime_status,
         "installed": installed if isinstance(installed, bool) else False,
         "ready": ready if isinstance(ready, bool) else False,
-        "degraded": (
-            degraded
-            if isinstance(degraded, bool)
-            else bool(store is not None and index_status.get("degraded", False))
-        ),
         "device": device,
         "cuda_available": cuda_available,
         "cuda_status": (
             "reported" if cuda_available is not None else "not_reported"
         ),
-        "fallback_reason": str(
-            raw_runtime.get("fallback_reason")
-            or (
-                index_status.get("fallback_reason")
-                if store is not None
-                else ""
-            )
-            or (
-                "EMBEDDING_RUNTIME_PATH_INVALID"
-                if not python_path_valid or not model_path_valid
-                else ""
-            )
-            or ""
+        "error": (
+            "EMBEDDING_RUNTIME_PATH_INVALID"
+            if not python_path_valid or not model_path_valid
+            else str(raw_runtime.get("error") or "")
         ),
     }
     runtime = {

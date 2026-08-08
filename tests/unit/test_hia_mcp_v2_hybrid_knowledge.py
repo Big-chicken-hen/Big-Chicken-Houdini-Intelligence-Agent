@@ -24,6 +24,7 @@ sys.path.insert(0, str(RUNTIME_PACKAGE_ROOT))
 from hia_mcp_runtime.executor import HoudiniExecutor  # noqa: E402
 from hia_mcp_runtime import hybrid_knowledge as hybrid_module  # noqa: E402
 from hia_mcp_runtime.hybrid_knowledge import (  # noqa: E402
+    HybridKnowledgeError,
     HybridKnowledgeStore,
 )
 from hia_mcp_runtime.knowledge_index import (  # noqa: E402
@@ -330,52 +331,90 @@ class HybridKnowledgeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._temporary.cleanup()
 
-    def test_default_hybrid_without_model_preserves_lexical_results(self) -> None:
+    def test_lexical_mode_is_explicit_and_never_reports_fallback(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)
         _seed_document(
             index,
-            source_key="fallback",
-            title="Fallback workflow",
-            bodies=("lexical fallback needle remains searchable",),
+            source_key="lexical-only",
+            title="Lexical only",
+            bodies=("strict lexical needle",),
         )
-        embedder = FakeEmbedder(available=False)
         store = HybridKnowledgeStore(
             self.project_root,
             index=index,
-            embedder=embedder,
-        )
-        lexical = index.search(
-            "fallback needle",
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
+            embedder=FakeEmbedder(available=False),
         )
 
         result = store.search_many(
-            ("fallback needle",),
+            ("strict lexical needle",),
             {"user"},
             current_houdini_version="21.0",
             offset=0,
             limit=10,
+            mode="lexical",
         )[0]
 
-        self.assertEqual(
-            [
-                {**match, "source_kind": "user_document"}
-                for match in lexical["matches"]
-            ],
-            result["matches"],
-        )
-        self.assertEqual(lexical["total"], result["total"])
-        self.assertEqual(lexical["tokenizer"], result["tokenizer"])
-        self.assertEqual("hybrid", result["retrieval"]["requested_mode"])
+        self.assertTrue(result["matches"])
         self.assertEqual("lexical", result["retrieval"]["mode_used"])
-        self.assertFalse(result["retrieval"]["vector"]["available"])
-        self.assertIn(
-            "No installed local embedding model",
-            result["retrieval"]["fallback_reason"],
+        self.assertNotIn("fallback_reason", result["retrieval"])
+        self.assertEqual("not_requested", result["retrieval"]["encoder"]["status"])
+
+    def test_hybrid_without_encoder_returns_an_explicit_error(self) -> None:
+        index = LocalKnowledgeIndex(self.project_root)
+        _seed_document(
+            index,
+            source_key="strict-hybrid",
+            title="Strict hybrid",
+            bodies=("strict hybrid needle",),
         )
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=FakeEmbedder(available=False),
+        )
+
+        with self.assertRaisesRegex(
+            HybridKnowledgeError,
+            "requires an available vector encoder",
+        ):
+            store.search_many(
+                ("strict hybrid needle",),
+                {"user"},
+                current_houdini_version="21.0",
+                offset=0,
+                limit=10,
+                mode="hybrid",
+            )
+
+    def test_requested_profile_mismatch_returns_an_explicit_error(self) -> None:
+        index = LocalKnowledgeIndex(self.project_root)
+        _seed_document(
+            index,
+            source_key="strict-profile",
+            title="Strict profile",
+            bodies=("strict profile needle",),
+        )
+        store = HybridKnowledgeStore(
+            self.project_root,
+            index=index,
+            embedder=FakeEmbedder(
+                requested_profile="qwen3-embedding-8b",
+                active_profile="qwen3-embedding-0.6b",
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            HybridKnowledgeError,
+            "did not activate the requested profile",
+        ):
+            store.search_many(
+                ("strict profile needle",),
+                {"user"},
+                current_houdini_version="21.0",
+                offset=0,
+                limit=10,
+                mode="vector",
+            )
 
     def test_chunk_hash_incremental_vector_sync_reencodes_only_change(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)
@@ -590,6 +629,11 @@ class HybridKnowledgeTests(unittest.TestCase):
                 "complete": False,
                 "partial": True,
                 "signature_compatible": True,
+                "database_signature": (
+                    "qwen3-embedding-0.6b|Qwen/Qwen3-Embedding-0.6B|"
+                    "fake-revision-1|32|normalized=1"
+                ),
+                "current_model_signature_match": True,
                 "vector_chunks": 32,
                 "total_chunks": total_chunks,
                 "pending_chunks": total_chunks - 32,
@@ -627,6 +671,11 @@ class HybridKnowledgeTests(unittest.TestCase):
                 "complete": False,
                 "partial": True,
                 "signature_compatible": True,
+                "database_signature": (
+                    "qwen3-embedding-0.6b|Qwen/Qwen3-Embedding-0.6B|"
+                    "fake-revision-1|32|normalized=1"
+                ),
+                "current_model_signature_match": True,
                 "vector_chunks": 40,
                 "total_chunks": total_chunks,
                 "pending_chunks": total_chunks - 40,
@@ -638,138 +687,6 @@ class HybridKnowledgeTests(unittest.TestCase):
                 ),
             },
             second_progress,
-        )
-
-    def test_partial_index_uses_relaxed_lexical_candidates_only(self) -> None:
-        index = LocalKnowledgeIndex(self.project_root)
-        biased_body = "legacy CHOP Warp operator"
-        biased_document_id = _seed_document(
-            index,
-            source_key="biased-chop",
-            title="CHOP Warp",
-            bodies=(biased_body,),
-        )
-        _seed_document(
-            index,
-            source_key="ripple-target",
-            title="Ripple Solver",
-            bodies=("ripple lexical candidate",),
-        )
-        _seed_document(
-            index,
-            source_key="rbd-material-fracture",
-            title="RBD Material Fracture",
-            bodies=(
-                "Prepare a concrete wall with the fracture SOP, add interior "
-                "detail, and configure constraint geometry.",
-            ),
-        )
-        _seed_document(
-            index,
-            source_key="pending-filler",
-            title="Pending filler",
-            bodies=("unrelated pending document",),
-        )
-        semantic_query = "velocity advected field"
-        embedder = MappedEmbedder(
-            {
-                biased_body: 0,
-                semantic_query: 0,
-            }
-        )
-        store = HybridKnowledgeStore(
-            self.project_root,
-            index=index,
-            embedder=embedder,
-        )
-        store._vectorize_documents((biased_document_id,))  # noqa: SLF001
-
-        long_query = (
-            "RBD Material Fracture SOP concrete wall constraints "
-            "interior detail workflow"
-        )
-        relaxed_candidate = store.search_many(
-            (long_query,),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-            mode="hybrid",
-        )[0]
-        self.assertEqual(
-            {"rbd-material-fracture"},
-            {
-                match["metadata"]["source_key"]
-                for match in relaxed_candidate["matches"]
-            },
-        )
-        relaxed_index = relaxed_candidate["retrieval"]["vector"]["index"]
-        self.assertFalse(relaxed_index["complete"])
-        self.assertTrue(relaxed_index["partial"])
-        self.assertEqual(
-            "lexical_candidates",
-            relaxed_index["ranking_scope"],
-        )
-
-        lexical_candidate = store.search_many(
-            ("ripple",),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-            mode="hybrid",
-        )[0]
-        self.assertEqual(
-            {"ripple-target"},
-            {
-                match["metadata"]["source_key"]
-                for match in lexical_candidate["matches"]
-            },
-        )
-        candidate_index = lexical_candidate["retrieval"]["vector"]["index"]
-        self.assertFalse(candidate_index["complete"])
-        self.assertEqual(
-            "lexical_candidates",
-            candidate_index["ranking_scope"],
-        )
-
-        no_candidate = store.search_many(
-            (semantic_query,),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-            mode="vector",
-        )[0]
-        self.assertEqual([], no_candidate["matches"])
-        self.assertEqual("lexical", no_candidate["retrieval"]["mode_used"])
-        self.assertEqual(
-            "none",
-            no_candidate["retrieval"]["vector"]["index"]["ranking_scope"],
-        )
-        self.assertEqual(
-            hybrid_module.PARTIAL_NO_CANDIDATES_REASON,
-            no_candidate["retrieval"]["fallback_reason"],
-        )
-
-        completed = _build_all_vectors(store)
-        self.assertTrue(completed["complete"])
-        global_result = store.search_many(
-            (semantic_query,),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-            mode="vector",
-        )[0]
-        self.assertEqual("vector", global_result["retrieval"]["mode_used"])
-        self.assertEqual(
-            "global",
-            global_result["retrieval"]["vector"]["index"]["ranking_scope"],
-        )
-        self.assertEqual(
-            "biased-chop",
-            global_result["matches"][0]["metadata"]["source_key"],
         )
 
     def test_partial_multi_query_ranking_keeps_candidate_sets_isolated(
@@ -1033,47 +950,6 @@ class HybridKnowledgeTests(unittest.TestCase):
             "cloth-workflow",
             match["metadata"]["canonical_id"],
         )
-
-    def test_lexical_fallback_keeps_corpus_available_without_encoder(self) -> None:
-        index = LocalKnowledgeIndex(self.project_root)
-        _seed_document(
-            index,
-            source_key="lexical-status",
-            title="Lexical status",
-            bodies=("LexicalStatusNeedle remains searchable through FTS5",),
-        )
-        store = HybridKnowledgeStore(
-            self.project_root,
-            index=index,
-            embedder=FakeEmbedder(available=False),
-        )
-
-        lexical = store.search_many(
-            ("LexicalStatusNeedle",),
-            {"user"},
-            current_houdini_version="21.0.440",
-            offset=0,
-            limit=10,
-            mode="lexical",
-        )[0]["retrieval"]
-        self.assertTrue(lexical["lexical"]["available"])
-        self.assertTrue(lexical["corpus"]["available"])
-        self.assertEqual("ready", lexical["corpus"]["state"])
-        self.assertFalse(lexical["encoder"]["loaded"])
-        self.assertFalse(lexical["vector"]["available"])
-
-        degraded = store.search_many(
-            ("LexicalStatusNeedle",),
-            {"user"},
-            current_houdini_version="21.0.440",
-            offset=0,
-            limit=10,
-            mode="hybrid",
-        )[0]["retrieval"]
-        self.assertEqual("lexical", degraded["mode_used"])
-        self.assertTrue(degraded["corpus"]["available"])
-        self.assertEqual("ready", degraded["corpus"]["state"])
-        self.assertFalse(degraded["vector"]["available"])
 
     def test_complete_vector_search_honors_builtin_identity_filters(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)
@@ -1369,267 +1245,6 @@ class HybridKnowledgeTests(unittest.TestCase):
                 for row in vectors_after
             )
         )
-
-    def test_default_search_is_read_only_across_revision_and_backlog(
-        self,
-    ) -> None:
-        index = LocalKnowledgeIndex(self.project_root)
-        target_body = "revision target workflow"
-        _seed_document(
-            index,
-            source_key="revision-target",
-            title="Revision target",
-            bodies=(target_body,),
-        )
-        embedder = FakeEmbedder(model_revision="revision-one")
-        store = HybridKnowledgeStore(
-            self.project_root,
-            index=index,
-            embedder=embedder,
-        )
-        completed = _build_all_vectors(store)
-        self.assertTrue(completed["complete"])
-        original_signature = _rows(
-            index,
-            "SELECT value FROM metadata "
-            "WHERE key = 'active_vector_signature'",
-        )[0][0]
-        original_vectors = _rows(
-            index,
-            "SELECT chunk_id, model_id, dim, vector_blob "
-            "FROM chunk_vectors ORDER BY chunk_id",
-        )
-        self.assertIn("revision-one", original_signature)
-        self.assertTrue(original_signature.endswith("|normalized=1"))
-
-        embedder.reconfigure(
-            model_id=embedder.model_id,
-            active_profile=embedder.active_profile,
-            requested_profile=embedder.requested_profile,
-            dim=embedder.dim,
-            model_revision="revision-two",
-        )
-        embedder.calls.clear()
-        read_only = store.search_many(
-            ("revision target",),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-        )[0]
-
-        self.assertEqual([], embedder.document_inputs)
-        self.assertEqual(
-            original_vectors,
-            _rows(
-                index,
-                "SELECT chunk_id, model_id, dim, vector_blob "
-                "FROM chunk_vectors ORDER BY chunk_id",
-            ),
-        )
-        self.assertEqual(
-            original_signature,
-            _rows(
-                index,
-                "SELECT value FROM metadata "
-                "WHERE key = 'active_vector_signature'",
-            )[0][0],
-        )
-        retrieval = read_only["retrieval"]
-        self.assertEqual("lexical", retrieval["mode_used"])
-        self.assertEqual(
-            "VECTOR_INDEX_SIGNATURE_MISMATCH",
-            retrieval["fallback_reason"],
-        )
-        self.assertTrue(retrieval["encoder"]["available"])
-        self.assertEqual("revision-two", retrieval["encoder"]["model_revision"])
-        self.assertEqual("fake-cpu", retrieval["encoder"]["device"])
-        self.assertFalse(retrieval["corpus"]["signature_compatible"])
-        self.assertFalse(retrieval["corpus"]["global_recall"])
-        self.assertEqual(0, retrieval["corpus"]["vector_chunks"])
-        self.assertEqual(
-            {
-                "fts_seconds",
-                "query_encode_seconds",
-                "vector_scan_seconds",
-            },
-            set(retrieval["timings"]),
-        )
-
-        embedder.calls.clear()
-        updated = store.search_many(
-            ("revision target",),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-            allow_index_updates=True,
-        )[0]
-        active_signature = _rows(
-            index,
-            "SELECT value FROM metadata "
-            "WHERE key = 'active_vector_signature'",
-        )[0][0]
-        self.assertIn("revision-two", active_signature)
-        self.assertNotEqual(original_signature, active_signature)
-        self.assertEqual([target_body], embedder.document_inputs)
-        self.assertTrue(updated["retrieval"]["corpus"]["signature_compatible"])
-
-        pending_body = "new pending readonly candidate"
-        _seed_document(
-            index,
-            source_key="pending-readonly",
-            title="Pending readonly",
-            bodies=(pending_body,),
-        )
-        vectors_before_query = _rows(
-            index,
-            "SELECT chunk_id, vector_blob FROM chunk_vectors ORDER BY chunk_id",
-        )
-        embedder.calls.clear()
-        with (
-            mock.patch.object(
-                store,
-                "_activate_vector_layer",
-                side_effect=AssertionError("read-only search activated vectors"),
-            ),
-            mock.patch.object(
-                store,
-                "_sync_query_candidate_vectors",
-                side_effect=AssertionError("read-only search indexed candidates"),
-            ),
-        ):
-            pending = store.search_many(
-                ("pending readonly",),
-                {"user"},
-                current_houdini_version="21.0",
-                offset=0,
-                limit=10,
-            )[0]
-        self.assertEqual([], embedder.document_inputs)
-        self.assertEqual(
-            vectors_before_query,
-            _rows(
-                index,
-                "SELECT chunk_id, vector_blob "
-                "FROM chunk_vectors ORDER BY chunk_id",
-            ),
-        )
-        self.assertTrue(pending["retrieval"]["corpus"]["partial"])
-        self.assertEqual(
-            "lexical_candidates",
-            pending["retrieval"]["corpus"]["ranking_scope"],
-        )
-        self.assertEqual(
-            0,
-            pending["retrieval"]["corpus"]["chunks_indexed_this_call"],
-        )
-
-    def test_corrupt_blob_and_dimension_fall_back_to_lexical(self) -> None:
-        index = LocalKnowledgeIndex(self.project_root)
-        _seed_document(
-            index,
-            source_key="corruption",
-            title="Corruption fallback",
-            bodies=("corruption fallback remains lexical",),
-        )
-        embedder = FakeEmbedder()
-        store = HybridKnowledgeStore(
-            self.project_root,
-            index=index,
-            embedder=embedder,
-        )
-        store.search_many(
-            ("corruption fallback",),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-            allow_index_updates=True,
-        )
-        original = _rows(
-            index,
-            "SELECT chunk_id, dim, vector_blob FROM chunk_vectors",
-        )[0]
-
-        with closing(index._connect()) as connection:  # noqa: SLF001
-            connection.execute(
-                "UPDATE chunk_vectors SET vector_blob = ? WHERE chunk_id = ?",
-                (b"broken", original[0]),
-            )
-        corrupt_blob = store.search_many(
-            ("corruption fallback",),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-        )[0]
-        self.assertEqual("lexical", corrupt_blob["retrieval"]["mode_used"])
-        self.assertTrue(corrupt_blob["matches"])
-        self.assertIn(
-            "Stored vector dimension is corrupt",
-            corrupt_blob["retrieval"]["fallback_reason"],
-        )
-
-        with closing(index._connect()) as connection:  # noqa: SLF001
-            connection.execute(
-                "UPDATE chunk_vectors SET vector_blob = ?, dim = ? "
-                "WHERE chunk_id = ?",
-                (original[2], original[1] + 1, original[0]),
-            )
-        wrong_dim = store.search_many(
-            ("corruption fallback",),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-        )[0]
-        self.assertEqual("lexical", wrong_dim["retrieval"]["mode_used"])
-        self.assertTrue(wrong_dim["matches"])
-        self.assertIn(
-            "dimension or normalization is corrupt",
-            wrong_dim["retrieval"]["fallback_reason"],
-        )
-
-    def test_requested_8b_can_report_degraded_active_06_profile(self) -> None:
-        index = LocalKnowledgeIndex(self.project_root)
-        _seed_document(
-            index,
-            source_key="profile-fallback",
-            title="Profile fallback",
-            bodies=("profile fallback evidence",),
-        )
-        embedder = FakeEmbedder(
-            requested_profile="qwen3-embedding-8b",
-            active_profile="qwen3-embedding-0.6b",
-            fallback_reason="8B unavailable; using 0.6B",
-        )
-        store = HybridKnowledgeStore(
-            self.project_root,
-            index=index,
-            embedder=embedder,
-        )
-
-        result = store.search_many(
-            ("profile fallback",),
-            {"user"},
-            current_houdini_version="21.0",
-            offset=0,
-            limit=10,
-            allow_index_updates=True,
-        )[0]
-        vector = result["retrieval"]["vector"]
-
-        self.assertEqual("hybrid", result["retrieval"]["mode_used"])
-        self.assertTrue(vector["available"])
-        self.assertEqual("degraded", vector["state"])
-        self.assertEqual("qwen3-embedding-8b", vector["requested_profile"])
-        self.assertEqual("qwen3-embedding-0.6b", vector["active_profile"])
-        self.assertEqual(
-            "Qwen/Qwen3-Embedding-0.6B",
-            vector["model_id"],
-        )
-        self.assertIn("using 0.6B", vector["fallback_reason"])
 
     def test_memory_crud_supersede_scope_types_and_vector_deletion(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)

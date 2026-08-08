@@ -474,168 +474,33 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
             )
         return hou_module, executor
 
-    def test_saved_hip_capture_and_save_as_choose_current_hip_directory(self) -> None:
+    def test_capture_always_uses_project_cache_even_for_saved_hip(self) -> None:
         viewport = FakeViewport(
             original_camera=None,
             default_camera_state="view",
             camera_locked=False,
-            image_size=(640, 360),
+            image_size=(320, 200),
         )
         hou_module, executor = self.make_executor(viewport)
-        first_parent = Path(self._temporary.name) / "first-scene"
-        second_parent = Path(self._temporary.name) / "second-scene"
-        first_parent.mkdir()
-        second_parent.mkdir()
-        first_hip = first_parent / "first.hip"
-        second_hip = second_parent / "second.hip"
-        first_hip.write_bytes(b"hip")
-        second_hip.write_bytes(b"hip")
-        hou_module.hipFile.current_path = str(first_hip)
+        hip_directory = self.project_root / "saved-scene"
+        hip_directory.mkdir()
+        hou_module.hipFile.current_path = str(hip_directory / "asset.hip")
         hou_module.hipFile.new_file = False
 
-        first = executor.dispatch(
+        response = executor.dispatch(
             "hia_capture_viewport",
             {"return_image": False},
         )
-        hou_module.hipFile.current_path = str(second_hip)
-        second = executor.dispatch(
-            "hia_capture_viewport",
-            {
-                "mode": "flipbook",
-                "frame_range": [12, 12],
-                "return_image": False,
-            },
-        )
 
-        self.assertEqual("hip", first["result"]["storage_scope"])
-        self.assertEqual("hip", second["result"]["storage_scope"])
+        expected_root = (
+            self.project_root / ".runtime" / "cache" / "screenshots"
+        ).resolve()
+        self.assertEqual("project_cache", response["result"]["storage_scope"])
         self.assertEqual(
-            first_parent / ".hia" / "screenshots",
-            Path(first["result"]["absolute_path"]).parent,
+            expected_root,
+            Path(response["result"]["absolute_path"]).parent,
         )
-        self.assertEqual(
-            second_parent / ".hia" / "screenshots",
-            Path(second["result"]["absolute_path"]).parent,
-        )
-        self.assertTrue(Path(first["result"]["path"]).is_file())
-        self.assertTrue(Path(second["result"]["path"]).is_file())
-
-    def test_unsafe_saved_hip_parent_falls_back_to_runtime_cache(self) -> None:
-        viewport = FakeViewport(
-            original_camera=None,
-            default_camera_state="view",
-            camera_locked=False,
-            image_size=(320, 200),
-        )
-        hou_module, executor = self.make_executor(viewport)
-        scene_parent = Path(self._temporary.name) / "unsafe-scene"
-        scene_parent.mkdir()
-        hip_path = scene_parent / "scene.hip"
-        hip_path.write_bytes(b"hip")
-        hou_module.hipFile.current_path = str(hip_path)
-        hou_module.hipFile.new_file = False
-
-        with mock.patch(
-            "hia_mcp_runtime.executor._is_reparse_point",
-            side_effect=lambda path: Path(path) == scene_parent,
-        ):
-            response = executor.dispatch(
-                "hia_capture_viewport",
-                {"return_image": False},
-            )
-
-        self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
-        self.assertTrue(
-            Path(response["result"]["absolute_path"]).is_relative_to(
-                self.project_root / ".runtime" / "cache" / "screenshots"
-            )
-        )
-        self.assertFalse((scene_parent / ".hia").exists())
-
-    def test_reparse_ancestor_falls_back_before_creating_hip_local_storage(
-        self,
-    ) -> None:
-        viewport = FakeViewport(
-            original_camera=None,
-            default_camera_state="view",
-            camera_locked=False,
-            image_size=(320, 200),
-        )
-        hou_module, executor = self.make_executor(viewport)
-        reparse_ancestor = Path(self._temporary.name) / "linked-ancestor"
-        scene_parent = reparse_ancestor / "nested" / "scene"
-        scene_parent.mkdir(parents=True)
-        hip_path = scene_parent / "scene.hip"
-        hip_path.write_bytes(b"hip")
-        hou_module.hipFile.current_path = str(hip_path)
-        hou_module.hipFile.new_file = False
-
-        with mock.patch(
-            "hia_mcp_runtime.executor._is_reparse_point",
-            side_effect=lambda path: Path(path) == reparse_ancestor,
-        ):
-            response = executor.dispatch(
-                "hia_capture_viewport",
-                {"return_image": False},
-            )
-
-        self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
-        self.assertFalse((scene_parent / ".hia").exists())
-
-    def test_unwritable_saved_hip_parent_falls_back_to_runtime_cache(self) -> None:
-        viewport = FakeViewport(
-            original_camera=None,
-            default_camera_state="view",
-            camera_locked=False,
-            image_size=(320, 200),
-        )
-        hou_module, executor = self.make_executor(viewport)
-        scene_parent = Path(self._temporary.name) / "read-only-scene"
-        scene_parent.mkdir()
-        hip_path = scene_parent / "scene.hip"
-        hip_path.write_bytes(b"hip")
-        hou_module.hipFile.current_path = str(hip_path)
-        hou_module.hipFile.new_file = False
-
-        with mock.patch(
-            "hia_mcp_runtime.executor.os.access",
-            return_value=False,
-        ):
-            response = executor.dispatch(
-                "hia_capture_viewport",
-                {"return_image": False},
-            )
-
-        self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
-        self.assertFalse((scene_parent / ".hia").exists())
-
-    def test_reparse_hia_directory_is_rejected_before_leaf_creation(self) -> None:
-        viewport = FakeViewport(
-            original_camera=None,
-            default_camera_state="view",
-            camera_locked=False,
-            image_size=(320, 200),
-        )
-        hou_module, executor = self.make_executor(viewport)
-        scene_parent = Path(self._temporary.name) / "linked-hia-scene"
-        hia_directory = scene_parent / ".hia"
-        hia_directory.mkdir(parents=True)
-        hip_path = scene_parent / "scene.hip"
-        hip_path.write_bytes(b"hip")
-        hou_module.hipFile.current_path = str(hip_path)
-        hou_module.hipFile.new_file = False
-
-        with mock.patch(
-            "hia_mcp_runtime.executor._is_reparse_point",
-            side_effect=lambda path: Path(path) == hia_directory,
-        ):
-            response = executor.dispatch(
-                "hia_capture_viewport",
-                {"return_image": False},
-            )
-
-        self.assertEqual("runtime_fallback", response["result"]["storage_scope"])
-        self.assertFalse((hia_directory / "screenshots").exists())
+        self.assertFalse((hip_directory / ".hia").exists())
 
     def test_reparse_runtime_screenshot_fallback_is_rejected_before_write(self) -> None:
         viewport = FakeViewport(
@@ -689,9 +554,7 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertEqual((1280, 720), (response["result"]["width"], response["result"]["height"]))
         self.assertEqual("scene_viewer.flipbook", response["result"]["capture_api"])
         self.assertTrue(response["result"]["capture_ok"])
-        self.assertEqual("passed", response["result"]["quality_status"])
-        self.assertEqual("unverified", response["result"]["visual_match"])
-        self.assertEqual("unverified", response["result"]["display_match"])
+        self.assertEqual("project_cache", response["result"]["storage_scope"])
         self.assertEqual("persp1", response["result"]["source_state"]["viewport"]["name"])
         self.assertEqual(
             capture_camera.path,
@@ -724,121 +587,8 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         self.assertTrue(viewport.isCameraLockedToView())
         self.assertEqual(0, hou_module.scene_viewer.focus_calls)
 
-    def test_quality_gate_rejects_black_and_overexposed_captures(self) -> None:
-        cases = (
-            ((0, 0, 0), "near_all_black"),
-            ((255, 255, 255), "severe_highlight_clipping"),
-        )
-        for color, expected_code in cases:
-            with self.subTest(color=color):
-                viewport = FakeViewport(
-                    original_camera=None,
-                    default_camera_state="view",
-                    camera_locked=False,
-                    image_size=(640, 360),
-                    image_color=color,
-                )
-                _hou_module, executor = self.make_executor(viewport)
-
-                response = executor.dispatch(
-                    "hia_capture_viewport",
-                    {"return_image": False},
-                )
-
-                self.assertFalse(response["ok"])
-                self.assertTrue(response["result"]["capture_ok"])
-                self.assertEqual("failed", response["result"]["quality_status"])
-                self.assertEqual("failed", response["result"]["visual_match"])
-                self.assertIn(
-                    expected_code,
-                    {
-                        reason["code"]
-                        for reason in response["result"]["quality_reasons"]
-                    },
-                )
-
-    def test_quality_gate_rejects_flat_neutral_no_content_capture(self) -> None:
-        viewport = FakeViewport(
-            original_camera=None,
-            default_camera_state="view",
-            camera_locked=False,
-            image_size=(640, 360),
-            image_color=(96, 96, 96),
-        )
-        _hou_module, executor = self.make_executor(viewport)
-
-        response = executor.dispatch(
-            "hia_capture_viewport",
-            {"return_image": False},
-        )
-
-        self.assertFalse(response["ok"])
-        self.assertTrue(response["result"]["capture_ok"])
-        self.assertEqual("failed", response["result"]["quality_status"])
-        self.assertEqual("failed", response["result"]["visual_match"])
-        self.assertIn(
-            "flat_no_content",
-            {
-                reason["code"]
-                for reason in response["result"]["quality_reasons"]
-            },
-        )
-
-    def test_quality_gate_keeps_low_contrast_image_with_real_detail(self) -> None:
-        viewport = FakeViewport(
-            original_camera=None,
-            default_camera_state="view",
-            camera_locked=False,
-            image_size=(640, 360),
-            image_color=(96, 96, 96),
-            alternate_image_color=(99, 99, 99),
-        )
-        _hou_module, executor = self.make_executor(viewport)
-
-        response = executor.dispatch(
-            "hia_capture_viewport",
-            {"return_image": False},
-        )
-
-        self.assertTrue(response["ok"])
-        self.assertTrue(response["result"]["capture_ok"])
-        self.assertEqual("passed", response["result"]["quality_status"])
-        self.assertEqual(
-            [3, 3, 3],
-            response["result"]["quality_metrics"]["channel_ranges"],
-        )
-
-    def test_quality_gate_warns_for_extreme_single_channel_cast(self) -> None:
-        viewport = FakeViewport(
-            original_camera=None,
-            default_camera_state="view",
-            camera_locked=False,
-            image_size=(640, 360),
-            image_color=(220, 5, 5),
-        )
-        _hou_module, executor = self.make_executor(viewport)
-
-        response = executor.dispatch(
-            "hia_capture_viewport",
-            {"return_image": False},
-        )
-
-        self.assertTrue(response["ok"])
-        self.assertEqual("warning", response["result"]["quality_status"])
-        self.assertIn(
-            "single_channel_cast",
-            {
-                reason["code"]
-                for reason in response["result"]["quality_reasons"]
-            },
-        )
-
-    def test_quality_gate_rejects_resolution_and_aspect_mismatches(self) -> None:
-        cases = (
-            ((640, 480), "aspect_ratio_mismatch"),
-            ((800, 450), "resolution_mismatch"),
-        )
-        for output_size, expected_code in cases:
+    def test_capture_rejects_resolution_mismatch(self) -> None:
+        for output_size in ((640, 480), (800, 450)):
             with self.subTest(output_size=output_size):
                 viewport = FakeViewport(
                     original_camera=None,
@@ -849,22 +599,17 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
                 hou_module, executor = self.make_executor(viewport)
                 hou_module.scene_viewer.flipbook_output_size = output_size
 
-                response = executor.dispatch(
-                    "hia_capture_viewport",
-                    {"width": 640, "height": 360, "return_image": False},
+                with self.assertRaises(HiaRuntimeError) as raised:
+                    executor.dispatch(
+                        "hia_capture_viewport",
+                        {"width": 640, "height": 360, "return_image": False},
+                    )
+                self.assertEqual(
+                    "VIEWPORT_CAPTURE_UNAVAILABLE",
+                    raised.exception.code,
                 )
 
-                self.assertFalse(response["ok"])
-                self.assertEqual("failed", response["result"]["quality_status"])
-                self.assertIn(
-                    expected_code,
-                    {
-                        reason["code"]
-                        for reason in response["result"]["quality_reasons"]
-                    },
-                )
-
-    def test_quality_gate_rejects_requested_camera_mismatch(self) -> None:
+    def test_capture_rejects_requested_camera_mismatch(self) -> None:
         capture_camera = FakeCamera("/obj/capture_camera")
         viewport = FakeViewport(
             original_camera=None,
@@ -875,55 +620,17 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         _hou_module, executor = self.make_executor(viewport, capture_camera)
 
         with mock.patch.object(viewport, "setCamera", return_value=None):
-            response = executor.dispatch(
-                "hia_capture_viewport",
-                {
-                    "camera_path": capture_camera.path,
-                    "return_image": False,
-                },
-            )
+            with self.assertRaises(HiaRuntimeError) as raised:
+                executor.dispatch(
+                    "hia_capture_viewport",
+                    {
+                        "camera_path": capture_camera.path,
+                        "return_image": False,
+                    },
+                )
+        self.assertEqual("VIEWPORT_CAPTURE_UNAVAILABLE", raised.exception.code)
 
-        self.assertFalse(response["ok"])
-        self.assertIn(
-            "camera_mismatch",
-            {
-                reason["code"]
-                for reason in response["result"]["quality_reasons"]
-            },
-        )
-
-    def test_missing_ocio_and_hdr_state_are_explicitly_unverified(self) -> None:
-        viewport = FakeViewport(
-            original_camera=None,
-            default_camera_state="view",
-            camera_locked=False,
-            image_size=(640, 360),
-        )
-        hou_module, executor = self.make_executor(viewport)
-        hou_module.scene_viewer.color_state_available = False
-
-        response = executor.dispatch(
-            "hia_capture_viewport",
-            {"return_image": False},
-        )
-
-        source_state = response["result"]["source_state"]
-        self.assertEqual(
-            "unverified",
-            source_state["color_management"]["ocio_enabled"],
-        )
-        self.assertIn(
-            "color_management.ocio_display",
-            source_state["unverified"],
-        )
-        self.assertEqual("unverified", source_state["hdr"]["os_hdr"])
-        self.assertEqual("unverified", response["result"]["display_match"])
-        self.assertEqual(
-            "unverified",
-            response["result"]["hdr_display_mismatch_risk"],
-        )
-
-    def test_legacy_viewport_api_is_only_an_explicit_degraded_fallback(self) -> None:
+    def test_capture_requires_scene_viewer_flipbook(self) -> None:
         viewport = FakeViewport(
             original_camera=None,
             default_camera_state="view",
@@ -933,21 +640,12 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
         hou_module, executor = self.make_executor(viewport)
         hou_module.scene_viewer.flipbook = None  # type: ignore[method-assign]
 
-        response = executor.dispatch(
-            "hia_capture_viewport",
-            {"return_image": False},
-        )
-
-        self.assertTrue(response["ok"])
-        self.assertEqual(
-            "viewport.saveViewToImage_fallback",
-            response["result"]["capture_api"],
-        )
-        self.assertEqual("passed", response["result"]["quality_status"])
-        self.assertEqual("unverified", response["result"]["visual_match"])
-        self.assertTrue(
-            any("legacy viewport image API" in item for item in response["warnings"])
-        )
+        with self.assertRaises(HiaRuntimeError) as raised:
+            executor.dispatch(
+                "hia_capture_viewport",
+                {"return_image": False},
+            )
+        self.assertEqual("VIEWPORT_CAPTURE_UNAVAILABLE", raised.exception.code)
 
     def test_failed_viewport_capture_restores_default_camera_and_lock(self) -> None:
         capture_camera = FakeCamera("/obj/capture_camera")
@@ -966,7 +664,7 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
                 {"mode": "viewport", "camera_path": capture_camera.path},
             )
 
-        self.assertEqual("VIEWPORT_CAPTURE_FAILED", raised.exception.code)
+        self.assertEqual("VIEWPORT_CAPTURE_UNAVAILABLE", raised.exception.code)
         self.assertIs(capture_camera, hou_module.scene_viewer.camera_at_flipbook)
         self.assertFalse(hou_module.scene_viewer.camera_lock_at_flipbook)
         self.assertIsNone(viewport.camera())
@@ -1155,7 +853,7 @@ class HiaMcpV2ViewportStateTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual("VIEWPORT_STATE_RESTORE_FAILED", raised.exception.code)
+        self.assertEqual("VIEWPORT_CAPTURE_UNAVAILABLE", raised.exception.code)
         self.assertEqual("restore_camera", raised.exception.details["errors"][0]["operation"])
         self.assertTrue(viewport.isCameraLockedToView())
         self.assertEqual(12.0, hou_module.frame())

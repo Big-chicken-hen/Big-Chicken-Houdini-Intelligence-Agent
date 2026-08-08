@@ -96,13 +96,13 @@ class BridgeClient(QtCore.QObject):
 
         return self._request("GET", "/v1/session", context=context)
 
-    def get_models(self) -> str | None:
+    def get_models(self, *, context: str = "models") -> str | None:
         """Read the Bridge-sanitized stable Codex model catalog."""
 
-        return self._request("GET", "/v1/models", context="models")
+        return self._request("GET", "/v1/models", context=context)
 
-    def get_threads(self) -> str | None:
-        return self._request("GET", "/v1/threads", context="threads")
+    def get_threads(self, *, context: str = "threads") -> str | None:
+        return self._request("GET", "/v1/threads", context=context)
 
     def get_goal(self, thread_id: str) -> str | None:
         return self._request(
@@ -297,14 +297,6 @@ class BridgeClient(QtCore.QObject):
 
     def interrupt(self, *, context: str = "interrupt") -> str | None:
         return self._request("POST", "/v1/interrupt", {}, context=context)
-
-    def resolve_approval(self, request_id: Any, decision: str) -> str | None:
-        return self._request(
-            "POST",
-            "/v1/approval",
-            {"request_id": request_id, "decision": decision},
-            context=f"approval_{decision}",
-        )
 
     def poll_events(self, after: int, timeout: int = 15) -> str | None:
         # Normalize caller values before claiming the single event slot so an

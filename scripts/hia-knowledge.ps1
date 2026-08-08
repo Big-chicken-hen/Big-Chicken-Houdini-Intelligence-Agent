@@ -426,11 +426,12 @@ function Write-HiaKnowledgeMissingEnvironment {
             items = @()
             installed_profiles = @()
         }
+        requested_profile = ''
         active_profile = ''
-        embedding_mode = 'fts5'
+        selected_profile_available = $false
+        embedding_mode = 'unavailable'
         embedding_runtime_environment = [ordered]@{}
-        fallback_non_blocking = $true
-        houdini_launch_blocked = $false
+        houdini_launch_blocked = $true
         repair_actions = [ordered]@{
             parser_only = 'environment-install'
             embedding = (
@@ -498,12 +499,12 @@ function Write-HiaKnowledgeMissingEnvironment {
                     'Deleting a managed copy never deletes the original file.'
                 )
             }
-            fallback = [ordered]@{
-                mode = 'fts5'
+            retrieval = [ordered]@{
+                mode = 'unavailable'
                 fts5_available = (
                     Test-HiaKnowledgeOrdinaryFile -LiteralPath $indexPath
                 )
-                houdini_launch_blocked = $false
+                houdini_launch_blocked = $true
             }
             warning = ''
         }
@@ -569,57 +570,27 @@ function Get-HiaKnowledgeEnvironmentInstallPlan {
         [string]$RequestedDevice = 'auto'
     )
 
-    $installedProfiles = @()
-    if ($null -ne $Environment -and $null -ne $Environment.models) {
-        $installedProfiles = @(
-            $Environment.models.items |
-                Where-Object { $_.installed -eq $true } |
-                ForEach-Object { [string]$_.profile_id } |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-        )
+    $selectedProfile = $RequestedProfile
+    if (
+        [string]::IsNullOrWhiteSpace($selectedProfile) -and
+        $null -ne $Environment
+    ) {
+        $selectedProfile = [string]$Environment.requested_profile
     }
     $selectedModel = $null
     if (
-        -not [string]::IsNullOrWhiteSpace($RequestedProfile) -and
-        $RequestedProfile -in $installedProfiles
-    ) {
-        $selectedModel = @(
-            $Environment.models.items |
-                Where-Object {
-                    $_.installed -eq $true -and
-                    [string]$_.profile_id -eq $RequestedProfile
-                } |
-                Select-Object -First 1
-        )[0]
-    } elseif (
+        -not [string]::IsNullOrWhiteSpace($selectedProfile) -and
         $null -ne $Environment -and
-        -not [string]::IsNullOrWhiteSpace([string]$Environment.active_profile) -and
-        [string]$Environment.active_profile -in $installedProfiles
+        $null -ne $Environment.models
     ) {
         $selectedModel = @(
             $Environment.models.items |
                 Where-Object {
                     $_.installed -eq $true -and
-                    [string]$_.profile_id -eq
-                        [string]$Environment.active_profile
+                    [string]$_.profile_id -eq $selectedProfile
                 } |
                 Select-Object -First 1
         )[0]
-    } elseif ($installedProfiles.Count -gt 0) {
-        $fallbackProfile = [string]$installedProfiles[0]
-        $selectedModel = @(
-            $Environment.models.items |
-                Where-Object {
-                    $_.installed -eq $true -and
-                    [string]$_.profile_id -eq $fallbackProfile
-                } |
-                Select-Object -First 1
-        )[0]
-    }
-    $selectedProfile = if ($null -ne $selectedModel) {
-        [string]$selectedModel.profile_id
-    } else {
-        ''
     }
     $selectedDevice = $RequestedDevice
     if (
