@@ -2461,7 +2461,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         self.assertEqual("never", params["approvalPolicy"])
         self.assertEqual("priority", params["serviceTier"])
         self.assertEqual(
-            {"type": "workspaceWrite", "networkAccess": False},
+            {"type": "workspaceWrite", "networkAccess": True},
             params["sandboxPolicy"],
         )
         self.assertEqual("read Houdini state", params["input"][0]["text"])

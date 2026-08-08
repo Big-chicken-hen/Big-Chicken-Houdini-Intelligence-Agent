@@ -2652,6 +2652,25 @@ $lexicalOnly = ($script:calls -join ',')
         self.assertEqual("bootstrap", payload["complete"])
         self.assertEqual("bootstrap", payload["lexical_only"])
 
+    def test_lifecycle_passes_only_verified_embedding_values_to_bridge(self) -> None:
+        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
+        start = source.index("$bridgeEnvironment = @{")
+        end = source.index("$bridgeProcess =", start)
+        bridge_block = source[start:end]
+
+        self.assertIn("foreach ($name in $embeddingEnvironmentNames)", bridge_block)
+        self.assertIn("$embeddingEnvironment.ContainsKey($name)", bridge_block)
+        self.assertIn(
+            "$bridgeEnvironment[$name] = [string]$embeddingEnvironment[$name]",
+            bridge_block,
+        )
+        self.assertIn("$bridgeInfo.Environment.Remove($name)", bridge_block)
+        self.assertNotIn(
+            "Remove-ChildEnvironment `\n    -StartInfo $bridgeInfo `\n"
+            "    -Names $embeddingEnvironmentNames",
+            bridge_block,
+        )
+
     def test_render_output_directory_defaults_validates_and_creates_writable_local_path(self) -> None:
         fake_root = self.sandbox / "render-output-project"
         fake_root.mkdir()

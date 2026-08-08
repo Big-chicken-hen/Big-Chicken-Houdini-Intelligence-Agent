@@ -84,6 +84,11 @@ class ProjectPermissionTests(unittest.TestCase):
                 self.assertEqual(writer, profile.scene_write)
                 self.assertEqual("workspace-write" if writer else "read-only", profile.sandbox)
                 self.assertEqual("never", profile.approval_policy)
+                self.assertEqual("live", profile.config["web_search"])
+                self.assertIs(
+                    True,
+                    profile.config["sandbox_workspace_write.network_access"],
+                )
                 self.assertEqual(writer, profile.config[HIA_SERVER_KEYS[0]])
                 self.assertFalse(profile.config[HIA_SERVER_KEYS[1]])
 

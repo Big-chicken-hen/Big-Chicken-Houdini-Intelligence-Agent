@@ -515,7 +515,7 @@ class ProjectTeamService:
                 }
             ],
             "approvalPolicy": "never",
-            "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+            "sandboxPolicy": {"type": "readOnly", "networkAccess": True},
         }
         if supervisor.model is not None:
             params["model"] = supervisor.model

@@ -84,8 +84,10 @@ Codex bootstrap, complete the explicit device login, then install the base
 knowledge environment. If the pinned project-local Codex runtime is already
 verified and logged in, skip its bootstrap and continue with
 `hia-knowledge.ps1 environment-install`. A global/PATH Codex or Python is not
-silently adopted as a project default. Missing optional embedding still falls
-back to FTS5 and does not block Houdini.
+silently adopted as a project default. Missing optional embedding does not block
+Houdini or explicit lexical FTS5 search. Explicit hybrid/vector requests fail clearly
+until the selected project-local encoder and matching vector signature are available;
+they never fall back to lexical.
 
 Advanced users can run the same launcher flow without WPF:
 
@@ -118,6 +120,14 @@ You can describe the result directly:
 You do not need to name an MCP tool, a node whitelist, or an output directory. Current-scene work remains in the currently open Houdini session. Native `hython` is used only when the request explicitly asks for offline work, a separate HIP, batch processing, independent verification, a long simulation, or background rendering.
 
 Reference images and the current selection can be included from the composer. While Codex is working, **追加指令** steers the active Turn. Starting a different task in a new Thread keeps the context smaller and easier to follow.
+
+For a Houdini scene submission, **单个 AI** keeps the work in the current Thread.
+**项目团队** creates one project with exactly five native Codex Threads: Supervisor,
+Planning, Execution, Visual Review, and Technical Review. Execution is the only HIP
+writer; the other four roles are read-only and have no HIA/HOM inventory. If their
+selected model actually exposes native subagent tools, those four roles may use them
+only for bounded read-only research or review. Execution never delegates, and project
+correctness never depends on subagents being available.
 
 The history list also supports permanent Thread deletion. Select one idle Thread and click **Delete** twice within five seconds. An active Turn must be stopped and allowed to finish first. Deleting the currently open Thread returns the Panel to a blank state and releases its local UI references; attachment files are not deleted.
 

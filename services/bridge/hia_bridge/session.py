@@ -1040,7 +1040,7 @@ class BridgeSession:
                 "approvalPolicy": "never",
                 "sandboxPolicy": {
                     "type": "workspaceWrite",
-                    "networkAccess": False,
+                    "networkAccess": True,
                 },
                 "serviceTier": service_tier,
             }

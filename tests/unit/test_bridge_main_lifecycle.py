@@ -264,6 +264,8 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual(
             [
+                'web_search="live"',
+                "sandbox_workspace_write.network_access=true",
                 "mcp_servers.houdini_intelligence.command="
                 + bridge_main._toml_basic_string(
                     str(
@@ -460,6 +462,20 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             "HIA_LAUNCHER_SESSION_ID",
             bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT,
         )
+        for embedding_name in (
+            "HIA_EMBEDDING_PROFILE",
+            "HIA_EMBEDDING_PYTHON",
+            "HIA_EMBEDDING_DIM",
+            "HIA_EMBEDDING_DEVICE",
+            "HIA_EMBEDDING_MODEL_DIR_QWEN3_0_6B",
+            "HIA_EMBEDDING_MODEL_REVISION_QWEN3_0_6B",
+            "HIA_EMBEDDING_MODEL_DIR_QWEN3_8B",
+            "HIA_EMBEDDING_MODEL_REVISION_QWEN3_8B",
+        ):
+            self.assertIn(
+                embedding_name,
+                bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT,
+            )
         self.assertIn(
             f'{hia_server}.env_vars='
             + json.dumps(list(bridge_main.HIA_MCP_V2_CHILD_ENVIRONMENT)),
@@ -567,7 +583,12 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             for index, value in enumerate(command[:-1])
             if value == "-c"
         ]
-        self.assertEqual(9, len(overrides))
+        self.assertEqual(11, len(overrides))
+        self.assertEqual('web_search="live"', overrides[0])
+        self.assertEqual(
+            "sandbox_workspace_write.network_access=true",
+            overrides[1],
+        )
         self.assertEqual(
             1,
             overrides.count(
@@ -577,7 +598,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertEqual(
             "mcp_servers.houdini_intelligence.command="
             + json.dumps(mcp_python, ensure_ascii=True),
-            overrides[0],
+            overrides[2],
         )
         self.assertEqual(
             [
@@ -590,7 +611,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             ],
             [call.args[0] for call in encoder.call_args_list],
         )
-        provider_overrides = overrides[3:]
+        provider_overrides = overrides[5:]
         self.assertEqual(6, len(provider_overrides))
         self.assertEqual(
             {

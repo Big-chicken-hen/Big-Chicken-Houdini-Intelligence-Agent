@@ -31,7 +31,7 @@ def observable_thread_response(
             "id": thread_id,
             "threadSource": params.get("threadSource"),
         },
-        "sandbox": {"type": sandbox_type, "networkAccess": False},
+        "sandbox": {"type": sandbox_type, "networkAccess": True},
         "approvalPolicy": params.get("approvalPolicy"),
         "model": params.get("model") or "gpt-test",
         "reasoningEffort": "high",

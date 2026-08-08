@@ -182,6 +182,10 @@ class HybridKnowledgeStore:
                 total_chunks = int(
                     connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
                 )
+                database_signature = self.index._meta_value_from_connection(  # noqa: SLF001
+                    connection,
+                    "active_vector_signature",
+                )
             return {
                 "available": False,
                 "status": "unavailable",
@@ -192,6 +196,8 @@ class HybridKnowledgeStore:
                 "model_revision": "",
                 "dim": 0,
                 "normalized": False,
+                "database_signature": database_signature or "",
+                "current_model_signature_match": False,
                 "error": _bounded_reason(exc),
                 "repair": {},
                 "complete": total_chunks == 0,
@@ -926,7 +932,7 @@ class HybridKnowledgeStore:
             raise HybridKnowledgeError(
                 "The embedding runtime returned invalid status"
             )
-        return _embedding_batch(raw)
+        return _embedding_batch(raw, require_ready=False)
 
     def _encode(
         self,
@@ -1129,6 +1135,8 @@ class HybridKnowledgeStore:
             "complete": pending_chunks == 0,
             "partial": pending_chunks > 0,
             "signature_compatible": signature_compatible,
+            "database_signature": active_signature or "",
+            "current_model_signature_match": signature_compatible,
             "vector_chunks": vector_chunks,
             "total_chunks": total_chunks,
             "pending_chunks": pending_chunks,
@@ -1684,7 +1692,11 @@ class HybridKnowledgeStore:
         }
 
 
-def _embedding_batch(value: Any) -> _EmbeddingBatch:
+def _embedding_batch(
+    value: Any,
+    *,
+    require_ready: bool = True,
+) -> _EmbeddingBatch:
     def field(name: str, default: Any = None) -> Any:
         if isinstance(value, Mapping):
             return value.get(name, default)
@@ -1732,9 +1744,13 @@ def _embedding_batch(value: Any) -> _EmbeddingBatch:
             "Embedding worker did not activate the requested profile"
         )
     status = str(field("status") or "ready")
-    if status != "ready":
+    if require_ready and status != "ready":
         raise _VectorUnavailable(
             "Embedding worker is not ready for the requested profile: " + status
+        )
+    if not require_ready and status not in {"configured", "ready"}:
+        raise _VectorUnavailable(
+            "Embedding profile is not configured for status inspection: " + status
         )
     repair = field("repair", {})
     return _EmbeddingBatch(

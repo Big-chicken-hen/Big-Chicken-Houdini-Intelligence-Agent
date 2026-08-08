@@ -35,7 +35,10 @@ def permission_profile(
     if selected_backend not in {"hia_mcp_v2", "houdini_intelligence"}:
         raise ValueError("selected_backend is invalid")
     read_only = role in READ_ONLY_ROLES
-    config: dict[str, Any] = {}
+    config: dict[str, Any] = {
+        "web_search": "live",
+        "sandbox_workspace_write.network_access": True,
+    }
     _validate_selected_server_transport(selected_backend, server_transports)
     for server_id in HIA_SERVER_IDS:
         prefix = f"mcp_servers.{server_id}"

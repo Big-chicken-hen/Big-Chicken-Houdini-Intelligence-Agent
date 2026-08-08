@@ -375,12 +375,13 @@ class HoudiniSkillContractTests(unittest.TestCase):
             self.knowledge_memory,
         )
 
-    def test_qwen_is_only_an_encoder_and_fts5_remains_available(self) -> None:
+    def test_qwen_is_only_an_encoder_and_retrieval_mode_is_explicit(self) -> None:
         for marker in (
-            "user-selected local Qwen embedding encoder",
-            "keep using the FTS5 lexical results",
-            "encoder availability or choice must not disable local help search "
-            "or change memory policy",
+            "Retrieval mode is explicit",
+            "`lexical` uses FTS5 without requiring Qwen",
+            "selected `hybrid` or `vector`",
+            "explicit failure",
+            "never substitute lexical results",
             "encoder only supplies retrieval vectors",
             "Codex remains responsible",
         ):

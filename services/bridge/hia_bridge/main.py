@@ -100,6 +100,14 @@ HIA_MCP_V2_CHILD_ENVIRONMENT = (
     "HIA_MCP_V2_RUNTIME_DIR",
     "HIA_MCP_V2_EXECUTOR_PATH",
     "HIA_LAUNCHER_SESSION_ID",
+    "HIA_EMBEDDING_PROFILE",
+    "HIA_EMBEDDING_PYTHON",
+    "HIA_EMBEDDING_DIM",
+    "HIA_EMBEDDING_DEVICE",
+    "HIA_EMBEDDING_MODEL_DIR_QWEN3_0_6B",
+    "HIA_EMBEDDING_MODEL_REVISION_QWEN3_0_6B",
+    "HIA_EMBEDDING_MODEL_DIR_QWEN3_8B",
+    "HIA_EMBEDDING_MODEL_REVISION_QWEN3_8B",
 )
 _HIA_CHATGPT_HTTP_PROVIDER_ID = "hia_chatgpt_http"
 _HIA_CHATGPT_HTTP_PROVIDER_NAME = "HIA ChatGPT HTTP"
@@ -565,6 +573,10 @@ def _codex_app_server_command(
         str(codex_exe),
         "app-server",
         "--strict-config",
+        "-c",
+        "web_search=\"live\"",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
     ]
     for override in mcp_overrides:
         command.extend(("-c", override))

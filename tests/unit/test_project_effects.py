@@ -363,7 +363,7 @@ class ProjectRoleExecutorTests(unittest.TestCase):
         )
         self.assertEqual("never", turn_params["approvalPolicy"])
         self.assertEqual(
-            {"type": "workspaceWrite", "networkAccess": False},
+            {"type": "workspaceWrite", "networkAccess": True},
             turn_params["sandboxPolicy"],
         )
         self.assertIsNone(writer.snapshot()["owner"])

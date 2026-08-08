@@ -159,8 +159,10 @@ Do not reuse a worker for a different task merely because the asset or technique
 similar. Thread history is the collaboration record; do not add a second roster
 database, watcher, scheduler, or reasoning service. Project lifecycle follows the
 existing Panel project controls: preserve role histories and keep the user's main
-project visible after final handoff. Never delete a project or role Thread as cleanup,
-and never migrate or replace a Thread automatically in response to compaction.
+project visible after final handoff. Never delete a project or role Thread as background
+cleanup. A separately reviewed lifecycle change may implement only the strict
+third-real-compaction rotation and user-confirmed inactive-project deletion defined in
+`docs/V0.2_RELEASE_SCOPE.md`; this blueprint does not implement either one.
 
 ## Coordinate through the Codex app-server
 
@@ -696,18 +698,21 @@ Panel Thread. Keep scene writes bounded to the current card, then perform visual
 technical review as separated read-only passes before the next write. Do not create
 project roles or pretend that independent reviewer Threads ran.
 
-## Keep collaboration to the five project Threads
+## Keep the five project Threads as the collaboration baseline
 
 The five real project Threads are the complete collaboration baseline for every model.
 Any model supported by HIA Panel may serve any project role; do not hard-code a model
 family, model ID, service tier, or reasoning level into role identity. A user model
-change keeps the same project membership and role history. Do not create another
-subagent layer behind these roles or pretend that such work occurred.
+change keeps the same project membership and role history. When a model truly exposes
+native subagent tools, Supervisor, Planning, Visual Review, and Technical Review may
+use them only for non-overlapping read-only research or review. They never replace a
+project role, never receive HIA/HOM, and only real collaboration events count as use.
+Execution never delegates to subagents. Models without those tools run the same role
+work serially without reducing acceptance quality.
 
-Automatic context compaction is informational only. It does not authorize a local
-summary, persisted chat bodies, automatic Thread replacement, migration, or deletion.
-Project and Thread lifecycle changes require an explicit user action through the
-existing Panel controls.
+Automatic context compaction never authorizes a local summary or persisted chat body.
+The current PR does not rotate Threads; the only permitted future implementation is the
+unified third-real-compaction rotation specified in `docs/V0.2_RELEASE_SCOPE.md`.
 
 ## Keep the project visible and steerable in Panel
 

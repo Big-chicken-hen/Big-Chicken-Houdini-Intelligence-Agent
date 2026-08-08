@@ -1160,9 +1160,13 @@ $bridgeEnvironment = @{
 foreach ($entry in $bridgeBackendEnvironment.GetEnumerator()) {
     $bridgeEnvironment[$entry.Key] = $entry.Value
 }
-Remove-ChildEnvironment `
-    -StartInfo $bridgeInfo `
-    -Names $embeddingEnvironmentNames
+foreach ($name in $embeddingEnvironmentNames) {
+    if ($embeddingEnvironment.ContainsKey($name)) {
+        $bridgeEnvironment[$name] = [string]$embeddingEnvironment[$name]
+    } else {
+        [void]$bridgeInfo.Environment.Remove($name)
+    }
+}
 Remove-ChildEnvironment -StartInfo $bridgeInfo -Names $backendEnvironmentNames
 Set-ChildEnvironment -StartInfo $bridgeInfo -Values $bridgeEnvironment
 

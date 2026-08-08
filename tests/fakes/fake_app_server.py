@@ -50,7 +50,7 @@ def observable_thread_payload(
     )
     payload.update(
         {
-            "sandbox": {"type": sandbox_type, "networkAccess": False},
+            "sandbox": {"type": sandbox_type, "networkAccess": True},
             "approvalPolicy": params.get("approvalPolicy"),
             "model": params.get("model") or "fake-default-model",
             "reasoningEffort": "high",

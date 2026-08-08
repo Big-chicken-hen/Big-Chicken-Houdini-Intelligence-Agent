@@ -1049,9 +1049,9 @@ class ProjectRoleExecutor:
                 ],
                 "approvalPolicy": "never",
                 "sandboxPolicy": (
-                    {"type": "workspaceWrite", "networkAccess": False}
+                    {"type": "workspaceWrite", "networkAccess": True}
                     if role is Role.EXECUTION
-                    else {"type": "readOnly", "networkAccess": False}
+                    else {"type": "readOnly", "networkAccess": True}
                 ),
             }
         )
