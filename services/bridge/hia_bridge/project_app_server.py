@@ -51,6 +51,7 @@ class _TurnCursor:
     wait_finished: bool = False
     terminal_status: str | None = None
     active_hia_items: set[str] = field(default_factory=set)
+    anonymous_hia_items: int = 0
     scene_owner: str | None = None
     invalid_hia_item_id: bool = False
     interrupt_requested: bool = False
@@ -91,7 +92,8 @@ class ProjectRoleClient:
         ] = {}
         self._turns: dict[tuple[str, str], _TurnCursor] = {}
         add_observer = getattr(client, "add_notification_observer", None)
-        if callable(add_observer):
+        self._observes_notifications_synchronously = callable(add_observer)
+        if self._observes_notifications_synchronously:
             add_observer(self.observe_notification)
 
     def request(self, method: str, params: Mapping[str, Any]) -> Any:
@@ -122,12 +124,12 @@ class ProjectRoleClient:
                 )
             tracked.scene_owner = owner
             active_items = tuple(tracked.active_hia_items)
-            invalid_item_id = tracked.invalid_hia_item_id
+            anonymous_items = tracked.anonymous_hia_items
             terminal = tracked.terminal_status is not None
         for item_id in active_items:
             self._scene_writer.hia_started(owner, item_id)
-        if invalid_item_id:
-            self._scene_writer.fail_closed(owner)
+        for _ in range(anonymous_items):
+            self._scene_writer.hia_anonymous_started(owner)
         if terminal:
             self._scene_writer.turn_terminal(owner)
 
@@ -375,9 +377,10 @@ class ProjectRoleClient:
                         event_turn_id = turn.get("id") if isinstance(turn, Mapping) else None
                         if params.get("threadId") != thread_id or event_turn_id != turn_id:
                             continue
-                        self._observe_exact_event(
-                            method_name, params, thread_id, turn_id
-                        )
+                        if not self._observes_notifications_synchronously:
+                            self._observe_exact_event(
+                                method_name, params, thread_id, turn_id
+                            )
                         status = turn.get("status") if isinstance(turn, Mapping) else None
                         terminal_status = status if isinstance(status, str) else "completed"
                         continue
@@ -408,16 +411,18 @@ class ProjectRoleClient:
                         if _is_hia_item(item):
                             item_id = item.get("id")
                             if not isinstance(item_id, str) or not item_id:
-                                self._observe_exact_event(
-                                    method_name, params, thread_id, turn_id
-                                )
+                                if not self._observes_notifications_synchronously:
+                                    self._observe_exact_event(
+                                        method_name, params, thread_id, turn_id
+                                    )
                                 raise ProjectAppServerError(
                                     "INVALID_HIA_ITEM_ID",
                                     "an HIA item notification omitted its exact item id",
                                 )
-                            self._observe_exact_event(
-                                method_name, params, thread_id, turn_id
-                            )
+                            if not self._observes_notifications_synchronously:
+                                self._observe_exact_event(
+                                    method_name, params, thread_id, turn_id
+                                )
                             if method_name == "item/started":
                                 active_hia_items.add(item_id)
                             else:
@@ -500,7 +505,6 @@ class ProjectRoleClient:
         key = (thread_id, turn_id)
         scene_action: tuple[str, str] | None = None
         owner: str | None = None
-        invalid_identity = False
         with self._lock:
             tracked = self._turns.get(key)
             if tracked is None:
@@ -520,7 +524,13 @@ class ProjectRoleClient:
                 item_id = item.get("id")
                 if not isinstance(item_id, str) or not item_id:
                     tracked.invalid_hia_item_id = True
-                    invalid_identity = True
+                    if method == "item/started":
+                        tracked.anonymous_hia_items += 1
+                        scene_action = ("anonymous_started", "")
+                    else:
+                        if tracked.anonymous_hia_items > 0:
+                            tracked.anonymous_hia_items -= 1
+                        scene_action = ("anonymous_finished", "")
                 elif method == "item/started":
                     tracked.active_hia_items.add(item_id)
                     scene_action = ("started", item_id)
@@ -528,9 +538,6 @@ class ProjectRoleClient:
                     tracked.active_hia_items.discard(item_id)
                     scene_action = ("finished", item_id)
             self._drop_terminal_turn_locked(key, tracked)
-        if owner is not None and self._scene_writer is not None and invalid_identity:
-            self._scene_writer.fail_closed(owner)
-            return
         if owner is None or self._scene_writer is None or scene_action is None:
             return
         action, item_id = scene_action
@@ -538,6 +545,10 @@ class ProjectRoleClient:
             self._scene_writer.hia_started(owner, item_id)
         elif action == "finished":
             self._scene_writer.hia_finished(owner, item_id)
+        elif action == "anonymous_started":
+            self._scene_writer.hia_anonymous_started(owner)
+        elif action == "anonymous_finished":
+            self._scene_writer.hia_anonymous_finished(owner)
         else:
             self._scene_writer.turn_terminal(owner)
 
@@ -548,7 +559,7 @@ class ProjectRoleClient:
             tracked.wait_finished
             and tracked.terminal_status is not None
             and not tracked.active_hia_items
-            and not tracked.invalid_hia_item_id
+            and tracked.anonymous_hia_items == 0
             and self._turns.get(key) is tracked
         ):
             self._turns.pop(key, None)

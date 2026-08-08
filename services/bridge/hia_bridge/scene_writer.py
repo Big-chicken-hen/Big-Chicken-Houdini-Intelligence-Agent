@@ -27,7 +27,7 @@ class SceneWriterOwnership:
         self._owner_turn_id: str | None = None
         self._turn_terminal = False
         self._active_hia_items: set[str] = set()
-        self._identity_error = False
+        self._anonymous_hia_items = 0
 
     def reserve(self, kind: str, scope: str) -> SceneWriterReservation:
         if kind not in {"ordinary", "project"} or not scope:
@@ -48,7 +48,7 @@ class SceneWriterOwnership:
             self._reservation = reservation
             self._turn_terminal = False
             self._active_hia_items.clear()
-            self._identity_error = False
+            self._anonymous_hia_items = 0
             return reservation
 
     def bind(
@@ -96,6 +96,19 @@ class SceneWriterOwnership:
             self._active_hia_items.discard(item_id)
             return self._release_if_safe_locked()
 
+    def hia_anonymous_started(self, owner: str) -> None:
+        with self._lock:
+            if owner == self._owner:
+                self._anonymous_hia_items += 1
+
+    def hia_anonymous_finished(self, owner: str) -> bool:
+        with self._lock:
+            if owner != self._owner:
+                return False
+            if self._anonymous_hia_items > 0:
+                self._anonymous_hia_items -= 1
+            return self._release_if_safe_locked()
+
     def turn_terminal(self, owner: str) -> bool:
         with self._lock:
             if owner != self._owner:
@@ -103,17 +116,15 @@ class SceneWriterOwnership:
             self._turn_terminal = True
             return self._release_if_safe_locked()
 
-    def fail_closed(self, owner: str) -> None:
-        with self._lock:
-            if owner == self._owner:
-                self._identity_error = True
-
     def retained_after_terminal(self, owner: str) -> bool:
         with self._lock:
             return (
                 owner == self._owner
                 and self._turn_terminal
-                and (bool(self._active_hia_items) or self._identity_error)
+                and (
+                    bool(self._active_hia_items)
+                    or self._anonymous_hia_items > 0
+                )
             )
 
     def is_current(self, owner: str) -> bool:
@@ -129,14 +140,14 @@ class SceneWriterOwnership:
                 "starting": self._reservation is not None and self._owner is None,
                 "turn_terminal": self._turn_terminal,
                 "active_hia_items": len(self._active_hia_items),
-                "identity_error": self._identity_error,
+                "anonymous_hia_items": self._anonymous_hia_items,
             }
 
     def _release_if_safe_locked(self) -> bool:
         if (
             not self._turn_terminal
             or self._active_hia_items
-            or self._identity_error
+            or self._anonymous_hia_items > 0
         ):
             return False
         self._clear_locked()
@@ -149,7 +160,7 @@ class SceneWriterOwnership:
         self._owner_turn_id = None
         self._turn_terminal = False
         self._active_hia_items.clear()
-        self._identity_error = False
+        self._anonymous_hia_items = 0
 
     def _require_reservation(self, reservation: SceneWriterReservation) -> None:
         if (

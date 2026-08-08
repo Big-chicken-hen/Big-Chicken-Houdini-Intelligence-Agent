@@ -145,6 +145,7 @@ class BridgeSession:
         self._scene_writer_reservation: SceneWriterReservation | None = None
         self._scene_writer_owner: str | None = None
         self._active_hia_item_ids: set[str] = set()
+        self._anonymous_hia_items = 0
         self._closed = False
         self._client.set_event_sink(self._on_client_event)
 
@@ -1010,6 +1011,7 @@ class BridgeSession:
             self._scene_writer_reservation = reservation
             self._scene_writer_owner = None
             self._active_hia_item_ids.clear()
+            self._anonymous_hia_items = 0
             self._turn_generation += 1
             generation = self._turn_generation
             self._start_source_turn_id = self._turn_id or self._start_source_turn_id
@@ -1096,6 +1098,7 @@ class BridgeSession:
         publish_selection = False
         writer_terminal = False
         writer_items: tuple[str, ...] = ()
+        writer_anonymous_items = 0
         owner: str | None = None
         with self._lock:
             if generation == self._turn_generation:
@@ -1130,6 +1133,7 @@ class BridgeSession:
                             **runtime_changes,
                         )
                 writer_items = tuple(self._active_hia_item_ids)
+                writer_anonymous_items = self._anonymous_hia_items
                 writer_terminal = not self._turn_active
                 self._start_source_turn_id = None
                 if self._turn_active and self._turn_status == "starting":
@@ -1138,6 +1142,8 @@ class BridgeSession:
         if owner is not None:
             for item_id in writer_items:
                 self._scene_writer.hia_started(owner, item_id)
+            for _ in range(writer_anonymous_items):
+                self._scene_writer.hia_anonymous_started(owner)
             if writer_terminal and self._scene_writer.turn_terminal(owner):
                 with self._lock:
                     if self._scene_writer_owner == owner:
@@ -1867,8 +1873,21 @@ class BridgeSession:
         )
 
     def _require_no_active_turn_locked(self) -> None:
-        if not self._turn_active:
+        if not self._turn_active and self._scene_writer_owner is None:
             return
+        if not self._turn_active:
+            raise BridgeError(
+                "SCENE_WRITER_STILL_ACTIVE",
+                "The Turn ended, but an HIA scene write is still active",
+                http_status=409,
+                details={
+                    "turn_active": False,
+                    "thread_id": self._thread_id,
+                    "turn_id": self._turn_id,
+                    "turn_status": self._turn_status,
+                    "owner": self._scene_writer_owner,
+                },
+            )
         raise BridgeError(
             "TURN_ALREADY_ACTIVE",
             "A Turn is already active for the selected Thread",
@@ -2284,7 +2303,7 @@ class BridgeSession:
         return identifiers[0], identifiers[1]
 
     def _on_client_event(self, event: dict[str, Any]) -> None:
-        scene_writer_identity_error: tuple[str, str] | None = None
+        anonymous_hia_protocol_error: tuple[str, str] | None = None
         event_type = event.get("type")
         if event_type == "codex_notification":
             method = event.get("method")
@@ -2353,9 +2372,20 @@ class BridgeSession:
                             else None
                         )
                         if is_hia_item and exact_item_id is None:
-                            if isinstance(owner, str):
-                                self._scene_writer.fail_closed(owner)
-                            scene_writer_identity_error = (thread_id, turn_id)
+                            if method == "item/started":
+                                self._anonymous_hia_items += 1
+                                if isinstance(owner, str):
+                                    self._scene_writer.hia_anonymous_started(owner)
+                            else:
+                                if self._anonymous_hia_items > 0:
+                                    self._anonymous_hia_items -= 1
+                                if (
+                                    isinstance(owner, str)
+                                    and self._scene_writer.hia_anonymous_finished(owner)
+                                ):
+                                    self._scene_writer_owner = None
+                                    self._scene_writer_reservation = None
+                            anonymous_hia_protocol_error = (thread_id, turn_id)
                             self._last_tool_status = "failed"
                         elif method == "item/started" and is_hia_item:
                             self._active_hia_item_ids.add(exact_item_id)
@@ -2431,12 +2461,12 @@ class BridgeSession:
             with self._turn_condition:
                 self._connected = False
                 self._turn_condition.notify_all()
-        if scene_writer_identity_error is not None:
-            thread_id, turn_id = scene_writer_identity_error
+        if anonymous_hia_protocol_error is not None:
+            thread_id, turn_id = anonymous_hia_protocol_error
             self._events.publish(
                 "protocol_warning",
                 code="INVALID_HIA_ITEM_ID",
-                message="Retained scene writer ownership after an HIA item omitted its exact id",
+                message="Tracked an anonymous HIA item lifecycle after its exact id was omitted",
                 thread_id=thread_id,
                 turn_id=turn_id,
             )
