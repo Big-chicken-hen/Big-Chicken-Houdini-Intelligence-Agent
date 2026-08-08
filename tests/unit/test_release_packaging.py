@@ -213,7 +213,7 @@ class ReleasePackagingTests(unittest.TestCase):
                 f"'houdini_package/python{python_version}libs/uiready.py'",
                 allowlist_source,
             )
-        self.assertIn("'docs/PROJECT_TEAM_LIVE_ACCEPTANCE.md'", allowlist_source)
+        self.assertNotIn("PROJECT_TEAM_LIVE_ACCEPTANCE", allowlist_source)
         self.assertNotIn("'.runtime", allowlist_source)
         self.assertNotIn('".runtime', allowlist_source)
         self.assertNotIn("'.venv", allowlist_source)
@@ -251,28 +251,20 @@ class ReleasePackagingTests(unittest.TestCase):
         ]
         self.assertIn("'knowledge/sidefx-official/'", directory_allowlist)
 
-    def test_release_requires_every_project_team_panel_runtime_module(self) -> None:
+    def test_release_excludes_removed_project_team_panel_modules(self) -> None:
         source = BUILD_RELEASE_PATH.read_text(encoding="utf-8-sig")
         file_allowlist = source[
             source.index("$releaseFileAllowlist"):
             source.index("$releaseDirectoryAllowlist")
         ]
-        required = (
+        removed = (
             "houdini_package/python_libs/hia_panel/project_team.py",
             "houdini_package/python_libs/hia_panel/project_team_controller.py",
             "houdini_package/python_libs/hia_panel/project_team_view.py",
         )
-        tracked = subprocess.run(
-            ["git", "-C", str(REPOSITORY_ROOT), "ls-files", "--", *required],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-        ).stdout.splitlines()
-        self.assertEqual(set(required), {item.replace("\\", "/") for item in tracked})
-        for relative_path in required:
-            self.assertTrue((REPOSITORY_ROOT / relative_path).is_file())
-            self.assertIn(f"'{relative_path}'", file_allowlist)
+        for relative_path in removed:
+            self.assertFalse((REPOSITORY_ROOT / relative_path).exists())
+            self.assertNotIn(f"'{relative_path}'", file_allowlist)
 
     def test_release_preflight_is_read_only_and_uses_canonical_venv(
         self,

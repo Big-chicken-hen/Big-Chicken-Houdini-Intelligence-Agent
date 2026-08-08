@@ -4,6 +4,10 @@
 
 The product is a Codex client embedded in a Houdini Python Panel. Codex is the only reasoning, planning, and content-generation component; the surrounding code transports requests, displays state, executes deterministic Houdini operations, and may run an optional project-local Qwen text encoder for retrieval only.
 
+The runtime has one task path: an ordinary Codex Thread selected in the Panel, through the local Bridge, to the selected Houdini backend. It has no fixed role roster, project registry, project lifecycle, project attachments, or project-specific HTTP surface. Existing legacy project-team files under `.runtime` are ignored and are never migrated or deleted automatically.
+
+The experimental fixed five-role project-team mode was removed before v0.2.0 because it destabilized ordinary operation and had not completed embedded Houdini acceptance.
+
 ```text
 User → Houdini Panel → local Bridge → Codex app-server
      → one selected live backend

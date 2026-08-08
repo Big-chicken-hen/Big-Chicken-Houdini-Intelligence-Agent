@@ -133,36 +133,6 @@ class _ThreadContentClient(_ClientStub):
         return super().request(method, params)
 
 
-class _ProjectRoleBoundaryClient(_ClientStub):
-    def __init__(self, *, contradictory_resume: bool = False) -> None:
-        super().__init__()
-        self.contradictory_resume = contradictory_resume
-        self.requests: list[tuple[str, dict[str, Any]]] = []
-        self.read_count = 0
-
-    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        self.requests.append((method, dict(params)))
-        if method == "thread/read":
-            self.read_count += 1
-            source = None if self.contradictory_resume else "hia-project/project-a/planning"
-            return {
-                "thread": {
-                    "id": params["threadId"],
-                    "threadSource": source,
-                    "turns": [],
-                }
-            }
-        if method == "thread/resume" and self.contradictory_resume:
-            return {
-                "thread": {
-                    "id": params["threadId"],
-                    "threadSource": "hia-project/project-a/planning",
-                    "turns": [],
-                }
-            }
-        raise AssertionError(f"Unexpected project role mutation request: {method}")
-
-
 class _RecordingClient(_ClientStub):
     def __init__(self) -> None:
         super().__init__()
@@ -999,86 +969,6 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
 
         self.assertEqual("TURN_ALREADY_ACTIVE", caught.exception.code)
         self.assertEqual([], client.requests)
-
-
-class BridgeSessionProjectRoleBoundaryTests(unittest.TestCase):
-    ROLE_THREAD_ID = "project-role-thread"
-
-    def make_session(
-        self,
-        *,
-        contradictory_resume: bool = False,
-        active_turn: bool = False,
-        selected_thread_id: str | None = ROLE_THREAD_ID,
-    ) -> tuple[BridgeSession, _ProjectRoleBoundaryClient]:
-        client = _ProjectRoleBoundaryClient(
-            contradictory_resume=contradictory_resume
-        )
-        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
-        with session._lock:
-            session._thread_id = selected_thread_id
-            if active_turn:
-                session._turn_id = "role-turn"
-                session._turn_status = "inProgress"
-                session._turn_active = True
-                session._turn_created = True
-        return session, client
-
-    def assert_project_api_required(self, operation: Any, client: Any) -> None:
-        with self.assertRaises(BridgeError) as raised:
-            operation()
-        self.assertEqual("PROJECT_ROLE_REQUIRES_PROJECT_API", raised.exception.code)
-        self.assertEqual(409, raised.exception.http_status)
-        self.assertEqual(
-            {"thread/read"},
-            {method for method, _params in client.requests},
-        )
-
-    def test_every_generic_role_read_or_mutation_is_rejected_by_backend(self) -> None:
-        operations = (
-            lambda session: session.resume_thread(self.ROLE_THREAD_ID),
-            lambda session: session.read_thread(self.ROLE_THREAD_ID),
-            lambda session: session.rename_thread(self.ROLE_THREAD_ID, "new name"),
-            lambda session: session.delete_thread(self.ROLE_THREAD_ID),
-            lambda session: session.get_goal(self.ROLE_THREAD_ID),
-            lambda session: session.set_goal(
-                expected_thread_id=self.ROLE_THREAD_ID,
-                objective="must not mutate",
-                status="active",
-                token_budget=None,
-            ),
-            lambda session: session.clear_goal(self.ROLE_THREAD_ID),
-            lambda session: session.set_focus_mode(self.ROLE_THREAD_ID, True),
-            lambda session: session.start_turn("must not start"),
-        )
-        for operation in operations:
-            with self.subTest(operation=operation):
-                session, client = self.make_session()
-                self.assert_project_api_required(lambda: operation(session), client)
-
-        for operation in (
-            lambda session: session.steer_turn("must not steer"),
-            lambda session: session.interrupt_turn(),
-        ):
-            with self.subTest(operation=operation):
-                session, client = self.make_session(active_turn=True)
-                self.assert_project_api_required(lambda: operation(session), client)
-
-    def test_resume_response_cannot_reclassify_project_role_as_ordinary(self) -> None:
-        session, client = self.make_session(
-            contradictory_resume=True,
-            selected_thread_id="ordinary-current",
-        )
-
-        with self.assertRaises(BridgeError) as raised:
-            session.resume_thread(self.ROLE_THREAD_ID)
-
-        self.assertEqual("PROJECT_ROLE_REQUIRES_PROJECT_API", raised.exception.code)
-        self.assertEqual(
-            ["thread/read", "thread/resume"],
-            [method for method, _params in client.requests],
-        )
-        self.assertEqual("ordinary-current", session.snapshot()["thread_id"])
 
 
 class BridgeSessionGoalTests(unittest.TestCase):
@@ -2128,33 +2018,6 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertFalse(after_late_ack["turn_active"])
         self.assertEqual("completed", after_late_ack["turn_status"])
         self.assertNotIn("error", outcomes[0])
-
-    def test_project_execution_blocks_ordinary_then_release_allows_next_writer(self) -> None:
-        writer = SceneWriterOwnership()
-        project_reservation = writer.reserve("project", "project-active")
-        project_owner = writer.bind(
-            project_reservation, "thread-project", "turn-project"
-        )
-        client = _RecordingClient()
-        session = BridgeSession(
-            REPOSITORY_ROOT,
-            client,
-            EventBuffer(),
-            scene_writer=writer,
-        )
-        session.start_thread()
-        client.requests.clear()
-
-        with self.assertRaises(BridgeError) as raised:
-            session.start_turn("ordinary must not queue")
-
-        self.assertEqual("SCENE_WRITER_BUSY", raised.exception.code)
-        self.assertEqual(project_owner, writer.snapshot()["owner"])
-        self.assertFalse(any(method == "turn/start" for method, _ in client.requests))
-
-        self.assertTrue(writer.turn_terminal(project_owner))
-        result = session.start_turn("ordinary after release")
-        self.assertEqual("turn-recorded", result["turn_id"])
 
     def test_missing_hia_item_id_retains_ordinary_writer_and_emits_diagnostic(self) -> None:
         writer = SceneWriterOwnership()

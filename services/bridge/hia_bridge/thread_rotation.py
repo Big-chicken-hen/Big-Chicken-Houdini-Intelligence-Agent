@@ -47,8 +47,6 @@ class ThreadRotationAdapters:
     is_idle: Callable[[str], bool]
     rebind: Callable[[str, str], None]
     publish: Callable[[Mapping[str, Any]], None]
-    validate_role_tools: Callable[[str, Mapping[str, Any]], bool] | None = None
-    supports_goal: Callable[[str], bool] | None = None
 
 
 @dataclass
@@ -157,38 +155,6 @@ class ThreadRotationService:
                 "failed": state.failed,
             }
 
-    def needs_rotation(self, thread_id: str) -> bool:
-        """Return whether the next project Role use must stop at its boundary."""
-
-        with self._lock:
-            state = self._states.get(thread_id)
-            return bool(
-                state is not None
-                and (state.pending or state.running or state.failed)
-            )
-
-    def rotate_before_turn(self, thread_id: str) -> str:
-        """Synchronously resolve one pending rotation at an existing Role boundary."""
-
-        if not isinstance(thread_id, str) or not thread_id:
-            raise ValueError("thread_id is required")
-        with self._lock:
-            state = self._states.get(thread_id)
-            if state is None:
-                return thread_id
-            if state.failed:
-                raise RuntimeError("Thread rotation previously failed")
-            if state.running:
-                raise RuntimeError("Thread rotation is already running")
-            if not state.pending:
-                return thread_id
-            state.pending = False
-            state.running = True
-        replacement = self._rotate(thread_id)
-        if not isinstance(replacement, str) or not replacement:
-            raise RuntimeError("Thread rotation failed")
-        return replacement
-
     def close(self, *, wait: bool = True) -> None:
         with self._lock:
             self._closed = True
@@ -262,14 +228,7 @@ class ThreadRotationService:
                 expected_source=profile.thread_source,
             )
             old_turn_prefix = self._turn_prefix(old_turn_ids, last_turn_id)
-            goal_supported = (
-                self._adapters.supports_goal(old_thread_id)
-                if self._adapters.supports_goal is not None
-                else False
-            )
-            old_goal = (
-                self._read_goal(old_thread_id) if goal_supported else None
-            )
+            old_goal = self._read_goal(old_thread_id)
             params = {
                 "threadId": old_thread_id,
                 "lastTurnId": last_turn_id,
@@ -308,9 +267,6 @@ class ThreadRotationService:
             )
             if self._turn_prefix(new_turn_ids, last_turn_id) != old_turn_prefix:
                 raise ValueError("forked Thread Turn identity sequence drifted")
-            validator = self._adapters.validate_role_tools
-            if validator is not None and not validator(old_thread_id, result):
-                raise ValueError("role/tool response validation failed")
             if old_goal is not None:
                 stage = "goal"
                 self._restore_goal(new_thread_id, old_goal)

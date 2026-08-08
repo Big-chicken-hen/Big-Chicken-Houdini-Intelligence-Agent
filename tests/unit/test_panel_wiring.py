@@ -65,6 +65,25 @@ class _HeadlessTextCursor:
         End = object()
 
 
+_HEADLESS_USER_ROLE = object()
+
+
+class _HeadlessTreeWidgetItem:
+    def __init__(self, labels: list[str]) -> None:
+        self.labels = list(labels)
+        self._data: dict[tuple[int, Any], Any] = {}
+        self._tooltips: dict[int, str] = {}
+
+    def setData(self, column: int, role: Any, value: Any) -> None:  # noqa: N802
+        self._data[(column, role)] = value
+
+    def data(self, column: int, role: Any) -> Any:
+        return self._data.get((column, role))
+
+    def setToolTip(self, column: int, text: str) -> None:  # noqa: N802
+        self._tooltips[column] = text
+
+
 def _slot(*_types: object, **_kwargs: object) -> Any:
     def decorator(function: Any) -> Any:
         return function
@@ -82,10 +101,14 @@ def _load_real_panel_class() -> type:
     qt_core.Slot = _slot
     qt_core.QTimer = _HeadlessTimer
     qt_core.Qt = types.SimpleNamespace(
-        ItemDataRole=types.SimpleNamespace(ToolTipRole=object())
+        ItemDataRole=types.SimpleNamespace(
+            ToolTipRole=object(),
+            UserRole=_HEADLESS_USER_ROLE,
+        )
     )
     qt_gui.QTextCursor = _HeadlessTextCursor
     qt_widgets.QWidget = _HeadlessQWidget
+    qt_widgets.QTreeWidgetItem = _HeadlessTreeWidgetItem
     pyside.QtCore = qt_core
     pyside.QtGui = qt_gui
     pyside.QtWidgets = qt_widgets
@@ -273,6 +296,33 @@ class _Widget:
             self._items[index] = (label, data)
         else:
             self._item_roles[(index, role)] = data
+
+
+class _TreeWidgetShim(_Widget):
+    def __init__(self) -> None:
+        super().__init__()
+        self._top_level_items: list[_HeadlessTreeWidgetItem] = []
+        self._current_item: _HeadlessTreeWidgetItem | None = None
+
+    def clear(self) -> None:
+        super().clear()
+        self._top_level_items.clear()
+        self._current_item = None
+
+    def addTopLevelItem(self, item: _HeadlessTreeWidgetItem) -> None:  # noqa: N802
+        self._top_level_items.append(item)
+
+    def currentItem(self) -> _HeadlessTreeWidgetItem | None:  # noqa: N802
+        return self._current_item
+
+    def setCurrentItem(self, item: _HeadlessTreeWidgetItem) -> None:  # noqa: N802
+        self._current_item = item
+
+    def topLevelItemCount(self) -> int:  # noqa: N802
+        return len(self._top_level_items)
+
+    def topLevelItem(self, index: int) -> _HeadlessTreeWidgetItem:  # noqa: N802
+        return self._top_level_items[index]
 
 
 class _ConversationShim:
@@ -513,12 +563,7 @@ class _AttachmentStripShim:
 
 
 class _AttachmentStoreShim:
-    def __init__(self) -> None:
-        self.project_draft_counter = 0
-
-    def new_project_draft_id(self) -> str:
-        self.project_draft_counter += 1
-        return f"draft-{self.project_draft_counter}"
+    pass
 
 
 class _BridgeClientShim:
@@ -835,13 +880,7 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
         if isinstance(selected_thread_id, str)
         else []
     )
-    panel._project_team_controller = None
-    panel._project_draft_active = False
-    panel._project_draft_id = None
-    panel._ordinary_composer_draft = None
     panel._ordinary_thread_drafts = {}
-    panel._project_start_pending = False
-    panel._pending_team_drafts = {}
     panel._thread_delete_confirm_id = None
     panel._thread_delete_pending = None
     panel._project_memory_loaded = False
@@ -935,13 +974,15 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.houdini_mcp_label = _Widget("● HIA MCP V2：不可用")
     panel.native_hython_label = _Widget("● Native Hython：不可用")
     panel.houdini_scene_label = _Widget("场景版本：不可用  ·  未保存：不可用")
-    panel.thread_id_edit = _Widget(selected_thread_id or "")
-    panel.history_combo = _Widget()
+    panel.history_tree = _TreeWidgetShim()
     if panel._thread_history:
-        panel.history_combo.addItem("Current thread", panel._thread_history[0])
-    else:
-        panel.history_combo.addItem("暂无历史会话", None)
+        history_item = _HeadlessTreeWidgetItem(["Current thread"])
+        history_item.setData(0, _HEADLESS_USER_ROLE, selected_thread_id)
+        panel.history_tree.addTopLevelItem(history_item)
+        panel.history_tree.setCurrentItem(history_item)
     panel.refresh_threads_button = _Widget()
+    panel.new_thread_button = _Widget("新建普通任务")
+    panel.open_thread_button = _Widget("打开所选任务")
     panel.thread_name_edit = _Widget("Current thread")
     panel.rename_thread_button = _Widget()
     panel.copy_thread_id_button = _Widget()
@@ -999,7 +1040,6 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel.task_sidebar_button = _Widget("任务")
     panel.task_sidebar_button.setChecked(True)
     panel.new_thread_button = _Widget()
-    panel.resume_thread_button = _Widget()
     panel.send_button = _Widget()
     panel.stop_button = _Widget()
     panel.goal_continue_button = _Widget("继续 Goal")
@@ -1230,96 +1270,9 @@ class PanelWiringTests(unittest.TestCase):
     def assert_idle_controls(self, panel: Any) -> None:
         self.assertEqual(TurnPhase.IDLE, panel._turn_state.phase)
         self.assertTrue(panel.new_thread_button.isEnabled())
-        self.assertTrue(panel.resume_thread_button.isEnabled())
+        self.assertTrue(panel.open_thread_button.isEnabled())
         self.assertTrue(panel.send_button.isEnabled())
         self.assertFalse(panel.stop_button.isEnabled())
-
-    def test_project_role_message_wrapper_is_hidden_from_conversation(self) -> None:
-        self.assertEqual(
-            "我的消息",
-            HoudiniIntelligencePanel._project_role_user_text(
-                "message{我的消息}",
-                "监督 AI",
-            ),
-        )
-
-    def test_project_role_protocol_request_is_rendered_as_readable_task(self) -> None:
-        envelope = {
-            "schema": "hia-project-role-request/1",
-            "action": "create_plan_and_stage_cards",
-            "authoritative_task": {
-                "task_text": "建造一栋克制写实的近未来住宅"
-            },
-        }
-
-        rendered = HoudiniIntelligencePanel._project_role_user_text(
-            json.dumps(envelope, ensure_ascii=False),
-            "方案 AI",
-        )
-
-        self.assertIn("项目任务", rendered)
-        self.assertIn("近未来住宅", rendered)
-        self.assertNotIn("hia-project-role-request", rendered)
-
-    def test_project_start_response_renders_only_the_natural_reply(self) -> None:
-        response = {
-            "schema": "hia-project-start/1",
-            "route": "non_scene_reply",
-            "reply": "你好！请告诉我需要处理的 Houdini 场景任务。",
-        }
-
-        rendered = HoudiniIntelligencePanel._project_role_agent_text(
-            json.dumps(response, ensure_ascii=False),
-            "监督 AI",
-        )
-
-        self.assertIn("监督 AI", rendered)
-        self.assertIn("你好！请告诉我需要处理的 Houdini 场景任务。", rendered)
-        self.assertNotIn("reply", rendered)
-        self.assertNotIn("non_scene_reply", rendered)
-        self.assertNotIn("hia-project-start", rendered)
-
-    def test_project_role_plan_keeps_complete_human_readable_content(self) -> None:
-        response = {
-            "schema": "hia-project-plan/1",
-            "requirements": [
-                {
-                    "requirement_id": "REQ-structure",
-                    "description": "主体必须采用可编辑的承重结构",
-                }
-            ],
-            "stages": [
-                {
-                    "stage_id": "stage-structure",
-                    "title": "主体结构",
-                    "steps": ["建立立柱与梁", "检查连接和净空"],
-                }
-            ],
-        }
-
-        rendered = HoudiniIntelligencePanel._project_role_agent_text(
-            json.dumps(response, ensure_ascii=False),
-            "方案 AI",
-        )
-
-        self.assertIn("REQ-structure", rendered)
-        self.assertIn("可编辑的承重结构", rendered)
-        self.assertIn("建立立柱与梁", rendered)
-        self.assertIn("检查连接和净空", rendered)
-        self.assertNotIn("\"requirements\"", rendered)
-
-    def test_invalid_project_role_json_is_reported_honestly_without_retry_claim(self) -> None:
-        rendered = HoudiniIntelligencePanel._project_role_agent_text(
-            "not-json project role output",
-            "Planning",
-            project_status="waiting_user",
-        )
-
-        self.assertIn("JSONDecodeError", rendered)
-        self.assertIn("waiting_user", rendered)
-        self.assertIn("not-json project role output", rendered)
-        self.assertNotIn("retry", rendered.casefold())
-        self.assertNotIn("reprocess", rendered.casefold())
 
     def test_mcp_backend_initialization_defaults_to_hia_and_rejects_unknown(self) -> None:
         cases = (
@@ -1503,7 +1456,7 @@ class PanelWiringTests(unittest.TestCase):
             PANEL_LIB_ROOT / "hia_panel" / "panel.py"
         ).read_text(encoding="utf-8")
 
-        self.assertNotIn("self.history_combo.setMinimumWidth(210)", panel_source)
+        self.assertNotIn("history_combo", panel_source)
         self.assertNotIn("right_column.setMinimumWidth(260)", panel_source)
         self.assertIn("self.left_column.setMinimumWidth(160)", panel_source)
         self.assertIn("self.center_column.setMinimumWidth(360)", panel_source)
@@ -1528,7 +1481,7 @@ class PanelWiringTests(unittest.TestCase):
         self.assertIn("self.main_splitter.setCollapsible(2, False)", panel_source)
         self.assertIn("self.main_splitter.setStretchFactor(1, 4)", panel_source)
         self.assertEqual(5, panel_source.count("self.task_tabs.addTab("))
-        for label in ("任务蓝图", "阶段进度", "审阅", "项目团队", "知识与记忆"):
+        for label in ("任务蓝图", "阶段进度", "审阅", "活动", "知识与记忆"):
             self.assertIn(f'"{label}"', panel_source)
         self.assertEqual(
             3,
@@ -3191,10 +3144,10 @@ class PanelWiringTests(unittest.TestCase):
     def test_second_delete_click_dispatches_without_silent_delay(self) -> None:
         panel = _make_panel()
 
-        panel._delete_project_navigation_thread("thread-1")
+        panel._request_thread_deletion("thread-1")
         self.assertEqual([], panel._client.thread_delete_requests)
 
-        panel._delete_project_navigation_thread("thread-1")
+        panel._request_thread_deletion("thread-1")
 
         self.assertEqual(1, len(panel._client.thread_delete_requests))
         self.assertEqual(
@@ -7111,53 +7064,6 @@ class PanelWiringTests(unittest.TestCase):
                     )
                 panel._on_events({"events": events, "gap": False})
                 self.assertEqual(1, len(panel._client.turn_requests))
-
-    def test_project_role_never_uses_ordinary_goal_auto_continuation(self) -> None:
-        panel = _make_panel()
-        goal = {
-            "threadId": "thread-1",
-            "objective": "project objective",
-            "status": "active",
-        }
-        panel._apply_goal("thread-1", goal)
-        panel._apply_focus_mode("thread-1", True)
-        _context, turn_id = _start_active_turn(panel, 1)
-        panel._project_role_context_for_thread = lambda thread_id: (
-            (object(), object()) if thread_id == "thread-1" else None
-        )
-
-        panel._on_events(
-            {"events": [_completed_notification(turn_id)], "gap": False}
-        )
-
-        self.assertEqual(1, len(panel._client.turn_requests))
-        self.assertIsNone(panel._goal_continuation_boundary)
-        self.assertFalse(panel._goal_continuation_is_safe())
-
-    def test_project_goal_rejects_every_ordinary_goal_mutation_handler(self) -> None:
-        panel = _make_panel()
-        panel._project_role_context_for_thread = lambda thread_id: (
-            (object(), object()) if thread_id == "thread-1" else None
-        )
-        panel._current_goal = {
-            "threadId": "thread-1",
-            "objective": "project objective",
-            "status": "paused",
-        }
-        panel.goal_objective_edit.setPlainText("stale ordinary goal")
-
-        panel._request_goal()
-        panel._save_goal()
-        panel._clear_goal()
-        panel._set_focus_mode(True)
-        panel._continue_goal()
-
-        self.assertEqual([], panel._client.goal_get_requests)
-        self.assertEqual("", panel.goal_objective_edit.toPlainText())
-        self.assertEqual([], panel._client.goal_set_requests)
-        self.assertEqual([], panel._client.goal_clear_requests)
-        self.assertEqual([], panel._client.focus_mode_requests)
-        self.assertEqual([], panel._client.turn_requests)
 
     def test_empty_auto_continuation_pauses_without_a_fast_loop(self) -> None:
         panel = _make_panel()

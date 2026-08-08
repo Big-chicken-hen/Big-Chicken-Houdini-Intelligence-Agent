@@ -1,6 +1,6 @@
-"""Exercise ThreadRotationService against the pinned real app-server.
+"""Run ThreadRotationService against the pinned real app-server.
 
-The script forks one existing project-local smoke Thread to create a disposable
+The script forks one existing repository-local smoke Thread to create a disposable
 source without modifying that fixture.  Its three compaction notifications are
 synthetic service inputs, so this smoke validates the real service
 fork/read/rebind/delete path but deliberately does not claim that automatic
@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import uuid
 
 
@@ -258,8 +259,6 @@ def main() -> int:
                 is_idle=lambda thread_id: authority["thread_id"] == thread_id,
                 rebind=rebind,
                 publish=publish,
-                validate_role_tools=lambda _thread_id, _result: True,
-                supports_goal=lambda thread_id: authority["thread_id"] == thread_id,
             ),
         )
         client.add_notification_observer(rotation.observe)
@@ -309,14 +308,29 @@ def main() -> int:
                 },
             )
 
-        try:
-            replacement_thread_id = rotation.rotate_before_turn(source_thread_id)
-        except Exception as exc:
+        rotation.observe(
+            "thread/status/changed",
+            {
+                "threadId": source_thread_id,
+                "status": {"type": "idle"},
+            },
+        )
+        rotation_deadline = time.monotonic() + 60.0
+        while (
+            not any(
+                event.get("type") in {"thread_rotated", "thread_rotation_failed"}
+                for event in rotation_events
+            )
+            and time.monotonic() < rotation_deadline
+        ):
+            time.sleep(0.05)
+        replacement_thread_id = authority["thread_id"]
+        if replacement_thread_id == source_thread_id:
             raise RuntimeError(
                 "ThreadRotationService failed: "
                 f"profile_source={thread_source!r}, "
                 f"readback={source_readback!r}, events={rotation_events!r}"
-            ) from exc
+            )
         owned_thread_ids.add(replacement_thread_id)
         rotated = next(
             (
@@ -394,6 +408,7 @@ def main() -> int:
             "thread/fork fixture",
             "thread/goal/set paused",
             "ThreadRotationService.observe",
+            "thread/status/changed idle",
             "thread/read(includeTurns=true)",
             "thread/goal/get",
             "thread/fork",

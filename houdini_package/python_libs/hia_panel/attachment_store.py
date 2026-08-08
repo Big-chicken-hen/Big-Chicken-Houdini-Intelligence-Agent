@@ -39,17 +39,6 @@ class AttachmentStore:
             self._project_root / ".runtime" / "attachments"
         ).resolve()
         self._require_descendant(self._attachments_root, self._project_root)
-        self._project_drafts_root = (
-            self._project_root
-            / ".runtime"
-            / "project-attachments"
-            / "drafts"
-        ).resolve()
-        self._require_descendant(self._project_drafts_root, self._project_root)
-
-    @staticmethod
-    def new_project_draft_id() -> str:
-        return f"draft-{uuid.uuid4().hex}"
 
     def copy_file(self, thread_id: str, source: Union[str, Path]) -> str:
         """Copy one supported image without replacing an existing attachment."""
@@ -101,29 +90,6 @@ class AttachmentStore:
                 rebound.append(str(destination))
         return rebound
 
-    def copy_project_file(
-        self,
-        draft_id: str,
-        source: Union[str, Path],
-    ) -> str:
-        """Copy one image into a project-owned draft directory."""
-
-        source_path = Path(source)
-        suffix = source_path.suffix.lower()
-        if suffix not in _SUPPORTED_IMAGE_SUFFIXES:
-            raise ValueError("attachment must be PNG, JPG, JPEG, or WEBP")
-        if not source_path.is_file():
-            raise FileNotFoundError(str(source_path))
-        directory = self._project_draft_directory(draft_id)
-        destination = self._unique_path(directory, suffix)
-        with source_path.open("rb") as source_file, destination.open("xb") as target_file:
-            shutil.copyfileobj(source_file, target_file)
-        return str(destination)
-
-    def project_clipboard_path(self, draft_id: str) -> str:
-        directory = self._project_draft_directory(draft_id)
-        return str(self._unique_path(directory, ".png"))
-
     def _thread_directory(self, thread_id: str) -> Path:
         directory = self._thread_path(thread_id)
         directory.mkdir(parents=True, exist_ok=True)
@@ -138,20 +104,6 @@ class AttachmentStore:
         directory = (self._attachments_root / thread_id).resolve()
         self._require_descendant(directory, self._attachments_root)
         return directory
-
-    def _project_draft_directory(self, draft_id: str) -> Path:
-        self._validate_owner_id(draft_id, "draft_id")
-        directory = (self._project_drafts_root / draft_id).resolve()
-        self._require_descendant(directory, self._project_drafts_root)
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
-
-    @staticmethod
-    def _validate_owner_id(value: str, name: str) -> None:
-        if not isinstance(value, str) or not _SAFE_THREAD_ID.fullmatch(value):
-            raise ValueError(f"{name} must be one safe directory name")
-        if value.upper() in _WINDOWS_RESERVED_NAMES:
-            raise ValueError(f"{name} is reserved on Windows")
 
     @staticmethod
     def _unique_path(directory: Path, suffix: str) -> Path:

@@ -155,18 +155,6 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         stack.enter_context(
             mock.patch.object(bridge_main, "BridgeSession", return_value=session)
         )
-        isolated_project_runtime = SimpleNamespace(
-            service=SimpleNamespace(snapshot=lambda: {"projects": []}),
-            observe_codex_event=lambda *_args, **_kwargs: None,
-            close=lambda *_args, **_kwargs: True,
-        )
-        stack.enter_context(
-            mock.patch.object(
-                bridge_main,
-                "_build_project_runtime",
-                return_value=isolated_project_runtime,
-            )
-        )
         stack.enter_context(mock.patch.object(bridge_main.signal, "signal"))
         return stack, client_constructor
 
@@ -515,7 +503,7 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         )
         self.assertEqual("hia_v2", json.loads(stdout.getvalue())["mcp_backend"])
 
-    def test_ordinary_server_lifecycle_does_not_construct_project_runtime(self) -> None:
+    def test_ordinary_server_lifecycle_has_no_project_runtime_dependency(self) -> None:
         order: list[str] = []
         client = _Client(order)
         session = _Session(order)
@@ -527,10 +515,6 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             shutdown=lambda: order.append("scene_queue_shutdown")
         )
         server = _Server(order)
-        project_runtime = SimpleNamespace(
-            service=SimpleNamespace(snapshot=lambda: {"projects": []}),
-            close=lambda: order.append("project_close") or True,
-        )
         stack, _ = self._common_patches(session, client)
 
         with stack, mock.patch.object(
@@ -542,10 +526,6 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             "SceneQueue",
             return_value=scene_queue,
         ), mock.patch.object(
-            bridge_main,
-            "_build_project_runtime",
-            return_value=project_runtime,
-        ) as runtime_builder, mock.patch.object(
             bridge_main,
             "BridgeApplication",
             return_value=object(),
@@ -559,10 +539,8 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertLess(order.index("session_start"), order.index("serve_forever"))
         self.assertLess(order.index("server_close"), order.index("session_close"))
-        self.assertNotIn("project_close", order)
         self.assertNotIn("project_team", application_builder.call_args.kwargs)
-        self.assertIn("project_team_factory", application_builder.call_args.kwargs)
-        runtime_builder.assert_not_called()
+        self.assertNotIn("project_team_factory", application_builder.call_args.kwargs)
 
     def test_http_provider_command_is_escaped_process_local_and_secret_free(self) -> None:
         mcp_python = 'E:\\runtime\\quoted "python"\\python.exe'

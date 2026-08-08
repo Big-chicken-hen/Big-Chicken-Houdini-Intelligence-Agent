@@ -12,7 +12,7 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlsplit
@@ -22,8 +22,6 @@ from hia_core.houdini_contract import ContractError, SchemaRegistry, strict_json
 from .errors import BridgeError
 from .events import EventBuffer
 from .knowledge_cli import KnowledgeCliError, KnowledgeCliRunner
-from .project_contracts import Requirement
-from .project_guidance import RequirementDelta
 from .scene_queue import (
     B2_READ_ONLY_PROFILE,
     RequestSnapshot,
@@ -31,59 +29,6 @@ from .scene_queue import (
     SceneQueueError,
 )
 from .session import BridgeSession
-from .project_service import (
-    ProjectGuidanceUnavailable,
-    ProjectGuidanceRecordError,
-    ProjectRuntimeSelectionError,
-    ProjectTeamService,
-)
-
-
-def _parse_requirement_delta(value: Any) -> RequirementDelta | None:
-    """Parse explicit user scope edits without interpreting guidance prose."""
-
-    if value is None:
-        return None
-    if not isinstance(value, dict) or set(value) - {"add", "supersede", "remove"}:
-        raise BridgeError("INVALID_REQUEST", "Invalid requirement_delta fields")
-    raw_add = value.get("add", [])
-    raw_supersede = value.get("supersede", {})
-    raw_remove = value.get("remove", [])
-    if not isinstance(raw_add, list) or not isinstance(raw_supersede, dict):
-        raise BridgeError("INVALID_REQUEST", "Invalid requirement_delta collection")
-    if not isinstance(raw_remove, list) or not all(
-        isinstance(item, str) and item for item in raw_remove
-    ):
-        raise BridgeError("INVALID_REQUEST", "Invalid removed requirement IDs")
-    additions = []
-    for item in raw_add:
-        if not isinstance(item, dict) or set(item) - {
-            "requirement_id",
-            "kind",
-            "source_ref",
-        }:
-            raise BridgeError("INVALID_REQUEST", "Invalid added requirement")
-        requirement_id = item.get("requirement_id")
-        kind = item.get("kind")
-        source_ref = item.get("source_ref", "")
-        if not all(isinstance(field, str) for field in (requirement_id, kind, source_ref)):
-            raise BridgeError("INVALID_REQUEST", "Invalid added requirement values")
-        if not requirement_id or not kind:
-            raise BridgeError("INVALID_REQUEST", "Added requirement needs ID and kind")
-        additions.append(Requirement(requirement_id, kind, source_ref=source_ref))
-    if not all(
-        isinstance(old_id, str)
-        and old_id
-        and isinstance(new_id, str)
-        and new_id
-        for old_id, new_id in raw_supersede.items()
-    ):
-        raise BridgeError("INVALID_REQUEST", "Invalid supersession IDs")
-    return RequirementDelta(
-        add=tuple(additions),
-        supersede=dict(raw_supersede),
-        remove=tuple(raw_remove),
-    )
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -310,16 +255,11 @@ class BridgeApplication:
         houdini_launcher_session_id: str | None = None,
         houdini_executor_path: Path | None = None,
         knowledge_cli: KnowledgeCliRunner | None = None,
-        project_team: ProjectTeamService | None = None,
-        project_team_factory: Callable[[], ProjectTeamService] | None = None,
     ) -> None:
         if len(token) < 32:
             raise ValueError("Bearer token must contain at least 32 characters")
         self.session = session
         self.events = events
-        self.project_team = project_team
-        self._project_team_factory = project_team_factory
-        self._project_team_lock = threading.Lock()
         if scene_queue is None and scene_registry is not None:
             raise ValueError("A scene registry cannot be enabled without a scene queue")
         self.scene_queue = scene_queue
@@ -422,29 +362,6 @@ class BridgeApplication:
             self._hia_transport_error = TransportError
             self._hia_cancellation_type = CancellationToken
         self._knowledge_cli = knowledge_cli or KnowledgeCliRunner()
-
-    def require_project_team(self) -> ProjectTeamService:
-        with self._project_team_lock:
-            if self.project_team is not None:
-                return self.project_team
-            if self._project_team_factory is None:
-                raise BridgeError(
-                    "PROJECT_TEAM_UNAVAILABLE",
-                    "Project mode is unavailable; ordinary chat remains available",
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                )
-            try:
-                service = self._project_team_factory()
-            except BridgeError:
-                raise
-            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-                raise BridgeError(
-                    "PROJECT_REGISTRY_CORRUPTED",
-                    "Project registry exists but cannot be read",
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                ) from exc
-            self.project_team = service
-            return service
 
     def authorized(self, value: str | None) -> bool:
         return value is not None and hmac.compare_digest(
@@ -780,30 +697,6 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/threads":
             result = application.session.list_threads()
             return {"ok": True, **result}, HTTPStatus.OK
-        if path == "/v1/project-team":
-            project_team = application.require_project_team()
-            return {
-                "ok": True,
-                "project_team": project_team.snapshot(),
-            }, HTTPStatus.OK
-        project_thread_prefix = "/v1/project-team/threads/"
-        if path.startswith(project_thread_prefix):
-            thread_id = urllib_parse.unquote(path[len(project_thread_prefix) :])
-            if not thread_id or "/" in thread_id or "\\" in thread_id:
-                raise BridgeError(
-                    "INVALID_REQUEST",
-                    "Project role read requires one encoded thread id",
-                    HTTPStatus.BAD_REQUEST,
-                )
-            try:
-                result = application.require_project_team().read_role_thread(thread_id)
-            except KeyError as exc:
-                raise BridgeError(
-                    "PROJECT_ROLE_NOT_FOUND",
-                    "Project role Thread was not found",
-                    HTTPStatus.NOT_FOUND,
-                ) from exc
-            return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/goal":
             values = parse_qs(query, keep_blank_values=True)
             thread_ids = values.get("thread_id", [])
@@ -918,127 +811,6 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 service_tier=body.get("service_tier"),
             )
             return {"ok": True, **result}, HTTPStatus.OK
-        if path == "/v1/project-team/start":
-            allowed = {
-                "text",
-                "model",
-                "effort",
-                "service_tier",
-                "local_image_paths",
-                "attachment_draft_id",
-            }
-            if set(body) - allowed:
-                raise BridgeError(
-                    "INVALID_REQUEST",
-                    "Project start contains unsupported fields",
-                    HTTPStatus.BAD_REQUEST,
-                )
-            result = application.require_project_team().start_team_project(
-                task_text=body.get("text", ""),
-                model=body.get("model"),
-                effort=body.get("effort"),
-                service_tier=body.get("service_tier"),
-                local_image_paths=body.get("local_image_paths"),
-                attachment_draft_id=body.get("attachment_draft_id"),
-            )
-            return {"ok": True, **result}, HTTPStatus.OK
-        if path == "/v1/project-team":
-            self._require_exact_fields(body, {"mode"})
-            return {
-                "ok": True,
-                "project_team": application.require_project_team().set_mode(
-                    body.get("mode")
-                ),
-            }, HTTPStatus.OK
-        if path == "/v1/project-team/actions":
-            project_team = application.require_project_team()
-            action = body.get("action")
-            if action == "append_guidance":
-                allowed = {
-                    "action",
-                    "project_id",
-                    "thread_id",
-                    "text",
-                    "requirement_delta",
-                }
-                if set(body) - allowed:
-                    raise BridgeError("INVALID_REQUEST", "Unexpected guidance fields")
-                try:
-                    snapshot = project_team.append_guidance(
-                        project_id=body.get("project_id"),
-                        thread_id=body.get("thread_id"),
-                        text=body.get("text"),
-                        requirement_delta=_parse_requirement_delta(
-                            body.get("requirement_delta")
-                        ),
-                    )
-                except ProjectGuidanceUnavailable as exc:
-                    raise BridgeError(
-                        exc.code,
-                        str(exc),
-                        HTTPStatus.CONFLICT,
-                        {
-                            "project_id": exc.project_id,
-                            "status": exc.status,
-                            "recoverable": exc.recoverable,
-                            "next_action": (
-                                "continue" if exc.recoverable else "new_project"
-                            ),
-                        },
-                    ) from exc
-                except ProjectGuidanceRecordError as exc:
-                    raise BridgeError(
-                        exc.code,
-                        str(exc),
-                        HTTPStatus.CONFLICT,
-                        {"recoverable": True, "next_action": "retry_guidance"},
-                    ) from exc
-            elif action == "set_role_runtime":
-                expected = {
-                    "action",
-                    "project_id",
-                    "thread_id",
-                    "model",
-                    "effort",
-                    "service_tier",
-                }
-                self._require_exact_fields(body, expected)
-                try:
-                    snapshot = project_team.set_role_runtime(
-                        project_id=body.get("project_id"),
-                        thread_id=body.get("thread_id"),
-                        model=body.get("model"),
-                        effort=body.get("effort"),
-                        service_tier=body.get("service_tier"),
-                    )
-                except ProjectRuntimeSelectionError as exc:
-                    raise BridgeError(
-                        exc.code,
-                        str(exc),
-                        HTTPStatus.BAD_REQUEST,
-                        {
-                            "field": exc.field,
-                            "model": exc.model,
-                            "allowed": exc.allowed,
-                            "next_action": "refresh_models",
-                        },
-                    ) from exc
-            elif action in {"continue", "stop"}:
-                self._require_exact_fields(body, {"action", "project_id"})
-                if action == "continue":
-                    snapshot = project_team.continue_project(
-                        project_id=body.get("project_id")
-                    )
-                elif action == "stop":
-                    snapshot = project_team.stop_project(
-                        project_id=body.get("project_id")
-                    )
-            else:
-                raise BridgeError(
-                    "INVALID_PROJECT_ACTION",
-                    "Project action must be append_guidance, set_role_runtime, continue, or stop",
-                )
-            return {"ok": True, "project_team": snapshot}, HTTPStatus.OK
         if path == "/v1/project-memory":
             result = application.project_memory(body)
             return {"ok": True, **result}, HTTPStatus.OK

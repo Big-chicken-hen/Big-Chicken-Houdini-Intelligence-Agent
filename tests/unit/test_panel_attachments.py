@@ -68,26 +68,6 @@ class PanelAttachmentStoreTests(unittest.TestCase):
         self.assertEqual(".png", second.suffix)
         self.assertNotEqual(first, second)
 
-    def test_project_draft_images_never_use_an_ordinary_thread_directory(self) -> None:
-        draft_id = self.store.new_project_draft_id()
-        copied = Path(
-            self.store.copy_project_file(
-                draft_id,
-                self._source("project.png", b"project-image"),
-            )
-        )
-        clipboard = Path(self.store.project_clipboard_path(draft_id))
-        expected = (
-            self.project_root
-            / ".runtime"
-            / "project-attachments"
-            / "drafts"
-            / draft_id
-        ).resolve()
-        self.assertEqual(expected, copied.parent)
-        self.assertEqual(expected, clipboard.parent)
-        self.assertNotIn("attachments", copied.parent.parts[-2:])
-
     def test_rejects_unsupported_extension(self) -> None:
         source = self._source("reference.gif")
         with self.assertRaises(ValueError):

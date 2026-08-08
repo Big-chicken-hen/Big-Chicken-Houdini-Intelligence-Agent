@@ -629,6 +629,11 @@ class HybridKnowledgeTests(unittest.TestCase):
                 "complete": False,
                 "partial": True,
                 "signature_compatible": True,
+                "database_signature": (
+                    "qwen3-embedding-0.6b|Qwen/Qwen3-Embedding-0.6B|"
+                    "fake-revision-1|32|normalized=1"
+                ),
+                "current_model_signature_match": True,
                 "vector_chunks": 32,
                 "total_chunks": total_chunks,
                 "pending_chunks": total_chunks - 32,
@@ -666,6 +671,11 @@ class HybridKnowledgeTests(unittest.TestCase):
                 "complete": False,
                 "partial": True,
                 "signature_compatible": True,
+                "database_signature": (
+                    "qwen3-embedding-0.6b|Qwen/Qwen3-Embedding-0.6B|"
+                    "fake-revision-1|32|normalized=1"
+                ),
+                "current_model_signature_match": True,
                 "vector_chunks": 40,
                 "total_chunks": total_chunks,
                 "pending_chunks": total_chunks - 40,

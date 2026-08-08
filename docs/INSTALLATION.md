@@ -377,7 +377,12 @@ After launching Houdini:
 4. Confirm the status row reports Codex and Houdini connected and `HIA MCP V2：可用`.
 5. Create a new Thread and send a small inspection or creation request.
 
-The default request targets the current HIP. Big-Chicken Houdini Intelligence Agent does not silently switch to a separate offline file when the live connection is unavailable.
+The Panel has one ordinary task history and no project-team mode selector. The central
+composer always sends to the selected ordinary Thread. The default request targets the
+current HIP, and Big-Chicken Houdini Intelligence Agent does not silently switch to a
+separate offline file when the live connection is unavailable.
+
+The experimental fixed five-role project-team mode was removed before v0.2.0 because it destabilized ordinary operation and had not completed embedded Houdini acceptance.
 
 ## 7. Verify the installation
 

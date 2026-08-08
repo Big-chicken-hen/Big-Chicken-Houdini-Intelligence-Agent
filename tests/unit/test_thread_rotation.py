@@ -33,7 +33,7 @@ class _Client:
         self.fail_fork = False
         self.fail_delete_thread_ids: set[str] = set()
         self.corrupt_new_history = False
-        self.source = "hia-project/project-a/planning"
+        self.source = "appServer"
         self.goals: dict[str, dict[str, Any]] = {}
 
     @staticmethod
@@ -102,7 +102,6 @@ class _Client:
                 "serviceTier": params["serviceTier"],
                 "sandbox": {"type": "workspaceWrite", "networkAccess": True},
                 "approvalPolicy": params["approvalPolicy"],
-                "roleTools": {"hia": False, "houdini": False},
             }
         if method == "thread/delete":
             thread_id = str(params["threadId"])
@@ -120,7 +119,6 @@ class ThreadRotationServiceTests(unittest.TestCase):
         self.events: list[dict[str, Any]] = []
         self.event = threading.Event()
         self.client.order = []
-        self.goal_supported = False
         self.authoritative_thread_id = OLD_THREAD
 
         def publish(payload: Mapping[str, Any]) -> None:
@@ -135,15 +133,6 @@ class ThreadRotationServiceTests(unittest.TestCase):
             self.assertEqual(OLD_THREAD, self.authoritative_thread_id)
             self.authoritative_thread_id = new_thread_id
 
-        def validate_role_tools(
-            thread_id: str, result: Mapping[str, Any]
-        ) -> bool:
-            self.client.order.append("validate-role-tools")
-            return thread_id == OLD_THREAD and result.get("roleTools") == {
-                "hia": False,
-                "houdini": False,
-            }
-
         self.service = ThreadRotationService(
             self.client,
             ThreadRotationAdapters(
@@ -153,8 +142,6 @@ class ThreadRotationServiceTests(unittest.TestCase):
                 is_idle=lambda _thread_id: self.idle,
                 rebind=rebind,
                 publish=publish,
-                validate_role_tools=validate_role_tools,
-                supports_goal=lambda _thread_id: self.goal_supported,
             ),
         )
         self.addCleanup(self.service.close)
@@ -163,18 +150,15 @@ class ThreadRotationServiceTests(unittest.TestCase):
     def _profile() -> ThreadRotationProfile:
         return ThreadRotationProfile(
             cwd="E:/project",
-            developer_instructions="keep the role contract",
+            developer_instructions="keep the ordinary task contract",
             ephemeral=False,
-            thread_source="hia-project/project-a/planning",
+            thread_source="appServer",
             model="gpt-test",
             reasoning_effort="high",
             service_tier="priority",
             fork_sandbox="workspace-write",
             response_sandbox={"type": "workspaceWrite", "networkAccess": True},
-            config={
-                "mcp_servers.hia_mcp_v2.enabled": False,
-                "mcp_servers.houdini_intelligence.enabled": False,
-            },
+            config={},
         )
 
     def _compaction(self, index: int, *, duplicates: int = 0) -> None:
@@ -271,7 +255,13 @@ class ThreadRotationServiceTests(unittest.TestCase):
         self._idle_notification()
 
         self.assertEqual(
-            ["thread/read", "thread/fork", "thread/read", "thread/delete"],
+            [
+                "thread/read",
+                "thread/goal/get",
+                "thread/fork",
+                "thread/read",
+                "thread/delete",
+            ],
             [method for method, _ in self.client.calls],
         )
         fork_params = next(
@@ -282,15 +272,15 @@ class ThreadRotationServiceTests(unittest.TestCase):
         self.assertNotIn("reasoningEffort", fork_params)
         self.assertEqual("E:/project", fork_params["cwd"])
         self.assertEqual(
-            "keep the role contract", fork_params["developerInstructions"]
+            "keep the ordinary task contract", fork_params["developerInstructions"]
         )
         self.assertIs(fork_params["ephemeral"], False)
         self.assertEqual(
             [
                 "read:thread-old",
+                "goal-get:thread-old",
                 "fork",
                 "read:thread-new",
-                "validate-role-tools",
                 "rebind",
                 "delete:thread-old",
                 "publish:thread_rotated",
@@ -311,7 +301,7 @@ class ThreadRotationServiceTests(unittest.TestCase):
         self.assertTrue(state["failed"])
         self._idle_notification()
         self.assertEqual(
-            ["thread/read", "thread/fork"],
+            ["thread/read", "thread/goal/get", "thread/fork"],
             [method for method, _ in self.client.calls],
         )
         self.assertFalse(any(method == "thread/delete" for method, _ in self.client.calls))
@@ -326,7 +316,13 @@ class ThreadRotationServiceTests(unittest.TestCase):
         )
         self._idle_notification()
         self.assertEqual(
-            ["thread/read", "thread/fork", "thread/read", "thread/delete"],
+            [
+                "thread/read",
+                "thread/goal/get",
+                "thread/fork",
+                "thread/read",
+                "thread/delete",
+            ],
             [method for method, _ in self.client.calls],
         )
         self.assertEqual(["thread_rotated"], [event["type"] for event in self.events])
@@ -372,7 +368,6 @@ class ThreadRotationServiceTests(unittest.TestCase):
         self.assertEqual(NEW_THREAD, self.events[-1]["orphan_new_thread_id"])
 
     def test_native_goal_is_set_and_read_back_before_rebind(self) -> None:
-        self.goal_supported = True
         self.client.goals[OLD_THREAD] = self.client._goal(
             OLD_THREAD,
             {

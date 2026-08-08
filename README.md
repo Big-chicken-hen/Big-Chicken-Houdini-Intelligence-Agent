@@ -121,13 +121,12 @@ You do not need to name an MCP tool, a node whitelist, or an output directory. C
 
 Reference images and the current selection can be included from the composer. While Codex is working, **追加指令** steers the active Turn. Starting a different task in a new Thread keeps the context smaller and easier to follow.
 
-For a Houdini scene submission, **单个 AI** keeps the work in the current Thread.
-**项目团队** creates one project with exactly five native Codex Threads: Supervisor,
-Planning, Execution, Visual Review, and Technical Review. Execution is the only HIP
-writer; the other four roles are read-only and have no HIA/HOM inventory. If their
-selected model actually exposes native subagent tools, those four roles may use them
-only for bounded read-only research or review. Execution never delegates, and project
-correctness never depends on subagents being available.
+Every Houdini submission runs in one ordinary Codex Thread, and the central composer
+always targets the currently selected ordinary Thread. When the selected model exposes
+native subagent tools, Codex may still use bounded read-only subagents, but the plugin
+does not create or manage fixed role Threads.
+
+The experimental fixed five-role project-team mode was removed before v0.2.0 because it destabilized ordinary operation and had not completed embedded Houdini acceptance.
 
 The history list also supports permanent Thread deletion. Select one idle Thread and click **Delete** twice within five seconds. An active Turn must be stopped and allowed to finish first. Deleting the currently open Thread returns the Panel to a blank state and releases its local UI references; attachment files are not deleted.
 
@@ -333,7 +332,6 @@ Official sources: [Qwen3-Embedding-0.6B model card](https://huggingface.co/Qwen/
 - [Architecture](docs/ARCHITECTURE.md)
 - [HIA MCP V2](docs/HIA-MCP-V2.md)
 - [Runtime diagnostics](docs/DIAGNOSTICS.md)
-- [Project-team live acceptance](docs/PROJECT_TEAM_LIVE_ACCEPTANCE.md)
 - [Security policy](SECURITY.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 - [Changelog](CHANGELOG.md)
@@ -349,13 +347,13 @@ These labels are deliberately not interchangeable:
 | `unit-tested` | Deterministic Python tests passed in the named interpreter; no real app-server or Houdini process is implied |
 | `app-server smoke-tested` | A real Codex app-server exercised native Thread/Turn provisioning and cleanup; no Houdini scene integration is implied unless separately recorded |
 | `standalone Qt-tested` | The Panel ran under a standalone Qt harness; embedding, Houdini callbacks, and real scene writes are not implied |
-| `embedded Houdini-tested` | The exact Houdini/Python build completed the documented live Panel, HIA/HOM, evidence, review, repair, recovery, and path cases |
+| `embedded Houdini-tested` | The exact Houdini/Python build completed the documented live ordinary Panel, Thread/Turn, HIA/HOM, evidence, and path cases |
 | `unverified` | The named layer or target has not produced the required direct evidence |
 
 The current branch's status must be reported from its own test output and pull
 request checks, not inferred from the default-branch badge. Houdini 22/Python
-3.13 remains embedded-unverified until it completes
-[Project-team live acceptance](docs/PROJECT_TEAM_LIVE_ACCEPTANCE.md).
+3.13 remains embedded-unverified until the ordinary Panel and live HIA/HOM path
+complete direct acceptance on that exact build.
 
 Run the standard-library test suite from the repository root:
 

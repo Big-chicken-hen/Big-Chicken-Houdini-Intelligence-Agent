@@ -12,8 +12,7 @@ from .errors import BridgeError
 @dataclass(frozen=True)
 class SceneWriterReservation:
     token: str
-    kind: str
-    scope: str
+    thread_id: str
 
 
 class SceneWriterOwnership:
@@ -29,8 +28,8 @@ class SceneWriterOwnership:
         self._active_hia_items: set[str] = set()
         self._anonymous_hia_items = 0
 
-    def reserve(self, kind: str, scope: str) -> SceneWriterReservation:
-        if kind not in {"ordinary", "project"} or not scope:
+    def reserve(self, thread_id: str) -> SceneWriterReservation:
+        if not thread_id:
             raise ValueError("scene writer reservation identity is invalid")
         with self._lock:
             if self._reservation is not None or self._owner is not None:
@@ -42,8 +41,7 @@ class SceneWriterOwnership:
                 )
             reservation = SceneWriterReservation(
                 token=uuid.uuid4().hex,
-                kind=kind,
-                scope=scope,
+                thread_id=thread_id,
             )
             self._reservation = reservation
             self._turn_terminal = False
@@ -61,14 +59,9 @@ class SceneWriterOwnership:
             raise ValueError("thread_id and turn_id are required")
         with self._lock:
             self._require_reservation(reservation)
-            if reservation.kind == "ordinary":
-                if reservation.scope != thread_id:
-                    raise ValueError("ordinary scene writer scope must match thread_id")
-                owner = f"ordinary:{thread_id}:{turn_id}"
-            else:
-                owner = (
-                    f"project:{reservation.scope}:execution:{thread_id}:{turn_id}"
-                )
+            if reservation.thread_id != thread_id:
+                raise ValueError("scene writer reservation must match thread_id")
+            owner = f"ordinary:{thread_id}:{turn_id}"
             self._owner = owner
             self._owner_thread_id = thread_id
             self._owner_turn_id = turn_id

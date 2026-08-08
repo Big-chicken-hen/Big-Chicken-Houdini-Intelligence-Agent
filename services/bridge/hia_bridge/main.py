@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import hmac
 import json
 import os
@@ -13,7 +12,7 @@ import signal
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from hia_core.houdini_contract import B2_SCHEMA_VERSION, SchemaRegistry
 from hia_core.path_policy import PROJECT_ROOT, PathPolicyError, validate_project_subpath
@@ -23,13 +22,6 @@ from .errors import BridgeError
 from .events import EventBuffer
 from .http_server import BridgeApplication, LoopbackHTTPServer
 from .protocol import ProtocolPolicy
-from .project_registry import ProjectRegistry
-from .project_app_server import ProjectRoleClient
-from .project_effects import ProjectRoleExecutor
-from .project_runner import ProjectRunner
-from .project_service import ProjectTeamService, ProjectTeamSettings
-from .project_thread_factory import ProjectThreadFactory
-from .project_workflow import ProjectWorkflowHost
 from .scene_writer import SceneWriterOwnership
 from .scene_queue import B2_READ_ONLY_PROFILE, SceneQueue
 from .session import BridgeSession
@@ -46,12 +38,6 @@ PINNED_CODEX_RELATIVE_PATH = Path(
 CODEX_HOME_RELATIVE_PATH = Path(".runtime/codex-home")
 CACHE_RELATIVE_PATH = Path(".runtime/cache")
 FOCUS_STATE_RELATIVE_PATH = Path(".runtime/bridge/focus-mode.json")
-PROJECT_REGISTRY_RELATIVE_PATH = Path(
-    ".runtime/bridge/project-team-registry.json"
-)
-PROJECT_SETTINGS_RELATIVE_PATH = Path(
-    ".runtime/bridge/project-team-settings.json"
-)
 HIA_MCP_V2_SERVICE_RELATIVE_PATH = Path("services/hia_mcp_v2")
 HIA_MCP_V2_RUNTIME_RELATIVE_PATH = Path(".runtime/hia-mcp-v2")
 HIA_MCP_V2_EXECUTOR_RELATIVE_PATH = Path(
@@ -67,18 +53,6 @@ HIA_MCP_V2_BACKEND = "hia_v2"
 FXHOUDINI_MCP_BACKEND = "fxhoudini"
 HIA_MCP_V2_SERVER_ID = "hia_mcp_v2"
 FXHOUDINI_MCP_SERVER_ID = "houdini_intelligence"
-FXHOUDINI_MCP_CHILD_ENVIRONMENT = (
-    "PATH",
-    "PYTHONPATH",
-    "PYTHONDONTWRITEBYTECODE",
-    "PYTHONNOUSERSITE",
-    "TEMP",
-    "TMP",
-    "HIA_PROJECT_ROOT",
-    "HOUDINI_HOST",
-    "HOUDINI_PORT",
-    "FXHOUDINIMCP_TOKEN",
-)
 HIA_MCP_V2_HOST = "127.0.0.1"
 HIA_MCP_V2_EXECUTE_ROUTE = "/hia-mcp-v2/v1/execute"
 HIA_MCP_V2_HEALTH_ROUTE = "/hia-mcp-v2/v1/health"
@@ -193,163 +167,6 @@ def _cache_directory(project_root: Path, configured: str | None) -> Path:
             "HIA_CACHE_DIR must be the project .runtime/cache directory",
         )
     return expected
-
-
-def _project_evidence_roots(
-    project_root: Path, render_output_directory: str
-) -> tuple[Path, ...]:
-    """Allow project runtime artifacts and only the configured render root."""
-
-    runtime_root = validate_project_subpath(
-        project_root.resolve() / ".runtime",
-        project_root=project_root,
-    ).resolve()
-    if (
-        not isinstance(render_output_directory, str)
-        or not render_output_directory.strip()
-        or "\x00" in render_output_directory
-    ):
-        raise BridgeError(
-            "INVALID_RENDER_OUTPUT_DIR", "HIA_RENDER_OUTPUT_DIR is invalid"
-        )
-    configured = Path(render_output_directory)
-    if not configured.is_absolute():
-        raise BridgeError(
-            "INVALID_RENDER_OUTPUT_DIR", "HIA_RENDER_OUTPUT_DIR must be absolute"
-        )
-    try:
-        configured = configured.resolve()
-    except OSError as exc:
-        raise BridgeError(
-            "INVALID_RENDER_OUTPUT_DIR", "HIA_RENDER_OUTPUT_DIR cannot be resolved"
-        ) from exc
-    if configured == Path(configured.anchor):
-        raise BridgeError(
-            "INVALID_RENDER_OUTPUT_DIR", "HIA_RENDER_OUTPUT_DIR cannot be a drive root"
-        )
-    roots: list[Path] = []
-    for candidate in (runtime_root, configured):
-        if not any(_same_windows_path(candidate, existing) for existing in roots):
-            roots.append(candidate)
-    return tuple(roots)
-
-
-@dataclass(frozen=True)
-class ProjectRuntime:
-    service: ProjectTeamService
-    workflow: ProjectWorkflowHost
-    registry: ProjectRegistry
-    runner: ProjectRunner
-    client: ProjectRoleClient
-    thread_factory: ProjectThreadFactory
-    events: EventBuffer
-
-    def close(self, timeout_seconds: float = 5.0) -> bool:
-        completed = self.workflow.close(timeout_seconds)
-        self.events.publish(
-            "project_workflow_closed",
-            completed=completed,
-        )
-        return completed
-
-
-def _build_project_runtime(
-    *,
-    client: CodexStdioClient,
-    events: EventBuffer,
-    project_root: Path,
-    selected_backend: str,
-    server_transports: Mapping[str, Mapping[str, object]],
-    allowed_evidence_roots: Sequence[Path],
-    model_catalog: Callable[[], Mapping[str, object]],
-    scene_writer: SceneWriterOwnership,
-    on_project_idle: Callable[[str], None] | None = None,
-    before_role_turn: Callable[[str], str] | None = None,
-) -> ProjectRuntime:
-    """Compose the project runtime once around the owned app-server client."""
-
-    registry = ProjectRegistry(project_root / PROJECT_REGISTRY_RELATIVE_PATH)
-    runner = ProjectRunner(registry)
-    role_client = ProjectRoleClient(client, events, scene_writer=scene_writer)
-    thread_factory = ProjectThreadFactory(
-        role_client,
-        project_root,
-        selected_backend,
-        server_transports,
-    )
-    service_holder: list[ProjectTeamService] = []
-
-    def publish_snapshot(record: object) -> None:
-        if service_holder:
-            events.publish(
-                "project_team_updated",
-                project_team=service_holder[0].snapshot(),
-            )
-
-    def interrupt_project(project_id: str) -> None:
-        record = registry.require(project_id)
-        interrupted = role_client.interrupt_threads(
-            binding.thread_id for binding in record.state.roles.values()
-        )
-        events.publish(
-            "project_interrupt_requested",
-            project_id=project_id,
-            turns=[
-                {"thread_id": thread_id, "turn_id": turn_id}
-                for thread_id, turn_id in interrupted
-            ],
-        )
-
-    def notify_project_idle(project_id: str) -> None:
-        if on_project_idle is None:
-            return
-        record = registry.get(project_id)
-        if record is None:
-            return
-        for binding in record.state.roles.values():
-            on_project_idle(binding.thread_id)
-
-    def executor_factory(_: str) -> ProjectRoleExecutor:
-        return ProjectRoleExecutor(
-            client=role_client,
-            registry=registry,
-            scene_writer=scene_writer,
-            project_root=project_root,
-            allowed_evidence_roots=allowed_evidence_roots,
-            before_role_turn=before_role_turn,
-        )
-
-    workflow = ProjectWorkflowHost(
-        registry=registry,
-        runner=runner,
-        executor_factory=executor_factory,
-        interrupt_hook=interrupt_project,
-        on_snapshot=publish_snapshot,
-        on_idle=notify_project_idle,
-    )
-    service = ProjectTeamService(
-        client=role_client,
-        project_root=project_root,
-        registry=registry,
-        settings=ProjectTeamSettings(
-            project_root / PROJECT_SETTINGS_RELATIVE_PATH
-        ),
-        thread_factory=thread_factory,
-        runner=runner,
-        model_catalog=model_catalog,
-        workflow=workflow,
-    )
-    service_holder.append(service)
-    runtime = ProjectRuntime(
-        service=service,
-        workflow=workflow,
-        registry=registry,
-        runner=runner,
-        client=role_client,
-        thread_factory=thread_factory,
-        events=events,
-    )
-    return runtime
 
 
 def _required_launch_secret(name: str) -> str:
@@ -602,43 +419,6 @@ def _codex_app_server_command(
     return command
 
 
-def _project_mcp_server_transports(
-    mcp_python: str,
-    *,
-    backend: str,
-    project_root: Path,
-) -> dict[str, dict[str, object]]:
-    """Return complete per-Thread transports for both HIA inventories.
-
-    Codex 0.144.3 does not deep-merge an ``enabled``-only per-Thread MCP
-    override with the process configuration.  Every role therefore receives
-    complete transports, while its permission profile deterministically sets
-    ``enabled`` and ``required`` for each exact server.
-    """
-
-    if backend not in {HIA_MCP_V2_BACKEND, FXHOUDINI_MCP_BACKEND}:
-        raise BridgeError("INVALID_MCP_BACKEND", f"Unsupported MCP backend: {backend}")
-    common: dict[str, object] = {
-        "command": mcp_python,
-        "cwd": str(project_root),
-        "startup_timeout_sec": 15,
-        "tool_timeout_sec": 65,
-        "default_tools_approval_mode": "approve",
-    }
-    return {
-        HIA_MCP_V2_SERVER_ID: {
-            **common,
-            "args": ["-B", "-m", HIA_MCP_V2_SERVER_ID],
-            "env_vars": list(HIA_MCP_V2_CHILD_ENVIRONMENT),
-        },
-        FXHOUDINI_MCP_SERVER_ID: {
-            **common,
-            "args": ["-B", "-m", "fxhoudinimcp"],
-            "env_vars": list(FXHOUDINI_MCP_CHILD_ENVIRONMENT),
-        },
-    }
-
-
 def _validated_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
     project_root = Path(args.project_root)
     if not _same_windows_path(project_root, PROJECT_ROOT):
@@ -677,7 +457,6 @@ def run(argv: Sequence[str] | None = None) -> int:
     session: BridgeSession | None = None
     server: LoopbackHTTPServer | None = None
     scene_queue: SceneQueue | None = None
-    project_runtime: ProjectRuntime | None = None
     thread_rotation: ThreadRotationService | None = None
     sensitive_values: list[str] = []
     try:
@@ -843,59 +622,18 @@ def run(argv: Sequence[str] | None = None) -> int:
         def rotation_profile(
             thread_id: str, last_turn_id: str
         ) -> ThreadRotationProfile | None:
-            if session.owns_ordinary_thread(thread_id):
-                profile = session.rotation_profile(thread_id, last_turn_id)
-                if profile is None:
-                    raise ValueError("managed ordinary Thread has no rotation profile")
-                return profile
-            runtime = project_runtime
-            if (
-                runtime is not None
-                and runtime.service.role_identity_for_thread(thread_id) is not None
-            ):
-                profile = runtime.service.rotation_profile(thread_id, last_turn_id)
-                if profile is None:
-                    raise ValueError("managed project Role has no rotation profile")
-                return profile
-            return None
+            if not session.owns_ordinary_thread(thread_id):
+                return None
+            profile = session.rotation_profile(thread_id, last_turn_id)
+            if profile is None:
+                raise ValueError("managed ordinary Thread has no rotation profile")
+            return profile
 
         def rotation_is_idle(thread_id: str) -> bool:
-            if session.owns_ordinary_thread(thread_id):
-                return session.rotation_is_idle(thread_id)
-            runtime = project_runtime
-            return (
-                runtime.service.rotation_is_idle(thread_id)
-                if runtime is not None
-                else False
-            )
+            return session.rotation_is_idle(thread_id)
 
         def rotation_rebind(old_thread_id: str, new_thread_id: str) -> None:
-            if session.owns_ordinary_thread(old_thread_id):
-                session.rotation_rebind(old_thread_id, new_thread_id)
-                return
-            runtime = project_runtime
-            if (
-                runtime is not None
-                and runtime.service.role_identity_for_thread(old_thread_id) is not None
-            ):
-                runtime.service.rotation_rebind(old_thread_id, new_thread_id)
-                return
-            raise ValueError("rotation target is no longer authoritative")
-
-        def rotation_validate_role_tools(
-            thread_id: str, result: Mapping[str, Any]
-        ) -> bool:
-            if session.owns_ordinary_thread(thread_id):
-                return True
-            runtime = project_runtime
-            return (
-                runtime.service.rotation_validate_role_tools(thread_id, result)
-                if runtime is not None
-                else False
-            )
-
-        def rotation_supports_goal(thread_id: str) -> bool:
-            return session.owns_ordinary_thread(thread_id)
+            session.rotation_rebind(old_thread_id, new_thread_id)
 
         def publish_rotation(payload: Mapping[str, Any]) -> None:
             event_type = payload.get("type")
@@ -910,16 +648,6 @@ def run(argv: Sequence[str] | None = None) -> int:
                 return
             if session.owns_ordinary_thread(new_thread_id):
                 events.publish("session_state", session=session.snapshot())
-                return
-            runtime = project_runtime
-            if (
-                runtime is not None
-                and runtime.service.role_identity_for_thread(new_thread_id) is not None
-            ):
-                events.publish(
-                    "project_team_updated",
-                    project_team=runtime.service.snapshot(),
-                )
 
         thread_rotation = ThreadRotationService(
             client,
@@ -928,79 +656,9 @@ def run(argv: Sequence[str] | None = None) -> int:
                 is_idle=rotation_is_idle,
                 rebind=rotation_rebind,
                 publish=publish_rotation,
-                validate_role_tools=rotation_validate_role_tools,
-                supports_goal=rotation_supports_goal,
             ),
         )
         client.add_notification_observer(thread_rotation.observe)
-
-        def rotate_project_role_before_turn(thread_id: str) -> str:
-            if not thread_rotation.needs_rotation(thread_id):
-                return thread_id
-            runtime = project_runtime
-            if runtime is None:
-                raise BridgeError(
-                    "THREAD_ROTATION_FAILED",
-                    "Project Role rotation runtime is unavailable",
-                    409,
-                )
-            identity = runtime.service.role_identity_for_thread(thread_id)
-            if identity is None:
-                raise BridgeError(
-                    "THREAD_ROTATION_FAILED",
-                    "Project Role rotation identity is stale",
-                    409,
-                )
-            project_id, _ = identity
-            record = runtime.registry.require(project_id)
-            if any(
-                runtime.client.has_active_thread(binding.thread_id)
-                for binding in record.state.roles.values()
-            ):
-                raise BridgeError(
-                    "THREAD_ROTATION_FAILED",
-                    "Project Role rotation requires an idle Role boundary",
-                    409,
-                )
-            try:
-                return thread_rotation.rotate_before_turn(thread_id)
-            except Exception as exc:
-                raise BridgeError(
-                    "THREAD_ROTATION_FAILED",
-                    "Project Role rotation failed before turn/start",
-                    409,
-                ) from exc
-
-        project_runtime_arguments = dict(
-            client=client,
-            events=events,
-            project_root=project_root,
-            selected_backend=(
-                HIA_MCP_V2_SERVER_ID
-                if backend == HIA_MCP_V2_BACKEND
-                else FXHOUDINI_MCP_SERVER_ID
-            ),
-            server_transports=_project_mcp_server_transports(
-                mcp_python,
-                backend=backend,
-                project_root=project_root,
-            ),
-            allowed_evidence_roots=_project_evidence_roots(
-                project_root, render_output_directory
-            ),
-            scene_writer=scene_writer,
-            on_project_idle=thread_rotation.notify_idle,
-            before_role_turn=rotate_project_role_before_turn,
-        )
-        session_model_catalog = getattr(session, "list_models", None)
-        if callable(session_model_catalog):
-            project_runtime_arguments["model_catalog"] = session_model_catalog
-
-        def build_project_team() -> ProjectTeamService:
-            nonlocal project_runtime
-            if project_runtime is None:
-                project_runtime = _build_project_runtime(**project_runtime_arguments)
-            return project_runtime.service
 
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
@@ -1028,7 +686,6 @@ def run(argv: Sequence[str] | None = None) -> int:
             houdini_mcp_backend=backend,
             houdini_launcher_session_id=houdini_launcher_session_id,
             houdini_executor_path=houdini_executor_path,
-            project_team_factory=build_project_team,
         )
         server = LoopbackHTTPServer(
             ("127.0.0.1", requested_bridge_port),
@@ -1125,15 +782,11 @@ def run(argv: Sequence[str] | None = None) -> int:
                     thread_rotation.close()
             finally:
                 try:
-                    if project_runtime is not None:
-                        project_runtime.close()
+                    if scene_queue is not None:
+                        scene_queue.shutdown()
                 finally:
-                    try:
-                        if scene_queue is not None:
-                            scene_queue.shutdown()
-                    finally:
-                        if session is not None:
-                            session.close()
+                    if session is not None:
+                        session.close()
 
 
 def main() -> None:
