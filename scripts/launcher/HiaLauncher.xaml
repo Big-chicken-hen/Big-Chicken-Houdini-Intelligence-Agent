@@ -1344,36 +1344,6 @@
                                 </WrapPanel>
 
                                 <Border
-                                    x:Name="RecoveryCard"
-                                    Margin="0,4,0,14"
-                                    Padding="16,13"
-                                    Background="{StaticResource YellowSurfaceBrush}"
-                                    BorderBrush="{StaticResource StatusYellowBrush}"
-                                    BorderThickness="1"
-                                    CornerRadius="12"
-                                    Style="{StaticResource SubtleInteractiveCardStyle}"
-                                    Visibility="Collapsed">
-                                    <Border.RenderTransform>
-                                        <ScaleTransform ScaleX="1" ScaleY="1" />
-                                    </Border.RenderTransform>
-                                    <Grid>
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
-                                        </Grid.RowDefinitions>
-                                        <StackPanel>
-                                            <TextBlock Foreground="{StaticResource TextPrimaryBrush}" FontSize="14" FontWeight="SemiBold" Text="检测到可恢复副本" />
-                                            <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextSecondaryBrush}" Text="上次 Houdini 未正常结束。恢复会在新 session 中打开 checkpoint 副本，绝不覆盖原 HIP。" TextWrapping="Wrap" />
-                                            <TextBlock x:Name="RecoveryCheckpointText" Margin="0,5,0,0" Foreground="{StaticResource PickerSecondaryTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" />
-                                        </StackPanel>
-                                        <WrapPanel Grid.Row="1" Margin="0,10,0,0">
-                                            <RadioButton x:Name="RecoverCheckpointOption" AutomationProperties.Name="恢复副本" Content="恢复副本（推荐）" Foreground="{StaticResource TextPrimaryBrush}" GroupName="RecoveryChoice" IsChecked="True" TabIndex="4" />
-                                            <RadioButton x:Name="NormalLaunchOption" Margin="18,0,0,0" AutomationProperties.Name="正常启动" Content="正常启动" Foreground="{StaticResource TextPrimaryBrush}" GroupName="RecoveryChoice" TabIndex="5" />
-                                        </WrapPanel>
-                                    </Grid>
-                                </Border>
-
-                                <Border
                                     x:Name="OverviewQuickActionsPanel"
                                     Margin="0,3,0,14"
                                     Padding="2,11,2,12"

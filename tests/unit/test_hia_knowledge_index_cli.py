@@ -56,8 +56,6 @@ def _status(
         "model_revision": "test",
         "dim": 1024,
         "normalized": True,
-        "degraded": False,
-        "fallback_reason": "",
         "repair": {},
         "complete": pending == 0,
         "partial": pending > 0,
@@ -153,7 +151,7 @@ class RealIndexStore:
         self._hybrid = HybridKnowledgeStore(
             self.project_root,
             index=self.index,
-            embedder=FakeEmbedder(available=False),
+            embedder=FakeEmbedder(),
         )
 
     def vectorize_documents(
@@ -162,8 +160,24 @@ class RealIndexStore:
     ) -> dict[str, Any]:
         return self._hybrid.vectorize_documents(document_ids)
 
+    def refresh_explicit_sources(
+        self,
+        records: Any,
+        *,
+        remove_source_keys: tuple[str, ...] = (),
+        replace_thread_id: str = "",
+    ) -> dict[str, Any]:
+        return self._hybrid.refresh_explicit_sources(
+            records,
+            remove_source_keys=remove_source_keys,
+            replace_thread_id=replace_thread_id,
+        )
+
     def status(self) -> dict[str, Any]:
         return self._hybrid.status()
+
+    def project_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._hybrid.project_memory(arguments)
 
     def close(self) -> None:
         self._hybrid.close()
@@ -177,6 +191,17 @@ class RealHybridStore(RealIndexStore):
             self.project_root,
             index=self.index,
             embedder=FakeEmbedder(),
+        )
+
+
+class RealUnavailableStore(RealIndexStore):
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = Path(project_root)
+        self.index = LocalKnowledgeIndex(self.project_root)
+        self._hybrid = HybridKnowledgeStore(
+            self.project_root,
+            index=self.index,
+            embedder=FakeEmbedder(available=False),
         )
 
 
@@ -410,7 +435,7 @@ class KnowledgeIndexCliTests(unittest.TestCase):
         self.assertEqual("not_initialized", events[-1]["index"]["status"])
         self.assertEqual(
             "KNOWLEDGE_INDEX_NOT_INITIALIZED",
-            events[-1]["index"]["fallback_reason"],
+            events[-1]["index"]["error"],
         )
 
     def test_bootstrap_installs_builtin_pack_idempotently_with_jsonl_status(
@@ -612,7 +637,7 @@ class KnowledgeIndexCliTests(unittest.TestCase):
         self.assertFalse(result["runtime"]["model"]["exists"])
         self.assertEqual(
             "EMBEDDING_RUNTIME_PATH_INVALID",
-            result["embedding"]["fallback_reason"],
+            result["embedding"]["error"],
         )
 
     def test_status_rejects_legacy_toolchain_python_after_venv_migration(
@@ -646,7 +671,7 @@ class KnowledgeIndexCliTests(unittest.TestCase):
         self.assertFalse(result["runtime"]["python"]["exists"])
         self.assertEqual(
             "EMBEDDING_RUNTIME_PATH_INVALID",
-            result["embedding"]["fallback_reason"],
+            result["embedding"]["error"],
         )
 
     def test_build_emits_committed_progress_and_completion(self) -> None:
@@ -816,8 +841,7 @@ class KnowledgeIndexCliTests(unittest.TestCase):
     def test_memory_cli_reuses_real_record_supersede_list_and_delete(
         self,
     ) -> None:
-        record_exit, record_events = _run_real(
-            self.project_root,
+        record_exit, record_events = _run(
             "memory",
             "record",
             "--memory-type",
@@ -828,12 +852,13 @@ class KnowledgeIndexCliTests(unittest.TestCase):
             "Use Karma XPU for approved previews.",
             "--tag",
             "render",
+            store_type=RealIndexStore,
+            project_root=self.project_root,
         )
         self.assertEqual(0, record_exit)
         memory_id = record_events[-1]["result"]["memory"]["id"]
 
-        supersede_exit, supersede_events = _run_real(
-            self.project_root,
+        supersede_exit, supersede_events = _run(
             "memory",
             "supersede",
             "--memory-id",
@@ -844,6 +869,8 @@ class KnowledgeIndexCliTests(unittest.TestCase):
             "Use Karma CPU",
             "--body",
             "Use Karma CPU for deterministic previews.",
+            store_type=RealIndexStore,
+            project_root=self.project_root,
         )
         self.assertEqual(0, supersede_exit)
         replacement = supersede_events[-1]["result"]["replacement"]
@@ -853,11 +880,12 @@ class KnowledgeIndexCliTests(unittest.TestCase):
             supersede_events[-1]["result"]["superseded"]["superseded_by"],
         )
 
-        list_exit, list_events = _run_real(
-            self.project_root,
+        list_exit, list_events = _run(
             "memory",
             "list",
             "--include-superseded",
+            store_type=RealIndexStore,
+            project_root=self.project_root,
         )
         self.assertEqual(0, list_exit)
         listed = {
@@ -867,20 +895,22 @@ class KnowledgeIndexCliTests(unittest.TestCase):
         self.assertEqual("superseded", listed[memory_id])
         self.assertEqual("active", listed[replacement["id"]])
 
-        delete_exit, _delete_events = _run_real(
-            self.project_root,
+        delete_exit, _delete_events = _run(
             "memory",
             "delete",
             "--memory-id",
             replacement["id"],
+            store_type=RealIndexStore,
+            project_root=self.project_root,
         )
         self.assertEqual(0, delete_exit)
-        missing_exit, missing_events = _run_real(
-            self.project_root,
+        missing_exit, missing_events = _run(
             "memory",
             "delete",
             "--memory-id",
             replacement["id"],
+            store_type=RealIndexStore,
+            project_root=self.project_root,
         )
         self.assertEqual(3, missing_exit)
         self.assertEqual("MEMORY_NOT_FOUND", missing_events[-1]["code"])
@@ -970,6 +1000,15 @@ class KnowledgeIndexCliTests(unittest.TestCase):
             ["user"],
             refresh_events[-1]["result"]["refresh"]["groups"],
         )
+        with closing(index._connect(read_only=True)) as connection:  # noqa: SLF001
+            expected_vectors_deleted = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM chunk_vectors v "
+                    "JOIN chunks c ON c.id = v.chunk_id "
+                    "WHERE c.document_id = ?",
+                    (document_id,),
+                ).fetchone()[0]
+            )
 
         delete_exit, delete_events = _run(
             "sources",
@@ -984,7 +1023,7 @@ class KnowledgeIndexCliTests(unittest.TestCase):
         self.assertTrue(deleted["deleted"])
         self.assertTrue(deleted["document_deleted"])
         self.assertGreaterEqual(deleted["chunks_deleted"], 1)
-        self.assertEqual(1, deleted["vectors_deleted"])
+        self.assertEqual(expected_vectors_deleted, deleted["vectors_deleted"])
         self.assertFalse(managed.exists())
         self.assertFalse(sidecar.exists())
         self.assertEqual(original_bytes, original.read_bytes())
@@ -1058,7 +1097,7 @@ class KnowledgeIndexCliTests(unittest.TestCase):
         self.assertEqual(source["chunk_count"], deleted["chunks_deleted"])
         self.assertEqual(source["vector_count"], deleted["vectors_deleted"])
 
-    def test_source_import_without_encoder_stays_lexical_then_refresh_backfills(
+    def test_source_import_without_encoder_fails_then_refresh_backfills(
         self,
     ) -> None:
         original = self.project_root / "selected-pending-workflow.md"
@@ -1072,24 +1111,23 @@ class KnowledgeIndexCliTests(unittest.TestCase):
             "import",
             "--path",
             str(original),
-            store_type=RealIndexStore,
+            store_type=RealUnavailableStore,
             project_root=self.project_root,
         )
 
-        self.assertEqual(0, import_exit)
-        imported = import_events[-1]["result"]
-        source = imported["source"]
-        self.assertTrue(imported["indexed"])
+        self.assertEqual(1, import_exit)
+        self.assertEqual("SOURCES_IMPORT_FAILED", import_events[-1]["code"])
+        list_exit, list_events = _run(
+            "sources",
+            "list",
+            store_type=RealUnavailableStore,
+            project_root=self.project_root,
+        )
+        self.assertEqual(0, list_exit)
+        source = list_events[-1]["result"]["items"][0]
+        self.assertTrue(source["indexed"])
         self.assertGreater(source["chunk_count"], 0)
         self.assertEqual(0, source["vector_count"])
-        self.assertEqual("lexical", imported["vector"]["mode_used"])
-        self.assertFalse(imported["vector"]["vector"]["available"])
-        self.assertTrue(imported["vector"]["vector"]["degraded"])
-        self.assertTrue(imported["vector"]["vector"]["fallback_reason"])
-        self.assertEqual(
-            source["chunk_count"],
-            imported["vector"]["corpus"]["pending_chunks"],
-        )
         index = LocalKnowledgeIndex(self.project_root)
         with closing(index._connect(read_only=True)) as connection:  # noqa: SLF001
             lexical_count = int(
@@ -1315,14 +1353,15 @@ class KnowledgeIndexCliTests(unittest.TestCase):
         relative_snapshot = snapshot.relative_to(
             self.project_root
         ).as_posix()
-        first_exit, first_events = _run_real(
-            self.project_root,
+        first_exit, first_events = _run(
             "thread",
             "import",
             "--thread-id",
             "thread-1",
             "--snapshot-file",
             relative_snapshot,
+            store_type=RealIndexStore,
+            project_root=self.project_root,
         )
         self.assertEqual(0, first_exit)
         first = first_events[-1]["result"]
@@ -1398,14 +1437,15 @@ class KnowledgeIndexCliTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        update_exit, update_events = _run_real(
-            self.project_root,
+        update_exit, update_events = _run(
             "thread",
             "import",
             "--thread-id",
             "thread-1",
             "--snapshot-file",
             relative_snapshot,
+            store_type=RealIndexStore,
+            project_root=self.project_root,
         )
         self.assertEqual(0, update_exit)
         refresh = update_events[-1]["result"]["refresh"]
@@ -1426,12 +1466,13 @@ class KnowledgeIndexCliTests(unittest.TestCase):
         self.assertEqual([(assistant_key,)], updated)
         self.assertEqual(0, private_chunks)
 
-        remove_exit, remove_events = _run_real(
-            self.project_root,
+        remove_exit, remove_events = _run(
             "thread",
             "remove",
             "--thread-id",
             "thread-1",
+            store_type=RealIndexStore,
+            project_root=self.project_root,
         )
         self.assertEqual(0, remove_exit)
         self.assertEqual(

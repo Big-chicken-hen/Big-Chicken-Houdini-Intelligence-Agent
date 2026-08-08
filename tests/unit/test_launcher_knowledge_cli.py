@@ -249,8 +249,8 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
                 self.project_root
             )
         )
-        self.assertEqual("fts5", result["embedding_mode"])
-        self.assertFalse(result["houdini_launch_blocked"])
+        self.assertEqual("unavailable", result["embedding_mode"])
+        self.assertTrue(result["houdini_launch_blocked"])
 
     def test_external_base_prefix_is_not_portable_or_green(self) -> None:
         module = self._load_helper_module()
@@ -277,8 +277,9 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
         self.assertEqual("repair_required", result["state"])
         self.assertFalse(result["venv"]["portable"])
         self.assertFalse(result["python"]["base_prefix_is_project_local"])
-        self.assertEqual("fts5", result["embedding_mode"])
+        self.assertEqual("unavailable", result["embedding_mode"])
         self.assertEqual({}, result["embedding_runtime_environment"])
+        self.assertTrue(result["houdini_launch_blocked"])
 
     def test_legacy_cuda_environment_is_reported_but_fails_closed(self) -> None:
         module = self._load_helper_module()
@@ -320,10 +321,10 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
         self.assertTrue(result["embedding_worker"]["installed"])
         self.assertTrue(model["installed"])
         self.assertEqual(profile_id, result["active_profile"])
-        self.assertEqual("fts5", result["embedding_mode"])
+        self.assertEqual("unavailable", result["embedding_mode"])
         self.assertEqual("", result["active_device"])
         self.assertEqual({}, result["embedding_runtime_environment"])
-        self.assertFalse(result["houdini_launch_blocked"])
+        self.assertTrue(result["houdini_launch_blocked"])
 
     def test_aggregate_status_missing_database_is_zero_write(self) -> None:
         before_directories = tuple(
@@ -651,21 +652,17 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
         self.assertTrue(selected["configured_by_environment"])
         self.assertTrue(selected["installed"])
         self.assertEqual(alternate_profile, result["requested_profile"])
-        self.assertEqual(profile.profile_id, result["active_profile"])
-        self.assertTrue(result["profile_fallback"])
+        self.assertEqual("", result["active_profile"])
+        self.assertFalse(result["selected_profile_available"])
         self.assertEqual("settings", result["profile_source"])
         self.assertEqual("cpu", result["requested_device"])
-        self.assertEqual("cpu", result["active_device"])
+        self.assertEqual("", result["active_device"])
         self.assertEqual("settings", result["device_source"])
-        self.assertEqual("cpu_embedding", result["embedding_mode"])
-        self.assertEqual(
-            "cpu",
-            result["embedding_runtime_environment"][
-                contract.EMBEDDING_DEVICE_ENVIRONMENT
-            ],
-        )
+        self.assertEqual("unavailable", result["embedding_mode"])
+        self.assertEqual({}, result["embedding_runtime_environment"])
+        self.assertTrue(result["houdini_launch_blocked"])
         self.assertEqual(profile.profile_id, explicit["requested_profile"])
-        self.assertFalse(explicit["profile_fallback"])
+        self.assertTrue(explicit["selected_profile_available"])
         self.assertEqual("environment", explicit["profile_source"])
         self.assertEqual("cuda", explicit["requested_device"])
         self.assertEqual("cuda", explicit["active_device"])
@@ -688,10 +685,12 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             str(original),
         )
 
-        self.assertEqual(0, import_exit)
-        import_result = imported["result"]
-        self.assertEqual(1, import_result["imported"])
-        source_id = import_result["items"][0]["source_id"]
+        self.assertEqual(1, import_exit)
+        self.assertEqual("SOURCES_IMPORT_FAILED", imported["error"]["code"])
+        list_exit, listed, _stderr = self._run_helper("list")
+        self.assertEqual(0, list_exit)
+        self.assertEqual(1, listed["result"]["total"])
+        source_id = listed["result"]["items"][0]["source_id"]
         self.assertRegex(source_id, r"^original-[0-9a-f]{32}\.md$")
         managed = (
             self.project_root / ".runtime" / "knowledge" / "sources" / source_id
@@ -700,9 +699,6 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
         self.assertEqual(original.read_bytes(), managed.read_bytes())
         self.assertTrue(sidecar.is_file())
 
-        list_exit, listed, _stderr = self._run_helper("list")
-        self.assertEqual(0, list_exit)
-        self.assertEqual(1, listed["result"]["total"])
         item = listed["result"]["items"][0]
         self.assertEqual(source_id, item["source_id"])
         self.assertEqual(str(original.resolve()), item["source"])
@@ -740,14 +736,12 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             "--path",
             str(video),
         )
-        self.assertEqual(0, exit_code)
-        result = payload["result"]
-        self.assertIn(".mp4", result["supported_formats"])
-        self.assertIn("vector", result)
-        item = result["items"][0]
+        self.assertEqual(1, exit_code)
+        self.assertEqual("SOURCES_IMPORT_FAILED", payload["error"]["code"])
+        list_exit, listed, _stderr = self._run_helper("list")
+        self.assertEqual(0, list_exit)
+        item = listed["result"]["items"][0]
         self.assertEqual("user_transcript", item["source_kind"])
-        self.assertFalse(item["media_copied"])
-        self.assertTrue(item["transcript_managed"])
         managed = (
             self.project_root
             / ".runtime"
@@ -755,6 +749,11 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             / "sources"
             / item["source_id"]
         )
+        metadata = json.loads(
+            Path(str(managed) + ".metadata.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(metadata["media_copied"])
+        self.assertTrue(metadata["transcript_managed"])
         self.assertEqual(transcript.read_bytes(), managed.read_bytes())
         self.assertFalse(
             any(
@@ -822,10 +821,8 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             "--snapshot-file",
             relative,
         )
-        self.assertEqual(0, import_exit)
-        self.assertEqual("replaced", imported["result"]["status"])
-        self.assertEqual(1, imported["result"]["records_indexed"])
-        self.assertEqual(1, imported["result"]["messages_excluded"])
+        self.assertEqual(1, import_exit)
+        self.assertEqual("THREAD_IMPORT_FAILED", imported["error"]["code"])
 
         remove_exit, removed, _stderr = self._run_helper(
             "thread-remove",
@@ -856,13 +853,14 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             str(second),
         )
 
-        self.assertEqual(0, first_exit)
-        self.assertEqual(0, second_exit)
-        first_item = first_payload["result"]["items"][0]
-        second_item = second_payload["result"]["items"][0]
+        self.assertEqual(1, first_exit)
+        self.assertEqual(1, second_exit)
+        self.assertEqual("SOURCES_IMPORT_FAILED", first_payload["error"]["code"])
+        self.assertEqual("SOURCES_IMPORT_FAILED", second_payload["error"]["code"])
+        list_exit, listed, _stderr = self._run_helper("list")
+        self.assertEqual(0, list_exit)
+        first_item, second_item = listed["result"]["items"]
         self.assertNotEqual(first_item["source_id"], second_item["source_id"])
-        self.assertTrue(first_item["copied"])
-        self.assertTrue(second_item["copied"])
         for item in (first_item, second_item):
             managed = (
                 self.project_root
@@ -937,13 +935,14 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             str(folder),
         )
 
-        self.assertEqual(0, exit_code)
-        result = payload["result"]
-        self.assertEqual(7, result["imported"])
-        self.assertEqual(2, result["unsupported_files"])
+        self.assertEqual(1, exit_code)
+        self.assertEqual("SOURCES_IMPORT_FAILED", payload["error"]["code"])
+        status_exit, status, _stderr = self._run_helper("status")
+        self.assertEqual(0, status_exit)
+        result = status["result"]["source_contract"]
         self.assertEqual(
             [".htm", ".html", ".md", ".pdf", ".srt", ".txt", ".vtt"],
-            result["supported_formats"],
+            result["folder_supported_formats"],
         )
 
     def test_user_site_fake_pypdf_does_not_participate(self) -> None:
@@ -985,8 +984,11 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             "--path",
             str(original),
         )
-        self.assertEqual(0, exit_code)
-        source_id = payload["result"]["items"][0]["source_id"]
+        self.assertEqual(1, exit_code)
+        self.assertEqual("SOURCES_IMPORT_FAILED", payload["error"]["code"])
+        list_exit, listed, _stderr = self._run_helper("list")
+        self.assertEqual(0, list_exit)
+        source_id = listed["result"]["items"][0]["source_id"]
 
         escape_exit, escape_payload, _stderr = self._run_helper(
             "delete",
@@ -1670,8 +1672,9 @@ $retryPublish = Publish-HiaKnowledgeManagedVenv `
         self.assertIn("torch.cuda.get_device_name(0)", source)
         self.assertIn('"cuda_available": cuda_available', source)
         self.assertIn('"gpu_name": str(probe.get("gpu_name") or "")', source)
-        self.assertIn('"embedding_mode": fallback', source)
-        self.assertIn('"houdini_launch_blocked": False', source)
+        self.assertIn('"embedding_mode": embedding_mode', source)
+        self.assertIn('"houdini_launch_blocked": embedding_mode == "unavailable"', source)
+        self.assertNotIn("profile_fallback", source)
 
     def test_powershell_files_parse(self) -> None:
         script = f"""

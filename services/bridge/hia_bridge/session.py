@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import hashlib
 import json
-import ntpath
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from .codex_stdio import CodexStdioClient, RequestId
+from .codex_stdio import CodexStdioClient
 from .errors import BridgeError, CodexRPCError
 from .events import EventBuffer
+from .scene_writer import SceneWriterOwnership, SceneWriterReservation
+from .thread_rotation import ThreadRotationProfile
 
 
 MODEL_LIST_PAGE_SIZE = 100
@@ -29,7 +32,10 @@ MODEL_SERVICE_TIER_MAX_ENTRIES = 32
 MODEL_DISPLAY_NAME_MAX_LENGTH = 512
 MODEL_DESCRIPTION_MAX_LENGTH = 8192
 MODEL_CURSOR_MAX_LENGTH = 4096
-THREAD_LIST_LIMIT = 20
+THREAD_LIST_PAGE_SIZE = 100
+THREAD_LIST_MAX_PAGES = 32
+THREAD_LIST_MAX_ENTRIES = 4096
+THREAD_CURSOR_MAX_LENGTH = 4096
 THREAD_NAME_MAX_LENGTH = 512
 THREAD_PREVIEW_MAX_LENGTH = 8192
 THREAD_CWD_MAX_LENGTH = 32_767
@@ -52,129 +58,6 @@ LOCAL_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 HIA_MCP_V2_BACKEND = "hia_v2"
 FXHOUDINI_MCP_BACKEND = "fxhoudini"
 STOP_INTERRUPT_GRACE_SECONDS = 1.0
-STOP_RECOVERY_TOTAL_SECONDS = 50.0
-STOP_RESTART_GRACE_SECONDS = 0.25
-STOP_REINITIALIZE_MAX_SECONDS = 10.0
-
-_COMMAND_WRITE_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\b(?:set|add|clear)-content\b|\b(?:set|clear)-item\b|"
-    r"\bout-file\b|\bnew-item\b|"
-    r"\bremove-item\b|\bcopy-item\b|\bmove-item\b|\brename-item\b|"
-    r"\btee-object\b[^\r\n]*\s-filepath\b|"
-    r"\b(?:invoke-webrequest|invoke-restmethod|iwr|irm)\b"
-    r"[^\r\n]*\s-outfile\b|"
-    r"(?:^|[;&|]\s*|\bcmd(?:\.exe)?\s+/[ck]\s+)"
-    r"\s*(?:curl|wget)(?:\.exe)?\b[^\r\n]*"
-    r"\s(?:-o|--output(?:-document)?)(?:\s+|=)|"
-    r"(?:^|[;&|]\s*|\bcmd(?:\.exe)?\s+/[ck]\s+)"
-    r"\s*(?:del|erase|rm|rd|rmdir|mkdir|md|copy|move|xcopy|robocopy)\b|"
-    r"\b(?:write|append)all(?:text|bytes)\b|\bwrite_(?:text|bytes)\b|"
-    r"\b(?:copyfile|copy2|copytree)\s*\(|"
-    r"\b(?:unlink|remove|rmtree|makedirs|mkdir|rename|replace)\s*\(|"
-    r"\bopen\s*\([^\r\n]*[, ]\s*['\"]?[wax](?:\+)?['\"]?"
-    r"|(?<![<>=])>>?(?![=])"
-    r")"
-)
-_MOVE_PATTERN = re.compile(
-    r"(?i)\bmove-item\b|"
-    r"(?:^|[;&|]\s*|\bcmd(?:\.exe)?\s+/[ck]\s+)\s*move\b|"
-    r"\brobocopy\b[^\r\n]*\s/(?:mov|move)\b"
-)
-_COPY_PATTERN = re.compile(
-    r"(?i)\bcopy-item\b|\b(?:copyfile|copy2|copytree)\s*\(|"
-    r"(?:^|[;&|]\s*|\bcmd(?:\.exe)?\s+/[ck]\s+)"
-    r"\s*(?:copy|xcopy|robocopy)\b"
-)
-_RENAME_PATTERN = re.compile(r"(?i)\brename-item\b|\brename\s*\(")
-_WINDOWS_PATH_PATTERN = re.compile(
-    r'''(?ix)
-    "(?P<double>[a-z]:[\\/][^"]*)"
-    |'(?P<single>[a-z]:[\\/][^']*)'
-    |(?<![a-z])(?P<bare>[a-z]:[\\/][^\s|;&><,"']*)
-    '''
-)
-_DESTINATION_FLAG_PATTERN = re.compile(
-    r'''(?ix)
-    -(?:destination|dest)\s+
-    (?:"(?P<double>[^"]+)"|'(?P<single>[^']+)'|(?P<bare>[^\s|;&]+))
-    '''
-)
-_TARGET_FLAG_PATTERN = re.compile(
-    r'''(?ix)
-    -(?:literalpath|path|filepath|outfile|output|output-document|o)(?:\s+|=)
-    (?:"(?P<double>[^"]+)"|'(?P<single>[^']+)'|(?P<bare>[^\s|;&]+))
-    '''
-)
-_REDIRECTION_TARGET_PATTERN = re.compile(
-    r'''(?ix)
-    (?<![<>=])>>?(?![=])\s*
-    (?:"(?P<double>[^"]+)"|'(?P<single>[^']+)'|(?P<bare>[^\s|;&]+))
-    '''
-)
-_SYSTEM_LOCATION_REFERENCE_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\$(?:\{(?:env:)?(?:systemdrive|userprofile|home|appdata|localappdata|"
-    r"programfiles|programfiles\(x86\)|systemroot|windir)\}|"
-    r"(?:env:)?(?:systemdrive|userprofile|home|appdata|localappdata|programfiles|"
-    r"programfiles\(x86\)|systemroot|windir)\b)|"
-    r"%(?:systemdrive|userprofile|home|appdata|localappdata|programfiles|"
-    r"programfiles\(x86\)|systemroot|windir)%|"
-    r"~[\\/]|"
-    r"\[environment\]::getfolderpath\s*\(\s*['\"](?:desktop|"
-    r"userprofile|applicationdata|localapplicationdata|programfiles)"
-    r"['\"]\s*\)"
-    r")"
-)
-
-
-def _system_drive() -> str:
-    for candidate in (
-        os.environ.get("SystemDrive"),
-        os.environ.get("SystemRoot"),
-        os.environ.get("WINDIR"),
-        str(Path.home()),
-    ):
-        drive = ntpath.splitdrive(str(candidate or ""))[0]
-        if re.fullmatch(r"[A-Za-z]:", drive):
-            return drive.casefold()
-    return "c:"
-
-
-def _match_value(match: re.Match[str]) -> str:
-    return next(
-        (value for value in match.groupdict().values() if value is not None),
-        "",
-    ).strip().rstrip(",)")
-
-
-def _command_texts(params: dict[str, Any]) -> tuple[str, ...]:
-    texts: list[str] = []
-    actions = params.get("commandActions")
-    if isinstance(actions, list):
-        for action in actions:
-            if not isinstance(action, dict):
-                continue
-            command = action.get("command")
-            if isinstance(command, str) and command.strip():
-                texts.append(command)
-    if texts:
-        return tuple(texts)
-    command = params.get("command")
-    if isinstance(command, str) and command.strip():
-        texts.append(command)
-    return tuple(texts)
-
-
-def _normalized_windows_path(value: str, cwd: str | None = None) -> str | None:
-    candidate = value.strip().strip("\"'")
-    if not candidate or "\x00" in candidate:
-        return None
-    if not ntpath.isabs(candidate):
-        if not isinstance(cwd, str) or not ntpath.isabs(cwd):
-            return None
-        candidate = ntpath.join(cwd, candidate)
-    return ntpath.normcase(ntpath.normpath(candidate))
 
 
 def _normalized_thread_cwd(value: str) -> str | None:
@@ -211,219 +94,6 @@ def _thread_cwd_filters(value: str) -> list[str]:
     return list(dict.fromkeys((ordinary, extended)))
 
 
-def _path_is_within(value: str, root: str) -> bool:
-    try:
-        return ntpath.commonpath((value, root)) == root
-    except ValueError:
-        return False
-
-
-def _path_is_system_write_target(
-    value: str,
-    *,
-    cwd: str | None,
-    project_root: Path,
-    system_drive: str,
-) -> bool:
-    target = _normalized_windows_path(value, cwd)
-    project = _normalized_windows_path(str(project_root))
-    if target is None or project is None:
-        return False
-    if _path_is_within(target, project):
-        return False
-    return ntpath.splitdrive(target)[0].casefold() == system_drive
-
-
-def _command_requires_system_drive_approval(
-    params: dict[str, Any],
-    *,
-    project_root: Path,
-    system_drive: str,
-) -> bool:
-    cwd = params.get("cwd") if isinstance(params.get("cwd"), str) else None
-    for command in _command_texts(params):
-        if _COMMAND_WRITE_PATTERN.search(command) is None:
-            continue
-
-        targets = [
-            _match_value(match)
-            for match in _REDIRECTION_TARGET_PATTERN.finditer(command)
-        ]
-        if _MOVE_PATTERN.search(command) is not None:
-            targets.extend(
-                _match_value(match)
-                for match in _WINDOWS_PATH_PATTERN.finditer(command)
-            )
-            targets.extend(
-                _match_value(match)
-                for match in _TARGET_FLAG_PATTERN.finditer(command)
-            )
-            targets.extend(
-                _match_value(match)
-                for match in _DESTINATION_FLAG_PATTERN.finditer(command)
-            )
-        elif _COPY_PATTERN.search(command) is not None:
-            destinations = [
-                _match_value(match)
-                for match in _DESTINATION_FLAG_PATTERN.finditer(command)
-            ]
-            if destinations:
-                targets.extend(destinations)
-            else:
-                paths = [
-                    _match_value(match)
-                    for match in _WINDOWS_PATH_PATTERN.finditer(command)
-                ]
-                if paths:
-                    targets.append(paths[-1])
-        elif _RENAME_PATTERN.search(command) is not None:
-            targets.extend(
-                _match_value(match)
-                for match in _WINDOWS_PATH_PATTERN.finditer(command)
-            )
-            targets.extend(
-                _match_value(match)
-                for match in _TARGET_FLAG_PATTERN.finditer(command)
-            )
-        else:
-            flagged = [
-                _match_value(match)
-                for match in _TARGET_FLAG_PATTERN.finditer(command)
-            ]
-            targets.extend(flagged)
-            if not flagged and not targets:
-                targets.extend(
-                    _match_value(match)
-                    for match in _WINDOWS_PATH_PATTERN.finditer(command)
-                )
-
-        if any(
-            _SYSTEM_LOCATION_REFERENCE_PATTERN.search(target)
-            for target in targets
-        ):
-            return True
-        if (
-            not targets
-            and _SYSTEM_LOCATION_REFERENCE_PATTERN.search(command) is not None
-        ):
-            return True
-
-        if any(
-            _path_is_system_write_target(
-                target,
-                cwd=cwd,
-                project_root=project_root,
-                system_drive=system_drive,
-            )
-            for target in targets
-            if target
-        ):
-            return True
-        if not targets and isinstance(cwd, str) and _path_is_system_write_target(
-            ".",
-            cwd=cwd,
-            project_root=project_root,
-            system_drive=system_drive,
-        ):
-            return True
-    return False
-
-
-def _permission_write_targets(params: dict[str, Any]) -> tuple[str, ...]:
-    permissions = params.get("permissions")
-    if not isinstance(permissions, dict):
-        return ()
-    file_system = permissions.get("fileSystem")
-    if not isinstance(file_system, dict):
-        return ()
-
-    targets: list[str] = []
-    legacy_write = file_system.get("write")
-    if isinstance(legacy_write, list):
-        targets.extend(value for value in legacy_write if isinstance(value, str))
-
-    entries = file_system.get("entries")
-    if isinstance(entries, list):
-        for entry in entries:
-            if not isinstance(entry, dict) or entry.get("access") != "write":
-                continue
-            path = entry.get("path")
-            if not isinstance(path, dict):
-                continue
-            path_type = path.get("type")
-            if path_type == "path" and isinstance(path.get("path"), str):
-                targets.append(path["path"])
-            elif path_type == "glob_pattern" and isinstance(
-                path.get("pattern"), str
-            ):
-                targets.append(path["pattern"])
-            elif path_type == "special" and isinstance(path.get("value"), dict):
-                special = path["value"]
-                kind = special.get("kind")
-                if kind == "root":
-                    targets.append(system_drive + "\\")
-                elif kind == "unknown" and isinstance(special.get("path"), str):
-                    targets.append(special["path"])
-    return tuple(targets)
-
-
-def _requires_system_drive_approval(
-    method: Any,
-    params: Any,
-    *,
-    project_root: Path,
-    system_drive: str | None = None,
-) -> bool:
-    if not isinstance(method, str) or not isinstance(params, dict):
-        return False
-    resolved_system_drive = (system_drive or _system_drive()).casefold()
-    if method == "item/commandExecution/requestApproval":
-        return _command_requires_system_drive_approval(
-            params,
-            project_root=project_root,
-            system_drive=resolved_system_drive,
-        )
-    if method == "item/fileChange/requestApproval":
-        grant_root = params.get("grantRoot")
-        return isinstance(grant_root, str) and _path_is_system_write_target(
-            grant_root,
-            cwd=None,
-            project_root=project_root,
-            system_drive=resolved_system_drive,
-        )
-    if method == "item/permissions/requestApproval":
-        cwd = params.get("cwd") if isinstance(params.get("cwd"), str) else None
-        return any(
-            _path_is_system_write_target(
-                target,
-                cwd=cwd,
-                project_root=project_root,
-                system_drive=resolved_system_drive,
-            )
-            for target in _permission_write_targets(params)
-        )
-    return False
-
-
-def _offered_execpolicy_amendment(params: Any) -> list[str] | None:
-    if not isinstance(params, dict):
-        return None
-    amendment = params.get("proposedExecpolicyAmendment")
-    if (
-        not isinstance(amendment, list)
-        or not amendment
-        or not all(isinstance(part, str) and part.strip() for part in amendment)
-    ):
-        return None
-    available = params.get("availableDecisions")
-    if available is not None and (
-        not isinstance(available, list)
-        or "acceptWithExecpolicyAmendment" not in available
-    ):
-        return None
-    return list(amendment)
-
-
 class BridgeSession:
     """Own the Codex child and only the connection identifiers needed by UI."""
 
@@ -435,6 +105,7 @@ class BridgeSession:
         *,
         mcp_backend: str = HIA_MCP_V2_BACKEND,
         focus_state_path: Path | None = None,
+        scene_writer: SceneWriterOwnership | None = None,
     ) -> None:
         if mcp_backend not in {HIA_MCP_V2_BACKEND, FXHOUDINI_MCP_BACKEND}:
             raise ValueError(f"Unsupported Houdini MCP backend: {mcp_backend}")
@@ -447,6 +118,7 @@ class BridgeSession:
         self._client = client
         self._events = events
         self._mcp_backend = mcp_backend
+        self._scene_writer = scene_writer or SceneWriterOwnership()
         self._lock = threading.RLock()
         self._turn_condition = threading.Condition(self._lock)
         self._connected = False
@@ -454,6 +126,8 @@ class BridgeSession:
         self._account_result: dict[str, Any] | None = None
         self._account_error: dict[str, Any] | None = None
         self._thread_id: str | None = None
+        self._ordinary_thread_ids: set[str] = set()
+        self._ordinary_thread_profiles: dict[str, ThreadRotationProfile] = {}
         self._turn_id: str | None = None
         self._turn_status: str | None = None
         self._turn_active = False
@@ -462,7 +136,10 @@ class BridgeSession:
         self._start_source_turn_id: str | None = None
         self._last_tool_name: str | None = None
         self._last_tool_status: str | None = None
-        self._stop_recovery_thread: threading.Thread | None = None
+        self._scene_writer_reservation: SceneWriterReservation | None = None
+        self._scene_writer_owner: str | None = None
+        self._active_hia_item_ids: set[str] = set()
+        self._anonymous_hia_items = 0
         self._closed = False
         self._client.set_event_sink(self._on_client_event)
 
@@ -478,6 +155,8 @@ class BridgeSession:
                 self._initialize_result = initialize_result
                 self._connected = True
                 self._thread_id = None
+                self._ordinary_thread_ids.clear()
+                self._ordinary_thread_profiles.clear()
                 self._write_focus_state_locked()
             try:
                 account = self._client.request(
@@ -654,6 +333,7 @@ class BridgeSession:
     def _developer_instructions(self) -> str:
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             backend_instructions = (
+                "确定操作不枚举，直接调用目标；HOM先编译，类别API仅在对象支持时调用。"
                 "场景默认用 HIA MCP V2 与 HOM。明确小改只读目标值后直接执行；"
                 "修改既有网络先用 hia_context/hia_inspect 读取目标、输入输出、两层上游、"
                 "公共控制、材质入口、引用和允许 scope。优先现有节点和标准原生节点网络；"
@@ -662,14 +342,13 @@ class BridgeSession:
                 "Goal 阶段只按完整结构化场景证据验收，plan/revision/tool completed 不算通过。"
                 "视觉任务只在里程碑用 hia_capture_viewport，不固定尺寸；"
                 "静态一帧，动画/模拟用代表帧或短序列；材质验收读取绑定、MaterialX 连接和正确输入。"
-                "Stop 后已发 HOM 仍可能收尾；失败读 rollback.status/automatic_retry_safe，"
-                "仅 rolled_back+true 可修正重试一次；unknown/partial/NO_OBSERVED_EFFECT "
+                "Stop 后已提交的 HOM 仍可能收尾；失败后先显式 inspect、diff、validate，"
+                "根据新证据决定下一步，禁止自动重试；unknown/partial/NO_OBSERVED_EFFECT "
                 "不 Undo 也不算完成；session/source drift 停写并正常重启，不热加载。"
                 "仅主任务串行调用 hia_*/HOM 并写 HIP；子任务只研究、草拟、只读审阅；"
                 "MCP 无 caller lineage，非代码级隔离；同类读取不并发扇出，"
                 "多个关键词合并为一次批量查询；QUEUE_FULL 不立即重试。"
-                "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label；"
-                "聊天、关闭专注和逐参数操作不设。"
+                "阶段结果只按实际场景证据报告；失败阶段先检查当前场景再修正。"
             )
         else:
             backend_instructions = (
@@ -682,8 +361,9 @@ class BridgeSession:
             )
         common_instructions = (
             "复杂创建、修改或修复在首次场景写入前先做一次相关本地知识批量检索并复用结果；"
-            "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务还必须先用原生 web/search "
-            "查当前 SideFX 官方与原始来源；没有网页工具时才批量只读抓取公开页。"
+            "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务还必须研究当前 SideFX 官方与原始来源；"
+            "需要发现来源时明确用原生 web search，需要读取用户给定公开 URL 时明确用 openPage；"
+            "两者失败均直接报告，不得互相作为隐藏 fallback。"
             "本地检索不可用时明确说明，禁止静默跳过；"
             "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
             "实时 MCP 不可用时直接说明，不得改成离线 HIP。"
@@ -694,7 +374,7 @@ class BridgeSession:
             "上下文仅用 app-server 自动整理，不手动 compact，不创建本地摘要或记忆。"
             "实时代码禁止 hou.hipFile.clear/load/save，不替换当前场景；新资产放入唯一新根。"
             "不要调用 request_user_input；信息不足时采用合理默认值，无法执行才报告原因。"
-            "安全已保存 HIP 的自动截图优先写同级 .hia/screenshots，否则回退 HIA_CACHE_DIR/screenshots；"
+            "HIA 截图只能用 SceneViewer.flipbook 写入 HIA_CACHE_DIR/screenshots；不可用时明确失败；"
             "预览写 previews，中间图写 tmp，附件/知识/模型/索引仍留项目 .runtime；文件名加时间戳和短随机后缀。"
             "用户明确指定的最终渲染、EXR、视频、USD、模拟缓存或导出是用户交付物，"
             "可写所选普通本地项目外目录；未指定才用 HIA_RENDER_OUTPUT_DIR，并始终报告最终路径。"
@@ -703,8 +383,8 @@ class BridgeSession:
         if self._mcp_backend == HIA_MCP_V2_BACKEND:
             common_instructions = (
                 "复杂创建、修改或修复在首次场景写入前先用 hia_local_help_search 做一次相关批量检索并复用结果；"
-                "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务必须先用原生 web/search "
-                "查当前 SideFX 官方与原始来源；"
+                "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务必须研究当前 SideFX 官方与原始来源；"
+                "发现来源明确用原生 web search，读取给定公开 URL 明确用 openPage；失败不得互相隐藏切换；"
                 "检索不可用时明确说明，禁止静默跳过；"
                 "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究。"
                 "MCP 不可用就说明，不转离线 HIP；hython 仅用于用户明确的离线/独立 HIP/批处理/后台渲染。"
@@ -712,7 +392,7 @@ class BridgeSession:
                 "主任务只保留原生 Goal、决定和子任务短摘要；子任务详情按需查看，不塞入主上下文；主任务公开采纳。"
                 "禁止 hou.hipFile.clear/load/save 和替换当前场景；新资产置于唯一新根。"
                 "不调用 request_user_input；信息不足用默认，无法执行才报告。"
-                "安全已存 HIP 截图写同级 .hia/screenshots，否则用 HIA_CACHE_DIR/screenshots；"
+                "HIA 截图只能用 SceneViewer.flipbook 写入 HIA_CACHE_DIR/screenshots；不可用时明确失败；"
                 "预览写 previews，中间图写 tmp，附件/知识/模型/索引留 .runtime。"
                 "用户指定的最终渲染/EXR/视频/USD/模拟缓存/导出可写所选普通项目外目录；"
                 "否则用 HIA_RENDER_OUTPUT_DIR；始终报告最终路径。禁止屏幕接管。"
@@ -769,17 +449,22 @@ class BridgeSession:
             self._require_no_active_turn_locked()
         params: dict[str, Any] = {
             "cwd": str(self._project_root),
-            "approvalPolicy": "on-request",
+            "approvalPolicy": "never",
             "sandbox": "workspace-write",
             "ephemeral": False,
             "developerInstructions": self._developer_instructions(),
             "serviceTier": service_tier,
+            "threadSource": "appServer",
         }
         if model is not None:
             params["model"] = model
         result = self._client.request("thread/start", params)
         thread_id = self._extract_thread_id(result)
+        rotation_profile = self._rotation_profile_from_response(result)
         with self._lock:
+            self._ordinary_thread_ids.add(thread_id)
+            if rotation_profile is not None:
+                self._ordinary_thread_profiles[thread_id] = rotation_profile
             self._thread_id = thread_id
             self._reset_turn_locked()
             self._write_focus_state_locked()
@@ -803,21 +488,28 @@ class BridgeSession:
         )
         with self._lock:
             self._require_no_active_turn_locked()
+            self._require_ordinary_thread(thread_id)
         resumed = self._client.request(
             "thread/resume",
             {
                 "threadId": thread_id,
                 "cwd": str(self._project_root),
-                "approvalPolicy": "on-request",
+                "approvalPolicy": "never",
                 "sandbox": "workspace-write",
                 "developerInstructions": self._developer_instructions(),
                 "serviceTier": service_tier,
             },
         )
         resolved_id = self._extract_thread_id(resumed)
-        read_result = self._project_thread_messages(resumed, resolved_id)
+        self._require_ordinary_thread_result(resumed, resolved_id)
+        rotation_profile = self._rotation_profile_from_response(resumed)
+        read_result = self._thread_messages_projection(resumed, resolved_id)
         with self._lock:
             self._thread_id = resolved_id
+            if rotation_profile is not None:
+                self._ordinary_thread_profiles[resolved_id] = rotation_profile
+            else:
+                self._ordinary_thread_profiles.pop(resolved_id, None)
             self._reset_turn_locked()
             self._write_focus_state_locked()
         self._events.publish("thread_selected", action="resume", thread_id=resolved_id)
@@ -835,89 +527,131 @@ class BridgeSession:
             "thread/read",
             {"threadId": selected, "includeTurns": True},
         )
+        self._require_ordinary_thread_result(result, selected)
         return {
             "thread_id": selected,
-            "result": self._project_thread_messages(result, selected),
+            "result": self._thread_messages_projection(result, selected),
         }
 
     def list_threads(self) -> dict[str, Any]:
-        """Return one recent page for this project without local persistence."""
-
-        result = self._client.request(
-            "thread/list",
-            {
-                "cwd": _thread_cwd_filters(str(self._project_root)),
-                "archived": False,
-                "limit": THREAD_LIST_LIMIT,
-                "modelProviders": [],
-                "useStateDbOnly": True,
-                "sortKey": "recency_at",
-                "sortDirection": "desc",
-            },
-        )
-        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
-            raise self._invalid_thread_response("Response data must be an array")
+        """Return every bounded native Thread for this project."""
 
         project_root = _normalized_thread_cwd(str(self._project_root))
         threads: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for entry in result["data"][:THREAD_LIST_LIMIT]:
-            if not isinstance(entry, dict):
-                raise self._invalid_thread_response("Thread entry must be an object")
-            thread_id = self._validated_thread_response_string(
-                entry.get("id"), "id", MODEL_IDENTIFIER_MAX_LENGTH, allow_empty=False
-            )
-            cwd = self._validated_thread_response_string(
-                entry.get("cwd"), "cwd", THREAD_CWD_MAX_LENGTH, allow_empty=False
-            )
-            entry_root = _normalized_thread_cwd(cwd)
-            if entry_root != project_root:
-                continue
-            if thread_id in seen:
-                raise self._invalid_thread_response(
-                    "Response contains a duplicate thread id", field="id"
-                )
-            seen.add(thread_id)
+        seen_cursors: set[str] = set()
+        cursor: str | None = None
+        raw_entry_count = 0
 
-            raw_name = entry.get("name")
-            name = None
-            if raw_name is not None:
-                name = self._validated_thread_response_string(
-                    raw_name,
-                    "name",
-                    THREAD_NAME_MAX_LENGTH,
-                    allow_empty=True,
-                )
-            preview = self._sanitized_thread_preview(entry.get("preview"))
-            updated_at = entry.get("updatedAt")
-            if not isinstance(updated_at, int) or isinstance(updated_at, bool) or updated_at < 0:
-                raise self._invalid_thread_response(
-                    "Thread updatedAt must be a non-negative integer",
-                    field="updatedAt",
-                )
-            record: dict[str, Any] = {
-                "thread_id": thread_id,
-                "name": name,
-                "preview": preview,
-                "updated_at": updated_at,
+        for page_number in range(1, THREAD_LIST_MAX_PAGES + 1):
+            params: dict[str, Any] = {
+                "cwd": _thread_cwd_filters(str(self._project_root)),
+                "archived": False,
+                "limit": THREAD_LIST_PAGE_SIZE,
+                "modelProviders": [],
+                "useStateDbOnly": True,
+                "sortKey": "recency_at",
+                "sortDirection": "desc",
             }
-            recency_at = entry.get("recencyAt")
-            if recency_at is not None:
+            if cursor is not None:
+                params["cursor"] = cursor
+            result = self._client.request("thread/list", params)
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                raise self._invalid_thread_response("Response data must be an array")
+
+            raw_entry_count += len(result["data"])
+            if raw_entry_count > THREAD_LIST_MAX_ENTRIES:
+                raise BridgeError(
+                    "THREAD_LIST_LIMIT_EXCEEDED",
+                    "Codex Thread history exceeded the Bridge entry limit",
+                    http_status=502,
+                    details={"max_entries": THREAD_LIST_MAX_ENTRIES},
+                )
+            for entry in result["data"]:
+                if not isinstance(entry, dict):
+                    raise self._invalid_thread_response("Thread entry must be an object")
+                thread_id = self._validated_thread_response_string(
+                    entry.get("id"), "id", MODEL_IDENTIFIER_MAX_LENGTH, allow_empty=False
+                )
+                cwd = self._validated_thread_response_string(
+                    entry.get("cwd"), "cwd", THREAD_CWD_MAX_LENGTH, allow_empty=False
+                )
+                if thread_id in seen:
+                    raise self._invalid_thread_response(
+                        "Response contains a duplicate thread id", field="id"
+                    )
+                seen.add(thread_id)
+                if _normalized_thread_cwd(cwd) != project_root:
+                    continue
+                with self._lock:
+                    self._ordinary_thread_ids.add(thread_id)
+
+                raw_name = entry.get("name")
+                name = None
+                if raw_name is not None:
+                    name = self._validated_thread_response_string(
+                        raw_name, "name", THREAD_NAME_MAX_LENGTH, allow_empty=True
+                    )
+                preview = self._sanitized_thread_preview(entry.get("preview"))
+                updated_at = entry.get("updatedAt")
                 if (
-                    not isinstance(recency_at, int)
-                    or isinstance(recency_at, bool)
-                    or recency_at < 0
+                    not isinstance(updated_at, int)
+                    or isinstance(updated_at, bool)
+                    or updated_at < 0
                 ):
                     raise self._invalid_thread_response(
-                        "Thread recencyAt must be a non-negative integer or null",
-                        field="recencyAt",
+                        "Thread updatedAt must be a non-negative integer",
+                        field="updatedAt",
                     )
-                record["recency_at"] = recency_at
-            threads.append(record)
-        return {"threads": threads}
+                record: dict[str, Any] = {
+                    "thread_id": thread_id,
+                    "name": name,
+                    "preview": preview,
+                    "updated_at": updated_at,
+                }
+                recency_at = entry.get("recencyAt")
+                if recency_at is not None:
+                    if (
+                        not isinstance(recency_at, int)
+                        or isinstance(recency_at, bool)
+                        or recency_at < 0
+                    ):
+                        raise self._invalid_thread_response(
+                            "Thread recencyAt must be a non-negative integer or null",
+                            field="recencyAt",
+                        )
+                    record["recency_at"] = recency_at
+                threads.append(record)
+
+            next_cursor = result.get("nextCursor")
+            if next_cursor is None:
+                return {"threads": threads}
+            next_cursor = self._validated_thread_response_string(
+                next_cursor,
+                "nextCursor",
+                THREAD_CURSOR_MAX_LENGTH,
+                allow_empty=False,
+            )
+            if next_cursor in seen_cursors:
+                raise self._invalid_thread_response(
+                    "Response contains a repeated pagination cursor",
+                    field="nextCursor",
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+            if page_number == THREAD_LIST_MAX_PAGES:
+                raise BridgeError(
+                    "THREAD_LIST_LIMIT_EXCEEDED",
+                    "Codex Thread history exceeded the Bridge page limit",
+                    http_status=502,
+                    details={"max_pages": THREAD_LIST_MAX_PAGES},
+                )
+
+        raise AssertionError("unreachable Thread pagination state")
 
     def rename_thread(self, thread_id: str, name: str) -> dict[str, Any]:
         thread_id = self._validated_identifier(thread_id, "thread_id")
+        self._require_ordinary_thread(thread_id)
         name = self._validated_optional_selection(
             name, "thread_name", THREAD_NAME_MAX_LENGTH
         )
@@ -933,24 +667,15 @@ class BridgeSession:
 
         thread_id = self._validated_identifier(thread_id, "thread_id")
         with self._lock:
-            recovery_worker = self._stop_recovery_thread
-            if self._turn_status == "stopRecovering" or (
-                recovery_worker is not None and recovery_worker.is_alive()
-            ):
-                raise BridgeError(
-                    "STOP_RECOVERY_IN_PROGRESS",
-                    "The selected Thread is still recovering after Stop",
-                    http_status=409,
-                    details={
-                        "thread_id": self._thread_id,
-                        "turn_status": self._turn_status,
-                    },
-                )
             self._require_no_active_turn_locked()
+            self._require_ordinary_thread(thread_id)
 
         result = self._client.request(
             "thread/delete",
             {"threadId": thread_id},
+        )
+        removed_cache_paths, cache_cleanup_error = self._cleanup_thread_cache(
+            thread_id
         )
 
         cleanup_warning: dict[str, Any] | None = None
@@ -958,6 +683,8 @@ class BridgeSession:
             was_selected = self._thread_id == thread_id
             self._focus_enabled_threads.discard(thread_id)
             self._focus_goal_bindings.pop(thread_id, None)
+            self._ordinary_thread_ids.discard(thread_id)
+            self._ordinary_thread_profiles.pop(thread_id, None)
             if was_selected:
                 self._thread_id = None
                 self._reset_turn_locked()
@@ -974,21 +701,47 @@ class BridgeSession:
             "deleted": True,
             "was_selected": was_selected,
             "result": result,
+            "cache_cleanup": {
+                "complete": cache_cleanup_error is None,
+                "removed_paths": removed_cache_paths,
+            },
         }
+        if cache_cleanup_error is not None:
+            event_fields["cache_cleanup_error"] = cache_cleanup_error
+            response["cache_cleanup"]["error"] = cache_cleanup_error
         if cleanup_warning is not None:
             event_fields["cleanup_warning"] = cleanup_warning
             response["cleanup_warning"] = cleanup_warning
         self._events.publish("thread_deleted", **event_fields)
         return response
 
+    def _cleanup_thread_cache(self, thread_id: str) -> tuple[list[str], str | None]:
+        """Remove only the deleted Thread's project-local attachment cache."""
+
+        attachments_root = (
+            self._project_root / ".runtime" / "attachments"
+        ).resolve()
+        candidate = attachments_root / thread_id
+        if not candidate.exists():
+            return [], None
+        try:
+            resolved = candidate.resolve(strict=True)
+            if resolved.parent != attachments_root or not resolved.is_dir():
+                raise OSError("attachment cache target is not one safe Thread directory")
+            shutil.rmtree(resolved)
+        except (OSError, RuntimeError) as exc:
+            return [], f"{type(exc).__name__}: {exc}"
+        return [str(resolved)], None
+
     def get_goal(self, expected_thread_id: str) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)
+        self._require_ordinary_thread(thread_id)
         result = self._client.request(
             "thread/goal/get",
             {"threadId": thread_id},
         )
         self._selected_thread_id(thread_id)
-        goal = self._project_goal(result, thread_id, allow_none=True)
+        goal = self._goal_projection(result, thread_id, allow_none=True)
         focused = self._reconcile_focus_goal(thread_id, goal)
         with self._lock:
             goal_binding = (
@@ -1010,6 +763,7 @@ class BridgeSession:
         token_budget: int | None,
     ) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)
+        self._require_ordinary_thread(thread_id)
         if (
             not isinstance(objective, str)
             or not objective.strip()
@@ -1035,7 +789,7 @@ class BridgeSession:
         }
         result = self._client.request("thread/goal/set", params)
         self._selected_thread_id(thread_id)
-        goal = self._project_goal(result, thread_id, allow_none=False)
+        goal = self._goal_projection(result, thread_id, allow_none=False)
         self._reconcile_focus_goal(thread_id, goal)
         return {
             "thread_id": thread_id,
@@ -1045,6 +799,7 @@ class BridgeSession:
 
     def clear_goal(self, expected_thread_id: str) -> dict[str, Any]:
         thread_id = self._selected_thread_id(expected_thread_id)
+        self._require_ordinary_thread(thread_id)
         result = self._client.request(
             "thread/goal/clear",
             {"threadId": thread_id},
@@ -1080,12 +835,13 @@ class BridgeSession:
                 "Target focus mode enabled must be a boolean",
             )
         thread_id = self._selected_thread_id(expected_thread_id)
+        self._require_ordinary_thread(thread_id)
         if enabled:
             result = self._client.request(
                 "thread/goal/get",
                 {"threadId": thread_id},
             )
-            goal = self._project_goal(result, thread_id, allow_none=True)
+            goal = self._goal_projection(result, thread_id, allow_none=True)
             if goal is None or goal.get("status") != "active":
                 raise BridgeError(
                     "ACTIVE_GOAL_REQUIRED",
@@ -1212,6 +968,7 @@ class BridgeSession:
         )
         with self._lock:
             thread_id = self._validated_identifier(self._thread_id, "thread_id")
+            self._require_ordinary_thread(thread_id)
             image_paths = self._validated_local_image_paths(
                 local_image_paths,
                 thread_id,
@@ -1222,6 +979,11 @@ class BridgeSession:
                     "Natural-language input or at least one image is required",
                 )
             self._require_no_active_turn_locked()
+            reservation = self._scene_writer.reserve(thread_id)
+            self._scene_writer_reservation = reservation
+            self._scene_writer_owner = None
+            self._active_hia_item_ids.clear()
+            self._anonymous_hia_items = 0
             self._turn_generation += 1
             generation = self._turn_generation
             self._start_source_turn_id = self._turn_id or self._start_source_turn_id
@@ -1247,10 +1009,10 @@ class BridgeSession:
                 "threadId": thread_id,
                 "input": turn_input,
                 "cwd": str(self._project_root),
-                "approvalPolicy": "on-request",
+                "approvalPolicy": "never",
                 "sandboxPolicy": {
                     "type": "workspaceWrite",
-                    "networkAccess": False,
+                    "networkAccess": True,
                 },
                 "serviceTier": service_tier,
             }
@@ -1274,6 +1036,10 @@ class BridgeSession:
                     self._start_source_turn_id = None
                     confirmed_not_created = True
             if confirmed_not_created:
+                self._scene_writer.abandon_uncreated(reservation)
+                with self._lock:
+                    if self._scene_writer_reservation == reservation:
+                        self._scene_writer_reservation = None
                 details = dict(exc.details or {})
                 details.update(
                     {
@@ -1302,6 +1068,10 @@ class BridgeSession:
             raise
 
         publish_selection = False
+        writer_terminal = False
+        writer_items: tuple[str, ...] = ()
+        writer_anonymous_items = 0
+        owner: str | None = None
         with self._lock:
             if generation == self._turn_generation:
                 if self._turn_id not in {None, turn_id}:
@@ -1318,10 +1088,39 @@ class BridgeSession:
                     )
                 self._turn_created = True
                 self._turn_id = turn_id
+                owner = self._scene_writer.bind(reservation, thread_id, turn_id)
+                self._scene_writer_owner = owner
+                profile = self._ordinary_thread_profiles.get(thread_id)
+                if profile is not None:
+                    runtime_changes: dict[str, Any] = {}
+                    if model is not None:
+                        runtime_changes["model"] = model
+                    if effort is not None:
+                        runtime_changes["reasoning_effort"] = effort
+                    if service_tier is not None:
+                        runtime_changes["service_tier"] = service_tier
+                    if runtime_changes:
+                        self._ordinary_thread_profiles[thread_id] = replace(
+                            profile,
+                            **runtime_changes,
+                        )
+                writer_items = tuple(self._active_hia_item_ids)
+                writer_anonymous_items = self._anonymous_hia_items
+                writer_terminal = not self._turn_active
                 self._start_source_turn_id = None
                 if self._turn_active and self._turn_status == "starting":
                     self._turn_status = "inProgress"
                 publish_selection = True
+        if owner is not None:
+            for item_id in writer_items:
+                self._scene_writer.hia_started(owner, item_id)
+            for _ in range(writer_anonymous_items):
+                self._scene_writer.hia_anonymous_started(owner)
+            if writer_terminal and self._scene_writer.turn_terminal(owner):
+                with self._lock:
+                    if self._scene_writer_owner == owner:
+                        self._scene_writer_owner = None
+                        self._scene_writer_reservation = None
         if publish_selection:
             self._events.publish(
                 "turn_selected",
@@ -1344,6 +1143,7 @@ class BridgeSession:
 
         with self._lock:
             thread_id = self._validated_identifier(self._thread_id, "thread_id")
+            self._require_ordinary_thread(thread_id)
             turn_id = self._turn_id
             if not self._turn_active or not self._identifier_is_valid(turn_id):
                 raise BridgeError(
@@ -1559,18 +1359,15 @@ class BridgeSession:
                 self._identifier_is_valid(value) for value in (thread_id, turn_id)
             ):
                 raise self._no_active_turn_error_locked()
+            self._require_ordinary_thread(str(thread_id))
             if self._turn_status == "stopRequested":
-                snapshot = self.snapshot()
-                return {
-                    "thread_id": thread_id,
-                    "turn_id": turn_id,
-                    "result": None,
-                    "restarted_app_server": False,
-                    "recovery_pending": False,
-                    "houdini_may_still_be_finishing": self._tool_may_still_be_running_locked(),
-                    "session": snapshot,
-                }
+                raise BridgeError(
+                    "INTERRUPT_NOT_CONFIRMED",
+                    "The prior interrupt request is still unconfirmed",
+                    http_status=409,
+                )
             generation = self._turn_generation
+            prior_status = self._turn_status
             self._turn_status = "stopRequested"
             houdini_may_still_be_finishing = (
                 self._tool_may_still_be_running_locked()
@@ -1579,21 +1376,30 @@ class BridgeSession:
         self._events.publish("session_state", session=self.snapshot())
         result: Any = None
         request_with_timeout = getattr(self._client, "request_with_timeout", None)
+        if not callable(request_with_timeout):
+            with self._lock:
+                if (
+                    generation == self._turn_generation
+                    and self._thread_id == thread_id
+                    and self._turn_id == turn_id
+                    and self._turn_active
+                    and self._turn_status == "stopRequested"
+                ):
+                    self._turn_status = prior_status
+            raise BridgeError(
+                "INTERRUPT_NOT_CONFIRMED",
+                "Codex interrupt transport is unavailable, so interruption was not confirmed",
+                http_status=503,
+            )
         try:
-            if callable(request_with_timeout):
-                result = request_with_timeout(
-                    "turn/interrupt",
-                    {"threadId": thread_id, "turnId": turn_id},
-                    timeout_seconds=STOP_INTERRUPT_GRACE_SECONDS,
-                )
-            else:  # Test doubles and older in-process clients remain compatible.
-                result = self._client.request(
-                    "turn/interrupt",
-                    {"threadId": thread_id, "turnId": turn_id},
-                )
+            result = request_with_timeout(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+                timeout_seconds=STOP_INTERRUPT_GRACE_SECONDS,
+            )
         except (BridgeError, CodexRPCError):
-            # A lost/late interrupt acknowledgement is not terminal evidence.
-            # The exact Turn is checked below before any process replacement.
+            # A lost or late interrupt acknowledgement is not terminal evidence.
+            # The exact Turn remains authoritative; no recovery action follows.
             pass
 
         with self._turn_condition:
@@ -1614,237 +1420,50 @@ class BridgeSession:
                 or not self._turn_active
             ):
                 snapshot = self.snapshot()
+                owner = self._scene_writer_owner
+                if (
+                    isinstance(owner, str)
+                    and self._scene_writer.retained_after_terminal(owner)
+                ):
+                    raise BridgeError(
+                        "SCENE_WRITER_STILL_ACTIVE",
+                        "The Turn stopped, but an HIA scene write is still active",
+                        http_status=409,
+                        details={
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "owner": owner,
+                        },
+                    )
                 return {
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "result": result,
-                    "restarted_app_server": False,
-                    "recovery_pending": False,
                     "houdini_may_still_be_finishing": False,
                     "session": snapshot,
                 }
 
-        snapshot = self._start_app_server_recovery_after_stop(
-            thread_id,
-            turn_id,
-            generation,
-        )
-        return {
-            "thread_id": thread_id,
-            "turn_id": turn_id,
-            "result": result,
-            "restarted_app_server": False,
-            "recovery_pending": snapshot.get("turn_status") == "stopRecovering",
-            "houdini_may_still_be_finishing": houdini_may_still_be_finishing,
-            "session": snapshot,
-        }
-
-    def _start_app_server_recovery_after_stop(
-        self,
-        thread_id: str,
-        turn_id: str,
-        generation: int,
-    ) -> dict[str, Any]:
-        """Release the stopped Turn and recover its exact Thread once in background."""
-
         with self._turn_condition:
-            if not (
+            if (
                 generation == self._turn_generation
                 and self._thread_id == thread_id
                 and self._turn_id == turn_id
                 and self._turn_active
                 and self._turn_status == "stopRequested"
             ):
-                return self.snapshot()
-            existing = self._stop_recovery_thread
-            if existing is not None and existing.is_alive():
-                return self.snapshot()
-            self._connected = False
-            self._initialize_result = None
-            self._turn_generation += 1
-            recovery_generation = self._turn_generation
-            self._start_source_turn_id = turn_id
-            self._turn_id = None
-            self._turn_status = "stopRecovering"
-            self._turn_active = False
-            self._turn_created = True
-            self._turn_condition.notify_all()
-            worker = threading.Thread(
-                target=self._recover_app_server_after_stop,
-                args=(thread_id, recovery_generation),
-                name="hia-stop-recovery",
-                daemon=True,
-            )
-            self._stop_recovery_thread = worker
+                self._turn_status = prior_status
             snapshot = self.snapshot()
-
         self._events.publish("session_state", session=snapshot)
-        try:
-            worker.start()
-        except RuntimeError:
-            with self._turn_condition:
-                if (
-                    recovery_generation == self._turn_generation
-                    and self._thread_id == thread_id
-                    and self._turn_status == "stopRecovering"
-                ):
-                    self._turn_status = "stopRecoveryFailed"
-                    self._stop_recovery_thread = None
-                    failed_snapshot = self.snapshot()
-                else:
-                    failed_snapshot = snapshot
-            self._events.publish("session_state", session=failed_snapshot)
-            return failed_snapshot
-        return snapshot
-
-    def _recover_app_server_after_stop(
-        self,
-        thread_id: str,
-        recovery_generation: int,
-    ) -> None:
-        """Replace Codex, resume one exact Thread, and never replay its Turn."""
-
-        deadline = time.monotonic() + STOP_RECOVERY_TOTAL_SECONDS
-
-        try:
-            with self._lock:
-                if self._closed:
-                    self._clear_stop_recovery_worker()
-                    return
-            restart = getattr(self._client, "restart", None)
-            initialize_with_timeout = getattr(
-                self._client,
-                "initialize_with_timeout",
-                None,
-            )
-            request_with_timeout = getattr(
-                self._client,
-                "request_with_timeout",
-                None,
-            )
-            if not all(
-                callable(value)
-                for value in (restart, initialize_with_timeout, request_with_timeout)
-            ):
-                raise BridgeError(
-                    "CODEX_RESTART_UNAVAILABLE",
-                    "Codex app-server restart is unavailable",
-                    http_status=503,
-                )
-            restart(
-                grace_seconds=STOP_RESTART_GRACE_SECONDS,
-                deadline=deadline,
-            )
-            remaining = min(
-                STOP_RECOVERY_TOTAL_SECONDS,
-                deadline - time.monotonic(),
-            )
-            if remaining <= 0:
-                raise BridgeError(
-                    "CODEX_STOP_RECOVERY_TIMEOUT",
-                    "Codex app-server stop recovery timed out",
-                    http_status=504,
-                )
-            initialize_result = initialize_with_timeout(
-                min(STOP_REINITIALIZE_MAX_SECONDS, remaining)
-            )
-            remaining = min(
-                STOP_RECOVERY_TOTAL_SECONDS,
-                deadline - time.monotonic(),
-            )
-            if remaining <= 0:
-                raise BridgeError(
-                    "CODEX_STOP_RECOVERY_TIMEOUT",
-                    "Codex app-server stop recovery timed out",
-                    http_status=504,
-                )
-            with self._turn_condition:
-                recovery_still_current = (
-                    not self._closed
-                    and recovery_generation == self._turn_generation
-                    and self._thread_id == thread_id
-                    and self._turn_status == "stopRecovering"
-                )
-                if not recovery_still_current and not self._closed:
-                    self._initialize_result = initialize_result
-                    self._connected = True
-                    self._turn_condition.notify_all()
-                    cancelled_snapshot = self.snapshot()
-                else:
-                    cancelled_snapshot = None
-            if not recovery_still_current:
-                if cancelled_snapshot is not None:
-                    self._events.publish(
-                        "session_state",
-                        session=cancelled_snapshot,
-                    )
-                self._clear_stop_recovery_worker()
-                return
-            resumed = request_with_timeout(
-                "thread/resume",
-                {
-                    "threadId": thread_id,
-                    "cwd": str(self._project_root),
-                    "approvalPolicy": "on-request",
-                    "sandbox": "workspace-write",
-                    "developerInstructions": self._developer_instructions(),
-                    "serviceTier": None,
-                },
-                timeout_seconds=remaining,
-            )
-            if self._extract_thread_id(resumed) != thread_id:
-                raise BridgeError(
-                    "INVALID_CODEX_RESPONSE",
-                    "Restarted Codex resumed a different Thread",
-                    http_status=502,
-                )
-        except Exception:
-            with self._turn_condition:
-                if (
-                    not self._closed
-                    and recovery_generation == self._turn_generation
-                    and self._thread_id == thread_id
-                    and self._turn_status == "stopRecovering"
-                ):
-                    self._connected = False
-                    self._initialize_result = None
-                    self._turn_status = "stopRecoveryFailed"
-                    self._turn_active = False
-                    self._turn_condition.notify_all()
-                    failed_snapshot = self.snapshot()
-                else:
-                    failed_snapshot = None
-            if failed_snapshot is not None:
-                self._events.publish("session_state", session=failed_snapshot)
-            self._clear_stop_recovery_worker()
-            return
-
-        with self._turn_condition:
-            if not (
-                not self._closed
-                and recovery_generation == self._turn_generation
-                and self._thread_id == thread_id
-                and self._turn_status == "stopRecovering"
-            ):
-                self._clear_stop_recovery_worker()
-                return
-            self._initialize_result = initialize_result
-            self._connected = True
-            self._turn_generation += 1
-            self._turn_id = None
-            self._turn_status = "interrupted"
-            self._turn_active = False
-            self._turn_created = True
-            self._turn_condition.notify_all()
-            recovered_snapshot = self.snapshot()
-        self._events.publish("session_state", session=recovered_snapshot)
-
-        self._clear_stop_recovery_worker()
-
-    def _clear_stop_recovery_worker(self) -> None:
-        with self._lock:
-            if self._stop_recovery_thread is threading.current_thread():
-                self._stop_recovery_thread = None
+        raise BridgeError(
+            "INTERRUPT_NOT_CONFIRMED",
+            "Codex did not confirm that the active Turn was interrupted",
+            http_status=504,
+            details={
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "houdini_may_still_be_finishing": houdini_may_still_be_finishing,
+            },
+        )
 
     def _tool_may_still_be_running_locked(self) -> bool:
         return (
@@ -1852,66 +1471,6 @@ class BridgeSession:
             and bool(self._last_tool_name)
             and self._last_tool_status not in {"completed", "failed"}
         )
-
-    def resolve_approval(self, request_id: RequestId, decision: str) -> dict[str, Any]:
-        if decision not in {"allow", "deny", "allow_rule"}:
-            raise BridgeError(
-                "INVALID_APPROVAL_DECISION",
-                "Approval decision must be 'allow', 'deny', or 'allow_rule'",
-            )
-        request = self._client.pending_server_request(request_id)
-        if request is None:
-            raise BridgeError(
-                "APPROVAL_NOT_FOUND",
-                "The approval request is no longer pending",
-                http_status=404,
-            )
-        method = request["method"]
-        params = request.get("params", {})
-        if decision == "allow_rule":
-            amendment = _offered_execpolicy_amendment(params)
-            if (
-                method != "item/commandExecution/requestApproval"
-                or amendment is None
-            ):
-                raise BridgeError(
-                    "INVALID_APPROVAL_DECISION",
-                    "This approval request does not offer a persistent command rule",
-                )
-            response = {
-                "decision": {
-                    "acceptWithExecpolicyAmendment": {
-                        "execpolicy_amendment": list(amendment),
-                    }
-                }
-            }
-        elif method in {
-            "item/commandExecution/requestApproval",
-            "item/fileChange/requestApproval",
-        }:
-            response = {"decision": "accept" if decision == "allow" else "decline"}
-        elif method == "item/permissions/requestApproval":
-            response = {
-                "permissions": params.get("permissions", {}) if decision == "allow" else {},
-                "scope": "turn",
-            }
-        else:
-            raise BridgeError(
-                "UNSUPPORTED_APPROVAL",
-                f"Unsupported approval method: {method}",
-            )
-        resolved_method = self._client.respond_to_server_request(request_id, response)
-        self._events.publish(
-            "approval_resolved",
-            request_id=request_id,
-            method=resolved_method,
-            decision=decision,
-        )
-        return {
-            "request_id": request_id,
-            "method": resolved_method,
-            "decision": decision,
-        }
 
     @staticmethod
     def _validated_optional_selection(
@@ -1997,7 +1556,7 @@ class BridgeSession:
         return expected_thread_id
 
     @classmethod
-    def _project_goal(
+    def _goal_projection(
         cls,
         result: Any,
         expected_thread_id: str,
@@ -2286,8 +1845,21 @@ class BridgeSession:
         )
 
     def _require_no_active_turn_locked(self) -> None:
-        if not self._turn_active:
+        if not self._turn_active and self._scene_writer_owner is None:
             return
+        if not self._turn_active:
+            raise BridgeError(
+                "SCENE_WRITER_STILL_ACTIVE",
+                "The Turn ended, but an HIA scene write is still active",
+                http_status=409,
+                details={
+                    "turn_active": False,
+                    "thread_id": self._thread_id,
+                    "turn_id": self._turn_id,
+                    "turn_status": self._turn_status,
+                    "owner": self._scene_writer_owner,
+                },
+            )
         raise BridgeError(
             "TURN_ALREADY_ACTIVE",
             "A Turn is already active for the selected Thread",
@@ -2325,14 +1897,147 @@ class BridgeSession:
         self._last_tool_status = None
 
     @staticmethod
+    def _is_hia_item(item: Mapping[str, Any]) -> bool:
+        server = item.get("server")
+        tool = item.get("tool")
+        return server in {"hia_mcp_v2", "houdini_intelligence"} or (
+            isinstance(tool, str) and tool.startswith("hia_")
+        )
+
+    @staticmethod
     def _extract_thread_id(result: Any) -> str:
         if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
             raise BridgeError("INVALID_CODEX_RESPONSE", "Thread response has no thread object", 502)
         thread_id = result["thread"].get("id")
         return BridgeSession._validated_identifier(thread_id, "thread_id")
 
+    def _rotation_profile_from_response(
+        self, result: Any
+    ) -> ThreadRotationProfile | None:
+        if not isinstance(result, Mapping):
+            return None
+        thread = result.get("thread")
+        model = result.get("model")
+        sandbox = result.get("sandbox")
+        if (
+            not isinstance(thread, Mapping)
+            or not isinstance(model, str)
+            or not model
+            or not isinstance(sandbox, Mapping)
+        ):
+            return None
+        reasoning_effort = result.get("reasoningEffort")
+        service_tier = result.get("serviceTier")
+        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+            return None
+        if service_tier is not None and not isinstance(service_tier, str):
+            return None
+        thread_source = thread.get("threadSource")
+        if not isinstance(thread_source, str) or not thread_source:
+            return None
+        cwd = result.get("cwd")
+        return ThreadRotationProfile(
+            cwd=cwd if isinstance(cwd, str) and cwd else str(self._project_root),
+            developer_instructions=self._developer_instructions(),
+            ephemeral=False,
+            thread_source=thread_source,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
+            fork_sandbox="workspace-write",
+            response_sandbox=copy.deepcopy(dict(sandbox)),
+            config={},
+        )
+
+    def owns_ordinary_thread(self, thread_id: str) -> bool:
+        with self._lock:
+            return thread_id in self._ordinary_thread_ids
+
+    def rotation_profile(
+        self, thread_id: str, last_turn_id: str
+    ) -> ThreadRotationProfile | None:
+        if not self._identifier_is_valid(last_turn_id):
+            return None
+        with self._lock:
+            if thread_id not in self._ordinary_thread_ids:
+                return None
+            profile = self._ordinary_thread_profiles.get(thread_id)
+            return copy.deepcopy(profile) if profile is not None else None
+
+    def rotation_is_idle(self, thread_id: str) -> bool:
+        with self._lock:
+            if thread_id not in self._ordinary_thread_ids or self._closed:
+                return False
+            if thread_id == self._thread_id and (
+                self._turn_active
+                or self._active_hia_item_ids
+                or self._scene_writer_reservation is not None
+                or self._scene_writer_owner is not None
+            ):
+                return False
+        writer = self._scene_writer.snapshot()
+        return writer.get("thread_id") != thread_id
+
+    def rotation_rebind(self, old_thread_id: str, new_thread_id: str) -> None:
+        with self._lock:
+            if (
+                old_thread_id not in self._ordinary_thread_ids
+                or new_thread_id in self._ordinary_thread_ids
+            ):
+                raise ValueError("ordinary Thread rotation identity is stale")
+            profile = self._ordinary_thread_profiles.get(old_thread_id)
+            if profile is None:
+                raise ValueError("ordinary Thread rotation profile is missing")
+            old_ids = set(self._ordinary_thread_ids)
+            old_profiles = dict(self._ordinary_thread_profiles)
+            old_selected = self._thread_id
+            old_focus = set(self._focus_enabled_threads)
+            old_bindings = dict(self._focus_goal_bindings)
+            try:
+                self._ordinary_thread_ids.remove(old_thread_id)
+                self._ordinary_thread_ids.add(new_thread_id)
+                self._ordinary_thread_profiles.pop(old_thread_id, None)
+                self._ordinary_thread_profiles[new_thread_id] = profile
+                if self._thread_id == old_thread_id:
+                    self._thread_id = new_thread_id
+                if old_thread_id in self._focus_enabled_threads:
+                    self._focus_enabled_threads.remove(old_thread_id)
+                    self._focus_enabled_threads.add(new_thread_id)
+                binding = self._focus_goal_bindings.pop(old_thread_id, None)
+                if binding is not None:
+                    self._focus_goal_bindings[new_thread_id] = binding
+                self._write_focus_state_locked()
+            except Exception:
+                self._ordinary_thread_ids = old_ids
+                self._ordinary_thread_profiles = old_profiles
+                self._thread_id = old_selected
+                self._focus_enabled_threads = old_focus
+                self._focus_goal_bindings = old_bindings
+                raise
+
+    def _require_ordinary_thread(self, thread_id: str) -> None:
+        with self._lock:
+            if thread_id in self._ordinary_thread_ids:
+                return
+        result = self._client.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": False},
+        )
+        self._require_ordinary_thread_result(result, thread_id)
+
+    def _require_ordinary_thread_result(self, result: Any, thread_id: str) -> None:
+        resolved_id = BridgeSession._extract_thread_id(result)
+        if resolved_id != thread_id:
+            raise BridgeError(
+                "INVALID_CODEX_RESPONSE",
+                "Thread response does not match the requested thread",
+                502,
+            )
+        with self._lock:
+            self._ordinary_thread_ids.add(thread_id)
+
     @staticmethod
-    def _project_thread_messages(
+    def _thread_messages_projection(
         result: Any,
         expected_thread_id: str,
     ) -> dict[str, Any]:
@@ -2531,24 +2236,9 @@ class BridgeSession:
         return identifiers[0], identifiers[1]
 
     def _on_client_event(self, event: dict[str, Any]) -> None:
+        anonymous_hia_protocol_error: tuple[str, str] | None = None
         event_type = event.get("type")
-        if event_type == "server_request":
-            method = event.get("method")
-            params = event.get("params")
-            if not _requires_system_drive_approval(
-                method,
-                params,
-                project_root=self._project_root,
-            ):
-                try:
-                    self.resolve_approval(event.get("request_id"), "allow")
-                except Exception:
-                    # If the one-shot automatic response cannot be delivered,
-                    # keep the original request visible so it is never lost.
-                    pass
-                else:
-                    return
-        elif event_type == "codex_notification":
+        if event_type == "codex_notification":
             method = event.get("method")
             params = event.get("params")
             params = params if isinstance(params, dict) else {}
@@ -2588,6 +2278,13 @@ class BridgeSession:
                         )
                         self._turn_active = False
                         self._turn_created = True
+                        owner = self._scene_writer_owner
+                        if (
+                            isinstance(owner, str)
+                            and self._scene_writer.turn_terminal(owner)
+                        ):
+                            self._scene_writer_owner = None
+                            self._scene_writer_reservation = None
                         self._turn_condition.notify_all()
                 elif method in {"item/started", "item/completed"}:
                     item = params.get("item")
@@ -2599,6 +2296,44 @@ class BridgeSession:
                         and turn_id == self._turn_id
                         and item.get("type") == "mcpToolCall"
                     ):
+                        owner = self._scene_writer_owner
+                        item_id = item.get("id")
+                        is_hia_item = self._is_hia_item(item)
+                        exact_item_id = (
+                            item_id
+                            if isinstance(item_id, str) and bool(item_id)
+                            else None
+                        )
+                        if is_hia_item and exact_item_id is None:
+                            if method == "item/started":
+                                self._anonymous_hia_items += 1
+                                if isinstance(owner, str):
+                                    self._scene_writer.hia_anonymous_started(owner)
+                            else:
+                                if self._anonymous_hia_items > 0:
+                                    self._anonymous_hia_items -= 1
+                                if (
+                                    isinstance(owner, str)
+                                    and self._scene_writer.hia_anonymous_finished(owner)
+                                ):
+                                    self._scene_writer_owner = None
+                                    self._scene_writer_reservation = None
+                            anonymous_hia_protocol_error = (thread_id, turn_id)
+                            self._last_tool_status = "failed"
+                        elif method == "item/started" and is_hia_item:
+                            self._active_hia_item_ids.add(exact_item_id)
+                            if isinstance(owner, str):
+                                self._scene_writer.hia_started(owner, exact_item_id)
+                        elif method == "item/completed" and is_hia_item:
+                            self._active_hia_item_ids.discard(exact_item_id)
+                            if (
+                                isinstance(owner, str)
+                                and self._scene_writer.hia_finished(
+                                    owner, exact_item_id
+                                )
+                            ):
+                                self._scene_writer_owner = None
+                                self._scene_writer_reservation = None
                         tool_name = item.get("tool")
                         if isinstance(tool_name, str) and tool_name:
                             self._last_tool_name = " ".join(tool_name.split())[:128]
@@ -2644,6 +2379,8 @@ class BridgeSession:
                 elif method == "thread/deleted":
                     thread_id = params.get("threadId")
                     if isinstance(thread_id, str):
+                        self._ordinary_thread_ids.discard(thread_id)
+                        self._ordinary_thread_profiles.pop(thread_id, None)
                         self._focus_enabled_threads.discard(thread_id)
                         self._focus_goal_bindings.pop(thread_id, None)
                         if self._thread_id == thread_id:
@@ -2657,5 +2394,14 @@ class BridgeSession:
             with self._turn_condition:
                 self._connected = False
                 self._turn_condition.notify_all()
+        if anonymous_hia_protocol_error is not None:
+            thread_id, turn_id = anonymous_hia_protocol_error
+            self._events.publish(
+                "protocol_warning",
+                code="INVALID_HIA_ITEM_ID",
+                message="Tracked an anonymous HIA item lifecycle after its exact id was omitted",
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
         fields = {key: value for key, value in event.items() if key != "type"}
         self._events.publish(str(event_type), **fields)

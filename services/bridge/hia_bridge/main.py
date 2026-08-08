@@ -12,7 +12,7 @@ import signal
 import sys
 import threading
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from hia_core.houdini_contract import B2_SCHEMA_VERSION, SchemaRegistry
 from hia_core.path_policy import PROJECT_ROOT, PathPolicyError, validate_project_subpath
@@ -22,8 +22,14 @@ from .errors import BridgeError
 from .events import EventBuffer
 from .http_server import BridgeApplication, LoopbackHTTPServer
 from .protocol import ProtocolPolicy
+from .scene_writer import SceneWriterOwnership
 from .scene_queue import B2_READ_ONLY_PROFILE, SceneQueue
 from .session import BridgeSession
+from .thread_rotation import (
+    ThreadRotationAdapters,
+    ThreadRotationProfile,
+    ThreadRotationService,
+)
 
 
 PINNED_CODEX_RELATIVE_PATH = Path(
@@ -68,6 +74,14 @@ HIA_MCP_V2_CHILD_ENVIRONMENT = (
     "HIA_MCP_V2_RUNTIME_DIR",
     "HIA_MCP_V2_EXECUTOR_PATH",
     "HIA_LAUNCHER_SESSION_ID",
+    "HIA_EMBEDDING_PROFILE",
+    "HIA_EMBEDDING_PYTHON",
+    "HIA_EMBEDDING_DIM",
+    "HIA_EMBEDDING_DEVICE",
+    "HIA_EMBEDDING_MODEL_DIR_QWEN3_0_6B",
+    "HIA_EMBEDDING_MODEL_REVISION_QWEN3_0_6B",
+    "HIA_EMBEDDING_MODEL_DIR_QWEN3_8B",
+    "HIA_EMBEDDING_MODEL_REVISION_QWEN3_8B",
 )
 _HIA_CHATGPT_HTTP_PROVIDER_ID = "hia_chatgpt_http"
 _HIA_CHATGPT_HTTP_PROVIDER_NAME = "HIA ChatGPT HTTP"
@@ -376,6 +390,10 @@ def _codex_app_server_command(
         str(codex_exe),
         "app-server",
         "--strict-config",
+        "-c",
+        "web_search=\"live\"",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
     ]
     for override in mcp_overrides:
         command.extend(("-c", override))
@@ -439,6 +457,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     session: BridgeSession | None = None
     server: LoopbackHTTPServer | None = None
     scene_queue: SceneQueue | None = None
+    thread_rotation: ThreadRotationService | None = None
     sensitive_values: list[str] = []
     try:
         project_root, codex_exe, codex_home, temp_directory = _validated_paths(args)
@@ -578,6 +597,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             }
         )
         events = EventBuffer()
+        scene_writer = SceneWriterOwnership()
         client = CodexStdioClient(
             _codex_app_server_command(
                 codex_exe,
@@ -596,7 +616,50 @@ def run(argv: Sequence[str] | None = None) -> int:
             events,
             mcp_backend=backend,
             focus_state_path=focus_state_path,
+            scene_writer=scene_writer,
         )
+
+        def rotation_profile(
+            thread_id: str, last_turn_id: str
+        ) -> ThreadRotationProfile | None:
+            if not session.owns_ordinary_thread(thread_id):
+                return None
+            profile = session.rotation_profile(thread_id, last_turn_id)
+            if profile is None:
+                raise ValueError("managed ordinary Thread has no rotation profile")
+            return profile
+
+        def rotation_is_idle(thread_id: str) -> bool:
+            return session.rotation_is_idle(thread_id)
+
+        def rotation_rebind(old_thread_id: str, new_thread_id: str) -> None:
+            session.rotation_rebind(old_thread_id, new_thread_id)
+
+        def publish_rotation(payload: Mapping[str, Any]) -> None:
+            event_type = payload.get("type")
+            if not isinstance(event_type, str) or not event_type:
+                raise ValueError("rotation event type is required")
+            fields = {key: value for key, value in payload.items() if key != "type"}
+            events.publish(event_type, **fields)
+            if event_type != "thread_rotated":
+                return
+            new_thread_id = payload.get("newThreadId")
+            if not isinstance(new_thread_id, str):
+                return
+            if session.owns_ordinary_thread(new_thread_id):
+                events.publish("session_state", session=session.snapshot())
+
+        thread_rotation = ThreadRotationService(
+            client,
+            ThreadRotationAdapters(
+                expected_profile=rotation_profile,
+                is_idle=rotation_is_idle,
+                rebind=rotation_rebind,
+                publish=publish_rotation,
+            ),
+        )
+        client.add_notification_observer(thread_rotation.observe)
+
         scene_launch_id = f"launch-{secrets.token_hex(16)}"
         scene_generation = 1
         houdini_process_nonce = f"houdini-{secrets.token_hex(16)}"
@@ -715,11 +778,15 @@ def run(argv: Sequence[str] | None = None) -> int:
                 server.server_close()
         finally:
             try:
-                if scene_queue is not None:
-                    scene_queue.shutdown()
+                if thread_rotation is not None:
+                    thread_rotation.close()
             finally:
-                if session is not None:
-                    session.close()
+                try:
+                    if scene_queue is not None:
+                        scene_queue.shutdown()
+                finally:
+                    if session is not None:
+                        session.close()
 
 
 def main() -> None:

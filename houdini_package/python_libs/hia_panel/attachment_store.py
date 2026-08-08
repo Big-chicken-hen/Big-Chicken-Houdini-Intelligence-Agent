@@ -7,7 +7,7 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Union
+from typing import Iterable, Union
 
 
 def _default_project_root() -> Path:
@@ -62,12 +62,40 @@ class AttachmentStore:
         directory = self._thread_directory(thread_id)
         return str(self._unique_path(directory, ".png"))
 
-    def new_clipboard_path(self, thread_id: str) -> str:
-        """Compatibility spelling for callers that prefer an explicit verb."""
+    def rebind_thread_paths(
+        self,
+        old_thread_id: str,
+        new_thread_id: str,
+        paths: Iterable[Union[str, Path]],
+    ) -> list[str]:
+        """Copy staged images to the new Thread while retaining old history paths."""
 
-        return self.clipboard_path(thread_id)
+        old_directory = self._thread_path(old_thread_id)
+        new_directory = self._thread_directory(new_thread_id)
+        rebound: list[str] = []
+        for raw_path in paths:
+            display_path = os.fspath(raw_path)
+            candidate = Path(display_path).resolve()
+            try:
+                relative = candidate.relative_to(old_directory)
+            except ValueError:
+                rebound.append(display_path)
+            else:
+                destination = new_directory / relative
+                if destination.exists():
+                    destination = self._unique_path(new_directory, candidate.suffix.lower())
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with candidate.open("rb") as source_file, destination.open("xb") as target_file:
+                    shutil.copyfileobj(source_file, target_file)
+                rebound.append(str(destination))
+        return rebound
 
     def _thread_directory(self, thread_id: str) -> Path:
+        directory = self._thread_path(thread_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _thread_path(self, thread_id: str) -> Path:
         if not isinstance(thread_id, str) or not _SAFE_THREAD_ID.fullmatch(thread_id):
             raise ValueError("thread_id must be one safe directory name")
         if thread_id.upper() in _WINDOWS_RESERVED_NAMES:
@@ -75,7 +103,6 @@ class AttachmentStore:
 
         directory = (self._attachments_root / thread_id).resolve()
         self._require_descendant(directory, self._attachments_root)
-        directory.mkdir(parents=True, exist_ok=True)
         return directory
 
     @staticmethod

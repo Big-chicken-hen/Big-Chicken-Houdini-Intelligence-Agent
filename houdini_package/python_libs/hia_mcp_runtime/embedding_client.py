@@ -28,7 +28,6 @@ from hia_core.embedding_contract import (
     EMBEDDING_DIMENSION_ENVIRONMENT,
     EMBEDDING_PROFILE_ENVIRONMENT,
     EMBEDDING_PYTHON_ENVIRONMENT,
-    FALLBACK_EMBEDDING_PROFILE,
     MODEL_DIR_0_6B_ENVIRONMENT,
     MODEL_DIR_8B_ENVIRONMENT,
     MODEL_REVISION_0_6B_ENVIRONMENT,
@@ -72,23 +71,11 @@ _EMBEDDING_ENVIRONMENT_NAMES = frozenset(
         "HIA_EMBEDDING_MODEL_ID",
     }
 )
-_FALLBACK_PROFILE = FALLBACK_EMBEDDING_PROFILE
-_FALLBACK_ERROR_CODES = frozenset(
-    {
-        "EMBEDDING_TIMEOUT",
-        "EMBEDDING_FAILED",
-        "EMBEDDING_WORKER_CLOSED",
-        "EMBEDDING_WORKER_START_FAILED",
-        "MODEL_DIRECTORY_INVALID",
-        "MODEL_LOAD_FAILED",
-        "MODEL_RUNTIME_UNAVAILABLE",
-    }
-)
 _STDOUT_EOF = object()
 
 
 class EmbeddingClientError(RuntimeError):
-    """Stable worker/client error suitable for lexical fallback."""
+    """Stable worker/client error for the selected embedding profile."""
 
     def __init__(
         self,
@@ -118,7 +105,6 @@ class EmbeddingBatch:
     normalized: bool
     requested_profile: str
     status: str
-    fallback_reason: str | None
     repair: Mapping[str, Any] | None
 
 
@@ -138,7 +124,6 @@ class EmbeddingClient:
         active_dim: int,
         device: str,
         timeout_seconds: float,
-        fallback_reason: str | None = None,
         repair: Mapping[str, Any] | None = None,
     ) -> None:
         self._project_root = project_root
@@ -151,9 +136,7 @@ class EmbeddingClient:
         self._active_dim = active_dim
         self._device = device
         self._timeout_seconds = timeout_seconds
-        self._fallback_reason = fallback_reason
         self._repair = dict(repair) if repair else None
-        self._fallback_attempted = active_profile.profile_id != requested_profile.profile_id
 
         self._lock = threading.RLock()
         self._process: subprocess.Popen[str] | None = None
@@ -167,11 +150,7 @@ class EmbeddingClient:
         self._closed = False
         self._initialized = False
         self._loaded = False
-        self._status = (
-            "degraded"
-            if active_profile.profile_id != requested_profile.profile_id
-            else "configured"
-        )
+        self._status = "configured"
 
     @classmethod
     def from_environment(
@@ -256,34 +235,21 @@ class EmbeddingClient:
 
         active_profile = requested_profile
         active_dim = requested_dim
-        fallback_reason: str | None = None
         repair: Mapping[str, Any] | None = None
         if model_directories[requested_profile.profile_id] is None:
-            if (
-                requested_profile.profile_id == "qwen3-embedding-8b"
-                and model_directories[_FALLBACK_PROFILE] is not None
-            ):
-                active_profile = PROFILES[_FALLBACK_PROFILE]
-                active_dim = min(
-                    requested_dim,
-                    active_profile.max_dimension,
-                )
-                fallback_reason = "REQUESTED_MODEL_UNAVAILABLE"
-                repair = _repair_details(requested_profile)
-            else:
-                raise EmbeddingConfigurationError(
-                    "EMBEDDING_MODEL_UNAVAILABLE",
-                    "The selected local embedding model is unavailable",
-                    {
-                        "requested_profile": requested_profile.profile_id,
-                        "model_dir_environment": (
-                            requested_profile.model_dir_environment
-                        ),
-                        "configured": configured_model_paths[
-                            requested_profile.profile_id
-                        ],
-                    },
-                )
+            raise EmbeddingConfigurationError(
+                "EMBEDDING_MODEL_UNAVAILABLE",
+                "The selected local embedding model is unavailable",
+                {
+                    "requested_profile": requested_profile.profile_id,
+                    "model_dir_environment": (
+                        requested_profile.model_dir_environment
+                    ),
+                    "configured": configured_model_paths[
+                        requested_profile.profile_id
+                    ],
+                },
+            )
 
         return cls(
             project_root=root,
@@ -296,7 +262,6 @@ class EmbeddingClient:
             active_dim=active_dim,
             device=device,
             timeout_seconds=timeout_value,
-            fallback_reason=fallback_reason,
             repair=repair,
         )
 
@@ -330,7 +295,6 @@ class EmbeddingClient:
                     is not None
                 ),
                 "ready": self._loaded and not self._closed,
-                "degraded": bool(self._fallback_reason),
                 "requested_profile": self._requested_profile.profile_id,
                 "active_profile": self._active_profile.profile_id,
                 "model_id": self._active_model_id(),
@@ -348,7 +312,6 @@ class EmbeddingClient:
                 "normalized": True,
                 "initialized": self._initialized,
                 "loaded": self._loaded,
-                "fallback_reason": self._fallback_reason,
                 "repair": dict(self._repair) if self._repair else None,
             }
 
@@ -374,21 +337,9 @@ class EmbeddingClient:
                 )
             except EmbeddingClientError as exc:
                 self._stop_process(graceful=False)
-                if self._may_fallback(exc):
-                    self._activate_fallback(exc)
-                    try:
-                        document_vectors, query_vectors = self._encode_current(
-                            document_values,
-                            query_values,
-                        )
-                    except EmbeddingClientError as fallback_error:
-                        self._status = "error"
-                        self._stop_process(graceful=False)
-                        raise fallback_error
-                else:
-                    self._status = "error"
-                    raise
-            self._status = "degraded" if self._fallback_reason else "ready"
+                self._status = "error"
+                raise
+            self._status = "ready"
             self._loaded = True
             return self._batch(document_vectors, query_vectors)
 
@@ -414,8 +365,7 @@ class EmbeddingClient:
             dim=self._active_dim,
             normalized=True,
             requested_profile=self._requested_profile.profile_id,
-            status="degraded" if self._fallback_reason else self._status,
-            fallback_reason=self._fallback_reason,
+            status=self._status,
             repair=dict(self._repair) if self._repair else None,
         )
 
@@ -683,26 +633,6 @@ class EmbeddingClient:
                     "The embedding worker result must be an object",
                 )
             return result
-
-    def _may_fallback(self, error: EmbeddingClientError) -> bool:
-        return (
-            not self._fallback_attempted
-            and self._requested_profile.profile_id == "qwen3-embedding-8b"
-            and self._active_profile.profile_id == "qwen3-embedding-8b"
-            and self._model_directories.get(_FALLBACK_PROFILE) is not None
-            and error.code in _FALLBACK_ERROR_CODES
-        )
-
-    def _activate_fallback(self, error: EmbeddingClientError) -> None:
-        self._fallback_attempted = True
-        self._active_profile = PROFILES[_FALLBACK_PROFILE]
-        self._active_dim = min(
-            self._requested_dim,
-            self._active_profile.max_dimension,
-        )
-        self._fallback_reason = error.code
-        self._repair = _repair_details(self._requested_profile)
-        self._status = "degraded"
 
     def _active_revision(self) -> str:
         return self._model_revisions[self._active_profile.profile_id]
@@ -1140,17 +1070,6 @@ def _validated_vectors(
             )
         vectors.append(tuple(vector))
     return tuple(vectors)
-
-
-def _repair_details(profile: EmbeddingProfile) -> dict[str, Any]:
-    return {
-        "profile": profile.profile_id,
-        "model_id": profile.model_id,
-        "model_dir_environment": profile.model_dir_environment,
-        "model_revision_environment": profile.model_revision_environment,
-        "action": "Install or repair the requested local model through the launcher",
-        "downloads_performed": False,
-    }
 
 
 def _queue_item(destination: queue.Queue[object], value: object) -> None:

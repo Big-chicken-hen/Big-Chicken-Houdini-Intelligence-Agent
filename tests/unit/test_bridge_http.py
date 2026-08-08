@@ -138,25 +138,40 @@ class BridgeHTTPTests(unittest.TestCase):
         self.fail(f"Expected event was not observed; events={observed!r}")
 
     def complete_turn(self, turn_id: str, *, after: int = 0) -> int:
-        approval, after = self.wait_for_event(
-            lambda event: event.get("type") == "server_request"
-            and event.get("params", {}).get("turnId") == turn_id,
-            after=after,
-        )
-        resolved = self.request(
-            "POST",
-            "/v1/approval",
-            {"request_id": approval["request_id"], "decision": "allow"},
-        )
-        self.assertEqual("allow", resolved["decision"])
-        completed, after = self.wait_for_event(
-            lambda event: event.get("type") == "codex_notification"
-            and event.get("method") == "turn/completed"
-            and event.get("params", {}).get("turn", {}).get("id") == turn_id,
-            after=after,
-        )
-        self.assertEqual("completed", completed["params"]["turn"]["status"])
-        return after
+        deadline = time.monotonic() + 5.0
+        observed: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            batch = self.request("GET", f"/v1/events?after={after}&timeout=1")
+            after = batch["latest"]
+            observed.extend(batch["events"])
+            completed = next(
+                (
+                    event
+                    for event in observed
+                    if event.get("type") == "codex_notification"
+                    and event.get("method") == "turn/completed"
+                    and event.get("params", {}).get("turn", {}).get("id")
+                    == turn_id
+                ),
+                None,
+            )
+            if completed is not None:
+                self.assertTrue(
+                    any(
+                        event.get("type") == "protocol_warning"
+                        and event.get("code")
+                        == "UNEXPECTED_RUNTIME_APPROVAL_REQUEST"
+                        for event in observed
+                    )
+                )
+                self.assertFalse(
+                    any(event.get("type") == "server_request" for event in observed)
+                )
+                self.assertEqual(
+                    "completed", completed["params"]["turn"]["status"]
+                )
+                return after
+        self.fail(f"Turn did not complete unattended; events={observed!r}")
 
     def test_health_is_authenticated_and_bound_to_loopback(self) -> None:
         health = self.request("GET", "/v1/health")
@@ -846,6 +861,35 @@ class BridgeHTTPTests(unittest.TestCase):
                 received["input"],
             )
 
+    def test_turn_endpoint_accepts_image_only_without_invented_text(self) -> None:
+        attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="bridge-http-image-only-",
+            dir=attachments_root,
+        ) as temporary_thread_directory:
+            thread_directory = Path(temporary_thread_directory)
+            thread_id = thread_directory.name
+            image = thread_directory / "reference.png"
+            image.write_bytes(b"image-only payload")
+            self.request(
+                "POST",
+                "/v1/session",
+                {"action": "resume", "thread_id": thread_id},
+            )
+
+            response = self.request(
+                "POST",
+                "/v1/turn",
+                {"local_image_paths": [str(image)]},
+            )
+
+            received = response["result"]["receivedParams"]
+            self.assertEqual(
+                [{"type": "localImage", "path": str(image.resolve())}],
+                received["input"],
+            )
+
     def test_steer_endpoint_appends_to_the_same_active_turn(self) -> None:
         attachments_root = REPOSITORY_ROOT / ".runtime" / "attachments"
         attachments_root.mkdir(parents=True, exist_ok=True)
@@ -862,16 +906,17 @@ class BridgeHTTPTests(unittest.TestCase):
                 "/v1/session",
                 {"action": "resume", "thread_id": thread_id},
             )
-            started = self.request("POST", "/v1/turn", {"text": "initial"})
+            with mock.patch.object(self.client, "_handle_server_request"):
+                started = self.request("POST", "/v1/turn", {"text": "initial"})
 
-            steered = self.request(
-                "POST",
-                "/v1/steer",
-                {
-                    "text": "追加要求",
-                    "local_image_paths": [str(image)],
-                },
-            )
+                steered = self.request(
+                    "POST",
+                    "/v1/steer",
+                    {
+                        "text": "追加要求",
+                        "local_image_paths": [str(image)],
+                    },
+                )
 
             self.assertEqual(started["turn_id"], steered["turn_id"])
             self.assertEqual(started["turn_id"], steered["result"]["turnId"])
@@ -937,71 +982,57 @@ class BridgeHTTPTests(unittest.TestCase):
                     payload["structured_error"]["code"],
                 )
 
-    def test_session_turn_events_approval_and_interrupt(self) -> None:
+    def test_session_turn_rejects_unexpected_approval_without_input(self) -> None:
         started = self.request("POST", "/v1/session", {"action": "start"})
         self.assertEqual("thread-fake", started["thread_id"])
         self.assertNotIn("model", started["result"]["receivedParams"])
         self.assertIsNone(started["result"]["receivedParams"]["serviceTier"])
+        self.assertEqual(
+            "never", started["result"]["receivedParams"]["approvalPolicy"]
+        )
         turn = self.request("POST", "/v1/turn", {"text": "hello"})
         self.assertEqual("turn-fake", turn["turn_id"])
         self.assertNotIn("model", turn["result"]["receivedParams"])
         self.assertNotIn("effort", turn["result"]["receivedParams"])
         self.assertIsNone(turn["result"]["receivedParams"]["serviceTier"])
+        self.assertEqual(
+            "never", turn["result"]["receivedParams"]["approvalPolicy"]
+        )
 
-        _, after = self.wait_for_event(
-            lambda event: event.get("type") == "server_request"
-            and event.get("params", {}).get("turnId") == turn["turn_id"],
-        )
-        interrupted = self.request("POST", "/v1/interrupt", {})
-        self.assertEqual("turn-fake", interrupted["turn_id"])
-        completed, _ = self.wait_for_event(
-            lambda event: event.get("type") == "codex_notification"
-            and event.get("method") == "turn/completed"
-            and event.get("params", {}).get("turn", {}).get("id") == turn["turn_id"],
-            after=after,
-        )
-        self.assertEqual("interrupted", completed["params"]["turn"]["status"])
+        self.complete_turn(turn["turn_id"])
         session = self.request("GET", "/v1/session")["session"]
         self.assertFalse(session["turn_active"])
+        self.assertEqual("completed", session["turn_status"])
 
-    def test_resume_and_deny_approval(self) -> None:
-        resumed = self.request(
-            "POST",
-            "/v1/session",
-            {"action": "resume", "thread_id": "thread-resumed"},
-        )
-        self.assertEqual("thread-resumed", resumed["thread_id"])
-        self.request("POST", "/v1/turn", {"text": "request approval"})
-        batch = self.request("GET", "/v1/events?after=0&timeout=1")
-        approval = next(
-            event
-            for event in batch["events"]
-            if event.get("type") == "server_request"
-        )
-        denied = self.request(
-            "POST",
-            "/v1/approval",
-            {"request_id": approval["request_id"], "decision": "deny"},
-        )
-        self.assertEqual("deny", denied["decision"])
+    def test_runtime_approval_endpoint_is_absent(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                "/v1/approval",
+                {"request_id": "approval-fake", "decision": "deny"},
+            )
+        self.assertEqual(404, raised.exception.code)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual("NOT_FOUND", payload["structured_error"]["code"])
 
     def test_active_turn_rejects_second_start_with_structured_conflict(self) -> None:
         self.request("POST", "/v1/session", {"action": "start"})
-        first = self.request("POST", "/v1/turn", {"text": "first"})
+        with mock.patch.object(self.client, "_handle_server_request"):
+            first = self.request("POST", "/v1/turn", {"text": "first"})
 
-        with self.assertRaises(HTTPError) as raised:
-            self.request("POST", "/v1/turn", {"text": "second"})
-        self.assertEqual(409, raised.exception.code)
-        payload = json.loads(raised.exception.read().decode("utf-8"))
-        error = payload["structured_error"]
-        self.assertEqual("TURN_ALREADY_ACTIVE", error["code"])
-        self.assertFalse(error["details"]["turn_created"])
-        self.assertTrue(error["details"]["turn_active"])
-        self.assertEqual(first["turn_id"], error["details"]["turn_id"])
+            with self.assertRaises(HTTPError) as raised:
+                self.request("POST", "/v1/turn", {"text": "second"})
+            self.assertEqual(409, raised.exception.code)
+            payload = json.loads(raised.exception.read().decode("utf-8"))
+            error = payload["structured_error"]
+            self.assertEqual("TURN_ALREADY_ACTIVE", error["code"])
+            self.assertFalse(error["details"]["turn_created"])
+            self.assertTrue(error["details"]["turn_active"])
+            self.assertEqual(first["turn_id"], error["details"]["turn_id"])
 
-        session = self.request("GET", "/v1/session")["session"]
-        self.assertTrue(session["turn_active"])
-        self.assertEqual(first["turn_id"], session["turn_id"])
+            session = self.request("GET", "/v1/session")["session"]
+            self.assertTrue(session["turn_active"])
+            self.assertEqual(first["turn_id"], session["turn_id"])
 
     def test_visible_delta_then_no_active_interrupt_recovers_panel_state(self) -> None:
         started = self.request("POST", "/v1/session", {"action": "start"})
@@ -1020,22 +1051,34 @@ class BridgeHTTPTests(unittest.TestCase):
 
         after = 0
         observed: list[dict[str, Any]] = []
-        approval: dict[str, Any] | None = None
+        completed: dict[str, Any] | None = None
         deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and approval is None:
+        while time.monotonic() < deadline and completed is None:
             batch = self.request("GET", f"/v1/events?after={after}&timeout=1")
             after = batch["latest"]
             observed.extend(batch["events"])
-            approval = next(
+            completed = next(
                 (
                     event
                     for event in observed
-                    if event.get("type") == "server_request"
-                    and event.get("params", {}).get("turnId") == turn["turn_id"]
+                    if event.get("type") == "codex_notification"
+                    and event.get("method") == "turn/completed"
+                    and event.get("params", {}).get("turn", {}).get("id")
+                    == turn["turn_id"]
                 ),
                 None,
             )
-        self.assertIsNotNone(approval)
+        self.assertIsNotNone(completed)
+        self.assertTrue(
+            any(
+                event.get("type") == "protocol_warning"
+                and event.get("code") == "UNEXPECTED_RUNTIME_APPROVAL_REQUEST"
+                for event in observed
+            )
+        )
+        self.assertFalse(
+            any(event.get("type") == "server_request" for event in observed)
+        )
         displayed_reply = "".join(
             event.get("params", {}).get("delta", "")
             for event in observed
@@ -1044,20 +1087,6 @@ class BridgeHTTPTests(unittest.TestCase):
             and event.get("params", {}).get("turnId") == turn["turn_id"]
         )
         self.assertEqual("Hello from fake Codex", displayed_reply)
-
-        resolved = self.request(
-            "POST",
-            "/v1/approval",
-            {"request_id": approval["request_id"], "decision": "allow"},
-        )
-        self.assertEqual("allow", resolved["decision"])
-        self.wait_for_event(
-            lambda event: event.get("type") == "codex_notification"
-            and event.get("method") == "turn/completed"
-            and event.get("params", {}).get("turn", {}).get("id")
-            == turn["turn_id"],
-            after=after,
-        )
 
         # The completion event was deliberately not applied to PanelTurnState:
         # the visible delta exists, while the simulated Panel remains active.
@@ -1105,10 +1134,6 @@ class BridgeHTTPTests(unittest.TestCase):
             )
             observed_turn_ids.append(turn["turn_id"])
             self.assertEqual(expected_turn_id, turn["turn_id"])
-            active = self.request("GET", "/v1/session")["session"]
-            self.assertTrue(active["turn_active"])
-            self.assertEqual(turn["turn_id"], active["turn_id"])
-
             after = self.complete_turn(turn["turn_id"], after=after)
             completed = self.request("GET", "/v1/session")["session"]
             self.assertFalse(completed["turn_active"])

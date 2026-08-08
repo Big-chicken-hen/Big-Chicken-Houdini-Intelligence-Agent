@@ -382,7 +382,7 @@ class P1AssetTests(unittest.TestCase):
         )
         self.assertLess(terminal_branch, generic_failure)
         self.assertIn('details.get("turn_active") is False', source[terminal_branch:generic_failure])
-        self.assertIn("reconcile_no_active_error", source)
+        self.assertIn("_restore_steer_draft_to_composer", source)
         self.assertIn("claim_reconciliation", source)
         self.assertIn("_SESSION_RECONCILE_CONTEXT_PREFIX", source)
         self.assertIn("_PASSIVE_STATUS_NOTIFICATIONS", source)

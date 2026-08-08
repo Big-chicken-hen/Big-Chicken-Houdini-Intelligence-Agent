@@ -459,7 +459,7 @@ for line in sys.stdin:
         self.assertFalse(client.status()["initialized"])
         self.assertFalse(client.status()["loaded"])
 
-    def test_8b_load_failure_falls_back_once_to_installed_0_6b(self) -> None:
+    def test_8b_load_failure_is_reported_without_switching_profile(self) -> None:
         self._write_worker("fail_8b_embedding")
         environment = self._environment(
             profile="qwen3-embedding-8b",
@@ -471,27 +471,15 @@ for line in sys.stdin:
             client = EmbeddingClient.from_environment(self.project_root)
             assert client is not None
             with self._popen_patch():
-                batch = client.encode(documents=["fallback"], queries=["query"])
+                with self.assertRaises(EmbeddingClientError) as caught:
+                    client.encode(documents=["document"], queries=["query"])
                 client.close()
 
-        self.assertEqual(2, len(self.commands))
-        self.assertEqual("qwen3-embedding-8b", batch.requested_profile)
-        self.assertEqual("qwen3-embedding-0.6b", batch.profile_id)
-        self.assertEqual(
-            "Qwen/Qwen3-Embedding-0.6B@revision-0-6b",
-            batch.model_id,
-        )
-        self.assertEqual("revision-0-6b", batch.model_revision)
-        self.assertEqual(1024, batch.dim)
-        self.assertEqual("degraded", batch.status)
-        self.assertEqual("EMBEDDING_FAILED", batch.fallback_reason)
-        self.assertEqual(
-            MODEL_DIR_8B_ENVIRONMENT,
-            batch.repair["model_dir_environment"],
-        )
-        self.assertEqual("2", self.start_count_path.read_text(encoding="utf-8"))
+        self.assertEqual("EMBEDDING_FAILED", caught.exception.code)
+        self.assertEqual(1, len(self.commands))
+        self.assertEqual("1", self.start_count_path.read_text(encoding="utf-8"))
 
-    def test_missing_preferred_8b_uses_installed_0_6b_without_download(
+    def test_missing_selected_8b_is_an_explicit_configuration_error(
         self,
     ) -> None:
         environment = self._environment(
@@ -500,22 +488,12 @@ for line in sys.stdin:
             include_8b=False,
             dim=None,
         )
-        client = EmbeddingClient.from_environment(
-            self.project_root,
-            environ=environment,
-        )
-        assert client is not None
-        status = client.status()
-        self.assertEqual("degraded", status["status"])
-        self.assertEqual("qwen3-embedding-8b", status["requested_profile"])
-        self.assertEqual("qwen3-embedding-0.6b", status["active_profile"])
-        self.assertEqual(1024, status["dim"])
-        self.assertEqual(
-            "REQUESTED_MODEL_UNAVAILABLE",
-            status["fallback_reason"],
-        )
-        self.assertFalse(status["repair"]["downloads_performed"])
-        client.close()
+        with self.assertRaises(EmbeddingConfigurationError) as caught:
+            EmbeddingClient.from_environment(
+                self.project_root,
+                environ=environment,
+            )
+        self.assertEqual("EMBEDDING_MODEL_UNAVAILABLE", caught.exception.code)
         self.assertEqual([], self.commands)
 
     def test_8b_profile_uses_contract_default_and_mrl_bounds(self) -> None:

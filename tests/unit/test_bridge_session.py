@@ -17,16 +17,15 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "services" / "bridge"))
 
 from hia_bridge.errors import BridgeError, CodexRPCError  # noqa: E402
 from hia_bridge.events import EventBuffer  # noqa: E402
+from hia_bridge.scene_writer import SceneWriterOwnership  # noqa: E402
 from hia_bridge.session import (  # noqa: E402
     MODEL_LIST_MAX_ENTRIES,
     MODEL_LIST_MAX_PAGES,
     MODEL_LIST_PAGE_SIZE,
     MAX_LOCAL_IMAGES,
     STOP_INTERRUPT_GRACE_SECONDS,
-    STOP_RECOVERY_TOTAL_SECONDS,
     THREAD_PREVIEW_MAX_LENGTH,
     BridgeSession,
-    _requires_system_drive_approval,
     _thread_cwd_filters,
 )
 
@@ -105,6 +104,20 @@ class _ThreadHistoryClient(_ClientStub):
         return super().request(method, params)
 
 
+class _PagedThreadHistoryClient(_ThreadHistoryClient):
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        super().__init__({})
+        self.responses = list(responses)
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method != "thread/list":
+            return super().request(method, params)
+        self.requests.append((method, dict(params)))
+        if not self.responses:
+            raise AssertionError("Unexpected extra thread/list page request")
+        return self.responses.pop(0)
+
+
 class _ThreadContentClient(_ClientStub):
     def __init__(self, response: dict[str, Any]) -> None:
         super().__init__()
@@ -145,7 +158,7 @@ class _AdvancingClock:
         self.value += float(seconds)
 
 
-class _StopRecoveryClient(_RecordingClient):
+class _InterruptClient(_RecordingClient):
     def __init__(
         self,
         *,
@@ -161,9 +174,6 @@ class _StopRecoveryClient(_RecordingClient):
         self.timeout_during_resume = timeout_during_resume
         self.resume_gate = resume_gate
         self.clock = clock
-        self.restart_count = 0
-        self.restart_deadlines: list[float | None] = []
-        self.initialize_timeouts: list[float] = []
         self.timed_requests: list[tuple[str, dict[str, Any], float]] = []
         self.resume_entered = threading.Event()
         self.resume_finished = threading.Event()
@@ -225,19 +235,6 @@ class _StopRecoveryClient(_RecordingClient):
                 self.resume_finished.set()
         raise AssertionError(f"Unexpected timed request: {method}")
 
-    def restart(
-        self,
-        grace_seconds: float = 1.0,
-        *,
-        deadline: float | None = None,
-    ) -> None:
-        self.restart_count += 1
-        self.restart_deadlines.append(deadline)
-
-    def initialize_with_timeout(self, timeout_seconds: float) -> dict[str, Any]:
-        self.initialize_timeouts.append(timeout_seconds)
-        return {"userAgent": "fake-codex/0.144.3"}
-
 
 class _GoalClient(_RecordingClient):
     def __init__(self) -> None:
@@ -271,46 +268,6 @@ class _GoalClient(_RecordingClient):
             self.goal = None
             return {"cleared": cleared}
         return super().request(method, params)
-
-
-class _ApprovalClient(_RecordingClient):
-    def __init__(self, *, fail_response: bool = False) -> None:
-        super().__init__()
-        self.pending: dict[Any, dict[str, Any]] = {}
-        self.approval_responses: list[tuple[Any, dict[str, Any]]] = []
-        self.fail_response = fail_response
-
-    def emit_approval(
-        self,
-        request_id: str,
-        method: str,
-        params: dict[str, Any],
-    ) -> None:
-        request = {"method": method, "params": dict(params)}
-        self.pending[request_id] = request
-        assert self._event_sink is not None
-        self._event_sink(
-            {
-                "type": "server_request",
-                "request_id": request_id,
-                **request,
-            }
-        )
-
-    def pending_server_request(self, request_id: Any) -> dict[str, Any] | None:
-        request = self.pending.get(request_id)
-        return dict(request) if request is not None else None
-
-    def respond_to_server_request(
-        self,
-        request_id: Any,
-        response: dict[str, Any],
-    ) -> str:
-        if self.fail_response:
-            raise BridgeError("TEST_RESPONSE_FAILED", "test response failed")
-        request = self.pending.pop(request_id)
-        self.approval_responses.append((request_id, dict(response)))
-        return request["method"]
 
 
 class _SteerClient(_RecordingClient):
@@ -401,340 +358,6 @@ def _model_entry(
         ],
         "defaultReasoningEffort": "low",
     }
-
-
-class BridgeSessionApprovalRoutingTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.system_drive = os.environ.get("SystemDrive") or "C:"
-
-    def make_session(
-        self,
-        *,
-        fail_response: bool = False,
-        project_root: Path = REPOSITORY_ROOT,
-    ) -> tuple[BridgeSession, _ApprovalClient, EventBuffer]:
-        client = _ApprovalClient(fail_response=fail_response)
-        events = EventBuffer()
-        return BridgeSession(project_root, client, events), client, events
-
-    @staticmethod
-    def command_params(command: str, *, cwd: str | None = None) -> dict[str, Any]:
-        return {
-            "command": command,
-            "cwd": cwd or str(REPOSITORY_ROOT),
-            "itemId": "item-approval",
-            "startedAtMs": 1,
-            "threadId": "thread-approval",
-            "turnId": "turn-approval",
-        }
-
-    def test_only_explicit_system_drive_changes_require_manual_approval(self) -> None:
-        project_file = str(REPOSITORY_ROOT / ".runtime" / "tmp" / "approval.txt")
-        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
-        auto_commands = (
-            "[DateTimeOffset]::FromUnixTimeSeconds(1).ToString('u')",
-            (
-                "$r = Invoke-WebRequest -UseBasicParsing "
-                "'https://www.shadertoy.com/view/ltffzl'; "
-                "$r.Content.Substring(0, [Math]::Min(5000, $r.Content.Length))"
-            ),
-            (
-                "$r = Invoke-WebRequest -UseBasicParsing "
-                "'https://www.sidefx.com/docs/houdini/nodes/cop/wrangle.html'; "
-                "$r.Content | Select-String -Pattern 'VEX|kernel|pixel'"
-            ),
-            f"Get-Content -LiteralPath '{system_file}'",
-            f"Get-Content -LiteralPath '{self.system_drive}\\README.md'",
-            f"Set-Content -LiteralPath '{project_file}' -Value test",
-            (
-                f"Set-Content -LiteralPath '{project_file}' "
-                "-Value '$env:USERPROFILE'"
-            ),
-            f"Get-Content '{system_file}' > '{project_file}'",
-            "curl.exe 'https://www.shadertoy.com/view/ltffzl'",
-            (
-                f"Copy-Item -LiteralPath '{system_file}' -Destination "
-                f"'{project_file}'"
-            ),
-            (
-                "Copy-Item -LiteralPath '$env:USERPROFILE\\input.png' "
-                f"-Destination '{project_file}'"
-            ),
-        )
-        for command in auto_commands:
-            with self.subTest(command=command):
-                self.assertFalse(
-                    _requires_system_drive_approval(
-                        "item/commandExecution/requestApproval",
-                        self.command_params(command),
-                        project_root=REPOSITORY_ROOT,
-                        system_drive=self.system_drive,
-                    )
-                )
-
-        for command in (
-            f"Set-Content -LiteralPath '{system_file}' -Value test",
-            f"Remove-Item -LiteralPath '{system_file}'",
-            f"rm '{system_file}'",
-            f"rd '{self.system_drive}\\Users\\Public\\HIA-Test'",
-            f"python -c \"import os; os.remove(r'{system_file}')\"",
-            f"Set-Item -LiteralPath '{system_file}' -Value test",
-            (
-                "Invoke-RestMethod 'https://example.com/data' -OutFile "
-                f"'{system_file}'"
-            ),
-            f"curl.exe 'https://example.com/data' -o '{system_file}'",
-            f"[IO.File]::AppendAllText('{system_file}', 'test')",
-            f"shutil.copyfile(r'{project_file}', r'{system_file}')",
-            f"'test' | Tee-Object -FilePath '{system_file}'",
-            f"open(r'{system_file}', 'wb')",
-            f"'test' > '{system_file}'",
-            "Set-Content -LiteralPath '$env:SystemDrive\\HIA-Test.txt' -Value test",
-            "Set-Content -LiteralPath '${env:SystemDrive}\\HIA-Test.txt' -Value test",
-            "Set-Content -LiteralPath '%SystemDrive%\\HIA-Test.txt' -Value test",
-            "Set-Content -LiteralPath '~\\HIA-Test.txt' -Value test",
-            (
-                f"Copy-Item -LiteralPath '{project_file}' -Destination "
-                "'$env:SystemDrive\\HIA-Test.txt'"
-            ),
-            (
-                f"Move-Item -LiteralPath '{system_file}' -Destination "
-                f"'{project_file}'"
-            ),
-        ):
-            with self.subTest(command=command):
-                self.assertTrue(
-                    _requires_system_drive_approval(
-                        "item/commandExecution/requestApproval",
-                        self.command_params(command),
-                        project_root=REPOSITORY_ROOT,
-                        system_drive=self.system_drive,
-                    )
-                )
-
-    def test_command_actions_take_precedence_over_broken_serialized_command(self) -> None:
-        params = self.command_params(
-            "broken fallback; Set-Content C:\\Users\\Public\\wrong.txt"
-        )
-        params["commandActions"] = [
-            {
-                "command": (
-                    "Invoke-WebRequest -UseBasicParsing "
-                    "'https://www.shadertoy.com/view/ltffzl'"
-                )
-            }
-        ]
-
-        self.assertFalse(
-            _requires_system_drive_approval(
-                "item/commandExecution/requestApproval",
-                params,
-                project_root=REPOSITORY_ROOT,
-                system_drive=self.system_drive,
-            )
-        )
-
-    def test_project_root_remains_auto_allowed_when_it_is_on_system_drive(self) -> None:
-        project_root = Path(self.system_drive + "\\HIA-Portable")
-        params = self.command_params(
-            "Set-Content -LiteralPath "
-            f"'{project_root}\\.runtime\\tmp\\approval.txt' -Value test",
-            cwd=str(project_root),
-        )
-        self.assertFalse(
-            _requires_system_drive_approval(
-                "item/commandExecution/requestApproval",
-                params,
-                project_root=project_root,
-                system_drive=self.system_drive,
-            )
-        )
-
-    def test_file_and_permission_approvals_only_prompt_for_system_write(self) -> None:
-        system_root = self.system_drive + "\\ProgramData\\HIA"
-        project_root = str(REPOSITORY_ROOT / ".runtime")
-        self.assertTrue(
-            _requires_system_drive_approval(
-                "item/fileChange/requestApproval",
-                {"grantRoot": system_root},
-                project_root=REPOSITORY_ROOT,
-                system_drive=self.system_drive,
-            )
-        )
-        for grant_root in (None, project_root):
-            self.assertFalse(
-                _requires_system_drive_approval(
-                    "item/fileChange/requestApproval",
-                    {"grantRoot": grant_root},
-                    project_root=REPOSITORY_ROOT,
-                    system_drive=self.system_drive,
-                )
-            )
-
-        def permission(access: str, path: str) -> dict[str, Any]:
-            return {
-                "cwd": str(REPOSITORY_ROOT),
-                "permissions": {
-                    "fileSystem": {
-                        "entries": [
-                            {
-                                "access": access,
-                                "path": {"type": "path", "path": path},
-                            }
-                        ]
-                    }
-                },
-            }
-
-        self.assertTrue(
-            _requires_system_drive_approval(
-                "item/permissions/requestApproval",
-                permission("write", system_root),
-                project_root=REPOSITORY_ROOT,
-                system_drive=self.system_drive,
-            )
-        )
-        for params in (
-            permission("read", system_root),
-            permission("write", project_root),
-            {
-                "cwd": str(REPOSITORY_ROOT),
-                "permissions": {"network": {"enabled": True}},
-            },
-        ):
-            self.assertFalse(
-                _requires_system_drive_approval(
-                    "item/permissions/requestApproval",
-                    params,
-                    project_root=REPOSITORY_ROOT,
-                    system_drive=self.system_drive,
-                )
-            )
-
-    def test_auto_allow_uses_existing_accept_and_never_publishes_card(self) -> None:
-        _session, client, events = self.make_session()
-        for request_id, url in (
-            ("approval-auto-shadertoy", "https://www.shadertoy.com/view/ltffzl"),
-            (
-                "approval-auto-sidefx",
-                "https://www.sidefx.com/docs/houdini/nodes/cop/wrangle.html",
-            ),
-        ):
-            client.emit_approval(
-                request_id,
-                "item/commandExecution/requestApproval",
-                self.command_params(
-                    f"Invoke-WebRequest -UseBasicParsing '{url}'"
-                ),
-            )
-
-        self.assertEqual(
-            [
-                ("approval-auto-shadertoy", {"decision": "accept"}),
-                ("approval-auto-sidefx", {"decision": "accept"}),
-            ],
-            client.approval_responses,
-        )
-        self.assertEqual({}, client.pending)
-        published = events.poll(0, timeout=0)["events"]
-        self.assertFalse(
-            any(event.get("type") == "server_request" for event in published)
-        )
-        self.assertTrue(
-            any(
-                event.get("type") == "approval_resolved"
-                and event.get("decision") == "allow"
-                for event in published
-            )
-        )
-
-    def test_persistent_rule_is_only_sent_when_the_protocol_offers_it(self) -> None:
-        session, client, _events = self.make_session()
-        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
-        params = self.command_params(
-            f"Set-Content -LiteralPath '{system_file}' -Value test"
-        )
-        params["proposedExecpolicyAmendment"] = [
-            "Set-Content",
-            "-LiteralPath",
-        ]
-        client.emit_approval(
-            "approval-rule",
-            "item/commandExecution/requestApproval",
-            params,
-        )
-
-        session.resolve_approval("approval-rule", "allow_rule")
-
-        self.assertEqual(
-            [
-                (
-                    "approval-rule",
-                    {
-                        "decision": {
-                            "acceptWithExecpolicyAmendment": {
-                                "execpolicy_amendment": [
-                                    "Set-Content",
-                                    "-LiteralPath",
-                                ]
-                            }
-                        }
-                    },
-                )
-            ],
-            client.approval_responses,
-        )
-
-        params_without_rule = self.command_params(
-            f"Remove-Item -LiteralPath '{system_file}'"
-        )
-        params_without_rule["proposedExecpolicyAmendment"] = ["Remove-Item"]
-        params_without_rule["availableDecisions"] = ["accept", "decline"]
-        client.emit_approval(
-            "approval-no-rule",
-            "item/commandExecution/requestApproval",
-            params_without_rule,
-        )
-        with self.assertRaises(BridgeError) as raised:
-            session.resolve_approval("approval-no-rule", "allow_rule")
-        self.assertEqual("INVALID_APPROVAL_DECISION", raised.exception.code)
-        self.assertIn("approval-no-rule", client.pending)
-
-    def test_system_write_and_auto_response_failure_fall_back_to_panel(self) -> None:
-        system_file = self.system_drive + "\\Users\\Public\\approval.txt"
-        _session, client, events = self.make_session()
-        client.emit_approval(
-            "approval-manual-system",
-            "item/commandExecution/requestApproval",
-            self.command_params(
-                f"Set-Content -LiteralPath '{system_file}' -Value test"
-            ),
-        )
-        self.assertEqual([], client.approval_responses)
-        self.assertIn("approval-manual-system", client.pending)
-        self.assertTrue(
-            any(
-                event.get("type") == "server_request"
-                for event in events.poll(0, timeout=0)["events"]
-            )
-        )
-
-        _session, failed_client, failed_events = self.make_session(
-            fail_response=True
-        )
-        failed_client.emit_approval(
-            "approval-auto-failed",
-            "item/commandExecution/requestApproval",
-            self.command_params("[DateTimeOffset]::FromUnixTimeSeconds(1)"),
-        )
-        self.assertIn("approval-auto-failed", failed_client.pending)
-        self.assertTrue(
-            any(
-                event.get("type") == "server_request"
-                and event.get("request_id") == "approval-auto-failed"
-                for event in failed_events.poll(0, timeout=0)["events"]
-            )
-        )
 
 
 class _BlockingTurnClient(_ClientStub):
@@ -924,7 +547,10 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
 
         result = session.resume_thread("thread-current")
 
-        self.assertEqual(["thread/resume"], [method for method, _ in client.requests])
+        self.assertEqual(
+            ["thread/read", "thread/resume"],
+            [method for method, _ in client.requests],
+        )
         self.assertNotIn("resume", result)
         self.assertEqual("thread-current", result["thread_id"])
         self.assertEqual("thread-current", result["read"]["thread"]["id"])
@@ -1086,7 +712,7 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
                             "\\\\?\\" + str(REPOSITORY_ROOT),
                         ],
                         "archived": False,
-                        "limit": 20,
+                        "limit": 100,
                         "modelProviders": [],
                         "useStateDbOnly": True,
                         "sortKey": "recency_at",
@@ -1110,6 +736,48 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
             },
             result,
         )
+
+    def test_list_threads_reads_every_native_page(self) -> None:
+        def entry(thread_id: str, updated_at: int) -> dict[str, Any]:
+            return {
+                "id": thread_id,
+                "cwd": str(REPOSITORY_ROOT),
+                "name": thread_id,
+                "preview": thread_id,
+                "updatedAt": updated_at,
+            }
+
+        client = _PagedThreadHistoryClient(
+            [
+                {"data": [entry("thread-new", 20)], "nextCursor": "page-2"},
+                {"data": [entry("thread-old", 10)], "nextCursor": None},
+            ]
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        result = session.list_threads()
+
+        self.assertEqual(
+            ["thread-new", "thread-old"],
+            [thread["thread_id"] for thread in result["threads"]],
+        )
+        self.assertNotIn("cursor", client.requests[0][1])
+        self.assertEqual("page-2", client.requests[1][1]["cursor"])
+
+    def test_list_threads_rejects_repeated_pagination_cursor(self) -> None:
+        client = _PagedThreadHistoryClient(
+            [
+                {"data": [], "nextCursor": "same"},
+                {"data": [], "nextCursor": "same"},
+            ]
+        )
+        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
+
+        with self.assertRaises(BridgeError) as raised:
+            session.list_threads()
+
+        self.assertEqual("INVALID_THREAD_LIST_RESPONSE", raised.exception.code)
+        self.assertEqual("nextCursor", raised.exception.details["field"])
     @unittest.skipUnless(os.name == "nt", "Windows extended paths only")
     def test_list_threads_accepts_windows_extended_cwd(self) -> None:
         client = _ThreadHistoryClient(
@@ -1189,6 +857,40 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
         self.assertFalse(result["was_selected"])
         self.assertEqual("thread-test", session.snapshot()["thread_id"])
 
+    def test_delete_removes_only_the_exact_thread_attachment_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            deleted_cache = (
+                project_root / ".runtime" / "attachments" / "thread-delete"
+            )
+            kept_cache = project_root / ".runtime" / "attachments" / "thread-keep"
+            deleted_cache.mkdir(parents=True)
+            kept_cache.mkdir(parents=True)
+            (deleted_cache / "image.png").write_bytes(b"delete")
+            (kept_cache / "image.png").write_bytes(b"keep")
+            project_image = (
+                project_root
+                / ".runtime"
+                / "project-attachments"
+                / "project-one"
+                / "content.png"
+            )
+            project_image.parent.mkdir(parents=True)
+            project_image.write_bytes(b"project")
+            client = _ThreadHistoryClient({"data": []})
+            session = BridgeSession(project_root, client, EventBuffer())
+
+            result = session.delete_thread("thread-delete")
+
+            self.assertFalse(deleted_cache.exists())
+            self.assertTrue((kept_cache / "image.png").is_file())
+            self.assertEqual(b"project", project_image.read_bytes())
+            self.assertTrue(result["cache_cleanup"]["complete"])
+            self.assertEqual(
+                [str(deleted_cache.resolve())],
+                result["cache_cleanup"]["removed_paths"],
+            )
+
     def test_delete_response_does_not_clear_thread_selected_during_rpc(self) -> None:
         client = _ThreadHistoryClient({"data": []})
         session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
@@ -1206,61 +908,6 @@ class BridgeSessionThreadHistoryTests(unittest.TestCase):
             1,
             sum(method == "thread/delete" for method, _params in client.requests),
         )
-
-    def test_delete_is_rejected_during_stop_recovery(self) -> None:
-        client = _ThreadHistoryClient({"data": []})
-        session = BridgeSession(REPOSITORY_ROOT, client, EventBuffer())
-        session.start_thread()
-        client.requests.clear()
-        with session._lock:
-            session._turn_status = "stopRecovering"
-            session._stop_recovery_thread = threading.current_thread()
-
-        with self.assertRaises(BridgeError) as caught:
-            session.delete_thread("thread-test")
-
-        self.assertEqual("STOP_RECOVERY_IN_PROGRESS", caught.exception.code)
-        self.assertEqual(409, caught.exception.http_status)
-        self.assertEqual([], client.requests)
-
-    def test_deleted_thread_is_not_resumed_by_stop_recovery(self) -> None:
-        client = _StopRecoveryClient(complete_during_interrupt=False)
-        events = EventBuffer()
-        session = BridgeSession(REPOSITORY_ROOT, client, events)
-        session.start_thread()
-        with session._turn_condition:
-            session._connected = False
-            session._turn_generation += 1
-            recovery_generation = session._turn_generation
-            session._turn_status = "stopRecovering"
-            session._turn_active = False
-            session._stop_recovery_thread = threading.current_thread()
-
-        def initialize_and_delete(timeout_seconds: float) -> dict[str, Any]:
-            client.initialize_timeouts.append(timeout_seconds)
-            client.emit_notification(
-                "thread/deleted",
-                {"threadId": "thread-test"},
-            )
-            return {"userAgent": "fake-codex/0.144.3"}
-
-        with mock.patch.object(
-            client,
-            "initialize_with_timeout",
-            side_effect=initialize_and_delete,
-        ):
-            session._recover_app_server_after_stop(
-                "thread-test",
-                recovery_generation,
-            )
-
-        self.assertIsNone(session.snapshot()["thread_id"])
-        self.assertTrue(session.snapshot()["connected"])
-        self.assertIsNone(session._stop_recovery_thread)
-        self.assertFalse(any(
-            method == "thread/resume"
-            for method, _params, _timeout in client.timed_requests
-        ))
 
     def test_focus_write_failure_after_delete_returns_success_warning(self) -> None:
         client = _ThreadHistoryClient({"data": []})
@@ -2204,8 +1851,8 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertEqual("hia_execute_hom", snapshot["last_tool_name"])
         self.assertEqual("inProgress", snapshot["last_tool_status"])
 
-    def test_interrupt_completion_within_grace_does_not_restart_codex(self) -> None:
-        client = _StopRecoveryClient(complete_during_interrupt=True)
+    def test_interrupt_completion_within_grace_is_terminal(self) -> None:
+        client = _InterruptClient(complete_during_interrupt=True)
         events = EventBuffer()
         session = BridgeSession(REPOSITORY_ROOT, client, events)
         session.start_thread()
@@ -2213,180 +1860,44 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
 
         result = session.interrupt_turn()
 
-        self.assertFalse(result["restarted_app_server"])
-        self.assertEqual(0, client.restart_count)
         self.assertEqual("thread-test", result["thread_id"])
         self.assertEqual(turn_id, result["turn_id"])
         self.assertFalse(result["session"]["turn_active"])
         self.assertEqual("interrupted", result["session"]["turn_status"])
         self.assertEqual(STOP_INTERRUPT_GRACE_SECONDS, client.timed_requests[0][2])
 
-    def test_interrupt_timeout_restarts_and_resumes_exact_thread_without_replay(self) -> None:
-        client = _StopRecoveryClient(
-            complete_during_interrupt=False,
-        )
-        events = EventBuffer()
-        session = BridgeSession(REPOSITORY_ROOT, client, events)
-        session.start_thread()
-        turn_id = session.start_turn("stop and recover")["turn_id"]
-        client.emit_notification(
-            "item/started",
-            {
-                "threadId": "thread-test",
-                "turnId": turn_id,
-                "item": {
-                    "type": "mcpToolCall",
-                    "tool": "hia_execute_hom",
-                    "status": "inProgress",
-                },
-            },
-        )
-
-        with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
-            result = session.interrupt_turn()
-
-        self.assertTrue(result["recovery_pending"])
-        self.assertFalse(result["restarted_app_server"])
-        self.assertTrue(result["houdini_may_still_be_finishing"])
-        self.assertEqual("stopRecovering", result["session"]["turn_status"])
-        self.assertFalse(result["session"]["turn_active"])
-        self.assertTrue(client.resume_finished.wait(2.0))
-        worker = session._stop_recovery_thread
-        if worker is not None:
-            worker.join(2.0)
-        self.assertEqual(1, client.restart_count)
-        self.assertEqual(1, len(client.restart_deadlines))
-        self.assertIsNotNone(client.restart_deadlines[0])
-        self.assertEqual(1, len(client.initialize_timeouts))
-        timed_methods = [method for method, _params, _timeout in client.timed_requests]
-        self.assertEqual(["turn/interrupt", "thread/resume"], timed_methods)
-        resume_params = client.timed_requests[1][1]
-        self.assertEqual("thread-test", resume_params["threadId"])
-        self.assertEqual(
-            1,
-            sum(method == "turn/start" for method, _params in client.requests),
-        )
-        snapshot = session.snapshot()
-        self.assertEqual("thread-test", snapshot["thread_id"])
-        self.assertIsNone(snapshot["turn_id"])
-        self.assertTrue(snapshot["connected"])
-        self.assertFalse(snapshot["turn_active"])
-        self.assertEqual("interrupted", snapshot["turn_status"])
-        session_states = [
-            event["session"]
-            for event in events.poll(0, timeout=0)["events"]
-            if event.get("type") == "session_state"
-        ]
-        self.assertEqual("stopRequested", session_states[0]["turn_status"])
-        self.assertIn(
-            "stopRecovering",
-            [state["turn_status"] for state in session_states],
-        )
-        self.assertEqual("interrupted", session_states[-1]["turn_status"])
-
-    def test_stop_background_recovery_failure_is_bounded_and_releases_the_turn(self) -> None:
-        client = _StopRecoveryClient(
-            complete_during_interrupt=False,
-            timeout_during_resume=True,
-        )
-        events = EventBuffer()
-        session = BridgeSession(REPOSITORY_ROOT, client, events)
-        session.start_thread()
-        turn_id = session.start_turn("resume must stay bounded")["turn_id"]
-
-        with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
-            result = session.interrupt_turn()
-
-        self.assertTrue(result["recovery_pending"])
-        self.assertTrue(client.resume_finished.wait(2.0))
-        worker = session._stop_recovery_thread
-        if worker is not None:
-            worker.join(2.0)
-        self.assertEqual(50.0, STOP_RECOVERY_TOTAL_SECONDS)
-        self.assertEqual(1.0, STOP_INTERRUPT_GRACE_SECONDS)
-        self.assertEqual(1, client.restart_count)
-        resume_timeout = next(
-            timeout
-            for method, _params, timeout in client.timed_requests
-            if method == "thread/resume"
-        )
-        self.assertLessEqual(resume_timeout, STOP_RECOVERY_TOTAL_SECONDS)
-        snapshot = session.snapshot()
-        self.assertFalse(snapshot["connected"])
-        self.assertFalse(snapshot["turn_active"])
-        self.assertEqual("stopRecoveryFailed", snapshot["turn_status"])
-        self.assertIsNone(snapshot["turn_id"])
-        self.assertIsNone(session._stop_recovery_thread)
-        session_states = [
-            event["session"]
-            for event in events.poll(0, timeout=0)["events"]
-            if event.get("type") == "session_state"
-        ]
-        self.assertFalse(session_states[-1]["connected"])
-        self.assertFalse(session_states[-1]["turn_active"])
-
-    def test_old_completion_during_restart_cannot_revive_the_stopped_turn(self) -> None:
-        client = _StopRecoveryClient(
-            complete_during_interrupt=False,
-            complete_during_resume=True,
-        )
+    def test_interrupt_timeout_preserves_the_active_turn(self) -> None:
+        client = _InterruptClient(complete_during_interrupt=False)
         session = self.make_session(client)
-        turn_id = session.start_turn("complete while restarting")["turn_id"]
+        turn_id = session.start_turn("stop without confirmation")["turn_id"]
 
         with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
-            result = session.interrupt_turn()
-
-        self.assertTrue(result["recovery_pending"])
-        self.assertTrue(client.resume_finished.wait(2.0))
-        worker = session._stop_recovery_thread
-        if worker is not None:
-            worker.join(2.0)
-        snapshot = session.snapshot()
-        self.assertIsNone(snapshot["turn_id"])
-        self.assertFalse(snapshot["turn_active"])
-        self.assertEqual("interrupted", snapshot["turn_status"])
-
-    def test_slow_stop_recovery_has_one_worker_and_one_exact_resume(self) -> None:
-        resume_gate = threading.Event()
-        client = _StopRecoveryClient(
-            complete_during_interrupt=False,
-            resume_gate=resume_gate,
-        )
-        session = self.make_session(client)
-        session.start_turn("recover once")
-
-        try:
-            with mock.patch("hia_bridge.session.STOP_INTERRUPT_GRACE_SECONDS", 0.01):
-                result = session.interrupt_turn()
-            self.assertTrue(result["recovery_pending"])
-            self.assertTrue(client.resume_entered.wait(2.0))
-            recovering = session.snapshot()
-            self.assertFalse(recovering["connected"])
-            self.assertFalse(recovering["turn_active"])
-            self.assertEqual("stopRecovering", recovering["turn_status"])
             with self.assertRaises(BridgeError) as raised:
                 session.interrupt_turn()
-            self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
-            self.assertEqual(1, client.restart_count)
-        finally:
-            resume_gate.set()
-        self.assertTrue(client.resume_finished.wait(2.0))
-        worker = session._stop_recovery_thread
-        if worker is not None:
-            worker.join(2.0)
-        self.assertEqual(1, client.restart_count)
+
+        self.assertEqual("INTERRUPT_NOT_CONFIRMED", raised.exception.code)
         self.assertEqual(
-            ["thread-test"],
-            [
-                params["threadId"]
-                for method, params, _timeout in client.timed_requests
-                if method == "thread/resume"
-            ],
+            ["turn/interrupt"],
+            [method for method, _params, _timeout in client.timed_requests],
         )
-        self.assertEqual(
-            1,
-            sum(method == "turn/start" for method, _params in client.requests),
-        )
+        snapshot = session.snapshot()
+        self.assertEqual(turn_id, snapshot["turn_id"])
+        self.assertTrue(snapshot["turn_active"])
+        self.assertEqual("inProgress", snapshot["turn_status"])
+
+    def test_interrupt_without_bounded_transport_is_not_confirmed(self) -> None:
+        client = _RecordingClient()
+        session = self.make_session(client)
+        turn_id = session.start_turn("stop without transport")["turn_id"]
+
+        with self.assertRaises(BridgeError) as raised:
+            session.interrupt_turn()
+
+        self.assertEqual("INTERRUPT_NOT_CONFIRMED", raised.exception.code)
+        snapshot = session.snapshot()
+        self.assertEqual(turn_id, snapshot["turn_id"])
+        self.assertTrue(snapshot["turn_active"])
+        self.assertEqual("inProgress", snapshot["turn_status"])
 
     def test_turn_start_claim_is_atomic_and_completion_must_match(self) -> None:
         client = _BlockingTurnClient()
@@ -2478,7 +1989,7 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertEqual("NO_ACTIVE_TURN", raised.exception.code)
         self.assertEqual(409, raised.exception.http_status)
 
-    def test_late_ack_cannot_regress_a_newer_turn_generation(self) -> None:
+    def test_unknown_first_ack_keeps_exclusive_writer_ownership(self) -> None:
         client = _GenerationClient()
         session = self.make_session(client)
         outcomes: list[dict[str, Any]] = [{}, {}]
@@ -2495,28 +2006,79 @@ class BridgeSessionTurnStateTests(unittest.TestCase):
         self.assertFalse(session.snapshot()["turn_active"])
         self.assertEqual("completed", session.snapshot()["turn_status"])
 
-        second = threading.Thread(target=start_turn, args=(1, "second"))
-        second.start()
-        self.assertTrue(client.second_entered.wait(2.0))
-        self.assertEqual("starting", session.snapshot()["turn_status"])
+        start_turn(1, "second")
+        self.assertIsInstance(outcomes[1].get("error"), BridgeError)
+        self.assertEqual("SCENE_WRITER_BUSY", outcomes[1]["error"].code)
+        self.assertFalse(client.second_entered.is_set())
 
         client.release_first_ack.set()
         first.join(2.0)
         self.assertFalse(first.is_alive())
         after_late_ack = session.snapshot()
-        self.assertTrue(after_late_ack["turn_active"])
-        self.assertEqual("starting", after_late_ack["turn_status"])
-        self.assertIsNone(after_late_ack["turn_id"])
-
-        client.release_second_ack.set()
-        second.join(2.0)
-        self.assertFalse(second.is_alive())
+        self.assertFalse(after_late_ack["turn_active"])
+        self.assertEqual("completed", after_late_ack["turn_status"])
         self.assertNotIn("error", outcomes[0])
-        self.assertNotIn("error", outcomes[1])
-        current = session.snapshot()
-        self.assertTrue(current["turn_active"])
-        self.assertEqual("turn-2", current["turn_id"])
-        self.assertEqual("inProgress", current["turn_status"])
+
+    def test_missing_hia_item_id_retains_ordinary_writer_and_emits_diagnostic(self) -> None:
+        writer = SceneWriterOwnership()
+        events = EventBuffer()
+        client = _RecordingClient()
+        session = BridgeSession(
+            REPOSITORY_ROOT,
+            client,
+            events,
+            scene_writer=writer,
+        )
+        session.start_thread()
+        turn_id = session.start_turn("write the scene")["turn_id"]
+        owner = writer.snapshot()["owner"]
+
+        client.emit_notification(
+            "item/started",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "hia_mcp_v2",
+                    "tool": "hia_execute_hom",
+                },
+            },
+        )
+        client.emit_notification(
+            "turn/completed",
+            {
+                "threadId": "thread-test",
+                "turn": {"id": turn_id, "status": "completed"},
+            },
+        )
+
+        snapshot = writer.snapshot()
+        self.assertEqual(owner, snapshot["owner"])
+        self.assertTrue(snapshot["turn_terminal"])
+        self.assertEqual(1, snapshot["anonymous_hia_items"])
+        with self.assertRaises(BridgeError) as blocked:
+            session.start_thread()
+        self.assertEqual("SCENE_WRITER_STILL_ACTIVE", blocked.exception.code)
+        warnings = [
+            event
+            for event in events.poll(0, timeout=0)["events"]
+            if event.get("type") == "protocol_warning"
+        ]
+        self.assertEqual("INVALID_HIA_ITEM_ID", warnings[-1]["code"])
+        client.emit_notification(
+            "item/completed",
+            {
+                "threadId": "thread-test",
+                "turnId": turn_id,
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "hia_mcp_v2",
+                    "tool": "hia_execute_hom",
+                },
+            },
+        )
+        self.assertIsNone(writer.snapshot()["owner"])
 
     def test_only_explicit_rpc_rejection_releases_an_uncreated_turn(self) -> None:
         rpc_client = _FailingTurnClient("rpc")
@@ -2580,7 +2142,7 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         method, params = client.requests[0]
         self.assertEqual("thread/start", method)
         self.assertEqual("workspace-write", params["sandbox"])
-        self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual("never", params["approvalPolicy"])
         self.assertIsNone(params["serviceTier"])
         instructions = params["developerInstructions"]
         self.assertLessEqual(len(instructions), 1_000)
@@ -2609,8 +2171,8 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "不要调用 request_user_input",
             "信息不足时采用合理默认值",
             "无法执行才报告原因",
-            "安全已保存 HIP 的自动截图优先写同级 .hia/screenshots",
-            "否则回退 HIA_CACHE_DIR/screenshots",
+            "HIA 截图只能用 SceneViewer.flipbook 写入 HIA_CACHE_DIR/screenshots",
+            "不可用时明确失败",
             "预览写 previews",
             "中间图写 tmp",
             "附件/知识/模型/索引仍留项目 .runtime",
@@ -2642,6 +2204,9 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
         self.assertLessEqual(len(instructions), 1_320)
         for required_text in (
             "HIA MCP V2 与 HOM",
+            "确定操作不枚举",
+            "HOM先编译",
+            "类别API仅在对象支持时调用",
             "明确小改只读目标值后直接执行",
             "修改既有网络先用 hia_context/hia_inspect",
             "输入输出、两层上游",
@@ -2654,9 +2219,9 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "hia_capture_viewport，不固定尺寸",
             "动画/模拟用代表帧或短序列",
             "材质验收读取绑定、MaterialX 连接和正确输入",
-            "Stop 后已发 HOM 仍可能收尾",
-            "失败读 rollback.status/automatic_retry_safe",
-            "仅 rolled_back+true 可修正重试一次",
+            "Stop 后已提交的 HOM 仍可能收尾",
+            "失败后先显式 inspect、diff、validate",
+            "根据新证据决定下一步，禁止自动重试",
             "unknown/partial/NO_OBSERVED_EFFECT 不 Undo 也不算完成",
             "session/source drift 停写并正常重启，不热加载",
             "仅主任务串行调用 hia_*/HOM 并写 HIP",
@@ -2666,13 +2231,13 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
             "多个关键词合并为一次批量查询",
             "同类读取不并发扇出",
             "QUEUE_FULL 不立即重试",
-            "仅 goal_focus_mode=true 的有意义成功阶段设 checkpoint_label",
-            "聊天、关闭专注和逐参数操作不设",
+            "阶段结果只按实际场景证据报告",
+            "失败阶段先检查当前场景再修正",
             "主任务只保留原生 Goal、决定和子任务短摘要",
             "子任务详情按需查看",
             "不塞入主上下文",
-            "安全已存 HIP 截图写同级 .hia/screenshots",
-            "否则用 HIA_CACHE_DIR/screenshots",
+            "HIA 截图只能用 SceneViewer.flipbook 写入 HIA_CACHE_DIR/screenshots",
+            "不可用时明确失败",
             "附件/知识/模型/索引留 .runtime",
         ):
             self.assertIn(required_text, instructions)
@@ -2701,8 +2266,13 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                     "一次相关",
                     "批量检索并复用结果",
                     "复杂、参考驱动、材质、FX、模拟、渲染或版本不确定任务",
-                    "必须先用原生 web/search",
+                    (
+                        "发现来源时明确用原生 web search"
+                        if backend == "fxhoudini"
+                        else "发现来源明确用原生 web search"
+                    ),
                     "当前 SideFX 官方与原始来源",
+                    "openPage",
                     "简单参数/连接/删除/重命名/布局不强制知识检索或网页研究",
                 ):
                     self.assertIn(required_text, instructions)
@@ -2727,21 +2297,22 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
                         instructions,
                     )
 
-    def test_thread_resume_enables_workspace_write_with_on_request_approval(self) -> None:
+    def test_thread_resume_enables_workspace_write_without_runtime_approval(self) -> None:
         session, client = self.make_session()
 
         session.resume_thread("thread-existing", service_tier="priority")
 
-        method, params = client.requests[0]
+        self.assertEqual("thread/read", client.requests[0][0])
+        method, params = client.requests[1]
         self.assertEqual("thread/resume", method)
         self.assertEqual("workspace-write", params["sandbox"])
-        self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual("never", params["approvalPolicy"])
         self.assertEqual("priority", params["serviceTier"])
         self.assertIn("FXHoudini MCP 与 HOM", params["developerInstructions"])
         self.assertNotIn("baseInstructions", params)
         self.assertNotIn("config", params)
 
-    def test_turn_start_reasserts_workspace_write_and_on_request(self) -> None:
+    def test_turn_start_reasserts_workspace_write_without_runtime_approval(self) -> None:
         session, client = self.make_session()
         session.start_thread()
         client.requests.clear()
@@ -2750,10 +2321,10 @@ class BridgeSessionNativeToolPolicyTests(unittest.TestCase):
 
         method, params = client.requests[0]
         self.assertEqual("turn/start", method)
-        self.assertEqual("on-request", params["approvalPolicy"])
+        self.assertEqual("never", params["approvalPolicy"])
         self.assertEqual("priority", params["serviceTier"])
         self.assertEqual(
-            {"type": "workspaceWrite", "networkAccess": False},
+            {"type": "workspaceWrite", "networkAccess": True},
             params["sandboxPolicy"],
         )
         self.assertEqual("read Houdini state", params["input"][0]["text"])

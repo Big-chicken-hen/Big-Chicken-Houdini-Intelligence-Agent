@@ -6,7 +6,7 @@ HIA MCP V2 是 Codex 的 Houdini 感知、知识、执行与验证层。Codex �
 
 第三方 `fxhoudinimcp` 1.3.0 暴露 179 个工具，其中大量是 `create_node`、`set_parameter`、`connect_nodes` 一类微操作。复杂网络因此需要很多往返调用，模型还要在大量重叠工具间选择。HIA V2 不复制其实现或模块路径，也不维护旧 HIA MCP 的五节点白名单；它按能力域提供可过滤、分页、批量的语义工具，复杂变更优先一次 `hia_execute_hom` 完成。
 
-HIA V2 不是固定五工具桥，也不是另一个 Agent。当前能力矩阵公开 18 个工具。目录由 stdio 注册表的唯一事实源 `TOOL_SPECS` 派生，不再维护第二份手写工具清单；`hia_search_capabilities` 可检索工具名、能力域、描述、参数名及少量中英文别名，并用 `catalog_health` 报告 registered/catalogued/missing/orphaned。`checkpoint/检查点/备份` 指向 `hia_execute_hom`，`runtime/recovery/恢复` 指向 `hia_context`；空结果明确区分 `NO_MATCH` 与 `CATALOG_INCOMPLETE`。
+HIA V2 不是固定五工具桥，也不是另一个 Agent。当前能力矩阵公开 17 个工具。目录由 stdio 注册表的唯一事实源 `TOOL_SPECS` 派生，不再维护第二份手写工具清单；`hia_search_capabilities` 可检索工具名、能力域、描述、参数名及少量中英文别名，并用 `catalog_health` 报告 registered/catalogued/missing/orphaned。执行、HOM 与 Undo 相关查询指向 `hia_execute_hom`，runtime/recovery 查询指向 `hia_context`；空结果明确区分 `NO_MATCH` 与 `CATALOG_INCOMPLETE`。
 
 ## 能力矩阵与首版工具
 
@@ -21,7 +21,6 @@ HIA V2 不是固定五工具桥，也不是另一个 Agent。当前能力矩阵�
 | 动画 | `hia_animation_summary` | 已实现 |
 | 模拟与缓存理解 | `hia_simulation_summary` | 已实现 |
 | 高能力执行 | `hia_execute_hom` | 已实现；一次批量 UI 主线程执行 |
-| 通用效果实验 | `hia_run_effect_experiment` | 已实现；临时 baseline + 2–3 candidates、多帧证据与 contact sheet，不评分 |
 | 调试与验证 | `hia_validate`, `hia_scene_diff` | 已实现 |
 | 视觉反馈 | `hia_capture_viewport` | 已实现；显式调用才截图/flipbook |
 | 本地帮助 | `hia_local_help_search` | 已实现；兼容的 SQLite FTS5 + 可选 Qwen hybrid 检索 |
@@ -43,11 +42,11 @@ Houdini Panel 输入/图片
      -> 独立持久 hia_embedding_worker stdio（仅在显式配置本地 encoder 时）
 ```
 
-`hia_execute_hom` 给脚本注入 `hou`、`hia_result`、`hia_changed_paths` 与 `hia_mark_changed(path)`。返回 `ok/result/stdout/warnings/errors/created_or_changed_paths/revision/dirty/diff`。传输超时可以停止等待，但脚本一旦进入不可中断的 HOM 调用就不会伪造强杀。
+`hia_execute_hom` 给脚本注入 `hou` 与 `hia_result`。输入只有 `script` 和可选的 `timeout_seconds`；输出只有 `ok/result/stdout/warnings/errors/revision/dirty/elapsed_seconds/script_sha256/scene_change_status`。每次调用只进入一个普通 Houdini Undo group，HIA 不自动请求 Undo。传输超时可以停止等待，但脚本一旦进入不可中断的 HOM 调用就不会伪造强杀。
 
 ## 本地知识索引
 
-`hia_local_help_search` 保持原有 `query/sources/offset/limit` 参数兼容，并增加 `queries` 批量形状、`mode=lexical|vector|hybrid` 与 `sources=memory`；默认 `hybrid`。已初始化 corpus 的 SQLite FTS5 是可靠的确定性基础；全新项目第一次需要显式 `refresh=true` 或运行 CLI 建立索引，严格只读查询不会暗中创建数据库。可选 Qwen encoder 只增加向量候选，不参与回答、推理或写入；不可用时检索降级为 FTS5，并在结果中返回原因。
+`hia_local_help_search` 保持原有 `query/sources/offset/limit` 参数兼容，并增加 `queries` 批量形状、`mode=lexical|vector|hybrid` 与 `sources=memory`；默认 `hybrid`。已初始化 corpus 的 SQLite FTS5 提供确定性的 lexical 模式；全新项目第一次需要显式 `refresh=true` 或运行 CLI 建立索引，严格只读查询不会暗中创建数据库。可选 Qwen encoder 只增加向量候选，不参与回答、推理或写入；vector/hybrid 模式在所选 encoder 不可用时明确失败，不会静默切换为 lexical。
 
 索引来源固定为：
 
@@ -68,7 +67,7 @@ Houdini Panel 输入/图片
 
 `hia_local_help_search` 是唯一通用本地知识检索工具；`source_kinds` 可精确隔离 `builtin_official_workflow`、`community_tutorial`、`user_document`、`user_transcript`、`thread_export` 与 `project_memory`。场景首次写入前的一次相关 batched lookup 由 Codex/AGENTS/Skill 工作流负责，MCP 不在 `hia_execute_hom` 前增加数据库审批、状态机或强制 Gate，也不诱导并行重复搜索。
 
-encoder runtime 与 corpus index 是两个独立状态面：`retrieval.encoder` 说明实际 encoder/profile/model revision/dim/device/ready/degraded/fallback，`index.corpus` 说明 total/vector/pending chunks、complete/partial、ranking scope、global recall 与本次增量数量；其中 `index.corpus.inventory` 还报告 active built-in pack 的 ID/version/digest、card/document/chunk 数，以及用户资料、项目记忆、Houdini help 和项目参考的文档数。encoder ready 不等于 corpus complete，partial corpus 也不宣称全库语义召回。
+encoder runtime 与 corpus index 是两个独立状态面：`retrieval.encoder` 说明实际 encoder/profile/model revision/dim/device/ready/error，`index.corpus` 说明 total/vector/pending chunks、complete/partial、ranking scope、global recall 与本次增量数量；其中 `index.corpus.inventory` 还报告 active built-in pack 的 ID/version/digest、card/document/chunk 数，以及用户资料、项目记忆、Houdini help 和项目参考的文档数。encoder ready 不等于 corpus complete，partial corpus 也不宣称全库语义召回。
 
 ### 独立知识与记忆 CLI
 
@@ -103,7 +102,7 @@ Thread snapshot 固定为项目根内、非 reparse、大小不超过 4 MiB 的�
 .\scripts\hia-knowledge.ps1 thread-remove -ThreadId <thread-id>
 ```
 
-CLI 的 `--project-root` 可由 `HIA_PROJECT_ROOT` 替代，省略两者时从源码位置推导，所有默认路径均由该 root 生成而非写死盘符。`status` 分开返回 index、embedding 和 runtime：实际 worker Python/venv 是否存在、所选 device、运行时已证明的 CUDA availability（未证明时为 `null/not_reported`）、profile/model/model path、SQLite index path，以及 ready/degraded/fallback 原因；Python、model 和 device 可由现有 `HIA_EMBEDDING_*` 环境覆盖。
+CLI 的 `--project-root` 可由 `HIA_PROJECT_ROOT` 替代，省略两者时从源码位置推导，所有默认路径均由该 root 生成而非写死盘符。`status` 分开返回 index、embedding 和 runtime：实际 worker Python/venv 是否存在、所选 device、运行时已证明的 CUDA availability（未证明时为 `null/not_reported`）、profile/model/model path、SQLite index path，以及 ready/error 原因；Python、model 和 device 可由现有 `HIA_EMBEDDING_*` 环境覆盖。
 
 迁移说明：旧版“首次查询或每 10 分钟自动刷新”行为已经废止；调用方需要更新资料时显式传 `refresh=true` 或调用 `sources refresh`。旧的已配置运行环境仍可用 `python -m hia_mcp_runtime.knowledge_index_cli status|build`，但完整、无 launcher 依赖的当前契约是上述项目相对 CLI 及其全部子命令。
 
@@ -123,7 +122,7 @@ CLI 的 `--project-root` 可由 `HIA_PROJECT_ROOT` 替代，省略两者时从�
 
 `list` 与 Panel 列表默认只显示 `scope=project`；该范围为空不代表其他 scope 的记忆被删除或丢失。查看其他 scope 时必须显式指定对应 scope。
 
-记忆搜索同样默认 hybrid，并遵循相同的 encoder/corpus 状态、partial-index 排名保护和 FTS5 降级规则；只读搜索不补 vector backlog。
+记忆搜索同样默认 hybrid，并遵循相同的 encoder/corpus 状态和 partial-index 排名保护；所选模式不可用时明确失败，只读搜索不补 vector backlog。
 
 ## 可选 encoder 与双 profile
 
@@ -138,7 +137,7 @@ CLI 的 `--project-root` 可由 `HIA_PROJECT_ROOT` 替代，省略两者时从�
 
 MRL 由 worker 在构造 `SentenceTransformer` 时传入 `truncate_dim=profile.dim`，并在该截断维度上执行 normalize；不是取得完整 Python 向量后再 slice。
 
-所选 8B 缺失、显存/内存不足、初始化失败或模型损坏时，只能先降级到**已经安装**且可加载的 0.6B，再降级到 FTS5；所选 0.6B 失败则直接 FTS5。公共搜索结果以 `retrieval.encoder` 报告 requested/active profile、model、device、ready/degraded/fallback/repair，以 `index.corpus` 报告向量完整度与召回范围；底层 `retrieval.vector` 仅保留兼容摘要。import、搜索或 fallback 绝不隐式下载，也没有量化、reranker 或第三模型。
+所选模型缺失、显存/内存不足、初始化失败或模型损坏时，vector/hybrid 请求返回明确错误，不自动切换模型或检索模式。公共搜索结果以 `retrieval.encoder` 报告 requested/active profile、model、device、ready/error/repair，以 `index.corpus` 报告向量完整度与召回范围；底层 `retrieval.vector` 仅保留兼容摘要。import 或搜索绝不隐式下载，也没有量化、reranker 或第三模型。
 
 独立 `hia_embedding_worker` 使用协议 `hia-embedding-stdio/1`，由项目根 `.venv/Scripts/python.exe` 运行 `python -m hia_embedding_worker`（console entry point 同名）。它是 HIA MCP 生命周期内的单一持久 stdio 子进程，不是网络服务、Agent 或 scheduler，也绝不加载进 Houdini Python/UI 主线程。`.venv` 是 Bridge、本地知识解析器和 worker 共用的唯一 HIA managed environment；Houdini embedded Python/hython 与 FXHoudiniMCP fallback venv 不会激活、合并或安装到它。managed CPython base、uv、模型、Hugging Face/Transformers/Torch cache、临时文件、SQLite 正文和向量仍全部留在 `.runtime`。`.venv` 与 `.runtime` 都不进入发行包；旧 `.runtime/toolchains/hia-embedding/venv` 仅作为事务迁移 source，在新 `.venv` 完整验证并再次确认后才可能安全清理，失败时保持原样。
 
@@ -163,20 +162,20 @@ HIA V2 不读取 `FXHOUDINIMCP_*`，不注册 `/api`，不使用 `fxhoudinimcp` 
 - JSONL 请求最大 1 MiB，loopback 响应最大 4 MiB，HOM 脚本最大 512 KiB；查询默认分页。
 - 缺失/错误 token 分别返回 401/403；traceback 保留有用段落并脱敏 Bearer、token、secret、password、API key 与用户目录。
 - `notifications/cancelled` 能在 HTTP 提交/UI 主线程执行前取消；进入 HOM 后不可中断。
-- viewport 图像小于内联上限时作为 MCP image 返回，否则返回实际本地路径。真实已保存且父目录安全可写的当前 HIP 使用 `<hip-parent>/.hia/screenshots`；未保存或路径不安全时回退 `HIA_CACHE_DIR/screenshots`。结果始终给出 `storage_scope=hip|runtime_fallback` 与绝对路径。
+- viewport 图像小于内联上限时作为 MCP image 返回，否则返回实际本地路径。所有图片只写入 `<project-root>/.runtime/cache/screenshots`，结果给出 `storage_scope=project_cache`、项目相对路径与绝对路径。
 - Web 研究仍由 Codex 与 `houdini-visual-research` Skill 承担；MCP 不包含爬虫、自治 RAG、Planner 或第二个 Agent。
 
 ## 复杂视觉任务的低分辨率审阅闭环
 
-复杂且可见结果占主导的任务由 Codex 串联现有能力完成有限审阅闭环。普通里程碑继续复用 `hia_capture_viewport`、`hia_validate` 与 `hia_scene_diff`；只有需要主观候选对比的 Full 任务才使用唯一的 `hia_run_effect_experiment`。该工具只执行临时 baseline/candidate 参数实验并返回多帧事实与 contact sheet，不评分、不生成 EffectSpec，也不新增服务、调度器或第二个 Agent：
+复杂且可见结果占主导的任务由 Codex 串联现有能力完成有限审阅闭环。里程碑复用显式的 `hia_execute_hom`、`hia_capture_viewport`、`hia_validate` 与 `hia_scene_diff`。需要候选对比时，Codex 逐个执行有界改动并审阅真实图片；runtime 不提供候选实验器、评分器、调度器或第二个 Agent：
 
 1. 在主要结构完成、任务范围内的材质/灯光完成、最终交付前等有意义视觉里程碑，Codex 自动调用现有 `hia_capture_viewport`。相邻或没有可见变化的阶段合并或跳过；Box、单参数修改和普通 HOM 报错等简单任务不截图。
 2. 阶段预览使用同帧 `flipbook` 与 `return_image=true`。省略宽高时从 live viewport 推导；只给一边时保留 viewport 纵横比；两边都给时精确采用请求尺寸。动画和模拟只抽代表帧或关键帧，不为审阅生成连续长序列；任意 `frame_range` 跨度不得超过 240 帧。
-3. 图片在安全的已保存 HIP 下写入同级唯一 `.hia/screenshots`，否则写入 `HIA_CACHE_DIR/screenshots`。路径每次调用重新读取，不缓存首次 HIP，因此 Save As 后自然切换。捕获不打开 MPlay、不抢焦点，并在成功或失败后恢复原相机、自由视图、相机锁定状态和当前帧。
+3. 图片只写入 `<project-root>/.runtime/cache/screenshots`。捕获只调用 `SceneViewer.flipbook`，不切换到其他截图 API，不打开 MPlay，并在成功或失败后恢复原相机、自由视图、相机锁定状态和当前帧。
 4. 只读 `houdini-artifact-review` 结合预览以及按需的 `hia_validate`、`hia_scene_diff`，检查比例/轮廓、浮空/穿插、支撑/接触、构图、材质、曝光、透明度和参考一致性。它只返回证据和最低修复建议，不写 HIP。
 5. 当前主任务是唯一 HIP writer，每轮只修最高影响的可见区域，再用相同证据复核。迭代预算按任务设为小范围；达到要求立即停止，预算耗尽或无法捕获则明确报告未验证项。
 
-截图清理边界没有扩张：仍只针对 `.runtime/cache/screenshots` fallback，不扫描或清理 HIP-local `.hia`，也不触碰 `previews`、`tmp`、附件或用户最终输出。带 `checkpoint_label` 的 AI Goal stage checkpoint 同样优先写 `<hip-parent>/.hia/checkpoints`；当前 launcher session 目录只保留绑定 session/Thread/Goal/保存 HIP 的受验证指针，供既有崩溃恢复链发现。失败或不安全时仍使用 session checkpoint 目录。
+截图清理边界没有扩张：只针对 `.runtime/cache/screenshots`，不触碰 `previews`、`tmp`、附件、HIP 或用户最终输出。HIA 不自动创建或打开场景恢复副本。
 
 ## 生产接入
 
@@ -186,7 +185,7 @@ WPF launcher 现在提供互斥 backend 选择：默认 `hia_v2`，手动兼容�
 
 普通项目 `.codex/config.toml` 仍为 `required=false`，不会在未通过启动器运行 Houdini 时阻断普通 Codex 任务；受控 Houdini session 的 `required=true` 只由 Bridge 进程级 strict config 注入。
 
-固定 Codex 0.144.3 的离线 app-server 握手已验证：`thread/start` 成功；当前 `hia_mcp_v2` registry 暴露 18 个 `hia_` 工具，禁用的 `houdini_intelligence` 暴露 0 个工具。Codex 的真实 `tools/list` 请求携带标准 `_meta` 对象，stdio adapter 已兼容该形状。
+固定 Codex 0.144.3 的离线 app-server 握手已验证：`thread/start` 成功；当前 `hia_mcp_v2` registry 暴露 17 个 `hia_` 工具，禁用的 `houdini_intelligence` 暴露 0 个工具。Codex 的真实 `tools/list` 请求携带标准 `_meta` 对象，stdio adapter 已兼容该形状。
 
 ## 真实 Houdini 验收
 
@@ -211,10 +210,10 @@ Cook/cache 证据按 target 和 frame 记录 `needsToCook()`、`isTimeDependent(
 
 `hia_context(include_runtime_capabilities=true)` 返回 `hia-runtime-capabilities/1`，绑定当前 Houdini build，对 HIA 实际依赖的少量 HOM 方法分别报告 `documented`、`callable`、`probe_status` 与脱敏 error。`cook()`、`geometry()` 和体积采样只检查是否 callable，不在 capability probe 中调用。依据为 SideFX 当前官方 [`hou.OpNode`](https://www.sidefx.com/docs/houdini/hom/hou/OpNode.html)、[`hou.Geometry`](https://www.sidefx.com/docs/houdini/hom/hou/Geometry.html)、[`hou.Volume`](https://www.sidefx.com/docs/houdini/hom/hou/Volume.html) 与 [`hou.VDB`](https://www.sidefx.com/docs/houdini/hom/hou/VDB.html) 文档；文档存在不会被当作当前 build 中可调用的证明。
 
-`hia_execute_hom` 的原始 `script` 仍是唯一必填写入接口；可选 `task`、`mutable_root`、`protected_paths`、`expected_outputs`、`checks` 与同一份 `semantic_checks` 只是轻量执行 envelope。它复用定向 Scene Diff 和上述检查输出前后证据，但不是 HOM 沙箱，也不会把脚本转换为 IR。`expected_outputs` 只隐式补目标存在性和节点错误检查；`empty_output`、`geometry_summary`、语义检查以及依赖新鲜输出的 cook 必须由调用方显式请求，`fresh_validation=false` 不会再偷偷追加或执行这些检查。`hia_context(include_context_pack=false)` 会明确关闭 Context Pack 和知识检索，即使同一次调用还带有 `task`、`change_scope` 或 `knowledge_queries`。
+`hia_execute_hom` 的 `script` 是唯一必填输入，`timeout_seconds` 只是可选的客户端等待预算。runtime 不自动运行 Scene Diff、验证、截图、追踪或质量判断，也不会把脚本转换为 IR。需要前后结构证据时显式调用 `hia_scene_diff`；需要节点、几何、scope 或语义证据时显式调用 `hia_validate`；需要视觉证据时显式调用 `hia_capture_viewport`。`hia_context(include_context_pack=false)` 会明确关闭 Context Pack 和知识检索，即使同一次调用还带有 `task`、`change_scope` 或 `knowledge_queries`。
 
-每批写入位于一个 Houdini Undo group 内，但只在真实 HOM 异常，或已观察到的显式验证、scope、删除契约失败时请求 Undo；`unknown`、`partial` 与 `NO_OBSERVED_EFFECT` 会保持失败或未证明状态，不会触发整批回滚。调用方读取 `rollback.status` 与错误中的 `automatic_retry_safe`：只有 Undo 栈和 HIP dirty 状态都恢复到批处理前，回滚才会报告 `rolled_back`；随后只有 `automatic_retry_safe=true` 才允许一次修正后的有界重试。Undo 已撤销临时节点但 dirty 状态未恢复时会返回 `DIRTY_STATE_NOT_RESTORED` 和 `not_proven`，不会虚报无残留。未证明回滚、超时和可能存在外部文件/render 副作用时必须先检查实际场景。`protected_paths` 比较持久节点类型、参数、flag 与拓扑，不把切帧造成的 cook 计数、缓存或求值结果变化误判为场景写入。
+每批写入位于一个普通 Houdini Undo group 内，供用户手动撤销；HIA 自身不请求 Undo。失败结果通过 `errors` 中的 `partial_scene_changes_possible` 与顶层 `scene_change_status` 明确表达执行是否开始以及场景变化是否可观察。超时、执行异常或 `scene_change_status=unknown` 时，调用方必须先读取实际场景，再决定是否提交修正批次。
 
-运行时身份绑定 launcher session、Houdini PID 和已加载的 executor 路径，并报告 HIP、scene revision 及 executor 源码 loaded/disk mtime。运行中源码或会话变化时，`hia_execute_hom` 与 `hia_run_effect_experiment` 在提交写入前返回 `restart_required`；health 和只读工具仍可用于确认实际连接，正常重连或重启后再写，不做热重载。HIP 路径和 revision 是状态证据，不会因为正常打开另一份 HIP 而永久锁死写入。
+运行时身份绑定 launcher session、Houdini PID 和已加载的 executor 路径，并报告 HIP、scene revision 及 executor 源码 loaded/disk mtime。运行中源码或会话变化时，`hia_execute_hom` 在提交写入前返回 `restart_required`；health 和只读工具仍可用于确认实际连接，正常重连或重启后再写，不做热重载。HIP 路径和 revision 是状态证据，不会因为正常打开另一份 HIP 而永久锁死写入。
 
-每次 HOM 执行返回后，runtime 在 `.runtime/hia-mcp-v2/execution-traces/<session>.jsonl` 追加一条不超过 64 KiB 的机器事实：脚本 SHA-256、前后 revision、观察到的路径、check 状态、错误 code 与阶段耗时。Trace 不保存脚本正文、task 正文、聊天、stdout、结果、traceback、凭据，也不会自动写项目记忆或晋升为知识。协议工具为 18 个、Houdini runtime 工具为 17 个；本次只新增唯一通用 `hia_run_effect_experiment`，没有新增服务。
+每次 HOM 执行只通过当前响应返回十个直接事实字段，不额外持久化执行 trace。协议工具与 Houdini runtime 工具均为 17 个，没有候选实验器、评分服务或额外 Agent。

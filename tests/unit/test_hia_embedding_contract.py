@@ -22,10 +22,6 @@ class EmbeddingContractTests(unittest.TestCase):
             "qwen3-embedding-0.6b",
             contract.DEFAULT_EMBEDDING_PROFILE,
         )
-        self.assertEqual(
-            "qwen3-embedding-0.6b",
-            contract.FALLBACK_EMBEDDING_PROFILE,
-        )
 
         small = contract.PROFILE_REGISTRY["qwen3-embedding-0.6b"]
         self.assertEqual("Qwen/Qwen3-Embedding-0.6B", small.model_id)
@@ -73,7 +69,7 @@ class EmbeddingContractTests(unittest.TestCase):
             self.assertEqual(32, profile.min_mrl_dimension)
             self.assertTrue(profile.model_directory.startswith(".runtime/models/"))
 
-    def test_launcher_settings_environment_status_and_fallback_are_exact(
+    def test_launcher_settings_environment_and_strict_selection_are_exact(
         self,
     ) -> None:
         public = contract.launcher_contract()
@@ -82,10 +78,7 @@ class EmbeddingContractTests(unittest.TestCase):
             "qwen3-embedding-0.6b",
             public["default_profile"],
         )
-        self.assertEqual(
-            "qwen3-embedding-0.6b",
-            public["fallback_profile"],
-        )
+        self.assertNotIn("fallback_profile", public)
         self.assertEqual(
             {
                 "profile": "embedding_profile",
@@ -123,7 +116,6 @@ class EmbeddingContractTests(unittest.TestCase):
                 "status",
                 "installed",
                 "ready",
-                "degraded",
                 "requested_profile",
                 "active_profile",
                 "model_id",
@@ -137,20 +129,14 @@ class EmbeddingContractTests(unittest.TestCase):
                 "normalized",
                 "initialized",
                 "loaded",
-                "fallback_reason",
                 "repair",
             ],
             public["status_fields"],
         )
-        self.assertEqual(
-            ["qwen3-embedding-0.6b", "lexical"],
-            public["selection"]["selected_8b_fallback"],
-        )
-        self.assertEqual(
-            ["lexical"],
-            public["selection"]["selected_0_6b_fallback"],
-        )
         self.assertTrue(public["selection"]["single_loaded_model"])
+        self.assertTrue(public["selection"]["selected_profile_required"])
+        self.assertFalse(public["selection"]["implicit_profile_switch"])
+        self.assertTrue(public["selection"]["lexical_mode_explicit"])
         self.assertFalse(
             public["selection"]["download_on_import_or_search"]
         )
@@ -297,8 +283,6 @@ class EmbeddingContractTests(unittest.TestCase):
                     "model_revision",
                     "dim",
                     "normalized",
-                    "degraded",
-                    "fallback_reason",
                     "repair",
                     "complete",
                     "partial",

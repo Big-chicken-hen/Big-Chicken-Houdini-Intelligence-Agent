@@ -57,7 +57,7 @@ class PanelAttachmentStoreTests(unittest.TestCase):
 
     def test_clipboard_paths_are_unique_png_paths_in_thread_directory(self) -> None:
         first = Path(self.store.clipboard_path("thread-clipboard"))
-        second = Path(self.store.new_clipboard_path("thread-clipboard"))
+        second = Path(self.store.clipboard_path("thread-clipboard"))
         expected_directory = (
             self.project_root / ".runtime" / "attachments" / "thread-clipboard"
         ).resolve()

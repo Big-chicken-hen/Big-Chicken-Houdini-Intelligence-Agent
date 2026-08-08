@@ -1136,7 +1136,7 @@ function Invoke-HiaEmbeddingChildProcess {
     def setUp(self) -> None:
         self.sandbox = (
             REPOSITORY_ROOT
-            / f".hia-installer-flow-test-{uuid.uuid4().hex}"
+            / f".hif-{uuid.uuid4().hex[:16]}"
         )
         self.sandbox.mkdir()
 

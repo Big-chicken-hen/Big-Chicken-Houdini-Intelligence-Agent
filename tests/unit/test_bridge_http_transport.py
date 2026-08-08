@@ -169,7 +169,9 @@ class HttpTransportTests(unittest.TestCase):
         self.assertEqual("request-success", identifier)
         self.assertEqual("http://127.0.0.1:49152/v1/health", observed["url"])
         self.assertEqual("Bearer test-secret", observed["authorization"])
-        self.assertEqual(1.0, observed["timeout"])
+        self.assertGreater(observed["timeout"], 0.0)
+        self.assertLessEqual(observed["timeout"], 1.0)
+        self.assertAlmostEqual(1.0, observed["timeout"], delta=0.05)
         self.assertIs(type(result), dict)
         self.assertEqual(b'{"ok":true}', result["raw"])
         self.assertEqual(200, result["http_status"])
@@ -179,6 +181,50 @@ class HttpTransportTests(unittest.TestCase):
         self.assertTrue(all(thread.daemon for thread in transport.worker_threads))
         self.assertEqual(1, sum("-events" in thread.name for thread in transport.worker_threads))
         self.assertEqual(2, sum("-control-" in thread.name for thread in transport.worker_threads))
+
+    def test_successive_requests_share_and_reduce_one_deadline(self) -> None:
+        results: queue.Queue[dict[str, Any]] = queue.Queue()
+        observed_timeouts: list[float] = []
+        first_started = threading.Event()
+
+        def urlopen(_request: Any, *, timeout: float) -> _Response:
+            observed_timeouts.append(timeout)
+            if len(observed_timeouts) == 1:
+                first_started.set()
+                threading.Event().wait(0.05)
+            return _Response(b'{"ok":true}', status=200)
+
+        transport = HttpTransport(
+            "http://127.0.0.1:49152",
+            "test-secret",
+            results,
+            urlopen=urlopen,
+        )
+        self.addCleanup(transport.close)
+        deadline = time.monotonic() + 1.0
+        _submit(
+            transport,
+            request_id="shared-deadline-1",
+            event_request=True,
+            timeout_ms=1_000,
+            deadline_monotonic=deadline,
+        )
+        self.assertTrue(first_started.wait(1.0))
+        _submit(
+            transport,
+            request_id="shared-deadline-2",
+            event_request=True,
+            timeout_ms=1_000,
+            deadline_monotonic=deadline,
+        )
+        for _ in range(2):
+            self.assertIsNone(results.get(timeout=2.0)["error_kind"])
+
+        self.assertEqual(2, len(observed_timeouts))
+        self.assertGreater(observed_timeouts[0], 0.0)
+        self.assertLessEqual(observed_timeouts[0], 1.0)
+        self.assertGreater(observed_timeouts[1], 0.0)
+        self.assertLess(observed_timeouts[1], observed_timeouts[0])
 
     def test_http_error_preserves_safe_structured_body_and_status(self) -> None:
         results: queue.Queue[dict[str, Any]] = queue.Queue()

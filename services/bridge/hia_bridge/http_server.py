@@ -790,8 +790,21 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/turn":
+            allowed = {
+                "text",
+                "model",
+                "effort",
+                "local_image_paths",
+                "service_tier",
+            }
+            if set(body) - allowed:
+                raise BridgeError(
+                    "INVALID_REQUEST",
+                    "Ordinary Turn contains unsupported fields",
+                    HTTPStatus.BAD_REQUEST,
+                )
             result = application.session.start_turn(
-                text=body.get("text"),
+                text=body.get("text", ""),
                 model=body.get("model"),
                 effort=body.get("effort"),
                 local_image_paths=body.get("local_image_paths"),
@@ -866,14 +879,6 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/interrupt":
             result = application.session.interrupt_turn()
-            return {"ok": True, **result}, HTTPStatus.OK
-        if path == "/v1/approval":
-            if "request_id" not in body:
-                raise BridgeError("MISSING_REQUEST_ID", "request_id is required")
-            result = application.session.resolve_approval(
-                body["request_id"],
-                body.get("decision"),
-            )
             return {"ok": True, **result}, HTTPStatus.OK
         if path == "/v1/scene/requests":
             return self._submit_scene_request(body)
