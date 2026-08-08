@@ -126,10 +126,25 @@ class ProjectTeamQtTests(unittest.TestCase):
         opened = []
         self.view.openThreadRequested.connect(opened.append)
         self.state.select("project:project-a")
+        self.view.refresh_view()
+        self.assertFalse(self.view.open_button.isEnabled())
         self.view._open_selected()
         self.assertEqual([], opened)
         self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.assertTrue(self.view.open_button.isEnabled())
         self.view._open_selected()
+        self.assertEqual(["thread-supervisor"], opened)
+
+        restricted = snapshot()
+        restricted["projects"][0]["threads"][0]["actions"][
+            "open_thread"
+        ] = False
+        self.state.apply_snapshot(restricted)
+        self.state.select("role:project-a:supervisor")
+        self.view.refresh_view()
+        self.assertFalse(self.view.open_button.isEnabled())
+        self.view.open_button.click()
         self.assertEqual(["thread-supervisor"], opened)
 
     def test_not_applicable_is_presented_as_handled_not_interrupted(self) -> None:
@@ -143,20 +158,21 @@ class ProjectTeamQtTests(unittest.TestCase):
         self.assertIn("已由监督 AI 处理", self.view.selection_meta.text())
         self.assertNotIn("中断", self.view.selection_meta.text())
 
-    def test_double_click_opens_and_redundant_open_button_is_removed(self) -> None:
-        from PySide6 import QtWidgets
-
+    def test_open_button_and_double_click_open_the_selected_task(self) -> None:
         opened = []
         self.view.openThreadRequested.connect(opened.append)
         self.state.select("role:project-a:supervisor")
         self.view.refresh_view()
 
+        self.assertTrue(self.view.open_button.isVisible())
+        self.assertTrue(self.view.open_button.isEnabled())
+        self.assertEqual("监督 AI（项目协调者）", self.view.selection_title.text())
+        self.view.open_button.click()
         self.view._item_double_clicked(None, 0)
 
-        self.assertEqual(["thread-supervisor"], opened)
-        self.assertNotIn(
-            "打开所选任务",
-            [button.text() for button in self.view.findChildren(QtWidgets.QPushButton)],
+        self.assertEqual(
+            ["thread-supervisor", "thread-supervisor"],
+            opened,
         )
 
     def test_delete_is_available_for_ordinary_threads_and_inactive_projects(self) -> None:

@@ -158,6 +158,17 @@ if PYSIDE_AVAILABLE:
             create_grid.addWidget(self.new_project_button, 1, 0)
             navigation_layout.addLayout(create_grid)
 
+            self.creation_feedback_label = QtWidgets.QLabel(
+                "Bridge 连接后可新建普通任务或项目。"
+            )
+            self.creation_feedback_label.setObjectName("taskCreationFeedback")
+            self.creation_feedback_label.setAccessibleName("任务创建状态")
+            self.creation_feedback_label.setWordWrap(True)
+            self.creation_feedback_label.setStyleSheet(
+                "color: #9aa6ba; padding: 2px 1px;"
+            )
+            navigation_layout.addWidget(self.creation_feedback_label)
+
             self.tree = QtWidgets.QTreeWidget()
             self.tree.setHeaderHidden(True)
             self.tree.setRootIsDecorated(True)
@@ -185,13 +196,17 @@ if PYSIDE_AVAILABLE:
             navigation_layout.addWidget(self.ordinary_actions)
 
             action_grid = QtWidgets.QGridLayout()
+            self.open_button = QtWidgets.QPushButton("打开所选任务")
+            self.open_button.setToolTip("打开所选任务；也可以双击任务行")
+            self.open_button.setEnabled(False)
             self.refresh_button = QtWidgets.QPushButton("刷新")
             self.delete_button = QtWidgets.QPushButton("删除所选任务")
             self.delete_button.setToolTip(
                 "永久删除所选普通任务、原生聊天记录和该任务的本地附件缓存"
             )
-            action_grid.addWidget(self.refresh_button, 0, 0)
-            action_grid.addWidget(self.delete_button, 0, 1)
+            action_grid.addWidget(self.open_button, 0, 0, 1, 2)
+            action_grid.addWidget(self.refresh_button, 1, 0)
+            action_grid.addWidget(self.delete_button, 1, 1)
             action_grid.setColumnStretch(1, 1)
             navigation_layout.addLayout(action_grid)
             root.addWidget(self.navigation_body, 1)
@@ -329,6 +344,7 @@ if PYSIDE_AVAILABLE:
                 lambda item: self._remember_expansion(item, False)
             )
             self.tree.itemDoubleClicked.connect(self._item_double_clicked)
+            self.open_button.clicked.connect(self._open_selected)
             self.delete_button.clicked.connect(self._delete_selected)
             self.rename_button.clicked.connect(self._rename_selected)
             self.copy_id_button.clicked.connect(self._copy_selected_id)
@@ -350,6 +366,27 @@ if PYSIDE_AVAILABLE:
             )
             self.continue_button.clicked.connect(self._continue_project)
             self.stop_button.clicked.connect(self._stop_project)
+
+        def set_creation_feedback(
+            self,
+            text: str,
+            *,
+            tone: str = "info",
+        ) -> None:
+            """Render one local creation status without owning workflow state."""
+
+            colors = {
+                "info": "#9aa6ba",
+                "busy": "#7eb6ff",
+                "success": "#78d6a3",
+                "error": "#ff8f8f",
+            }
+            message = text.strip() if isinstance(text, str) else ""
+            self.creation_feedback_label.setText(message)
+            self.creation_feedback_label.setStyleSheet(
+                f"color: {colors.get(tone, colors['info'])}; padding: 2px 1px;"
+            )
+            self.creation_feedback_label.setVisible(bool(message))
 
         def set_model_catalog(self, models: list[dict[str, Any]]) -> None:
             current = self._selected_model_id()
@@ -592,6 +629,9 @@ if PYSIDE_AVAILABLE:
 
         def _render_selection(self) -> None:
             selected = find_tree_item(self.state.tree, self.state.selected_key)
+            self.open_button.setEnabled(
+                self.state.selected_chat_thread_id() is not None
+            )
             self.delete_button.setEnabled(
                 isinstance(selected, OrdinaryThreadViewModel)
             )
@@ -631,7 +671,7 @@ if PYSIDE_AVAILABLE:
                 self.projectSelected.emit(selected.project_id)
             elif isinstance(selected, RoleViewModel):
                 self.selection_title.setText(
-                    f"{selected.title}（项目 Goal 持有者）"
+                    f"{selected.title}（项目协调者）"
                     if selected.role == "supervisor"
                     else selected.title
                 )

@@ -60,7 +60,12 @@ class _PanelClient:
         self.role_reads: list[tuple[str, str]] = []
         self.resumes: list[tuple[str, str]] = []
         self.goal_reads: list[str] = []
+        self.thread_starts: list[dict] = []
+        self.project_starts: list[tuple[str, dict]] = []
+        self.thread_list_requests = 0
         self.resume_result: str | None = "resume"
+        self.start_thread_result: str | None = "thread-start"
+        self.start_project_result: str | None = "project-start"
 
     def read_project_role_thread(self, thread_id: str, *, context: str) -> str:
         self.role_reads.append((thread_id, context))
@@ -81,6 +86,18 @@ class _PanelClient:
         self.goal_reads.append(thread_id)
         return "goal-read"
 
+    def start_thread(self, **kwargs) -> str | None:
+        self.thread_starts.append(dict(kwargs))
+        return self.start_thread_result
+
+    def start_project(self, text: str, **kwargs) -> str | None:
+        self.project_starts.append((text, dict(kwargs)))
+        return self.start_project_result
+
+    def get_threads(self) -> str:
+        self.thread_list_requests += 1
+        return "threads"
+
     def dispose(self) -> None:
         pass
 
@@ -89,12 +106,16 @@ class _NavigationController:
     def __init__(self) -> None:
         self.selected: list[str] = []
         self.snapshots: list[list[dict]] = []
+        self.refresh_calls = 0
 
     def select_ordinary_thread_when_available(self, thread_id: str) -> None:
         self.selected.append(thread_id)
 
     def consume_ordinary_threads(self, records: list[dict]) -> None:
         self.snapshots.append(list(records))
+
+    def refresh(self) -> None:
+        self.refresh_calls += 1
 
     def close(self) -> None:
         pass
@@ -223,11 +244,17 @@ class PanelP0PySide6Tests(unittest.TestCase):
             )
             view.state.select("project:project-a")
             view.refresh_view()
-            team_page = view.project_action_surface.parentWidget()
+            team_page = view.detail_surface.parentWidget()
             panel.task_tabs.setCurrentWidget(team_page)
             self.app.processEvents()
+            self.assertIs(panel.right_column, view.project_action_surface.parentWidget())
             self.assertIs(team_page, view.detail_surface.parentWidget())
             self.assertIs(team_page, view.attention_surface.parentWidget())
+            right_layout = panel.right_column.layout()
+            self.assertLess(
+                right_layout.indexOf(view.project_action_surface),
+                right_layout.indexOf(panel.task_tabs),
+            )
             self.assertTrue(view.project_action_surface.isVisible())
             self.assertTrue(view.detail_surface.isVisible())
             self.assertTrue(view.attention_surface.isVisible())
@@ -288,6 +315,9 @@ class PanelP0PySide6Tests(unittest.TestCase):
             panel._project_team_controller = controller
             panel._connected = True
             panel._authenticated = True
+            panel.project_team_view.newTaskRequested.connect(
+                panel._on_project_team_new_task
+            )
             panel._selected_thread_id = "thread-ordinary"
             panel._thread_history = [
                 {"thread_id": "thread-ordinary", "name": "普通任务"}
@@ -343,6 +373,17 @@ class PanelP0PySide6Tests(unittest.TestCase):
             self.assertFalse(panel.goal_save_button.isEnabled())
             self.assertFalse(panel.goal_focus_checkbox.isEnabled())
             self.assertFalse(panel.knowledge_import_thread_button.isEnabled())
+            self.assertFalse(panel.project_team_view.new_single_button.isEnabled())
+            self.assertFalse(panel.goal_stage_summary_group.isVisible())
+            self.assertTrue(panel.project_team_view.new_project_button.isEnabled())
+
+            panel.project_team_view.new_project_button.click()
+            self.app.processEvents()
+            self.assertFalse(panel._project_draft_active)
+            self.assertIn(
+                "先返回普通任务",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
 
             panel.project_memory_title_edit.setText("记录")
             panel.project_memory_body_edit.setPlainText("正文")
@@ -434,7 +475,194 @@ class PanelP0PySide6Tests(unittest.TestCase):
             self.assertIn("普通聊天已恢复", panel.conversation.toPlainText())
             self.assertNotIn("项目角色历史", panel.conversation.toPlainText())
             self.assertTrue(panel.input_edit.isEnabled())
+            self.assertTrue(panel.goal_stage_summary_group.isVisible())
             self.assertIn("thread-ordinary", controller.selected)
+        finally:
+            self._close(panel)
+
+    def test_ordinary_creation_reports_pending_success_and_dispatch_failure(self) -> None:
+        panel = self._panel()
+        try:
+            client = _PanelClient()
+            panel._client = client
+            panel._project_team_controller = _NavigationController()
+            panel._connected = True
+            panel._authenticated = True
+            panel.project_team_view.newTaskRequested.connect(
+                panel._on_project_team_new_task
+            )
+            panel._refresh_controls()
+
+            client.start_thread_result = None
+            panel.project_team_view.new_single_button.click()
+            self.app.processEvents()
+
+            self.assertFalse(panel._session_action_pending)
+            self.assertIn(
+                "普通任务创建请求未能发出",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+            self.assertTrue(panel.project_team_view.new_single_button.isEnabled())
+
+            client.start_thread_result = "thread-start"
+            panel.project_team_view.new_single_button.click()
+            self.app.processEvents()
+
+            self.assertTrue(panel._session_action_pending)
+            self.assertEqual(
+                "正在新建普通任务…",
+                panel.project_team_view.new_single_button.text(),
+            )
+            self.assertIn(
+                "正在新建普通任务",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+            self.assertFalse(panel.project_team_view.new_project_button.isEnabled())
+
+            panel._on_action_completed(
+                "session_start",
+                {"thread_id": "thread-created", "focus_mode": False},
+            )
+            self.app.processEvents()
+
+            self.assertFalse(panel._session_action_pending)
+            self.assertEqual("thread-created", panel._selected_thread_id)
+            self.assertIn(
+                "普通任务已创建",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+            self.assertEqual(
+                "新建普通任务（单个 AI）",
+                panel.project_team_view.new_single_button.text(),
+            )
+        finally:
+            self._close(panel)
+
+    def test_project_creation_reports_draft_pending_failure_and_success(self) -> None:
+        panel = self._panel()
+        try:
+            client = _PanelClient()
+            controller = _NavigationController()
+            panel._client = client
+            panel._project_team_controller = controller
+            panel._connected = True
+            panel._authenticated = True
+            panel.project_team_view.newTaskRequested.connect(
+                panel._on_project_team_new_task
+            )
+            panel._refresh_controls()
+
+            panel.project_team_view.new_project_button.click()
+            self.app.processEvents()
+
+            self.assertTrue(panel._project_draft_active)
+            self.assertTrue(panel.project_draft_banner.isVisible())
+            self.assertEqual(
+                "正在创建新项目",
+                panel.project_draft_banner_label.text(),
+            )
+            self.assertEqual(
+                "创建项目",
+                panel.project_draft_create_button.text(),
+            )
+            self.assertEqual(
+                "取消",
+                panel.project_draft_cancel_button.text(),
+            )
+            panel.project_draft_cancel_button.click()
+            self.app.processEvents()
+            self.assertFalse(panel._project_draft_active)
+            self.assertFalse(panel.project_draft_banner.isVisible())
+
+            panel.project_team_view.new_project_button.click()
+            self.app.processEvents()
+            self.assertTrue(panel._project_draft_active)
+            self.assertEqual("创建项目", panel.send_button.text())
+            self.assertTrue(panel.project_team_view.creation_feedback_label.isVisible())
+            self.assertIn(
+                "项目创建模式",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+            self.assertIn("创建项目", panel.input_edit.placeholderText())
+            self.assertFalse(panel.project_team_view.new_project_button.isEnabled())
+            self.assertEqual(
+                "改建普通任务（放弃项目草稿）",
+                panel.project_team_view.new_single_button.text(),
+            )
+
+            panel._set_connection("测试断开", False)
+            self.assertIn(
+                "Bridge 未连接",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+            panel._set_connection("测试重连", True)
+            self.assertIn(
+                "项目创建模式",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+
+            panel.input_edit.setPlainText("创建完整测试项目")
+            panel.project_draft_create_button.click()
+            self.app.processEvents()
+            failure_context = client.project_starts[-1][1]["context"]
+
+            self.assertTrue(panel._project_start_pending)
+            self.assertTrue(panel.project_draft_banner.isVisible())
+            self.assertFalse(panel.project_draft_create_button.isEnabled())
+            self.assertFalse(panel.project_draft_cancel_button.isEnabled())
+            self.assertEqual("正在创建项目…", panel.send_button.text())
+            self.assertFalse(panel.send_button.isEnabled())
+            self.assertFalse(panel.input_edit.isEnabled())
+            self.assertIn(
+                "正在创建项目和 5 个角色任务",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+            self.assertFalse(panel.project_team_view.new_single_button.isEnabled())
+            self.assertFalse(panel.project_team_view.new_project_button.isEnabled())
+
+            panel._on_request_failed(
+                failure_context,
+                {
+                    "structured_error": {
+                        "code": "NETWORK_TIMEOUT",
+                        "message": "timeout",
+                    }
+                },
+            )
+            self.app.processEvents()
+
+            self.assertFalse(panel._project_start_pending)
+            self.assertTrue(panel._project_draft_active)
+            self.assertTrue(panel.project_draft_banner.isVisible())
+            self.assertTrue(panel.project_draft_create_button.isEnabled())
+            self.assertTrue(panel.project_draft_cancel_button.isEnabled())
+            self.assertEqual("创建完整测试项目", panel.input_edit.toPlainText())
+            self.assertIn(
+                "已保留",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+            self.assertEqual("创建项目", panel.send_button.text())
+
+            panel._send()
+            success_context = client.project_starts[-1][1]["context"]
+            panel._on_action_completed(
+                success_context,
+                {"project_id": "project-created"},
+            )
+            self.app.processEvents()
+
+            self.assertFalse(panel._project_draft_active)
+            self.assertFalse(panel._project_start_pending)
+            self.assertFalse(panel.project_draft_banner.isVisible())
+            self.assertIn(
+                "项目已创建",
+                panel.project_team_view.creation_feedback_label.text(),
+            )
+            self.assertEqual(1, controller.refresh_calls)
+            self.assertEqual(
+                "新建项目（项目团队）",
+                panel.project_team_view.new_project_button.text(),
+            )
         finally:
             self._close(panel)
 

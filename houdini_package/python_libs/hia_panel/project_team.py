@@ -219,7 +219,15 @@ def normalize_workspace_tree(
     snapshot = project_team if isinstance(project_team, Mapping) else {}
     schema = snapshot.get("schema")
     if schema not in {None, "hia-project-team/1", "hia-project-team/2"}:
-        return WorkspaceTreeViewModel(state_status="unsupported")
+        ordinary = tuple(
+            thread
+            for raw in _thread_candidates(ordinary_threads)
+            if (thread := _normalize_ordinary_thread(raw)) is not None
+        )
+        return WorkspaceTreeViewModel(
+            ordinary_threads=ordinary,
+            state_status="unsupported",
+        )
 
     projects = tuple(
         project

@@ -551,6 +551,7 @@ class _BridgeClientShim:
         self.capability_reports: list[dict[str, Any]] = []
         self.scene_polls: list[int] = []
         self.scene_results: list[tuple[str, str, dict[str, Any]]] = []
+        self.start_thread_result: str | None = "thread-request"
         self.start_turn_result: str | None = "turn-request"
         self.steer_turn_result: str | None = "steer-request"
 
@@ -559,9 +560,10 @@ class _BridgeClientShim:
         *,
         model: str | None,
         service_tier: str | None,
-    ) -> None:
+    ) -> str | None:
         self.thread_requests.append(model)
         self.thread_service_tiers.append(service_tier)
+        return self.start_thread_result
 
     def resume_thread(
         self,
@@ -837,10 +839,10 @@ def _make_panel(*, selected_thread_id: str | None = "thread-1") -> Any:
     panel._project_draft_active = False
     panel._project_draft_id = None
     panel._ordinary_composer_draft = None
+    panel._ordinary_thread_drafts = {}
     panel._project_start_pending = False
     panel._pending_team_drafts = {}
     panel._thread_delete_confirm_id = None
-    panel._thread_delete_confirm_not_before = None
     panel._thread_delete_pending = None
     panel._project_memory_loaded = False
     panel._project_memory_pending = None
@@ -3123,20 +3125,83 @@ class PanelWiringTests(unittest.TestCase):
                     panel._diagnostic_snapshot["scene_modified"],
                 )
 
-    def test_switching_threads_clears_attachment_references_without_deleting(self) -> None:
+    def test_switching_threads_preserves_separate_unsent_drafts(self) -> None:
         panel = _make_panel()
-        attachment = (
+        panel._thread_history.append(
+            {
+                "thread_id": "thread-2",
+                "name": "Second thread",
+                "preview": "",
+                "updated_at": 2,
+            }
+        )
+        first_attachment = (
             r"E:\houdini-intelligence-agent\.runtime\attachments\thread-1\reference.png"
         )
-        panel.attachment_strip.add_path(attachment)
+        second_attachment = (
+            r"E:\houdini-intelligence-agent\.runtime\attachments\thread-2\other.png"
+        )
+        panel.input_edit.setPlainText("draft for thread 1")
+        panel.attachment_strip.add_path(first_attachment)
 
+        self.assertTrue(
+            panel._request_thread_resume("thread-2", context="session_resume")
+        )
         panel._on_action_completed(
             "session_resume",
             {"thread_id": "thread-2"},
         )
 
+        self.assertEqual("", panel.input_edit.toPlainText())
         self.assertEqual([], panel.attachment_strip.paths())
         self.assertEqual("thread-2", panel._selected_thread_id)
+        panel._goal_action_context = None
+
+        panel.input_edit.setPlainText("draft for thread 2")
+        panel.attachment_strip.add_path(second_attachment)
+        self.assertTrue(
+            panel._request_thread_resume("thread-1", context="session_resume")
+        )
+        panel._on_action_completed(
+            "session_resume",
+            {"thread_id": "thread-1"},
+        )
+
+        self.assertEqual("draft for thread 1", panel.input_edit.toPlainText())
+        self.assertEqual([first_attachment], panel.attachment_strip.paths())
+        self.assertEqual(
+            "draft for thread 2",
+            panel._ordinary_thread_drafts["thread-2"]["text"],
+        )
+        self.assertEqual(
+            (second_attachment,),
+            panel._ordinary_thread_drafts["thread-2"]["attachment_paths"],
+        )
+        panel._goal_action_context = None
+
+        panel._send()
+
+        sent_text, _model, _effort, sent_images, _context = (
+            panel._client.turn_requests[-1]
+        )
+        self.assertEqual("draft for thread 1", sent_text)
+        self.assertEqual([first_attachment], sent_images)
+        self.assertNotIn("draft for thread 2", sent_text)
+
+    def test_second_delete_click_dispatches_without_silent_delay(self) -> None:
+        panel = _make_panel()
+
+        panel._delete_project_navigation_thread("thread-1")
+        self.assertEqual([], panel._client.thread_delete_requests)
+
+        panel._delete_project_navigation_thread("thread-1")
+
+        self.assertEqual(1, len(panel._client.thread_delete_requests))
+        self.assertEqual(
+            "thread-1",
+            panel._client.thread_delete_requests[0][0],
+        )
+        self.assertTrue(panel._session_action_pending)
 
     def test_selection_and_multiple_images_reach_one_turn_request(self) -> None:
         panel = _make_panel()

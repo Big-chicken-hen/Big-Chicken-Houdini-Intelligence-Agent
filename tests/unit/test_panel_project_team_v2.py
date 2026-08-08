@@ -210,9 +210,22 @@ class ProjectTeamViewModelTests(unittest.TestCase):
     def test_unknown_schema_does_not_render_untrusted_membership(self) -> None:
         snapshot = project_snapshot()
         snapshot["schema"] = "hia-project-team/999"
-        tree = normalize_workspace_tree(snapshot)
+        tree = normalize_workspace_tree(
+            snapshot,
+            [
+                {
+                    "thread_id": "ordinary-safe",
+                    "name": "普通任务仍可用",
+                    "updated_at": 7,
+                }
+            ],
+        )
         self.assertEqual("unsupported", tree.state_status)
         self.assertEqual((), tree.projects)
+        self.assertEqual(
+            ("ordinary-safe",),
+            tuple(item.thread_id for item in tree.ordinary_threads),
+        )
 
 
 class FakeSignal:
