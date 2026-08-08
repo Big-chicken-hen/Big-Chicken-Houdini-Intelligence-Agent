@@ -298,6 +298,7 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.new_routes = []
         self.opened = []
         self.deleted = []
+        self.renamed = []
         self.copied = []
         self.errors = []
         self.controller = ProjectTeamController(
@@ -306,6 +307,9 @@ class ProjectTeamControllerTests(unittest.TestCase):
             on_new_task=self.new_routes.append,
             on_open_thread=self.opened.append,
             on_delete_thread=self.deleted.append,
+            on_rename_thread=lambda thread_id, name: self.renamed.append(
+                (thread_id, name)
+            ),
             on_copy_thread_id=self.copied.append,
             on_error=self.errors.append,
         )
@@ -389,6 +393,39 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.assertEqual(1, len(self.view.state.tree.projects))
         self.assertEqual(1, len(self.view.state.tree.ordinary_threads))
 
+    def test_ordinary_history_survives_missing_and_failed_project_snapshot(self) -> None:
+        self.controller.show()
+        self.controller.consume_ordinary_threads(
+            [{"thread_id": "ordinary", "name": "普通", "updated_at": 1}]
+        )
+        self.assertEqual(
+            ["ordinary"],
+            [item.thread_id for item in self.view.state.tree.ordinary_threads],
+        )
+
+        self.gateway.requestFailed.emit(
+            "project_team_refresh",
+            {
+                "structured_error": {
+                    "code": "PROJECT_REGISTRY_CORRUPTED",
+                    "message": "registry unavailable",
+                }
+            },
+        )
+        self.assertEqual(
+            ["ordinary"],
+            [item.thread_id for item in self.view.state.tree.ordinary_threads],
+        )
+
+        self.view.openThreadRequested.emit("ordinary")
+        self.view.renameThreadRequested.emit("ordinary", "已重命名")
+        self.view.copyThreadIdRequested.emit("ordinary")
+        self.view.deleteThreadRequested.emit("ordinary")
+        self.assertEqual(["ordinary"], self.opened)
+        self.assertEqual([("ordinary", "已重命名")], self.renamed)
+        self.assertEqual(["ordinary"], self.copied)
+        self.assertEqual(["ordinary"], self.deleted)
+
     def test_new_ordinary_selection_survives_project_then_history_order(self) -> None:
         self.controller.show()
         self.controller.select_ordinary_thread_when_available("ordinary-new")
@@ -408,7 +445,7 @@ class ProjectTeamControllerTests(unittest.TestCase):
         self.controller.consume_ordinary_threads(
             [{"thread_id": "ordinary-new", "name": "新普通任务", "updated_at": 2}]
         )
-        self.assertIsNone(self.view.state.selected_key)
+        self.assertEqual("thread:ordinary-new", self.view.state.selected_key)
         self.gateway.actionCompleted.emit(
             "project_team_refresh", {"project_team": project_snapshot()}
         )

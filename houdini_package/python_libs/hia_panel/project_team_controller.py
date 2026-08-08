@@ -338,8 +338,6 @@ class ProjectTeamController:
         )
 
     def _render_if_available(self) -> None:
-        if self._project_snapshot is None:
-            return
         self.view.state.apply_snapshot(
             self._project_snapshot,
             self._ordinary_threads,

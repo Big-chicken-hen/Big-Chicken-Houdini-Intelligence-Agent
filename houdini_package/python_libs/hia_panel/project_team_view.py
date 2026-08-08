@@ -96,7 +96,8 @@ if PYSIDE_AVAILABLE:
                     background-color: {self._BACKGROUND};
                     color: {self._TEXT};
                 }}
-                QFrame#projectDetailSurface, QFrame#attentionSurface {{
+                QFrame#projectActionSurface, QFrame#projectDetailSurface,
+                QFrame#attentionSurface {{
                     background-color: {self._SURFACE};
                     border: 1px solid {self._BORDER};
                     border-radius: 4px;
@@ -194,6 +195,20 @@ if PYSIDE_AVAILABLE:
             action_grid.setColumnStretch(1, 1)
             navigation_layout.addLayout(action_grid)
             root.addWidget(self.navigation_body, 1)
+
+            self.project_action_surface = QtWidgets.QFrame()
+            self.project_action_surface.setObjectName("projectActionSurface")
+            project_actions = QtWidgets.QHBoxLayout(self.project_action_surface)
+            project_actions.setContentsMargins(8, 6, 8, 6)
+            project_actions.setSpacing(6)
+            self.project_status_label = QtWidgets.QLabel("项目状态：未选择")
+            self.project_status_label.setWordWrap(True)
+            project_actions.addWidget(self.project_status_label, 1)
+            self.stop_button = QtWidgets.QPushButton("停止项目")
+            self.continue_button = QtWidgets.QPushButton("继续")
+            project_actions.addWidget(self.stop_button)
+            project_actions.addWidget(self.continue_button)
+            root.addWidget(self.project_action_surface)
 
             self.detail_surface = QtWidgets.QFrame()
             self.detail_surface.setObjectName("projectDetailSurface")
@@ -294,12 +309,6 @@ if PYSIDE_AVAILABLE:
             self.attention_details.setWordWrap(True)
             attention_layout.addWidget(self.attention_title)
             attention_layout.addWidget(self.attention_details)
-            attention_buttons = QtWidgets.QGridLayout()
-            self.continue_button = QtWidgets.QPushButton("继续")
-            self.stop_button = QtWidgets.QPushButton("停止项目")
-            attention_buttons.addWidget(self.continue_button, 0, 0)
-            attention_buttons.addWidget(self.stop_button, 0, 1)
-            attention_layout.addLayout(attention_buttons)
             root.addWidget(self.attention_surface)
 
         def _connect_signals_once(self) -> None:
@@ -564,14 +573,9 @@ if PYSIDE_AVAILABLE:
         def _set_collapsed(self, collapsed: bool) -> None:
             self.state.collapsed = bool(collapsed)
             self.navigation_body.setVisible(not collapsed)
-            self.detail_surface.setVisible(not collapsed)
             self.title_label.setVisible(not collapsed)
             self.setMinimumWidth(42 if collapsed else 300)
             self.collapse_button.setText("展开" if collapsed else "收起")
-            if collapsed:
-                self.attention_surface.hide()
-            else:
-                self._render_selection()
             self.collapsedChanged.emit(bool(collapsed))
 
         def _selected_key(self) -> str | None:
@@ -602,6 +606,7 @@ if PYSIDE_AVAILABLE:
                 self.ordinary_name_edit.clear()
             self.runtime_widget.setVisible(isinstance(selected, RoleViewModel))
             project = self._selected_project(selected)
+            self._render_project_actions(project)
             self._render_requirement_choices(project)
             show_guidance = bool(project and project.can_guide)
             self.guidance_edit.setVisible(show_guidance)
@@ -681,6 +686,26 @@ if PYSIDE_AVAILABLE:
             self.projectContextChanged.emit(project is not None)
             self._render_attention(project)
 
+        def _render_project_actions(
+            self, project: ProjectViewModel | None
+        ) -> None:
+            visible = project is not None
+            self.project_action_surface.setVisible(visible)
+            if project is None:
+                self.project_status_label.setText("项目状态：未选择")
+                self.stop_button.setVisible(False)
+                self.stop_button.setEnabled(False)
+                self.continue_button.setVisible(False)
+                self.continue_button.setEnabled(False)
+                return
+            self.project_status_label.setText(
+                f"项目状态：{_status_label(project.status)}"
+            )
+            self.stop_button.setVisible(project.can_stop)
+            self.stop_button.setEnabled(project.can_stop)
+            self.continue_button.setVisible(project.can_continue)
+            self.continue_button.setEnabled(project.can_continue)
+
         def _render_requirement_choices(
             self, project: ProjectViewModel | None
         ) -> None:
@@ -712,7 +737,7 @@ if PYSIDE_AVAILABLE:
 
         def _render_attention(self, project: ProjectViewModel | None) -> None:
             visible = bool(project and project.attention.visible)
-            self.attention_surface.setVisible(visible and not self.state.collapsed)
+            self.attention_surface.setVisible(visible)
             if not visible or project is None:
                 return
             attention = project.attention
@@ -725,9 +750,6 @@ if PYSIDE_AVAILABLE:
                 f"最近证据：{evidence}\n"
                 f"最近修复卡：{attention.latest_repair_card or '无'}"
             )
-            self.continue_button.setEnabled(project.can_continue)
-            self.stop_button.setEnabled(project.can_stop)
-
         def _selected_project(self, selected: Any) -> ProjectViewModel | None:
             if isinstance(selected, ProjectViewModel):
                 return selected

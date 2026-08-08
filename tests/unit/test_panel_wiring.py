@@ -569,8 +569,9 @@ class _BridgeClientShim:
         *,
         service_tier: str | None,
         context: str,
-    ) -> None:
+    ) -> str:
         self.resume_requests.append((thread_id, service_tier, context))
+        return "resume-request"
 
     def start_turn(
         self,
