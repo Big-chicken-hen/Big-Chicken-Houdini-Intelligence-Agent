@@ -79,10 +79,10 @@ class AttachmentStore:
         new_thread_id: str,
         paths: Iterable[Union[str, Path]],
     ) -> list[str]:
-        """Rewrite only paths below one exact rotated Thread cache root."""
+        """Copy staged images to the new Thread while retaining old history paths."""
 
         old_directory = self._thread_path(old_thread_id)
-        new_directory = self._thread_path(new_thread_id)
+        new_directory = self._thread_directory(new_thread_id)
         rebound: list[str] = []
         for raw_path in paths:
             display_path = os.fspath(raw_path)
@@ -92,7 +92,13 @@ class AttachmentStore:
             except ValueError:
                 rebound.append(display_path)
             else:
-                rebound.append(str(new_directory / relative))
+                destination = new_directory / relative
+                if destination.exists():
+                    destination = self._unique_path(new_directory, candidate.suffix.lower())
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with candidate.open("rb") as source_file, destination.open("xb") as target_file:
+                    shutil.copyfileobj(source_file, target_file)
+                rebound.append(str(destination))
         return rebound
 
     def copy_project_file(

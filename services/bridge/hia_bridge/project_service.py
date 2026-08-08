@@ -278,13 +278,6 @@ class ProjectTeamService:
                 expected_revision=record.state.revision,
             )
 
-    def rotation_readback(self, old_thread_id: str, new_thread_id: str) -> bool:
-        new_identity = self.role_identity_for_thread(new_thread_id)
-        return (
-            new_identity is not None
-            and self.role_identity_for_thread(old_thread_id) is None
-        )
-
     def read_role_thread(self, thread_id: str) -> dict[str, Any]:
         """Read one project role without a resume call or ordinary Session mutation."""
 

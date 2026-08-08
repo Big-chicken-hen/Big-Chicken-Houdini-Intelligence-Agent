@@ -16,6 +16,9 @@ from typing import Any, Callable, Mapping, Protocol
 _COMPACTION_LIMIT = 3
 _LEGACY_KIND = "thread/compacted"
 _ITEM_KIND = "item/completed"
+_GOAL_STATUSES = frozenset(
+    {"active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"}
+)
 
 
 class AppServerClient(Protocol):
@@ -43,18 +46,15 @@ class ThreadRotationAdapters:
     expected_profile: Callable[[str, str], ThreadRotationProfile | None]
     is_idle: Callable[[str], bool]
     rebind: Callable[[str, str], None]
-    readback: Callable[[str, str], bool]
     publish: Callable[[Mapping[str, Any]], None]
     validate_role_tools: Callable[[str, Mapping[str, Any]], bool] | None = None
-
-
-NativeSeenKey = tuple[str, str, str | None, str]
+    supports_goal: Callable[[str], bool] | None = None
 
 
 @dataclass
 class _ThreadState:
     count: int = 0
-    seen: set[NativeSeenKey] = field(default_factory=set)
+    seen_turn_ids: set[str] = field(default_factory=set)
     pending: bool = False
     running: bool = False
     failed: bool = False
@@ -62,7 +62,7 @@ class _ThreadState:
 
 
 class ThreadRotationService:
-    """Fork a managed Thread once after its third paired native compaction."""
+    """Fork a managed Thread once after its third native compaction."""
 
     def __init__(
         self,
@@ -151,11 +151,43 @@ class ThreadRotationService:
                 return None
             return {
                 "count": state.count,
-                "seenCount": len(state.seen),
+                "seenCount": len(state.seen_turn_ids),
                 "pending": state.pending,
                 "running": state.running,
                 "failed": state.failed,
             }
+
+    def needs_rotation(self, thread_id: str) -> bool:
+        """Return whether the next project Role use must stop at its boundary."""
+
+        with self._lock:
+            state = self._states.get(thread_id)
+            return bool(
+                state is not None
+                and (state.pending or state.running or state.failed)
+            )
+
+    def rotate_before_turn(self, thread_id: str) -> str:
+        """Synchronously resolve one pending rotation at an existing Role boundary."""
+
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("thread_id is required")
+        with self._lock:
+            state = self._states.get(thread_id)
+            if state is None:
+                return thread_id
+            if state.failed:
+                raise RuntimeError("Thread rotation previously failed")
+            if state.running:
+                raise RuntimeError("Thread rotation is already running")
+            if not state.pending:
+                return thread_id
+            state.pending = False
+            state.running = True
+        replacement = self._rotate(thread_id)
+        if not isinstance(replacement, str) or not replacement:
+            raise RuntimeError("Thread rotation failed")
+        return replacement
 
     def close(self, *, wait: bool = True) -> None:
         with self._lock:
@@ -166,7 +198,7 @@ class ThreadRotationService:
         thread_id = params.get("threadId")
         turn_id = params.get("turnId")
         if isinstance(thread_id, str) and thread_id and isinstance(turn_id, str) and turn_id:
-            self._remember(thread_id, turn_id, None, _LEGACY_KIND)
+            self._remember(thread_id, turn_id)
 
     def _observe_item(self, params: Mapping[str, Any]) -> None:
         thread_id = params.get("threadId")
@@ -183,39 +215,27 @@ class ThreadRotationService:
             return
         item_id = item.get("id")
         if isinstance(item_id, str) and item_id:
-            self._remember(thread_id, turn_id, item_id, _ITEM_KIND)
+            self._remember(thread_id, turn_id)
 
-    def _remember(
-        self,
-        thread_id: str,
-        turn_id: str,
-        item_id: str | None,
-        kind: str,
-    ) -> None:
-        key = (thread_id, turn_id, item_id, kind)
+    def _remember(self, thread_id: str, turn_id: str) -> None:
         with self._lock:
             if self._closed:
                 return
             state = self._states.setdefault(thread_id, _ThreadState())
-            if state.pending or state.running or state.failed or key in state.seen:
+            if (
+                state.pending
+                or state.running
+                or state.failed
+                or turn_id in state.seen_turn_ids
+            ):
                 return
-            state.seen.add(key)
-            legacy = (thread_id, turn_id, None, _LEGACY_KIND)
-            items = tuple(
-                candidate
-                for candidate in state.seen
-                if candidate[0] == thread_id
-                and candidate[1] == turn_id
-                and candidate[3] == _ITEM_KIND
-            )
-            if legacy not in state.seen or len(items) != 1:
-                return
+            state.seen_turn_ids.add(turn_id)
             state.count = min(_COMPACTION_LIMIT, state.count + 1)
             state.last_turn_id = turn_id
             if state.count == _COMPACTION_LIMIT:
                 state.pending = True
 
-    def _rotate(self, old_thread_id: str) -> None:
+    def _rotate(self, old_thread_id: str) -> str | None:
         stage = "profile"
         new_thread_id: str | None = None
         try:
@@ -229,8 +249,27 @@ class ThreadRotationService:
             )
             if profile is None:
                 self._finish_unmanaged(old_thread_id)
-                return
+                return old_thread_id
             self._validate_profile(profile)
+            stage = "read_old"
+            old_read = self._client.request(
+                "thread/read",
+                {"threadId": old_thread_id, "includeTurns": True},
+            )
+            old_turn_ids = self._validate_native_thread(
+                old_read,
+                expected_thread_id=old_thread_id,
+                expected_source=profile.thread_source,
+            )
+            old_turn_prefix = self._turn_prefix(old_turn_ids, last_turn_id)
+            goal_supported = (
+                self._adapters.supports_goal(old_thread_id)
+                if self._adapters.supports_goal is not None
+                else False
+            )
+            old_goal = (
+                self._read_goal(old_thread_id) if goal_supported else None
+            )
             params = {
                 "threadId": old_thread_id,
                 "lastTurnId": last_turn_id,
@@ -240,7 +279,6 @@ class ThreadRotationService:
                 "ephemeral": profile.ephemeral,
                 "threadSource": copy.deepcopy(profile.thread_source),
                 "model": profile.model,
-                "reasoningEffort": profile.reasoning_effort,
                 "serviceTier": profile.service_tier,
                 "sandbox": copy.deepcopy(profile.fork_sandbox),
                 "config": copy.deepcopy(dict(profile.config)),
@@ -255,42 +293,161 @@ class ThreadRotationService:
                 and candidate_id != old_thread_id
             ):
                 new_thread_id = candidate_id
-            stage = "validate"
+            stage = "validate_fork"
             new_thread_id = self._validate_fork(old_thread_id, profile, result)
+            stage = "read_new"
+            new_read = self._client.request(
+                "thread/read",
+                {"threadId": new_thread_id, "includeTurns": True},
+            )
+            new_turn_ids = self._validate_native_thread(
+                new_read,
+                expected_thread_id=new_thread_id,
+                expected_source=profile.thread_source,
+                expected_forked_from=old_thread_id,
+            )
+            if self._turn_prefix(new_turn_ids, last_turn_id) != old_turn_prefix:
+                raise ValueError("forked Thread Turn identity sequence drifted")
             validator = self._adapters.validate_role_tools
             if validator is not None and not validator(old_thread_id, result):
                 raise ValueError("role/tool response validation failed")
+            if old_goal is not None:
+                stage = "goal"
+                self._restore_goal(new_thread_id, old_goal)
             stage = "rebind"
             self._adapters.rebind(old_thread_id, new_thread_id)
-            stage = "readback"
-            if not self._adapters.readback(old_thread_id, new_thread_id):
-                raise ValueError("authoritative identity readback failed")
-            stage = "publish"
-            self._adapters.publish(
-                {
-                    "type": "thread_rotated",
-                    "oldThreadId": old_thread_id,
-                    "newThreadId": new_thread_id,
-                }
-            )
         except Exception:
-            self._fail(old_thread_id, stage, new_thread_id)
-            return
+            orphan_new_thread_id = None
+            if new_thread_id is not None:
+                try:
+                    self._client.request(
+                        "thread/delete", {"threadId": new_thread_id}
+                    )
+                except Exception:
+                    orphan_new_thread_id = new_thread_id
+            self._fail(
+                old_thread_id,
+                stage,
+                orphan_new_thread_id=orphan_new_thread_id,
+            )
+            return None
 
+        old_thread_orphaned = False
         try:
             self._client.request("thread/delete", {"threadId": old_thread_id})
         except Exception:
-            self._safe_publish(
-                {
-                    "type": "thread_rotation_orphaned",
-                    "code": "THREAD_ROTATION_OLD_DELETE_FAILED",
-                    "oldThreadId": old_thread_id,
-                    "newThreadId": new_thread_id,
-                }
-            )
+            old_thread_orphaned = True
         finally:
             with self._lock:
                 self._states.pop(old_thread_id, None)
+        self._safe_publish(
+            {
+                "type": "thread_rotated",
+                "oldThreadId": old_thread_id,
+                "newThreadId": new_thread_id,
+                "old_thread_orphaned": old_thread_orphaned,
+            }
+        )
+        return new_thread_id
+
+    @staticmethod
+    def _validate_native_thread(
+        result: Any,
+        *,
+        expected_thread_id: str,
+        expected_source: Any,
+        expected_forked_from: str | None = None,
+    ) -> tuple[str, ...]:
+        thread = result.get("thread") if isinstance(result, Mapping) else None
+        if not isinstance(thread, Mapping):
+            raise ValueError("thread/read response Thread is missing")
+        if thread.get("id") != expected_thread_id:
+            raise ValueError("thread/read returned a different Thread")
+        if thread.get("threadSource") != expected_source:
+            raise ValueError("thread/read Thread source drifted")
+        if (
+            expected_forked_from is not None
+            and thread.get("forkedFromId") != expected_forked_from
+        ):
+            raise ValueError("thread/read fork ancestry drifted")
+        turns = thread.get("turns")
+        if not isinstance(turns, list):
+            raise ValueError("thread/read did not include native Turns")
+        turn_ids: list[str] = []
+        for turn in turns:
+            turn_id = turn.get("id") if isinstance(turn, Mapping) else None
+            items = turn.get("items") if isinstance(turn, Mapping) else None
+            if not isinstance(turn_id, str) or not turn_id or not isinstance(items, list):
+                raise ValueError("thread/read returned an incomplete native Turn")
+            turn_ids.append(turn_id)
+        if len(set(turn_ids)) != len(turn_ids):
+            raise ValueError("thread/read returned duplicate Turn identities")
+        return tuple(turn_ids)
+
+    @staticmethod
+    def _turn_prefix(turn_ids: tuple[str, ...], last_turn_id: str) -> tuple[str, ...]:
+        try:
+            index = turn_ids.index(last_turn_id)
+        except ValueError as exc:
+            raise ValueError("last compaction Turn is absent from native history") from exc
+        return turn_ids[: index + 1]
+
+    def _read_goal(self, thread_id: str) -> tuple[str, str, int | None] | None:
+        result = self._client.request(
+            "thread/goal/get", {"threadId": thread_id}
+        )
+        return self._goal_fields(result, thread_id, allow_none=True)
+
+    def _restore_goal(
+        self,
+        thread_id: str,
+        goal: tuple[str, str, int | None],
+    ) -> None:
+        objective, status, token_budget = goal
+        result = self._client.request(
+            "thread/goal/set",
+            {
+                "threadId": thread_id,
+                "objective": objective,
+                "status": status,
+                "tokenBudget": token_budget,
+            },
+        )
+        if self._goal_fields(result, thread_id, allow_none=False) != goal:
+            raise ValueError("thread/goal/set did not preserve stable Goal fields")
+        if self._read_goal(thread_id) != goal:
+            raise ValueError("forked Thread Goal readback drifted")
+
+    @staticmethod
+    def _goal_fields(
+        result: Any,
+        thread_id: str,
+        *,
+        allow_none: bool,
+    ) -> tuple[str, str, int | None] | None:
+        goal = result.get("goal") if isinstance(result, Mapping) else None
+        if goal is None and allow_none:
+            return None
+        if not isinstance(goal, Mapping) or goal.get("threadId") != thread_id:
+            raise ValueError("native Goal identity is invalid")
+        objective = goal.get("objective")
+        status = goal.get("status")
+        token_budget = goal.get("tokenBudget")
+        if (
+            not isinstance(objective, str)
+            or not objective
+            or status not in _GOAL_STATUSES
+            or (
+                token_budget is not None
+                and (
+                    not isinstance(token_budget, int)
+                    or isinstance(token_budget, bool)
+                    or token_budget <= 0
+                )
+            )
+        ):
+            raise ValueError("native Goal stable fields are invalid")
+        return objective, str(status), token_budget
 
     @staticmethod
     def _validate_profile(profile: ThreadRotationProfile) -> None:
@@ -350,7 +507,8 @@ class ThreadRotationService:
         self,
         thread_id: str,
         stage: str,
-        new_thread_id: str | None = None,
+        *,
+        orphan_new_thread_id: str | None = None,
     ) -> None:
         with self._lock:
             state = self._states.setdefault(thread_id, _ThreadState())
@@ -359,13 +517,18 @@ class ThreadRotationService:
             state.pending = False
             state.running = False
             state.failed = True
-        self._report_failure(thread_id, stage, new_thread_id)
+        self._report_failure(
+            thread_id,
+            stage,
+            orphan_new_thread_id=orphan_new_thread_id,
+        )
 
     def _report_failure(
         self,
         thread_id: str,
         stage: str,
-        new_thread_id: str | None = None,
+        *,
+        orphan_new_thread_id: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "type": "thread_rotation_failed",
@@ -373,8 +536,8 @@ class ThreadRotationService:
             "threadId": thread_id,
             "stage": stage,
         }
-        if new_thread_id is not None:
-            payload["newThreadId"] = new_thread_id
+        if orphan_new_thread_id is not None:
+            payload["orphan_new_thread_id"] = orphan_new_thread_id
         self._safe_publish(payload)
 
     def _safe_publish(self, payload: Mapping[str, Any]) -> None:

@@ -4697,6 +4697,8 @@ class HoudiniIntelligencePanel(QtWidgets.QWidget):
         if old_record is not None:
             self._apply_threads(self._thread_history)
         self._refresh_controls()
+        if was_selected:
+            self._request_goal()
         return old_record is not None or was_selected
 
     def _update_history_name(self, thread_id: Any, name: Any) -> None:

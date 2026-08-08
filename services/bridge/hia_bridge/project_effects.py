@@ -143,6 +143,7 @@ class ProjectRoleExecutor:
         scene_writer: SceneWriterOwnership,
         project_root: str | Path,
         allowed_evidence_roots: Sequence[str | Path],
+        before_role_turn: Callable[[str], str] | None = None,
         total_timeout_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -155,6 +156,7 @@ class ProjectRoleExecutor:
         self._scene_writer = scene_writer
         self._project_root = Path(project_root).resolve()
         self._allowed_roots = tuple(allowed_evidence_roots)
+        self._before_role_turn = before_role_turn
         self._timeout = float(total_timeout_seconds)
         self._clock = clock
         self._ledger = TurnOwnershipLedger()
@@ -197,6 +199,14 @@ class ProjectRoleExecutor:
                 LifecycleEvent(ProjectEvent.PROJECT_BLOCKED, {"reason": exc.code}),
             )
         except ProjectRoleError as exc:
+            if exc.code == "THREAD_ROTATION_FAILED":
+                return ProjectActionResult(
+                    exc.state or state,
+                    LifecycleEvent(
+                        ProjectEvent.PROJECT_BLOCKED,
+                        {"reason": exc.code},
+                    ),
+                )
             if exc.code not in _MODEL_OUTPUT_ERROR_CODES:
                 raise
             return ProjectActionResult(
@@ -642,6 +652,8 @@ class ProjectRoleExecutor:
         )
         required_roles = _stage_review_roles(stage)
         for role in required_roles:
+            state = self._prepare_role_rotation(state, role)
+        for role in required_roles:
             request = self._base_request(state, role, "review_stage")
             request.update({"stage_card": stage, "execution": execution})
             state, call = self._start_turn(
@@ -917,7 +929,14 @@ class ProjectRoleExecutor:
                     self._scene_writer.abandon_uncreated(reservation)
                 raise
             except Exception as exc:
-                if reservation is not None and getattr(exc, "turn_created", None) is False:
+                rotation_failed_before_start = (
+                    isinstance(exc, ProjectRoleError)
+                    and exc.code == "THREAD_ROTATION_FAILED"
+                )
+                if reservation is not None and (
+                    getattr(exc, "turn_created", None) is False
+                    or rotation_failed_before_start
+                ):
                     self._scene_writer.abandon_uncreated(reservation)
                 # A transport or protocol failure does not prove that Codex did
                 # not create the Execution Turn.  Retain the reservation so a
@@ -1006,6 +1025,7 @@ class ProjectRoleExecutor:
         *,
         local_image_paths: Sequence[str] = (),
     ) -> tuple[ProjectState, _TurnCall]:
+        state = self._prepare_role_rotation(state, role)
         envelope = dict(request)
         action = str(envelope.get("action") or "")
         envelope["guidance_revision"] = state.guidance_revision
@@ -1052,6 +1072,42 @@ class ProjectRoleExecutor:
             turn.thread_id or "",
             turn.turn_id or "",
             (),
+        )
+
+    def _prepare_role_rotation(
+        self, state: ProjectState, role: Role
+    ) -> ProjectState:
+        if self._before_role_turn is None:
+            return state
+        binding = state.roles.get(role)
+        if binding is None or not binding.thread_id:
+            raise ProjectRoleError(
+                "THREAD_ROTATION_FAILED",
+                "Project Role rotation identity is missing",
+                state=state,
+            )
+        try:
+            replacement = self._before_role_turn(binding.thread_id)
+        except Exception as exc:
+            raise ProjectRoleError(
+                "THREAD_ROTATION_FAILED",
+                "Project Role rotation failed before turn/start",
+                state=state,
+            ) from exc
+        if replacement == binding.thread_id:
+            return state
+        current = self._registry.require(state.project_id).state
+        rebound = current.roles.get(role)
+        if rebound is None or rebound.thread_id != replacement:
+            raise ProjectRoleError(
+                "THREAD_ROTATION_FAILED",
+                "Project Role rotation did not commit its native identity",
+                state=state,
+            )
+        return replace(
+            state,
+            roles=current.roles,
+            revision=max(state.revision, current.revision),
         )
 
     def _finish_turn(

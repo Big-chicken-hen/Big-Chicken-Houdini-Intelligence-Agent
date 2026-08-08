@@ -256,6 +256,7 @@ def _build_project_runtime(
     model_catalog: Callable[[], Mapping[str, object]],
     scene_writer: SceneWriterOwnership,
     on_project_idle: Callable[[str], None] | None = None,
+    before_role_turn: Callable[[str], str] | None = None,
 ) -> ProjectRuntime:
     """Compose the project runtime once around the owned app-server client."""
 
@@ -307,6 +308,7 @@ def _build_project_runtime(
             scene_writer=scene_writer,
             project_root=project_root,
             allowed_evidence_roots=allowed_evidence_roots,
+            before_role_turn=before_role_turn,
         )
 
     workflow = ProjectWorkflowHost(
@@ -829,15 +831,21 @@ def run(argv: Sequence[str] | None = None) -> int:
         def rotation_profile(
             thread_id: str, last_turn_id: str
         ) -> ThreadRotationProfile | None:
-            profile = session.rotation_profile(thread_id, last_turn_id)
-            if profile is not None:
+            if session.owns_ordinary_thread(thread_id):
+                profile = session.rotation_profile(thread_id, last_turn_id)
+                if profile is None:
+                    raise ValueError("managed ordinary Thread has no rotation profile")
                 return profile
             runtime = project_runtime
-            return (
-                runtime.service.rotation_profile(thread_id, last_turn_id)
-                if runtime is not None
-                else None
-            )
+            if (
+                runtime is not None
+                and runtime.service.role_identity_for_thread(thread_id) is not None
+            ):
+                profile = runtime.service.rotation_profile(thread_id, last_turn_id)
+                if profile is None:
+                    raise ValueError("managed project Role has no rotation profile")
+                return profile
+            return None
 
         def rotation_is_idle(thread_id: str) -> bool:
             if session.owns_ordinary_thread(thread_id):
@@ -862,17 +870,6 @@ def run(argv: Sequence[str] | None = None) -> int:
                 return
             raise ValueError("rotation target is no longer authoritative")
 
-        def rotation_readback(old_thread_id: str, new_thread_id: str) -> bool:
-            if session.owns_ordinary_thread(new_thread_id):
-                return session.rotation_readback(old_thread_id, new_thread_id)
-            runtime = project_runtime
-            return (
-                runtime.service.rotation_readback(old_thread_id, new_thread_id)
-                if runtime is not None
-                and runtime.service.role_identity_for_thread(new_thread_id) is not None
-                else False
-            )
-
         def rotation_validate_role_tools(
             thread_id: str, result: Mapping[str, Any]
         ) -> bool:
@@ -884,6 +881,9 @@ def run(argv: Sequence[str] | None = None) -> int:
                 if runtime is not None
                 else False
             )
+
+        def rotation_supports_goal(thread_id: str) -> bool:
+            return session.owns_ordinary_thread(thread_id)
 
         def publish_rotation(payload: Mapping[str, Any]) -> None:
             event_type = payload.get("type")
@@ -915,12 +915,50 @@ def run(argv: Sequence[str] | None = None) -> int:
                 expected_profile=rotation_profile,
                 is_idle=rotation_is_idle,
                 rebind=rotation_rebind,
-                readback=rotation_readback,
                 publish=publish_rotation,
                 validate_role_tools=rotation_validate_role_tools,
+                supports_goal=rotation_supports_goal,
             ),
         )
         client.add_notification_observer(thread_rotation.observe)
+
+        def rotate_project_role_before_turn(thread_id: str) -> str:
+            if not thread_rotation.needs_rotation(thread_id):
+                return thread_id
+            runtime = project_runtime
+            if runtime is None:
+                raise BridgeError(
+                    "THREAD_ROTATION_FAILED",
+                    "Project Role rotation runtime is unavailable",
+                    409,
+                )
+            identity = runtime.service.role_identity_for_thread(thread_id)
+            if identity is None:
+                raise BridgeError(
+                    "THREAD_ROTATION_FAILED",
+                    "Project Role rotation identity is stale",
+                    409,
+                )
+            project_id, _ = identity
+            record = runtime.registry.require(project_id)
+            if any(
+                runtime.client.has_active_thread(binding.thread_id)
+                for binding in record.state.roles.values()
+            ):
+                raise BridgeError(
+                    "THREAD_ROTATION_FAILED",
+                    "Project Role rotation requires an idle Role boundary",
+                    409,
+                )
+            try:
+                return thread_rotation.rotate_before_turn(thread_id)
+            except Exception as exc:
+                raise BridgeError(
+                    "THREAD_ROTATION_FAILED",
+                    "Project Role rotation failed before turn/start",
+                    409,
+                ) from exc
+
         project_runtime_arguments = dict(
             client=client,
             events=events,
@@ -940,6 +978,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             ),
             scene_writer=scene_writer,
             on_project_idle=thread_rotation.notify_idle,
+            before_role_turn=rotate_project_role_before_turn,
         )
         session_model_catalog = getattr(session, "list_models", None)
         if callable(session_model_catalog):

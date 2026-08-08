@@ -2003,23 +2003,6 @@ class BridgeSession:
             old_selected = self._thread_id
             old_focus = set(self._focus_enabled_threads)
             old_bindings = dict(self._focus_goal_bindings)
-            attachments_root = (
-                self._project_root / ".runtime" / "attachments"
-            ).resolve()
-            old_cache = (attachments_root / old_thread_id).resolve()
-            new_cache = (attachments_root / new_thread_id).resolve()
-            if old_cache.parent != attachments_root or new_cache.parent != attachments_root:
-                raise ValueError("ordinary Thread attachment cache identity is unsafe")
-            if new_cache.exists() or new_cache.is_symlink():
-                raise ValueError("replacement Thread attachment cache already exists")
-            moved_cache = False
-            if old_cache.is_symlink():
-                raise ValueError("ordinary Thread attachment cache is unsafe")
-            if old_cache.exists():
-                if not old_cache.is_dir():
-                    raise ValueError("ordinary Thread attachment cache is unsafe")
-                old_cache.rename(new_cache)
-                moved_cache = True
             try:
                 self._ordinary_thread_ids.remove(old_thread_id)
                 self._ordinary_thread_ids.add(new_thread_id)
@@ -2040,31 +2023,7 @@ class BridgeSession:
                 self._thread_id = old_selected
                 self._focus_enabled_threads = old_focus
                 self._focus_goal_bindings = old_bindings
-                if moved_cache:
-                    if old_cache.exists() or not new_cache.is_dir():
-                        raise RuntimeError(
-                            "ordinary Thread attachment cache rollback is unsafe"
-                        )
-                    new_cache.rename(old_cache)
                 raise
-
-    def rotation_readback(self, old_thread_id: str, new_thread_id: str) -> bool:
-        with self._lock:
-            return (
-                old_thread_id not in self._ordinary_thread_ids
-                and new_thread_id in self._ordinary_thread_ids
-                and old_thread_id not in self._ordinary_thread_profiles
-                and new_thread_id in self._ordinary_thread_profiles
-                and self._thread_id != old_thread_id
-                and old_thread_id not in self._focus_enabled_threads
-                and old_thread_id not in self._focus_goal_bindings
-                and not (
-                    self._project_root
-                    / ".runtime"
-                    / "attachments"
-                    / old_thread_id
-                ).exists()
-            )
 
     def _require_ordinary_thread(self, thread_id: str) -> None:
         with self._lock:
