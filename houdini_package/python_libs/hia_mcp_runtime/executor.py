@@ -6347,7 +6347,7 @@ class HoudiniExecutor:
         )
         offset = _bounded_int(arguments.get("offset", 0), 0, 1_000_000)
         limit = _bounded_int(arguments.get("limit", 10), 1, 50)
-        mode = str(arguments.get("mode") or "hybrid").casefold()
+        mode = str(arguments.get("mode") or "lexical").casefold()
         if mode not in {"lexical", "vector", "hybrid"}:
             raise HiaRuntimeError(
                 "INVALID_ARGUMENTS",

@@ -5,6 +5,7 @@ import os
 import re
 import runpy
 import shutil
+import struct
 import subprocess
 import sys
 import types
@@ -20,7 +21,9 @@ MODULE_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Core.psm1"
 LAUNCHER_PATH = REPOSITORY_ROOT / "scripts" / "hia-launcher.ps1"
 WPF_SCRIPT_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.Wpf.ps1"
 XAML_PATH = REPOSITORY_ROOT / "scripts" / "launcher" / "HiaLauncher.xaml"
+LAUNCHER_ICON_PATH = REPOSITORY_ROOT / "assets" / "launcher" / "big-chicken-hen.ico"
 LIFECYCLE_PATH = REPOSITORY_ROOT / "scripts" / "launch-houdini.ps1"
+SOURCE_LAUNCHER_PATH = REPOSITORY_ROOT / "Start-Big-Chicken-HIA.cmd"
 EMBEDDING_CONTRACT_PATH = REPOSITORY_ROOT / "src" / "hia_core" / "embedding_contract.py"
 EMBEDDING_INSTALLER_PATH = (
     REPOSITORY_ROOT / "scripts" / "launcher" / "Install-HiaEmbedding.ps1"
@@ -152,6 +155,22 @@ $wrapperValue = ConvertTo-HiaKnowledgeProcessArgument -Value ''
         self.assertEqual('""', payload["wrapper_encoded"])
         self.assertEqual("EMPTY", payload["core_received"])
         self.assertEqual("EMPTY", payload["wrapper_received"])
+
+    def test_source_checkout_has_one_root_launcher_entry(self) -> None:
+        source = SOURCE_LAUNCHER_PATH.read_text(encoding="utf-8")
+        self.assertIn("%~dp0", source)
+        self.assertIn(
+            r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe",
+            source,
+        )
+        self.assertIn("scripts\\hia-launcher.ps1", source)
+        self.assertIn("-NoProfile -Sta -ExecutionPolicy Bypass", source)
+        self.assertNotIn("Start-Process", source)
+        self.assertNotRegex(source, r"(?i)[a-z]:[\\/]")
+
+        readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("`Start-Big-Chicken-HIA.cmd`", readme)
+        self.assertIn("`BigChickenLauncher.exe`", readme)
 
     def make_houdini_install(self, name: str, *, hython: bool = True) -> Path:
         bin_directory = self.sandbox / "Side Effects Software" / name / "bin"
@@ -656,9 +675,20 @@ $failedCheck = @($failedResult.checks | Where-Object id -eq 'bridge.python')[0]
         package_directory = fake_root / "houdini_package" / "packages"
         package_directory.mkdir(parents=True)
         (fake_root / ".codex" / "config.toml").write_text(
-            """[mcp_servers.houdini_intelligence]
+            """approval_policy = 'never'
+
+[mcp_servers.unrelated]
+command = 'keep-me.exe'
+enabled = false
+required = true
+custom_option = 'keep-me'
+
+[mcp_servers.houdini_intelligence]
 command = 'Z:\\old-location\\.runtime\\fxhoudinimcp\\1.3.0\\venv\\Scripts\\python.exe'
 cwd = 'Z:\\old-location'
+enabled = false
+required = true
+custom_option = 'keep-hia-option'
 """,
             encoding="utf-8",
         )
@@ -691,6 +721,17 @@ cwd = 'Z:\\old-location'
         )
         self.assertIn("command = '.runtime\\fxhoudinimcp", config)
         self.assertIn("cwd = '.'", config)
+        self.assertIn("approval_policy = 'never'", config)
+        self.assertIn("command = 'keep-me.exe'", config)
+        self.assertIn("custom_option = 'keep-me'", config)
+        self.assertIn("custom_option = 'keep-hia-option'", config)
+        unrelated, target = config.split("[mcp_servers.houdini_intelligence]", 1)
+        self.assertIn("enabled = false", unrelated)
+        self.assertIn("required = true", unrelated)
+        self.assertIn("enabled = true", target)
+        self.assertIn("required = false", target)
+        self.assertNotIn("enabled = false", target)
+        self.assertNotIn("required = true", target)
         self.assertNotIn("Z:\\old-location", config)
         self.assertEqual("$HIA_PROJECT_ROOT/houdini_package", package["path"])
         self.assertNotIn("Z:/old-location", json.dumps(package))
@@ -698,7 +739,19 @@ cwd = 'Z:\\old-location'
 
     def test_codex_login_guidance_is_project_local_and_contains_no_credentials(self) -> None:
         fake_root = self.sandbox / "portable login project"
-        fake_root.mkdir()
+        (fake_root / "contracts" / "codex-app-server" / "test-contract").mkdir(
+            parents=True
+        )
+        codex_executable = (
+            fake_root
+            / ".runtime"
+            / "toolchains"
+            / "codex"
+            / "test-contract"
+            / "codex.exe"
+        )
+        codex_executable.parent.mkdir(parents=True)
+        codex_executable.write_bytes(b"test")
         output = self.run_powershell(
             f"Get-HiaCodexLoginCommand -ProjectRoot {_ps_literal(fake_root)}"
         )
@@ -709,12 +762,13 @@ cwd = 'Z:\\old-location'
                 / ".runtime"
                 / "toolchains"
                 / "codex"
-                / "0.144.3"
+                / "test-contract"
                 / "codex.exe"
             ),
             output,
         )
         self.assertIn("login --device-auth", output)
+        self.assertIn('cli_auth_credentials_store="file"', output)
         self.assertNotRegex(output.lower(), r"(bearer|refresh_token|sk-proj)")
 
     def test_report_json_redacts_credentials(self) -> None:
@@ -835,6 +889,72 @@ $check | ConvertTo-Json -Compress
         self.assertEqual("red", check["level"])
         self.assertIn("required=true", check["message"])
         self.assertIn("任务恢复", check["message"])
+
+        self.run_powershell(
+            f"Repair-HiaSafeProject -ProjectRoot {_ps_literal(fake_root)} | Out-Null"
+        )
+        repaired = (config_directory / "config.toml").read_text(encoding="utf-8")
+        self.assertIn("enabled = true", repaired)
+        self.assertIn("required = false", repaired)
+        repaired_check = json.loads(
+            self.run_powershell(
+                f"""
+$result = Invoke-HiaPreflight `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -HoudiniExe {_ps_literal(fake_root / 'missing' / 'houdini.exe')} `
+    -BridgePython {_ps_literal(fake_root / 'missing' / 'python.exe')} `
+    -ProbeOverrides @{{ runtime_writable = $false; loopback = $true }}
+$result.checks | Where-Object id -eq 'project.codex_config_required' |
+    ConvertTo-Json -Compress
+"""
+            )
+        )
+        self.assertEqual("green", repaired_check["level"])
+
+    def test_wpf_repair_routes_managed_bridge_and_reports_incomplete_package(self) -> None:
+        source = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        update = source[
+            source.index("function Update-RepairButton") :
+            source.index("function New-CheckView")
+        ]
+        handler = source[
+            source.index("$repairButton.Add_Click") :
+            source.index("function Invoke-HiaCacheCleanup")
+        ]
+
+        self.assertIn("安装包不完整，请重新下载完整包", update)
+        self.assertIn("'project.launch_script'", update)
+        self.assertIn("'hia_mcp_v2.runtime'", update)
+        self.assertIn("'project.codex_config_required'", update)
+        self.assertIn("切换到项目受管 Bridge Python", update)
+        self.assertLess(
+            update.index("$requiredPackageFileMissing"),
+            update.index("Test-CurrentRedCheck -Id 'codex.executable'"),
+        )
+
+        knowledge_route = handler.index(
+            "if (-not [string]::IsNullOrWhiteSpace($knowledgeAction))"
+        )
+        bridge_route = handler.index("Test-CurrentRedCheck -Id 'bridge.python'")
+        self.assertLess(knowledge_route, bridge_route)
+        self.assertIn(
+            "Get-HiaManagedBridgePythonPath -ProjectRoot $projectRoot",
+            handler,
+        )
+        self.assertIn("-PreferredBridge $managedBridge", handler)
+        self.assertNotIn("Start-HiaEmbeddingInstall", handler)
+        self.assertNotIn("embedding.runtime", update)
+
+        explicit_embedding_handler = source[
+            source.index("$installEmbeddingButton.Add_Click") :
+            source.index("$embeddingDeviceCombo.Add_SelectionChanged")
+        ]
+        self.assertIn("Start-HiaEmbeddingInstall", explicit_embedding_handler)
+        self.assertIn("Get-ComboEmbeddingProfile", explicit_embedding_handler)
+        call_sites = re.findall(
+            r"(?m)^\s*Start-HiaEmbeddingInstall\s*$", source
+        )
+        self.assertEqual(1, len(call_sites))
 
     def test_settings_store_backend_with_paths_and_default_legacy_settings_to_hia_v2(self) -> None:
         fake_root = self.sandbox / "settings-project"
@@ -1112,7 +1232,7 @@ $deviceKey = [string]$data.contract.settings.device
         self.assertEqual("cuda", payload["device"])
         self.assertEqual(public["settings"]["profile"], payload["setting_key"])
         self.assertEqual(
-            set(public["profiles"]),
+            {"", *public["profiles"]},
             {choice["id"] for choice in payload["choices"]},
         )
         details = " ".join(choice["detail"] for choice in payload["choices"])
@@ -1482,7 +1602,7 @@ $duplicate = New-TestResult @(
         }
         missing = json.loads(json.dumps(base))
         missing["state"] = "missing"
-        missing["requested_profile"] = "qwen3-embedding-0.6b"
+        missing["requested_profile"] = ""
         missing_with_model = json.loads(json.dumps(missing))
         missing_with_model["models"]["items"][0]["installed"] = True
         legacy = json.loads(json.dumps(base))
@@ -1584,58 +1704,32 @@ $script:knowledgeEnvironmentStatus = $missing
 """
         )
         payload = json.loads(output)
-        self.assertEqual(
-            "qwen3-embedding-0.6b",
-            payload["fresh_clone_profile"],
-        )
-        self.assertEqual(
-            "environment-install-embedding",
-            payload["missing_action"],
-        )
+        self.assertEqual("", payload["fresh_clone_profile"])
+        self.assertEqual("environment-install", payload["missing_action"])
         self.assertEqual(
             "environment-install",
             payload["missing_no_profile_action"],
         )
-        self.assertEqual(
-            "environment-install-embedding",
-            payload["missing_model_action"],
-        )
-        self.assertEqual(
-            "environment-repair-embedding",
-            payload["legacy_action"],
-        )
+        self.assertEqual("environment-install", payload["missing_model_action"])
+        self.assertEqual("environment-repair", payload["legacy_action"])
         self.assertEqual(
             "environment-repair",
             payload["legacy_no_profile_action"],
         )
-        self.assertEqual(
-            "environment-repair-embedding",
-            payload["legacy_model_action"],
-        )
-        self.assertEqual(
-            "environment-repair-embedding",
-            payload["repair_model_action"],
-        )
-        self.assertEqual(
-            "environment-repair-embedding",
-            payload["unsafe_action"],
-        )
-        self.assertEqual(
-            "environment-repair-embedding",
-            payload["existing_model_action"],
-        )
+        self.assertEqual("environment-repair", payload["legacy_model_action"])
+        self.assertEqual("environment-repair", payload["repair_model_action"])
+        self.assertEqual("environment-repair", payload["unsafe_action"])
+        self.assertEqual("", payload["existing_model_action"])
         self.assertEqual("", payload["ready_model_action"])
-        self.assertEqual(
-            "environment-repair-embedding",
-            payload["fts_action"],
-        )
+        self.assertEqual("", payload["fts_action"])
         self.assertEqual("", payload["fts_no_profile_action"])
         self.assertIn("项目外 Python", payload["legacy_reason"])
         self.assertIn("受管标记", payload["legacy_reason"])
-        self.assertIn("一次修复", payload["legacy_model_reason"])
-        self.assertIn("下载或复用所选模型和项目缓存", payload["legacy_model_reason"])
-        self.assertIn("PyTorch", payload["existing_model_reason"])
-        self.assertIn("下载或复用模型和项目缓存", payload["existing_model_reason"])
+        self.assertIn("pypdf", payload["legacy_model_reason"])
+        self.assertNotIn("PyTorch", payload["legacy_model_reason"])
+        self.assertNotIn("下载", payload["legacy_model_reason"])
+        self.assertIn("FTS5", payload["existing_model_reason"])
+        self.assertNotIn("下载", payload["existing_model_reason"])
         self.assertIn("pypdf", payload["parser_stage"])
 
     def test_gui_knowledge_environment_repair_is_async_logged_and_retryable(
@@ -1671,16 +1765,8 @@ $script:knowledgeEnvironmentStatus = $missing
             start,
         )
         self.assertIn("'-LogPath', $environmentLogPath", start)
-        self.assertIn("$selectedProfile = Get-ComboEmbeddingProfile", start)
-        self.assertIn(
-            "[string]::IsNullOrWhiteSpace($selectedProfile)",
-            start,
-        )
-        self.assertIn(
-            "$arguments += @('-Profile', $selectedProfile)",
-            start,
-        )
-        self.assertIn("'-Device', (Get-ComboEmbeddingDevice)", start)
+        self.assertNotIn("'-Profile'", start)
+        self.assertNotIn("'-Device'", start)
         self.assertIn("'environment-install'", start)
         self.assertIn("'environment-repair'", start)
         self.assertNotIn("Start-HiaEmbeddingInstall", start)
@@ -2131,6 +2217,23 @@ $data = Get-HiaEmbeddingContractData `
     -ProjectRoot {_ps_literal(fake_root)} `
     -PythonExe {_ps_literal(sys.executable)}
 $profile = [string]$data.contract.default_profile
+$lexicalStatus = New-HiaKnowledgeIndexProcessPlan `
+    -ProjectRoot {_ps_literal(fake_root)} `
+    -BridgePython {_ps_literal(sys.executable)} `
+    -EmbeddingData $data `
+    -EmbeddingProfile '' `
+    -Action status
+$lexicalBuildError = ''
+try {{
+    New-HiaKnowledgeIndexProcessPlan `
+        -ProjectRoot {_ps_literal(fake_root)} `
+        -BridgePython {_ps_literal(sys.executable)} `
+        -EmbeddingData $data `
+        -EmbeddingProfile '' `
+        -Action build | Out-Null
+}} catch {{
+    $lexicalBuildError = [string]$_.Exception.Message
+}}
 $status = New-HiaKnowledgeIndexProcessPlan `
     -ProjectRoot {_ps_literal(fake_root)} `
     -BridgePython {_ps_literal(sys.executable)} `
@@ -2144,6 +2247,8 @@ $build = New-HiaKnowledgeIndexProcessPlan `
     -EmbeddingProfile $profile `
     -Action build
 [pscustomobject]@{{
+    lexical_status = $lexicalStatus
+    lexical_build_error = $lexicalBuildError
     status = $status
     build = $build
 }} | ConvertTo-Json -Depth 12 -Compress
@@ -2184,6 +2289,11 @@ $build = New-HiaKnowledgeIndexProcessPlan `
             set(public["environment"].values()),
             set(payload["status"]["clear_environment_names"]),
         )
+        lexical_environment = payload["lexical_status"]["environment"]
+        self.assertNotIn(public["environment"]["profile"], lexical_environment)
+        self.assertNotIn(public["environment"]["dimension"], lexical_environment)
+        self.assertNotIn(public["environment"]["device"], lexical_environment)
+        self.assertIn("explicitly selected Qwen profile", payload["lexical_build_error"])
 
     def test_knowledge_index_jsonl_parser_handles_progress_completion_and_error(
         self,
@@ -2551,6 +2661,7 @@ function Add-TestModel([object]$Profile, [bool]$Complete) {{
     }}
 }}
 
+$lexical = New-EmbeddingChildEnvironment -Payload $payload -RequestedProfile '' -Root $root
 $empty = New-EmbeddingChildEnvironment -Payload $payload -RequestedProfile $alternate -Root $root
 [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($workerPython)) | Out-Null
 [System.IO.File]::WriteAllBytes($workerPython, [byte[]](1))
@@ -2572,6 +2683,9 @@ $alternateManifest = [ordered]@{{
 $full = New-EmbeddingChildEnvironment -Payload $payload -RequestedProfile $alternate -RequestedDevice cpu -Root $root
 $environment = $data.contract.environment
 [pscustomobject]@{{
+    lexical_keys = @($lexical.values.Keys)
+    lexical_requested = [string]$lexical.requested_profile
+    lexical_cleared_environment_count = @($lexical.environment_names).Count
     empty_keys = @($empty.values.Keys)
     empty_has_python = $empty.values.ContainsKey([string]$environment.python)
     half_has_python = $half.values.ContainsKey([string]$environment.python)
@@ -2588,6 +2702,8 @@ $environment = $data.contract.environment
 """
         )
         payload = json.loads(output)
+        self.assertEqual([], payload["lexical_keys"])
+        self.assertEqual("", payload["lexical_requested"])
         self.assertEqual(3, len(payload["empty_keys"]))
         self.assertFalse(payload["empty_has_python"])
         self.assertTrue(payload["half_has_python"])
@@ -2609,6 +2725,10 @@ $environment = $data.contract.environment
         self.assertEqual(
             len(set(contract["environment"].values())),
             payload["cleared_environment_count"],
+        )
+        self.assertEqual(
+            len(set(contract["environment"].values())),
+            payload["lexical_cleared_environment_count"],
         )
 
     def test_lifecycle_bootstrap_builds_only_installed_pending_knowledge(
@@ -2703,6 +2823,247 @@ $lexicalOnly = ($script:calls -join ',')
         self.assertEqual("bootstrap,build", payload["pending"])
         self.assertEqual("bootstrap", payload["complete"])
         self.assertEqual("bootstrap", payload["lexical_only"])
+
+    def test_lifecycle_surfaces_redacted_bridge_startup_error(self) -> None:
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(LIFECYCLE_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'launch-houdini.ps1 did not parse' }}
+$definition = @($ast.FindAll({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-BridgeStartupFailureMessage'
+}}, $true))
+if ($definition.Count -ne 1) {{ throw 'Bridge startup error helper is unavailable' }}
+. ([scriptblock]::Create($definition[0].Extent.Text))
+Set-StrictMode -Version Latest
+
+$structured = @{{
+    ok = $false
+    structured_error = @{{
+        code = 'CODEX_PROCESS_EXITED'
+        message = 'Codex app-server stdout closed unexpectedly'
+    }}
+}} | ConvertTo-Json -Compress
+$longStructured = @{{
+    ok = $false
+    structured_error = @{{
+        code = 'BRIDGE_START_FAILED'
+        message = (('x' * 10) + "`r`n" + [char]1 + ('y' * 890))
+    }}
+}} | ConvertTo-Json -Compress
+[pscustomobject]@{{
+    structured = Get-BridgeStartupFailureMessage -StandardError $structured
+    mixed = Get-BridgeStartupFailureMessage -StandardError ($structured + "`n{{`"level`":`"warning`"}}")
+    unrelated = Get-BridgeStartupFailureMessage -StandardError '{{"level":"warning"}}'
+    bounded = Get-BridgeStartupFailureMessage -StandardError $longStructured
+}} | ConvertTo-Json -Compress
+"""
+        )
+        payload = json.loads(output)
+        self.assertEqual(
+            "Bridge startup failed [CODEX_PROCESS_EXITED]: "
+            "Codex app-server stdout closed unexpectedly",
+            payload["structured"],
+        )
+        self.assertEqual(payload["structured"], payload["mixed"])
+        self.assertEqual(
+            "Bridge exited without bootstrap data",
+            payload["unrelated"],
+        )
+        bounded_prefix = "Bridge startup failed [BRIDGE_START_FAILED]: "
+        self.assertTrue(payload["bounded"].startswith(bounded_prefix))
+        bounded_message = payload["bounded"][len(bounded_prefix) :]
+        self.assertEqual(800, len(bounded_message))
+        self.assertNotRegex(bounded_message, r"[\x00-\x1f\x7f]")
+
+        source = LIFECYCLE_PATH.read_text(encoding="utf-8")
+        self.assertIn("$bridgeInfo.RedirectStandardError = $true", source)
+        self.assertIn(
+            "$bridgeProcess.StandardError.ReadToEndAsync()",
+            source,
+        )
+
+    def test_wpf_opens_project_local_codex_login_and_surfaces_bootstrap_errors(self) -> None:
+        source = WPF_SCRIPT_PATH.read_text(encoding="utf-8")
+        login = source[
+            source.index("function Start-HiaCodexLogin") :
+            source.index("function New-HiaEmbeddingInstallLogPath")
+        ]
+        bootstrap = source[
+            source.index("function Complete-HiaCodexBootstrap") :
+            source.index("function Start-HiaCodexLogin")
+        ]
+
+        self.assertIn("Get-HiaCodexLoginCommand -ProjectRoot", login)
+        self.assertIn("WindowsPowerShell\\v1.0\\powershell.exe", login)
+        self.assertIn("'-NoProfile'", login)
+        self.assertIn("'-Command', $loginCommand", login)
+        self.assertIn("$startInfo.UseShellExecute = $false", login)
+        self.assertIn("$startInfo.CreateNoWindow = $false", login)
+        self.assertNotIn("Clipboard", login)
+        self.assertIn("Start-HiaCodexLogin", source)
+        self.assertIn("function Complete-HiaCodexLogin", source)
+        self.assertIn("$script:codexLoginTimer.Add_Tick", source)
+        self.assertIn("Invoke-GuiScan", login)
+        self.assertIn("$null -ne $script:currentResult", login)
+        self.assertIn("-not $script:preflightFailed", login)
+        self.assertIn("$startInfo.RedirectStandardOutput = $true", bootstrap)
+        self.assertIn("$startInfo.RedirectStandardError = $true", bootstrap)
+        self.assertIn("ConvertTo-HiaRedactedText -Text $detail", bootstrap)
+        self.assertIn("-Repair", bootstrap)
+
+    def test_wpf_tracks_houdini_process_until_real_exit(self) -> None:
+        launcher = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
+        wpf = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        start = launcher[
+            launcher.index("function Start-ExistingHoudiniLauncher") :
+            launcher.index("if ($PrintCodexLoginCommand)")
+        ]
+        self.assertIn("return $process", start)
+        self.assertNotIn("$process.Dispose()", start)
+
+        handler = wpf[
+            wpf.index("$launchButton.Add_Click") :
+            wpf.index("$minimizeWindowButton.Add_Click")
+        ]
+        process_assignment = handler.index(
+            "$script:launchProcess = Start-ExistingHoudiniLauncher"
+        )
+        timer_start = handler.index(
+            "$script:launchProcessTimer.Start()",
+            process_assignment,
+        )
+        post_start_recovery = handler.index(
+            "if ($null -ne $script:pendingRecovery)",
+            process_assignment,
+        )
+        self.assertLess(timer_start, post_start_recovery)
+        self.assertIn("Set-HiaLaunchRunningFeedback", handler)
+        self.assertIn(
+            "if ($null -ne $script:launchProcess -and "
+            "-not $script:launchProcess.HasExited)",
+            handler,
+        )
+        self.assertIn("Set-BusyState -Busy $false", handler)
+        self.assertNotIn("已交给脚本", handler)
+
+        output = self.run_powershell(
+            f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    {_ps_literal(WPF_SCRIPT_PATH)},
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -gt 0) {{ throw 'WPF launcher did not parse.' }}
+foreach ($name in @('Set-HiaLaunchRunningFeedback', 'Complete-HiaLaunchProcess')) {{
+    $definition = @($ast.FindAll({{
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $name
+    }}, $true))
+    if ($definition.Count -ne 1) {{ throw "Missing function: $name" }}
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+}}
+
+$launchButton = [pscustomobject]@{{ IsEnabled = $true }}
+$overallStatusText = [pscustomobject]@{{ Text = '' }}
+$overviewOverallHeadline = [pscustomobject]@{{ Text = '' }}
+$overviewOverallDetail = [pscustomobject]@{{ Text = '' }}
+$script:isBusy = $false
+$script:messages = @()
+$script:timerStopped = $false
+function Set-BusyState([bool]$Busy) {{ $script:isBusy = $Busy }}
+function Set-OverallState([string]$State) {{ }}
+function Show-InlineStatus(
+    [string]$Kind,
+    [string]$Text,
+    [switch]$Transient
+) {{ $script:messages += $Text }}
+function New-TestTimer {{
+    $timer = [pscustomobject]@{{ stopped = $false }}
+    $timer | Add-Member -MemberType ScriptMethod -Name Stop -Value {{
+        $this.stopped = $true
+    }}
+    return $timer
+}}
+function Start-TestProcess([string]$Command) {{
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = (Get-Process -Id $PID).Path
+    $info.Arguments = '-NoProfile -Command "' + $Command + '"'
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) {{ throw 'Test process did not start.' }}
+    return $process
+}}
+
+$script:launchProcessTimer = New-TestTimer
+$script:launchProcess = Start-TestProcess -Command 'Start-Sleep -Milliseconds 400; exit 0'
+Complete-HiaLaunchProcess
+$runningTracked = $null -ne $script:launchProcess
+$runningBusy = $script:isBusy
+$runningLaunchDisabled = -not [bool]$launchButton.IsEnabled
+if (-not $script:launchProcess.WaitForExit(5000)) {{
+    throw 'Running test process did not exit.'
+}}
+Complete-HiaLaunchProcess
+$successReleased = $null -eq $script:launchProcess -and -not $script:isBusy
+$successStopped = [bool]$script:launchProcessTimer.stopped
+$successMessage = [string]$script:messages[-1]
+
+$script:messages = @()
+$script:launchProcessTimer = New-TestTimer
+$script:launchProcess = Start-TestProcess -Command 'exit 7'
+if (-not $script:launchProcess.WaitForExit(5000)) {{
+    throw 'Failure test process did not exit.'
+}}
+Complete-HiaLaunchProcess
+[pscustomobject]@{{
+    running_tracked = $runningTracked
+    running_busy = $runningBusy
+    running_launch_disabled = $runningLaunchDisabled
+    success_released = $successReleased
+    success_stopped = $successStopped
+    success_message = $successMessage
+    failure_released = $null -eq $script:launchProcess -and -not $script:isBusy
+    failure_stopped = [bool]$script:launchProcessTimer.stopped
+    failure_message = [string]$script:messages[-1]
+}} | ConvertTo-Json -Compress
+""",
+            timeout=15,
+        )
+        payload = json.loads(output)
+        self.assertTrue(payload["running_tracked"])
+        self.assertTrue(payload["running_busy"])
+        self.assertTrue(payload["running_launch_disabled"])
+        self.assertTrue(payload["success_released"])
+        self.assertTrue(payload["success_stopped"])
+        self.assertIn("正常结束", payload["success_message"])
+        self.assertTrue(payload["failure_released"])
+        self.assertTrue(payload["failure_stopped"])
+        self.assertIn("退出码 7", payload["failure_message"])
+
+        closed = wpf[
+            wpf.index("$window.Add_Closed") :
+            wpf.index("$window.Add_ContentRendered")
+        ]
+        launch_cleanup = closed[
+            closed.index("if ($null -ne $script:launchProcess)") :
+            closed.index("if ($null -ne $script:embeddingProcess)")
+        ]
+        self.assertIn("$script:launchProcess.Dispose()", launch_cleanup)
+        self.assertNotIn("Stop-Process", launch_cleanup)
+        self.assertNotIn(".Kill(", launch_cleanup)
 
     def test_render_output_directory_defaults_validates_and_creates_writable_local_path(self) -> None:
         fake_root = self.sandbox / "render-output-project"
@@ -4886,11 +5247,15 @@ Add-Type -TypeDefinition $source -Language CSharp
         self.assertEqual("net8.0-windows", properties["TargetFramework"])
         self.assertEqual("true", properties["UseWPF"])
         self.assertEqual("BigChickenLauncher", properties["AssemblyName"])
+        self.assertEqual(
+            r"..\..\assets\launcher\big-chicken-hen.ico",
+            properties["ApplicationIcon"],
+        )
         self.assertEqual("Big-Chicken Launcher", properties["Title"])
         self.assertEqual("Big-Chicken Launcher", properties["AssemblyTitle"])
         self.assertEqual("Big-Chicken Houdini Intelligence Agent", properties["Product"])
         self.assertEqual("Big-Chicken", properties["Company"])
-        self.assertEqual("0.1.1-preview", properties["Version"])
+        self.assertEqual("1.0.0-beta.1", properties["Version"])
         self.assertEqual("win-x64", properties["RuntimeIdentifier"])
         self.assertEqual("true", properties["SelfContained"])
         self.assertEqual("true", properties["PublishSingleFile"])
@@ -4956,6 +5321,46 @@ Add-Type -TypeDefinition $source -Language CSharp
             (EXE_PROJECT_PATH.read_text(encoding="utf-8") + WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")).lower(),
         )
 
+    def test_launcher_hen_icon_is_multisize_and_wired_to_exe_and_wpf(self) -> None:
+        payload = LAUNCHER_ICON_PATH.read_bytes()
+        reserved, kind, count = struct.unpack_from("<HHH", payload, 0)
+        self.assertEqual((0, 1, 9), (reserved, kind, count))
+        sizes: list[tuple[int, int]] = []
+        for index in range(count):
+            (
+                width,
+                height,
+                _colors,
+                _reserved,
+                _planes,
+                bits_per_pixel,
+                byte_count,
+                offset,
+            ) = struct.unpack_from("<BBBBHHII", payload, 6 + index * 16)
+            sizes.append((256 if width == 0 else width, 256 if height == 0 else height))
+            self.assertEqual(32, bits_per_pixel)
+            self.assertEqual(b"\x89PNG\r\n\x1a\n", payload[offset : offset + 8])
+            self.assertLessEqual(offset + byte_count, len(payload))
+        self.assertEqual(
+            [(16, 16), (20, 20), (24, 24), (32, 32), (40, 40),
+             (48, 48), (64, 64), (128, 128), (256, 256)],
+            sizes,
+        )
+
+        wpf = WPF_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        icon_load = wpf[
+            wpf.index("$launcherIconPath =") : wpf.index("$windowChrome =")
+        ]
+        for required in (
+            "big-chicken-hen.ico",
+            "[System.IO.FileAttributes]::ReparsePoint",
+            "[System.Windows.Media.Imaging.IconBitmapDecoder]::new",
+            "[System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad",
+            "$window.Icon = $launcherIconFrame",
+            "请重新下载完整发布包",
+        ):
+            self.assertIn(required, icon_load)
+
     def test_cli_modes_do_not_load_wpf_assets(self) -> None:
         fake_root = self.sandbox / "portable-cli-no-ui"
         launcher_directory = fake_root / "scripts" / "launcher"
@@ -4966,6 +5371,20 @@ Add-Type -TypeDefinition $source -Language CSharp
             "# lifecycle marker\n", encoding="utf-8"
         )
         (fake_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        contract_version = "test-contract"
+        (fake_root / "contracts" / "codex-app-server" / contract_version).mkdir(
+            parents=True
+        )
+        codex_executable = (
+            fake_root
+            / ".runtime"
+            / "toolchains"
+            / "codex"
+            / contract_version
+            / "codex.exe"
+        )
+        codex_executable.parent.mkdir(parents=True)
+        codex_executable.write_bytes(b"test codex placeholder")
         self.assertFalse((launcher_directory / "HiaLauncher.Wpf.ps1").exists())
         self.assertFalse((launcher_directory / "HiaLauncher.xaml").exists())
 
@@ -5054,6 +5473,7 @@ Add-Type -TypeDefinition $source -Language CSharp
         for control_name in (
             "McpBackendComboBox",
             "EmbeddingProfileComboBox",
+            "InstallEmbeddingButton",
             "RescanButton",
             "RepairButton",
             "CleanupScreenshotsButton",

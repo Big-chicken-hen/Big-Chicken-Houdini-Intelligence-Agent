@@ -1229,23 +1229,19 @@ def _environment_status(project_root: Path) -> dict[str, Any]:
         "",
     ).strip()
     stored_profile = str(settings.get(setting_keys["profile"]) or "").strip()
-    requested_profile = (
-        environment_profile
-        or stored_profile
-        or str(public_contract["default_profile"])
-    )
+    requested_profile = environment_profile or stored_profile
     profile_source = (
         "environment"
         if environment_profile
         else "settings"
         if stored_profile
-        else "default"
+        else "lexical"
     )
     fallback_profile = str(public_contract["fallback_profile"])
     installed_profiles = list(models["installed_profiles"])
-    if requested_profile in installed_profiles:
+    if requested_profile and requested_profile in installed_profiles:
         active_profile = requested_profile
-    elif fallback_profile in installed_profiles:
+    elif requested_profile and fallback_profile in installed_profiles:
         active_profile = fallback_profile
     else:
         active_profile = ""

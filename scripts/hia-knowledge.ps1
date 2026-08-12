@@ -565,9 +565,9 @@ function Write-HiaKnowledgeMissingEnvironment {
             items = @()
             installed_profiles = @()
         }
-        requested_profile = 'qwen3-embedding-0.6b'
+        requested_profile = ''
         active_profile = ''
-        profile_source = 'installer_contract'
+        profile_source = 'lexical'
         embedding_mode = 'fts5'
         embedding_runtime_environment = [ordered]@{}
         fallback_non_blocking = $true
@@ -757,40 +757,6 @@ function Get-HiaKnowledgeEnvironmentInstallPlan {
             ) {
                 $selectedRevision = [string]$selectedModel.revision
             }
-        }
-    } elseif (
-        $null -ne $Environment -and
-        -not [string]::IsNullOrWhiteSpace([string]$Environment.active_profile) -and
-        [string]$Environment.active_profile -in $installedProfiles
-    ) {
-        $selectedModel = @(
-            $Environment.models.items |
-                Where-Object {
-                    $_.installed -eq $true -and
-                    [string]$_.profile_id -eq
-                        [string]$Environment.active_profile
-                } |
-                Select-Object -First 1
-        )[0]
-    } elseif ($installedProfiles.Count -gt 0) {
-        $fallbackProfile = [string]$installedProfiles[0]
-        $selectedModel = @(
-            $Environment.models.items |
-                Where-Object {
-                    $_.installed -eq $true -and
-                    [string]$_.profile_id -eq $fallbackProfile
-                } |
-                Select-Object -First 1
-        )[0]
-    }
-    if ([string]::IsNullOrWhiteSpace($selectedProfile) -and $null -ne $selectedModel) {
-        $selectedProfile = [string]$selectedModel.profile_id
-        if (
-            -not [string]::IsNullOrWhiteSpace([string]$selectedModel.revision)
-        ) {
-            $selectedRevision = [string]$selectedModel.revision
-        } elseif ($profileCatalog.ContainsKey($selectedProfile)) {
-            $selectedRevision = [string]$profileCatalog[$selectedProfile]
         }
     }
     $selectedDevice = $RequestedDevice

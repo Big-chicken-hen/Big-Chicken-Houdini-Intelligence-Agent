@@ -337,7 +337,7 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
         self.assertEqual("NVIDIA GeForce RTX Test", result["torch"]["gpu_name"])
         self.assertTrue(result["embedding_worker"]["installed"])
         self.assertTrue(model["installed"])
-        self.assertEqual(profile_id, result["active_profile"])
+        self.assertEqual("", result["active_profile"])
         self.assertEqual("fts5", result["embedding_mode"])
         self.assertEqual("", result["active_device"])
         self.assertEqual({}, result["embedding_runtime_environment"])
@@ -495,9 +495,20 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             "cuda_available": True,
             "gpu_name": "Test NVIDIA GPU",
         }
-        with mock.patch.object(module, "_python_probe", return_value=cpu_probe):
+        contract = module._load_project_module(self.project_root, "contract")
+        selected = {
+            contract.EMBEDDING_PROFILE_ENVIRONMENT:
+                contract.DEFAULT_EMBEDDING_PROFILE,
+        }
+        with (
+            mock.patch.dict(os.environ, selected, clear=False),
+            mock.patch.object(module, "_python_probe", return_value=cpu_probe),
+        ):
             cpu = module._environment_status(self.project_root)
-        with mock.patch.object(module, "_python_probe", return_value=cuda_probe):
+        with (
+            mock.patch.dict(os.environ, selected, clear=False),
+            mock.patch.object(module, "_python_probe", return_value=cuda_probe),
+        ):
             cuda = module._environment_status(self.project_root)
 
         self.assertEqual("ready", cpu["state"])
@@ -566,16 +577,17 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
             result = moved_module._environment_status(moved_root)
 
         serialized = json.dumps(result, ensure_ascii=False)
-        selected = next(
-            item
-            for item in result["models"]["items"]
-            if item["profile_id"] == result["active_profile"]
-        )
         self.assertEqual("ready", result["state"])
         self.assertTrue(result["venv"]["portable"])
         self.assertEqual(str(moved_python), result["layout"]["worker_python"])
         self.assertEqual(str(moved_base), result["python"]["base_prefix"])
-        self.assertTrue(Path(selected["path"]).is_relative_to(moved_root))
+        self.assertEqual("", result["active_profile"])
+        self.assertTrue(
+            all(
+                Path(item["path"]).is_relative_to(moved_root)
+                for item in result["models"]["items"]
+            )
+        )
         self.assertNotIn(str(old_root), serialized)
 
     def test_settings_profile_device_and_explicit_environment_flow_to_cli(
@@ -1080,12 +1092,9 @@ class LauncherKnowledgeCliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual("missing", payload["result"]["state"])
         self.assertFalse(payload["result"]["python"]["available"])
+        self.assertEqual("", payload["result"]["requested_profile"])
         self.assertEqual(
-            "qwen3-embedding-0.6b",
-            payload["result"]["requested_profile"],
-        )
-        self.assertEqual(
-            "installer_contract",
+            "lexical",
             payload["result"]["profile_source"],
         )
         self.assertEqual(
@@ -1353,6 +1362,10 @@ $explicitEight = Get-HiaKnowledgeEnvironmentInstallPlan `
 $base = Get-HiaKnowledgeEnvironmentInstallPlan `
     -Environment $clean `
     -ActionName 'environment-install'
+$installed = {_ps_literal(json.dumps({"active_profile": "qwen3-embedding-0.6b", "requested_device": "cuda", "torch": {"cuda_available": True}, "models": {"items": [{"profile_id": "qwen3-embedding-0.6b", "installed": True, "revision": "main"}]}}))} | ConvertFrom-Json
+$installedBase = Get-HiaKnowledgeEnvironmentInstallPlan `
+    -Environment $installed `
+    -ActionName 'environment-repair'
 $invalidFailure = ''
 try {{
     [void](Get-HiaKnowledgeEnvironmentInstallPlan `
@@ -1366,6 +1379,7 @@ try {{
     explicit = $explicit
     explicit_eight = $explicitEight
     base = $base
+    installed_base = $installedBase
     invalid_failure = $invalidFailure
 }} | ConvertTo-Json -Depth 6 -Compress
 """
@@ -1403,6 +1417,8 @@ try {{
         self.assertEqual("main", payload["explicit_eight"]["revision"])
         self.assertTrue(payload["base"]["parser_only"])
         self.assertEqual("", payload["base"]["profile"])
+        self.assertTrue(payload["installed_base"]["parser_only"])
+        self.assertEqual("", payload["installed_base"]["profile"])
         self.assertIn(
             "Unsupported embedding profile",
             payload["invalid_failure"],

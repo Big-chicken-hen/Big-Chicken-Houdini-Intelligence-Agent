@@ -321,7 +321,7 @@ class HybridKnowledgeStore:
         current_houdini_version: str,
         offset: int,
         limit: int,
-        mode: str = "hybrid",
+        mode: str = "lexical",
         memory_scope: str = "",
         include_superseded: bool = False,
         allow_index_updates: bool = False,
@@ -331,7 +331,7 @@ class HybridKnowledgeStore:
     ) -> list[dict[str, Any]]:
         if not isinstance(allow_index_updates, bool):
             raise HybridKnowledgeError("allow_index_updates must be a boolean")
-        requested_mode = str(mode or "hybrid").casefold()
+        requested_mode = str(mode or "lexical").casefold()
         if requested_mode not in SEARCH_MODES:
             raise HybridKnowledgeError(
                 f"Unsupported local retrieval mode: {requested_mode}"
@@ -664,7 +664,7 @@ class HybridKnowledgeStore:
         if not query:
             raise HybridKnowledgeError("query is required for memory search")
         scope = _scope(arguments)
-        mode = str(arguments.get("mode") or "hybrid").casefold()
+        mode = str(arguments.get("mode") or "lexical").casefold()
         offset = _integer(arguments.get("offset", 0), 0, 1_000_000)
         limit = _integer(arguments.get("limit", 20), 1, 100)
         include_superseded = bool(arguments.get("include_superseded", False))

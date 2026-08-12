@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from hia_core.codex_protocol import CONTRACT_RELATIVE_ROOT
 from hia_core.houdini_contract import B2_SCHEMA_VERSION, SchemaRegistry
 from hia_core.path_policy import PROJECT_ROOT, PathPolicyError, validate_project_subpath
 
@@ -26,8 +27,8 @@ from .scene_queue import B2_READ_ONLY_PROFILE, SceneQueue
 from .session import BridgeSession
 
 
-PINNED_CODEX_RELATIVE_PATH = Path(
-    ".runtime/toolchains/codex/0.144.3/codex.exe"
+PINNED_CODEX_RELATIVE_PATH = (
+    Path(".runtime/toolchains/codex") / CONTRACT_RELATIVE_ROOT.name / "codex.exe"
 )
 CODEX_HOME_RELATIVE_PATH = Path(".runtime/codex-home")
 CACHE_RELATIVE_PATH = Path(".runtime/cache")
@@ -73,6 +74,7 @@ _HIA_CHATGPT_HTTP_PROVIDER_ID = "hia_chatgpt_http"
 _HIA_CHATGPT_HTTP_PROVIDER_NAME = "HIA ChatGPT HTTP"
 _HIA_CHATGPT_HTTP_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _HIA_CHATGPT_HTTP_WIRE_API = "responses"
+_HIA_CODEX_CREDENTIAL_STORE = "file"
 _LAUNCH_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 _LAUNCHER_SESSION_PATTERN = re.compile(r"^[0-9A-Fa-f]{32}$")
 _BRIDGE_URL_PATTERN = re.compile(
@@ -344,6 +346,8 @@ def _codex_app_server_command(
     if backend == HIA_MCP_V2_BACKEND:
         server = f"mcp_servers.{HIA_MCP_V2_SERVER_ID}"
         mcp_overrides = [
+            f"mcp_servers.{FXHOUDINI_MCP_SERVER_ID}.command="
+            + _toml_basic_string(mcp_python),
             f"mcp_servers.{FXHOUDINI_MCP_SERVER_ID}.enabled=false",
             f"{server}.command=" + _toml_basic_string(mcp_python),
             f"{server}.args="
@@ -376,13 +380,16 @@ def _codex_app_server_command(
         str(codex_exe),
         "app-server",
         "--strict-config",
+        "-c",
+        "cli_auth_credentials_store="
+        + _toml_basic_string(_HIA_CODEX_CREDENTIAL_STORE),
+        "-c",
+        'web_search="live"',
     ]
     for override in mcp_overrides:
         command.extend(("-c", override))
     command.extend(
         [
-            "-c",
-            "model_provider=" + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_ID),
             "-c",
             f"{provider}.name="
             + _toml_basic_string(_HIA_CHATGPT_HTTP_PROVIDER_NAME),

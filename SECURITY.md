@@ -4,7 +4,7 @@ Big-Chicken Houdini Intelligence Agent is a local creative-tool integration that
 
 ## Supported version
 
-Security fixes currently target the latest `0.1.x-preview` source and Preview release. Older development commits and historical phase branches are not supported release channels.
+Security fixes currently target the latest `1.0.0-beta.x` source candidate and published beta release. Older development commits, the historical `0.1.x-preview` line, and phase branches are not supported release channels.
 
 ## Reporting a vulnerability
 

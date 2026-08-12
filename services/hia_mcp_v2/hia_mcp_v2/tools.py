@@ -48,6 +48,13 @@ QUERY = {"type": "string", "maxLength": 512}
 QUERIES = {"type": "array", "items": QUERY, "minItems": 1, "maxItems": 16}
 OFFSET = {"type": "integer", "minimum": 0, "maximum": 1_000_000, "default": 0}
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}
+NODE_HELP_LIMIT = {
+    **LIMIT,
+    "description": (
+        "Return at most 500 parameters for one target. Omit this field to use 50, "
+        "then use offset for another page."
+    ),
+}
 VALIDATION_CHECK_NAMES = (
     "node_errors",
     "empty_output",
@@ -64,7 +71,7 @@ VALIDATION_CHECKS = {
 RETRIEVAL_MODE = {
     "type": "string",
     "enum": ["lexical", "vector", "hybrid"],
-    "default": "hybrid",
+    "default": "lexical",
 }
 
 SEMANTIC_DATA_REF = _object(
@@ -164,7 +171,7 @@ NODE_HELP_PROPERTIES = {
     "include_parameters": {"type": "boolean", "default": True},
     "parameter_query": QUERY,
     "offset": OFFSET,
-    "limit": LIMIT,
+    "limit": NODE_HELP_LIMIT,
 }
 
 PROJECT_MEMORY_PROPERTIES = {
@@ -399,7 +406,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_node_help",
         "dynamic_node_knowledge",
-        "Resolve installed Houdini help. Use requests to batch several targets, or the compatible single-target form with node_path, category plus a bare node_type, or node_type=\"Category/name\". With requests, any top-level node-help fields are shared defaults and fields inside an item override them. A node_path returns expanded runtime parameter names, including instantiated multiparms; a type-only query returns template patterns such as names containing # because no live instance exists. Also returns the real versioned type, context, input rules, definition/source hints, and installed help metadata.",
+        "Resolve installed Houdini help. Use requests to batch several targets, or the compatible single-target form with node_path, category plus a bare node_type, or node_type=\"Category/name\". With requests, any top-level node-help fields are shared defaults and fields inside an item override them. Each target's limit must be 1-500; omit it to use 50, then use offset for another page instead of exceeding 500. A node_path returns expanded runtime parameter names, including instantiated multiparms; a type-only query returns template patterns such as names containing # because no live instance exists. Also returns the real versioned type, context, input rules, definition/source hints, and installed help metadata.",
         _object(
             {
                 **NODE_HELP_PROPERTIES,
@@ -778,7 +785,7 @@ TOOL_SPECS = (
     ToolSpec(
         "hia_project_memory",
         "project_memory",
-        "Explicitly record, search, list, delete, or supersede durable project decisions, preferences, assets, lessons, and workflows. This is not chat history: nothing is saved automatically, and Codex supplies the final memory text. Search defaults to hybrid local retrieval with lexical fallback; Qwen only encodes text. Results report requested/active embedding profiles and any degradation reason. The runtime generates stable IDs and keeps bodies and vectors under project .runtime/knowledge.",
+        "Explicitly record, search, list, delete, or supersede durable project decisions, preferences, assets, lessons, and workflows. This is not chat history: nothing is saved automatically, and Codex supplies the final memory text. Search defaults to lexical local retrieval; explicit vector or hybrid requires a compatible Qwen index. Qwen only encodes text. Results report requested/active embedding profiles and any vector failure reason. The runtime generates stable IDs and keeps bodies and vectors under project .runtime/knowledge.",
         _object(PROJECT_MEMORY_PROPERTIES, required=("action",)),
         read_only=False,
     ),
@@ -1077,4 +1084,8 @@ def _validate_number(value: int | float, schema: Mapping[str, Any], path: str) -
     if "minimum" in schema and value < schema["minimum"]:
         raise InputError("INVALID_ARGUMENTS", f"{path} is below its minimum")
     if "maximum" in schema and value > schema["maximum"]:
-        raise InputError("INVALID_ARGUMENTS", f"{path} exceeds its maximum")
+        raise InputError(
+            "INVALID_ARGUMENTS",
+            f"{path} exceeds its maximum",
+            {"maximum": schema["maximum"]},
+        )

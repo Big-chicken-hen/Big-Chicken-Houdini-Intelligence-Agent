@@ -330,7 +330,7 @@ class HybridKnowledgeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._temporary.cleanup()
 
-    def test_default_hybrid_without_model_preserves_lexical_results(self) -> None:
+    def test_default_lexical_does_not_require_a_model(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)
         _seed_document(
             index,
@@ -369,13 +369,10 @@ class HybridKnowledgeTests(unittest.TestCase):
         )
         self.assertEqual(lexical["total"], result["total"])
         self.assertEqual(lexical["tokenizer"], result["tokenizer"])
-        self.assertEqual("hybrid", result["retrieval"]["requested_mode"])
+        self.assertEqual("lexical", result["retrieval"]["requested_mode"])
         self.assertEqual("lexical", result["retrieval"]["mode_used"])
         self.assertFalse(result["retrieval"]["vector"]["available"])
-        self.assertIn(
-            "No installed local embedding model",
-            result["retrieval"]["fallback_reason"],
-        )
+        self.assertEqual("", result["retrieval"]["fallback_reason"])
 
     def test_chunk_hash_incremental_vector_sync_reencodes_only_change(self) -> None:
         index = LocalKnowledgeIndex(self.project_root)

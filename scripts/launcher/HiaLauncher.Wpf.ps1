@@ -31,6 +31,88 @@ try {
     exit 1
 }
 
+try {
+    $root = [System.IO.Path]::GetFullPath($projectRoot).TrimEnd('\')
+    $assetsRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $root 'assets')
+    ).TrimEnd('\')
+    $launcherAssetsRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $assetsRoot 'launcher')
+    ).TrimEnd('\')
+    $launcherIconPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $launcherAssetsRoot 'big-chicken-hen.ico')
+    ).TrimEnd('\')
+    if (
+        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            [System.IO.Path]::GetDirectoryName($launcherIconPath).TrimEnd('\'),
+            $launcherAssetsRoot
+        )
+    ) {
+        throw 'Launcher icon escaped its project-local directory.'
+    }
+    $launcherIconPaths = @(
+        $root,
+        $assetsRoot,
+        $launcherAssetsRoot,
+        $launcherIconPath
+    )
+    for ($index = 0; $index -lt $launcherIconPaths.Count; $index++) {
+        $expectedPath = $launcherIconPaths[$index]
+        $item = Get-Item -LiteralPath $expectedPath -Force -ErrorAction Stop
+        if (
+            ([int]$item.Attributes -band
+                [int][System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                [System.IO.Path]::GetFullPath($item.FullName).TrimEnd('\'),
+                $expectedPath
+            )
+        ) {
+            throw 'Launcher icon path is not an ordinary project-local path.'
+        }
+        if (
+            $index -lt ($launcherIconPaths.Count - 1) -and
+            $item -isnot [System.IO.DirectoryInfo]
+        ) {
+            throw 'Launcher icon parent is not a directory.'
+        }
+        if (
+            $index -eq ($launcherIconPaths.Count - 1) -and
+            $item -isnot [System.IO.FileInfo]
+        ) {
+            throw 'Launcher icon is not an ordinary file.'
+        }
+    }
+
+    $launcherIconUri = [System.Uri]::new(
+        $launcherIconPath,
+        [System.UriKind]::Absolute
+    )
+    $launcherIconDecoder = [System.Windows.Media.Imaging.IconBitmapDecoder]::new(
+        $launcherIconUri,
+        [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+        [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+    )
+    $launcherIconFrame = @(
+        $launcherIconDecoder.Frames | Sort-Object -Property @{
+            Expression = { $_.PixelWidth * $_.PixelHeight }
+            Descending = $true
+        }
+    )[0]
+    if ($null -eq $launcherIconFrame) {
+        throw 'Launcher icon contains no decodable image frame.'
+    }
+    $launcherIconFrame.Freeze()
+    $window.Icon = $launcherIconFrame
+} catch {
+    [void][System.Windows.MessageBox]::Show(
+        ('无法加载启动器任务栏图标。请重新下载完整发布包。' + [Environment]::NewLine + [Environment]::NewLine + $_.Exception.Message),
+        'Big-Chicken Houdini Intelligence Agent 无法继续',
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Error
+    )
+    exit 1
+}
+
 $windowChrome = [System.Windows.Shell.WindowChrome]::new()
 $windowChrome.CaptionHeight = 42
 $windowChrome.ResizeBorderThickness = [System.Windows.Thickness]::new(7)
@@ -65,6 +147,7 @@ $overallStatusDot = Get-RequiredControl -Name 'OverallStatusDot'
 $overallStatusText = Get-RequiredControl -Name 'OverallStatusText'
 $mcpBackendCombo = Get-RequiredControl -Name 'McpBackendComboBox'
 $embeddingProfileCombo = Get-RequiredControl -Name 'EmbeddingProfileComboBox'
+$installEmbeddingButton = Get-RequiredControl -Name 'InstallEmbeddingButton'
 $embeddingDeviceCombo = Get-RequiredControl -Name 'EmbeddingDeviceComboBox'
 $houdiniCombo = Get-RequiredControl -Name 'HoudiniComboBox'
 $browseHoudiniButton = Get-RequiredControl -Name 'BrowseHoudiniButton'
@@ -205,6 +288,10 @@ $script:compactLayout = $null
 $script:currentPage = 'overview'
 $script:bootstrapProcess = $null
 $script:bootstrapPreferences = $null
+$script:bootstrapOutputTask = $null
+$script:bootstrapErrorTask = $null
+$script:codexLoginProcess = $null
+$script:codexLoginPreferences = $null
 $script:embeddingData = $inputs.embedding_data
 $script:embeddingProcess = $null
 $script:embeddingPreferences = $null
@@ -239,6 +326,7 @@ $script:knowledgeAssetPauseRequested = $false
 $script:knowledgeAssetWindowClosing = $false
 $script:knowledgeAssetNextPollUtc = [DateTime]::MinValue
 $script:cachePreview = $null
+$script:launchProcess = $null
 $renderOutputTextBox.Text = [string]$inputs.render_output
 $renderOutputTextBox.ToolTip = if ($renderOutputTextBox.Text) {
     $renderOutputTextBox.Text
@@ -268,6 +356,10 @@ $script:inlineStatusTimer.Add_Tick({
 
 $script:bootstrapTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:bootstrapTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:codexLoginTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:codexLoginTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:launchProcessTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:launchProcessTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $script:embeddingTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:embeddingTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $script:knowledgeIndexTimer = [System.Windows.Threading.DispatcherTimer]::new()
@@ -784,9 +876,6 @@ function Get-ComboEmbeddingProfile {
         $idProperty = $selected.PSObject.Properties['id']
         if ($null -ne $idProperty) { return [string]$idProperty.Value }
     }
-    if ($null -ne $script:embeddingData) {
-        return [string]$script:embeddingData.contract.default_profile
-    }
     if ($null -ne $script:knowledgeEnvironmentStatus) {
         $requested = $script:knowledgeEnvironmentStatus.PSObject.Properties[
             'requested_profile'
@@ -1115,51 +1204,14 @@ function Get-HiaKnowledgeEnvironmentAction {
         [AllowEmptyString()][string]$SelectedProfile = ''
     )
 
-    $modelItems = @()
-    if ($null -ne $Environment) {
-        $modelItems = @($Environment.models.items)
-    }
-    $modelInstalled = @($modelItems | Where-Object {
-        $_.installed -eq $true
-    }).Count -gt 0
-    $profileSelected = -not [string]::IsNullOrWhiteSpace($SelectedProfile)
-    $selectedModelInstalled = $false
-    if ($profileSelected) {
-        $selectedModelInstalled = @($modelItems | Where-Object {
-            $_.installed -eq $true -and
-            [string]$_.profile_id -eq $SelectedProfile
-        }).Count -gt 0
-    }
-    $embeddingRequested = $profileSelected -or $modelInstalled
     if (
         $null -eq $Environment -or
         [string]$Environment.state -eq 'missing'
     ) {
-        if ($embeddingRequested) {
-            return 'environment-install-embedding'
-        }
         return 'environment-install'
     }
     if ([string]$Environment.state -ne 'ready') {
-        if ($embeddingRequested) {
-            return 'environment-repair-embedding'
-        }
         return 'environment-repair'
-    }
-    if (
-        (
-            $profileSelected -and
-            -not $selectedModelInstalled
-        ) -or
-        (
-            ($profileSelected -or $modelInstalled) -and
-            (
-                -not [bool]$Environment.torch.installed -or
-                -not [bool]$Environment.embedding_worker.installed
-            )
-        )
-    ) {
-        return 'environment-repair-embedding'
     }
     return ''
 }
@@ -1766,19 +1818,14 @@ function Start-HiaKnowledgeEnvironmentRepair {
     } else {
         'environment-repair'
     }
-    $selectedProfile = Get-ComboEmbeddingProfile
     $arguments = @(
         '-NoProfile',
         '-NonInteractive',
         '-ExecutionPolicy', 'Bypass',
         '-File', $knowledgeScript,
         $cliAction,
-        '-LogPath', $environmentLogPath,
-        '-Device', (Get-ComboEmbeddingDevice)
+        '-LogPath', $environmentLogPath
     )
-    if (-not [string]::IsNullOrWhiteSpace($selectedProfile)) {
-        $arguments += @('-Profile', $selectedProfile)
-    }
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $powershellExe
     $startInfo.Arguments = (@($arguments | ForEach-Object {
@@ -1916,6 +1963,7 @@ function Set-BusyState {
 
     $mcpBackendCombo.IsEnabled = -not $Busy
     $embeddingProfileCombo.IsEnabled = (-not $Busy -and $null -ne $script:embeddingData)
+    $installEmbeddingButton.IsEnabled = $false
     $embeddingDeviceCombo.IsEnabled = (-not $Busy -and $null -ne $script:embeddingData)
     $houdiniCombo.IsEnabled = -not $Busy
     $bridgeCombo.IsEnabled = -not $Busy
@@ -1951,10 +1999,15 @@ function Set-BusyState {
             [System.Windows.Threading.DispatcherPriority]::Render
         )
     } else {
+        $launchProcessActive = (
+            $null -ne $script:launchProcess -and
+            -not $script:launchProcess.HasExited
+        )
         $launchButton.IsEnabled = (
             $null -ne $script:currentResult -and
             -not $script:selectionNeedsCheck -and
-            $script:currentResult.overall -ne 'red'
+            $script:currentResult.overall -ne 'red' -and
+            -not $launchProcessActive
         )
         if ($script:preflightFailed) {
             Set-OverallState -State 'red'
@@ -1993,20 +2046,38 @@ function Test-CurrentNonGreenCheck {
 function Update-RepairButton {
     $label = '请先重新扫描'
     $actionAvailable = $false
+    $requiredPackageFileMissing = $false
+    if ($null -ne $script:currentResult) {
+        $requiredPackageFileMissing = @($script:currentResult.checks | Where-Object {
+            [string]$_.level -eq 'red' -and
+            [string]$_.id -in @(
+                'project.launch_script',
+                'project.bridge_source',
+                'project.core_source',
+                'project.houdini_package',
+                'project.panel',
+                'project.codex_config',
+                'project.pyproject',
+                'hia_mcp_v2.runtime'
+            )
+        }).Count -gt 0
+    }
     $knowledgeAction = Get-HiaKnowledgeEnvironmentAction `
         -Environment $script:knowledgeEnvironmentStatus `
         -SelectedProfile (Get-ComboEmbeddingProfile)
     if ($null -eq $script:currentResult) {
         $label = if ($script:preflightFailed) {
-            '自检失败，查看报告'
+            '自检失败，请点击重新扫描'
         } else {
             '请先重新扫描'
         }
+    } elseif ($requiredPackageFileMissing) {
+        $label = '安装包不完整，请重新下载完整包'
     } elseif (Test-CurrentRedCheck -Id 'codex.executable') {
         $label = '安装/修复 Codex'
         $actionAvailable = $true
     } elseif (Test-CurrentRedCheck -Id 'codex.login') {
-        $label = '复制登录命令'
+        $label = '登录 Codex'
         $actionAvailable = $true
     } elseif ($knowledgeAction -like 'environment-*') {
         $label = if ($script:knowledgeEnvironmentLastFailure) {
@@ -2017,17 +2088,15 @@ function Update-RepairButton {
             '修复本地知识环境'
         }
         $actionAvailable = $true
-    } elseif (
-        $null -ne $script:embeddingData -and
-        (Test-CurrentNonGreenCheck -Id 'embedding.runtime')
-    ) {
-        $label = '安装/修复知识向量模型'
+    } elseif (Test-CurrentRedCheck -Id 'bridge.python') {
+        $label = '切换到项目受管 Bridge Python'
         $actionAvailable = $true
     } elseif (@($script:currentResult.checks | Where-Object {
         [string]$_.level -ne 'green' -and
         [string]$_.id -in @(
             'project.runtime_writable',
             'project.portable_codex_config',
+            'project.codex_config_required',
             'project.portable_houdini_package'
         )
     }).Count -gt 0) {
@@ -2047,6 +2116,11 @@ function Update-RepairButton {
         "快捷操作：$label"
     )
     $quickRepairButton.IsEnabled = $repairButton.IsEnabled
+    $installEmbeddingButton.IsEnabled = (
+        -not $script:isBusy -and
+        $null -ne $script:embeddingData -and
+        -not [string]::IsNullOrWhiteSpace((Get-ComboEmbeddingProfile))
+    )
 }
 
 function New-CheckView {
@@ -2122,14 +2196,23 @@ function Show-Result {
 }
 
 function Show-PreflightFailure {
+    param([AllowNull()][System.Exception]$Exception = $null)
+
     $script:currentResult = $null
     $script:selectionNeedsCheck = $true
     $script:preflightFailed = $true
+    $detail = '启动器没有返回可用的自检结果。'
+    if ($null -ne $Exception -and -not [string]::IsNullOrWhiteSpace($Exception.Message)) {
+        $detail = ConvertTo-HiaRedactedText -Text ([string]$Exception.Message)
+        $detail = [regex]::Replace($detail, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ' ')
+        $detail = [regex]::Replace($detail, '\s+', ' ').Trim()
+        if ($detail.Length -gt 420) { $detail = $detail.Substring(0, 420) + '…' }
+    }
     $failedCheck = [pscustomobject]@{
         level = 'red'
         name = '启动器自检'
-        message = '自检过程未能完成。'
-        advice = '请在控制台运行 scripts\hia-launcher.ps1 -CheckOnly 查看可调试结果。'
+        message = "自检过程未能完成：$detail"
+        advice = '修正上方原因后点击“重新扫描”。如果安装包文件缺失，请重新下载完整发布包。'
     }
     $checksList.ItemsSource = @((New-CheckView -Check $failedCheck))
     $emptyStateBorder.Visibility = [System.Windows.Visibility]::Collapsed
@@ -2137,9 +2220,9 @@ function Show-PreflightFailure {
     $warningCountText.Text = '0'
     $blockedCountText.Text = '1'
     Set-OverallState -State 'red'
-    Update-HiaOverviewSummary -FailureMessage '自检过程未能完成'
+    Update-HiaOverviewSummary -FailureMessage $detail
     Update-RepairButton
-    Show-InlineStatus -Kind 'error' -Text '自检失败；未启动 Houdini。请使用控制台检查模式定位问题。'
+    Show-InlineStatus -Kind 'error' -Text "自检失败；未启动 Houdini。$detail"
 }
 
 function Mark-SelectionNeedsCheck {
@@ -2171,8 +2254,16 @@ function Complete-HiaCodexBootstrap {
 
     $script:bootstrapTimer.Stop()
     $exitCode = $script:bootstrapProcess.ExitCode
+    $stdout = if ($null -ne $script:bootstrapOutputTask) {
+        try { [string]$script:bootstrapOutputTask.Result } catch { '' }
+    } else { '' }
+    $stderr = if ($null -ne $script:bootstrapErrorTask) {
+        try { [string]$script:bootstrapErrorTask.Result } catch { '' }
+    } else { '' }
     $script:bootstrapProcess.Dispose()
     $script:bootstrapProcess = $null
+    $script:bootstrapOutputTask = $null
+    $script:bootstrapErrorTask = $null
 
     $preferences = $script:bootstrapPreferences
     $script:bootstrapPreferences = $null
@@ -2193,12 +2284,65 @@ function Complete-HiaCodexBootstrap {
         -PreferredEmbedding ([string]$preferences.embedding) `
         -PreferredEmbeddingDevice ([string]$preferences.embedding_device)
 
-    if ($exitCode -eq 0 -and -not $repairFailed) {
+    if (
+        $exitCode -eq 0 -and
+        -not $repairFailed -and
+        $null -ne $script:currentResult -and
+        -not $script:preflightFailed
+    ) {
         Show-InlineStatus -Kind 'success' -Transient -Text 'Codex 已安装到项目 .runtime；自检已自动刷新。'
         return
     }
-    Show-InlineStatus -Kind 'error' -Text ("Codex 项目本地安装失败（退出码 {0}）。请在 PowerShell 中运行 scripts\bootstrap-runtime.ps1 查看详情。" -f $exitCode)
+    $detail = ([string]$stderr).Trim()
+    if ([string]::IsNullOrWhiteSpace($detail)) {
+        $detail = ([string]$stdout).Trim()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($detail)) {
+        $detail = ConvertTo-HiaRedactedText -Text $detail
+        $detail = [regex]::Replace($detail, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ' ')
+        $detail = [regex]::Replace($detail, '\s+', ' ').Trim()
+        if ($detail.Length -gt 420) { $detail = $detail.Substring(0, 420) + '…' }
+    } else {
+        $detail = "退出码 $exitCode"
+    }
+    Show-InlineStatus -Kind 'error' -Text ("Codex 项目本地安装失败：$detail。可直接再次点击修复。")
 }
+
+function Set-HiaLaunchRunningFeedback {
+    if (-not $script:isBusy) {
+        Set-BusyState -Busy $true
+    }
+    $launchButton.IsEnabled = $false
+    Set-OverallState -State 'busy'
+    $overallStatusText.Text = 'Houdini 会话运行中'
+    $overviewOverallHeadline.Text = 'Houdini 启动会话正在运行'
+    $overviewOverallDetail.Text = '启动失败会在 Launcher 显示退出码；可见启动窗口保留详细、脱敏的 Bridge 错误。'
+}
+
+function Complete-HiaLaunchProcess {
+    if ($null -eq $script:launchProcess) {
+        $script:launchProcessTimer.Stop()
+        return
+    }
+    try { $script:launchProcess.Refresh() } catch { }
+    if (-not $script:launchProcess.HasExited) {
+        Set-HiaLaunchRunningFeedback
+        return
+    }
+
+    $script:launchProcessTimer.Stop()
+    $exitCode = [int]$script:launchProcess.ExitCode
+    $script:launchProcess.Dispose()
+    $script:launchProcess = $null
+    Set-BusyState -Busy $false
+    if ($exitCode -eq 0) {
+        Show-InlineStatus -Kind 'success' -Text 'Houdini 会话已正常结束；可以再次启动。'
+    } else {
+        Show-InlineStatus -Kind 'error' -Text ("Houdini 启动或会话异常结束（退出码 $exitCode）。详细原因保留在可见启动窗口与项目本地会话记录中。")
+    }
+}
+
+$script:launchProcessTimer.Add_Tick({ Complete-HiaLaunchProcess })
 
 $script:bootstrapTimer.Add_Tick({ Complete-HiaCodexBootstrap })
 
@@ -2221,29 +2365,130 @@ function Start-HiaCodexBootstrap {
     $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $powershellExe
-    $startInfo.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$bootstrapScript`""
+    $startInfo.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$bootstrapScript`" -Repair"
     $startInfo.WorkingDirectory = $projectRoot
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
 
     try {
         $script:bootstrapProcess = [System.Diagnostics.Process]::new()
         $script:bootstrapProcess.StartInfo = $startInfo
         if (-not $script:bootstrapProcess.Start()) { throw '无法启动 PowerShell bootstrap 进程。' }
+        $script:bootstrapOutputTask = $script:bootstrapProcess.StandardOutput.ReadToEndAsync()
+        $script:bootstrapErrorTask = $script:bootstrapProcess.StandardError.ReadToEndAsync()
         Set-BusyState -Busy $true
         $overallStatusText.Text = '正在安装 Codex'
-        Show-InlineStatus -Kind 'neutral' -Text '正在下载并校验官方 Codex 0.144.3；仅写入项目 .runtime。'
+        Show-InlineStatus -Kind 'neutral' -Text '正在准备当前发布包声明兼容的 Codex；仅写入本插件 .runtime，不修改用户已有 Codex。'
         $script:bootstrapTimer.Start()
     } catch {
         if ($null -ne $script:bootstrapProcess) {
             $script:bootstrapProcess.Dispose()
             $script:bootstrapProcess = $null
         }
+        $script:bootstrapOutputTask = $null
+        $script:bootstrapErrorTask = $null
         $script:bootstrapPreferences = $null
         Set-BusyState -Busy $false
         Show-InlineStatus -Kind 'error' -Text ("无法启动 Codex 项目本地安装：{0}" -f $_.Exception.Message)
     }
 }
+
+function Start-HiaCodexLogin {
+    if ($null -ne $script:codexLoginProcess -and -not $script:codexLoginProcess.HasExited) {
+        Show-InlineStatus -Kind 'warning' -Text '本插件专用 Codex 登录窗口已经打开；关闭后 Launcher 会自动重新扫描。'
+        return
+    }
+    if ($null -ne $script:codexLoginProcess) {
+        $script:codexLoginProcess.Dispose()
+        $script:codexLoginProcess = $null
+    }
+
+    $codexMatches = @(Get-HiaPinnedCodexExecutable -ProjectRoot $projectRoot)
+    $codexHome = Join-Path $projectRoot '.runtime\codex-home'
+    if ($codexMatches.Count -ne 1) {
+        Show-InlineStatus -Kind 'error' -Text '项目本地 Codex 尚未安装，请先点击“安装/修复 Codex”。'
+        return
+    }
+    try {
+        [System.IO.Directory]::CreateDirectory($codexHome) | Out-Null
+        $script:codexLoginPreferences = [pscustomobject]@{
+            houdini = Get-ComboPath -Combo $houdiniCombo
+            bridge = Get-ComboPath -Combo $bridgeCombo
+            backend = Get-ComboBackend
+            embedding = Get-ComboEmbeddingProfile
+            embedding_device = Get-ComboEmbeddingDevice
+        }
+        $loginCommand = Get-HiaCodexLoginCommand -ProjectRoot $projectRoot
+        $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $powershellExe
+        $startInfo.Arguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-Command', $loginCommand
+        ) | ForEach-Object {
+            ConvertTo-HiaProcessArgument -Value ([string]$_)
+        }
+        $startInfo.Arguments = $startInfo.Arguments -join ' '
+        $startInfo.WorkingDirectory = $projectRoot
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $false
+        $script:codexLoginProcess = [System.Diagnostics.Process]::new()
+        $script:codexLoginProcess.StartInfo = $startInfo
+        if (-not $script:codexLoginProcess.Start()) { throw 'Codex 登录进程未启动。' }
+        Set-BusyState -Busy $true
+        $overallStatusText.Text = '等待 Codex 登录'
+        Show-InlineStatus -Kind 'neutral' -Text '已打开本插件专用 Codex 登录窗口；完成或关闭后 Launcher 会自动重新扫描。'
+        $script:codexLoginTimer.Start()
+    } catch {
+        if ($null -ne $script:codexLoginProcess) {
+            $script:codexLoginProcess.Dispose()
+            $script:codexLoginProcess = $null
+        }
+        $script:codexLoginPreferences = $null
+        Set-BusyState -Busy $false
+        Show-InlineStatus -Kind 'error' -Text ("无法打开项目本地 Codex 登录：{0}" -f $_.Exception.Message)
+    }
+}
+
+function Complete-HiaCodexLogin {
+    if ($null -eq $script:codexLoginProcess -or -not $script:codexLoginProcess.HasExited) { return }
+
+    $script:codexLoginTimer.Stop()
+    $exitCode = [int]$script:codexLoginProcess.ExitCode
+    $script:codexLoginProcess.Dispose()
+    $script:codexLoginProcess = $null
+    $preferences = $script:codexLoginPreferences
+    $script:codexLoginPreferences = $null
+    Set-BusyState -Busy $false
+    Invoke-GuiScan `
+        -PreferredHoudini ([string]$preferences.houdini) `
+        -PreferredBridge ([string]$preferences.bridge) `
+        -PreferredBackend ([string]$preferences.backend) `
+        -PreferredEmbedding ([string]$preferences.embedding) `
+        -PreferredEmbeddingDevice ([string]$preferences.embedding_device)
+    if (
+        $exitCode -eq 0 -and
+        $null -ne $script:currentResult -and
+        -not $script:preflightFailed -and
+        -not (Test-CurrentRedCheck -Id 'codex.login')
+    ) {
+        Show-InlineStatus -Kind 'success' -Text 'Codex 登录已完成；Launcher 已自动重新扫描。'
+    } elseif (
+        $exitCode -eq 0 -and
+        ($null -eq $script:currentResult -or $script:preflightFailed)
+    ) {
+        Show-InlineStatus -Kind 'error' -Text 'Codex 登录窗口已结束，但自动扫描失败；请点击“重新扫描”查看明确原因。'
+    } else {
+        Show-InlineStatus -Kind 'error' -Text ("Codex 登录未完成（退出码 $exitCode）；可再次点击「登录 Codex」重试。")
+    }
+}
+
+$script:codexLoginTimer.Add_Tick({ Complete-HiaCodexLogin })
 
 function New-HiaEmbeddingInstallLogPath {
     $leafName = 'embedding-install-{0}-{1}.log' -f
@@ -3861,7 +4106,6 @@ function Get-BackendIndex {
 function Get-EmbeddingIndex {
     param([AllowEmptyString()][string]$Profile = '')
 
-    if (-not $Profile) { return -1 }
     for ($index = 0; $index -lt $embeddingProfileCombo.Items.Count; $index++) {
         $item = $embeddingProfileCombo.Items[$index]
         $property = $item.PSObject.Properties['id']
@@ -4023,7 +4267,7 @@ function Invoke-GuiScan {
                         -EmbeddingData $script:embeddingData `
                         -Profile $embeddingChoice
                 } catch {
-                    $embeddingChoice = [string]$script:embeddingData.contract.default_profile
+                    $embeddingChoice = ''
                 }
                 foreach ($candidate in @(Get-HiaEmbeddingProfileChoices -EmbeddingData $script:embeddingData)) {
                     [void]$embeddingProfileCombo.Items.Add($candidate)
@@ -4074,7 +4318,7 @@ function Invoke-GuiScan {
         Refresh-HiaKnowledgeDisplay -Quiet
         Refresh-HiaCacheDisplay -Quiet
     } catch {
-        Show-PreflightFailure
+        Show-PreflightFailure -Exception $_.Exception
     } finally {
         $script:suppressSelectionCheck = $false
         Set-BusyState -Busy $false
@@ -4423,7 +4667,7 @@ $mcpBackendCombo.Add_SelectionChanged({ Mark-SelectionNeedsCheck })
 $embeddingProfileCombo.Add_SelectionChanged({
     if ($script:suppressSelectionCheck -or $script:isBusy) { return }
     $selectedProfile = Get-ComboEmbeddingProfile
-    if ($null -ne $script:embeddingData -and $selectedProfile) {
+    if ($null -ne $script:embeddingData) {
         try {
             Write-HiaEmbeddingPreference `
                 -ProjectRoot $projectRoot `
@@ -4437,7 +4681,19 @@ $embeddingProfileCombo.Add_SelectionChanged({
     }
     Mark-SelectionNeedsCheck
     Update-HiaKnowledgeEnvironmentActions
-    Show-InlineStatus -Kind 'warning' -Text '知识向量模型已切换；FTS5 无需重建，向量索引将在使用新模型时按模型重建。请重新扫描。'
+    if ($selectedProfile) {
+        Show-InlineStatus -Kind 'warning' -Text '知识向量模型已切换；FTS5 无需重建，向量索引将在使用新模型时按模型重建。请重新扫描。'
+    } else {
+        Show-InlineStatus -Kind 'warning' -Text '已切换为仅 FTS5 lexical；不会下载或启动 Qwen/PyTorch。请重新扫描。'
+    }
+})
+$installEmbeddingButton.Add_Click({
+    if ($script:isBusy) { return }
+    if ([string]::IsNullOrWhiteSpace((Get-ComboEmbeddingProfile))) {
+        Show-InlineStatus -Kind 'warning' -Text '请先明确选择一个 Qwen Profile；普通修复不会下载模型。'
+        return
+    }
+    Start-HiaEmbeddingInstall
 })
 $embeddingDeviceCombo.Add_SelectionChanged({
     if ($script:suppressSelectionCheck -or $script:isBusy) { return }
@@ -4527,12 +4783,7 @@ $repairButton.Add_Click({
         return
     }
     if (Test-CurrentRedCheck -Id 'codex.login') {
-        try {
-            [System.Windows.Clipboard]::SetText((Get-HiaCodexLoginCommand -ProjectRoot $projectRoot))
-            Show-InlineStatus -Kind 'success' -Text '项目本地 Codex 登录命令已复制；请在 PowerShell 中运行并完成 device login。命令不含凭据。'
-        } catch {
-            Show-InlineStatus -Kind 'error' -Text '无法复制登录命令；请按安装文档中的项目本地登录步骤执行。'
-        }
+        Start-HiaCodexLogin
         return
     }
     $knowledgeAction = Get-HiaKnowledgeEnvironmentAction `
@@ -4543,11 +4794,19 @@ $repairButton.Add_Click({
         Start-HiaKnowledgeEnvironmentRepair
         return
     }
-    if (
-        $null -ne $script:embeddingData -and
-        (Test-CurrentNonGreenCheck -Id 'embedding.runtime')
-    ) {
-        Start-HiaEmbeddingInstall
+    if (Test-CurrentRedCheck -Id 'bridge.python') {
+        $managedBridge = Get-HiaManagedBridgePythonPath -ProjectRoot $projectRoot
+        Invoke-GuiScan `
+            -PreferredHoudini (Get-ComboPath -Combo $houdiniCombo) `
+            -PreferredBridge $managedBridge `
+            -PreferredBackend (Get-ComboBackend) `
+            -PreferredEmbedding (Get-ComboEmbeddingProfile) `
+            -PreferredEmbeddingDevice (Get-ComboEmbeddingDevice)
+        if ($null -ne $script:currentResult -and -not (Test-CurrentRedCheck -Id 'bridge.python')) {
+            Show-InlineStatus -Kind 'success' -Transient -Text '已切换并验证项目受管 .venv Bridge Python。'
+        } else {
+            Show-InlineStatus -Kind 'error' -Text '项目受管 .venv 未通过 Bridge 检查；请查看自检中的明确原因。'
+        }
         return
     }
     $preferredHoudini = Get-ComboPath -Combo $houdiniCombo
@@ -4766,7 +5025,7 @@ $launchButton.Add_Click({
                 -Candidates $script:currentCandidates
             Show-Result -Result $script:currentResult
         } catch {
-            Show-PreflightFailure
+            Show-PreflightFailure -Exception $_.Exception
             return
         }
         if ($script:currentResult.overall -eq 'red') { return }
@@ -4796,20 +5055,33 @@ $launchButton.Add_Click({
                     $launchParameters['RecoveryCheckpoint'] = [string]$script:pendingRecovery.checkpoint_path
                 }
             }
-            Start-ExistingHoudiniLauncher @launchParameters
+            $script:launchProcess = Start-ExistingHoudiniLauncher @launchParameters
+            $script:launchProcessTimer.Start()
             if ($null -ne $script:pendingRecovery) {
                 $script:pendingRecovery = $null
                 $recoveryCard.Visibility = [System.Windows.Visibility]::Collapsed
             }
             Show-InlineStatus `
-                -Kind 'success' `
-                -Transient `
-                -Text '已交给 scripts\launch-houdini.ps1 启动；Houdini 生命周期仍由该脚本管理。'
+                -Kind 'neutral' `
+                -Text 'Houdini 启动会话正在运行；请查看可见启动窗口。Launcher 会持续显示会话状态和真实退出结果。'
+            Set-HiaLaunchRunningFeedback
         } catch {
-            Show-InlineStatus -Kind 'error' -Text '未能启动现有 launch-houdini.ps1。请在控制台运行该脚本查看详情。'
+            $detail = ConvertTo-HiaRedactedText -Text ([string]$_.Exception.Message)
+            if ($detail.Length -gt 420) { $detail = $detail.Substring(0, 420) + '…' }
+            if ($null -ne $script:launchProcess) {
+                $script:launchProcessTimer.Start()
+                Show-InlineStatus -Kind 'error' -Text ("Houdini 会话已启动，但 Launcher 更新状态时遇到错误：$detail。仍会跟踪真实退出结果。")
+            } else {
+                Show-InlineStatus -Kind 'error' -Text ("未能启动 Houdini 会话：$detail")
+            }
         }
     } finally {
-        Set-BusyState -Busy $false
+        if ($null -ne $script:launchProcess -and -not $script:launchProcess.HasExited) {
+            $script:launchProcessTimer.Start()
+            Set-HiaLaunchRunningFeedback
+        } else {
+            Set-BusyState -Busy $false
+        }
     }
 })
 
@@ -4838,6 +5110,8 @@ $window.Add_SizeChanged({ Update-ResponsiveLayout })
 $window.Add_Closed({
     $script:inlineStatusTimer.Stop()
     $script:bootstrapTimer.Stop()
+    $script:codexLoginTimer.Stop()
+    $script:launchProcessTimer.Stop()
     $script:embeddingTimer.Stop()
     $script:knowledgeIndexWindowClosing = $true
     $script:knowledgeIndexTimer.Stop()
@@ -4868,6 +5142,16 @@ $window.Add_Closed({
         # Disposing this wrapper does not terminate the user-started verified bootstrap.
         $script:bootstrapProcess.Dispose()
         $script:bootstrapProcess = $null
+    }
+    if ($null -ne $script:codexLoginProcess) {
+        # Disposing the wrapper does not terminate the user-visible login process.
+        $script:codexLoginProcess.Dispose()
+        $script:codexLoginProcess = $null
+    }
+    if ($null -ne $script:launchProcess) {
+        # The visible Houdini launcher owns the active session; closing this UI does not stop it.
+        $script:launchProcess.Dispose()
+        $script:launchProcess = $null
     }
     if ($null -ne $script:embeddingProcess) {
         # The verified project-local install may continue after the launcher window closes.

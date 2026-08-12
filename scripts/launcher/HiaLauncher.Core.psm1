@@ -1,17 +1,21 @@
 ﻿Set-StrictMode -Version Latest
 
 $script:HiaFxHoudiniVersion = '1.3.0'
-$script:HiaCodexVersion = '0.144.3'
 $script:HiaProbeMarker = '__HIA_LAUNCHER_PROBE__'
 $script:HiaDefaultMcpBackend = 'hia_v2'
+$script:HiaCodexCredentialOverride = 'cli_auth_credentials_store="file"'
 
 function Get-HiaCodexLoginCommand {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
 
     $root = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\')
     $codexHome = (Join-Path $root '.runtime\codex-home').Replace("'", "''")
-    $codexExe = (Join-Path $root ".runtime\toolchains\codex\$script:HiaCodexVersion\codex.exe").Replace("'", "''")
-    return "`$env:CODEX_HOME = '$codexHome'; & '$codexExe' login --device-auth"
+    $codexMatches = @(Get-HiaPinnedCodexExecutable -ProjectRoot $root)
+    if ($codexMatches.Count -ne 1) {
+        throw "Expected exactly one installed Codex runtime matching this package's app-server contract; found $($codexMatches.Count)."
+    }
+    $codexExe = ([string]$codexMatches[0].path).Replace("'", "''")
+    return "`$env:CODEX_HOME = '$codexHome'; & '$codexExe' -c '$script:HiaCodexCredentialOverride' login --device-auth"
 }
 
 function Get-HiaMcpBackendChoices {
@@ -107,11 +111,8 @@ function Resolve-HiaEmbeddingProfile {
         [AllowEmptyString()][string]$Profile = ''
     )
 
-    $resolved = if ([string]::IsNullOrWhiteSpace($Profile)) {
-        [string]$EmbeddingData.contract.default_profile
-    } else {
-        $Profile.Trim()
-    }
+    $resolved = $Profile.Trim()
+    if ([string]::IsNullOrWhiteSpace($resolved)) { return '' }
     [void](Get-HiaEmbeddingProfileContract -EmbeddingData $EmbeddingData -Profile $resolved)
     return $resolved
 }
@@ -151,7 +152,15 @@ function Get-HiaEmbeddingProfileChoices {
     param([Parameter(Mandatory = $true)]$EmbeddingData)
 
     $defaultProfile = [string]$EmbeddingData.contract.default_profile
-    return @($EmbeddingData.profiles.PSObject.Properties | ForEach-Object {
+    $choices = @(
+        [pscustomobject]@{
+            id = ''
+            display = '仅 FTS5 lexical（不下载模型）'
+            detail = '默认 · 不安装 Qwen 或 PyTorch'
+            tooltip = '使用项目本地 FTS5 词法检索；仅在明确选择 Qwen 后才安装或传递向量模型环境。'
+        }
+    )
+    $choices += @($EmbeddingData.profiles.PSObject.Properties | ForEach-Object {
         $profile = $_.Value
         $size = ([double]$profile.repository_size_gb).ToString(
             '0.##',
@@ -169,6 +178,7 @@ function Get-HiaEmbeddingProfileChoices {
             tooltip = "$($profile.model_id)；安装还需为独立 venv 与项目本地缓存预留空间。"
         }
     })
+    return $choices
 }
 
 function Test-HiaEmbeddingProjectPath {
@@ -897,14 +907,22 @@ function New-HiaKnowledgeIndexProcessPlan {
     $selectedProfile = Resolve-HiaEmbeddingProfile `
         -EmbeddingData $EmbeddingData `
         -Profile $EmbeddingProfile
-    $selected = Get-HiaEmbeddingProfileContract `
-        -EmbeddingData $EmbeddingData `
-        -Profile $selectedProfile
-    $dimension = [int]$selected.default_dimension
-    if (
+    $lexicalOnly = [string]::IsNullOrWhiteSpace($selectedProfile)
+    if ($lexicalOnly -and $Action -eq 'build') {
+        throw 'Vector index build requires an explicitly selected Qwen profile; FTS5 lexical needs no vector build.'
+    }
+    $selected = if ($lexicalOnly) {
+        $null
+    } else {
+        Get-HiaEmbeddingProfileContract `
+            -EmbeddingData $EmbeddingData `
+            -Profile $selectedProfile
+    }
+    $dimension = if ($lexicalOnly) { 0 } else { [int]$selected.default_dimension }
+    if (-not $lexicalOnly -and (
         $dimension -lt [int]$selected.min_mrl_dimension -or
         $dimension -gt [int]$selected.max_dimension
-    ) {
+    )) {
         throw 'Knowledge index embedding dimension is invalid.'
     }
 
@@ -938,30 +956,32 @@ function New-HiaKnowledgeIndexProcessPlan {
         'PYTHONUTF8' = '1'
         'PYTHONPATH' = ($pythonPathEntries -join [System.IO.Path]::PathSeparator)
     }
-    foreach ($entry in @{
-        profile = $selectedProfile
-        dimension = [string]$dimension
-        device = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
-    }.GetEnumerator()) {
-        $nameProperty = $contract.environment.PSObject.Properties[[string]$entry.Key]
-        if ($null -eq $nameProperty) {
-            throw "Knowledge index embedding environment field is missing: $($entry.Key)"
+    if (-not $lexicalOnly) {
+        foreach ($entry in @{
+            profile = $selectedProfile
+            dimension = [string]$dimension
+            device = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
+        }.GetEnumerator()) {
+            $nameProperty = $contract.environment.PSObject.Properties[[string]$entry.Key]
+            if ($null -eq $nameProperty) {
+                throw "Knowledge index embedding environment field is missing: $($entry.Key)"
+            }
+            $environment[[string]$nameProperty.Value] = [string]$entry.Value
         }
-        $environment[[string]$nameProperty.Value] = [string]$entry.Value
     }
 
     $workerPython = [string]$EmbeddingData.layout.worker_python
-    if (
+    if (-not $lexicalOnly -and (
         Test-HiaEmbeddingProjectPath `
             -ProjectRoot $root `
             -Path $workerPython `
             -Kind file
-    ) {
+    )) {
         $environment[[string]$contract.environment.python] = $workerPython
     }
     foreach ($profileProperty in @($EmbeddingData.profiles.PSObject.Properties)) {
         $profile = $profileProperty.Value
-        if (-not (
+        if ($lexicalOnly -or -not (
             Test-HiaEmbeddingModelInstall `
                 -ProjectRoot $root `
                 -EmbeddingData $EmbeddingData `
@@ -1594,7 +1614,13 @@ function Get-HiaEmbeddingCheckResult {
     try {
         $selected = Resolve-HiaEmbeddingProfile -EmbeddingData $EmbeddingData -Profile $EmbeddingProfile
     } catch {
-        $selected = [string]$EmbeddingData.contract.default_profile
+        $selected = ''
+    }
+    if ([string]::IsNullOrWhiteSpace($selected)) {
+        return New-HiaCheckResult -Id 'embedding.runtime' -Name 'Local knowledge embedding' `
+            -Level 'green' `
+            -Message '当前使用 FTS5 lexical；未请求 Qwen、PyTorch 或向量 Worker。' `
+            -Advice '无需处理。只有明确选择并安装 Qwen profile 后才启用向量检索。'
     }
     $profile = Get-HiaEmbeddingProfileContract -EmbeddingData $EmbeddingData -Profile $selected
     $selectedDevice = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
@@ -2276,6 +2302,17 @@ function Get-HiaPinnedCodexExecutable {
     return @($matches | Sort-Object -Property version -Descending)
 }
 
+function Get-HiaCodexContractVersions {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+
+    $contractRoot = Join-Path $ProjectRoot 'contracts\codex-app-server'
+    return @(
+        Get-ChildItem -LiteralPath $contractRoot -Directory -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name |
+            Sort-Object -Descending
+    )
+}
+
 function Test-HiaRuntimeWritable {
     param([Parameter(Mandatory = $true)][string]$RuntimePath)
 
@@ -2708,7 +2745,7 @@ function Invoke-HiaProjectChecks {
         $checks += New-HiaCheckResult -Id $entry.Key -Name $entry.Value[0] `
             -Level $(if ($exists) { 'green' } else { 'red' }) `
             -Message $(if ($exists) { "存在：$($entry.Value[1])" } else { "缺少：$($entry.Value[1])" }) `
-            -Advice $(if ($exists) { '无需处理。' } else { '从完整项目副本恢复该项目本地文件。' })
+            -Advice $(if ($exists) { '无需处理。' } else { '安装包不完整，请重新下载完整发布包；启动器不会伪造或自动修复缺失文件。' })
     }
 
     $runtimePath = Join-Path $ProjectRoot '.runtime'
@@ -2847,11 +2884,17 @@ function Invoke-HiaProjectChecks {
         -TimeoutSeconds $TimeoutSeconds `
         -ProbeOverride $embeddingOverride
 
+    $codexContractVersions = @(Get-HiaCodexContractVersions -ProjectRoot $ProjectRoot)
+    $codexContractDisplay = if ($codexContractVersions.Count -gt 0) {
+        $codexContractVersions -join ', '
+    } else {
+        'none'
+    }
     $codexMatches = @(Get-HiaPinnedCodexExecutable -ProjectRoot $ProjectRoot)
     if ($codexMatches.Count -ne 1) {
         $checks += New-HiaCheckResult -Id 'codex.executable' -Name 'Project Codex executable' -Level 'red' `
-            -Message "与项目协议版本匹配的 codex.exe 数量为 $($codexMatches.Count)。" `
-            -Advice "点击「安装/修复 Codex」下载并校验官方固定版本 $script:HiaCodexVersion；仅写入项目 .runtime，不修改系统 PATH。"
+            -Message "与当前发布包 app-server 合同（$codexContractDisplay）匹配的项目内 Codex 数量为 $($codexMatches.Count)。" `
+            -Advice '点击「安装/修复 Codex」准备当前发布包声明兼容的运行时；不会替换用户自己的 Codex，也不会修改全局 PATH 或配置。'
     } else {
         $codex = $codexMatches[0]
         if ($ProbeOverrides.ContainsKey('codex_version')) {
@@ -2863,20 +2906,20 @@ function Invoke-HiaProjectChecks {
         $codexVersionPassed = (-not [bool]$codexVersionProbe.timed_out -and $codexVersionProbe.exit_code -eq 0 -and $reportedCodexVersion -eq $codex.version)
         $checks += New-HiaCheckResult -Id 'codex.executable' -Name 'Project Codex executable' `
             -Level $(if ($codexVersionPassed) { 'green' } else { 'red' }) `
-            -Message $(if ($codexVersionPassed) { "codex $reportedCodexVersion 与项目协议锁定版本匹配。" } else { "codex 版本探针失败或与锁定版本 $($codex.version) 不匹配。" }) `
-            -Advice $(if ($codexVersionPassed) { '无需处理。' } else { "点击「安装/修复 Codex」恢复官方固定版本 $script:HiaCodexVersion；仅写入项目 .runtime。" })
+            -Message $(if ($codexVersionPassed) { "codex $reportedCodexVersion 与当前发布包合同匹配。" } else { "codex 版本探针失败或与当前发布包合同 $($codex.version) 不匹配。" }) `
+            -Advice $(if ($codexVersionPassed) { '无需处理。' } else { '点击「安装/修复 Codex」准备当前发布包声明兼容的项目内运行时；用户自己的 Codex 保持不变。' })
 
         if ($ProbeOverrides.ContainsKey('codex_login')) {
             $loginProbe = $ProbeOverrides.codex_login
         } else {
-            $loginProbe = Invoke-HiaProcess -FilePath $codex.path -Arguments @('login', 'status') -TimeoutSeconds $TimeoutSeconds `
+            $loginProbe = Invoke-HiaProcess -FilePath $codex.path -Arguments @('-c', $script:HiaCodexCredentialOverride, 'login', 'status') -TimeoutSeconds $TimeoutSeconds `
                 -WorkingDirectory $ProjectRoot -Environment @{ 'CODEX_HOME' = (Join-Path $ProjectRoot '.runtime\codex-home') }
         }
         $loggedIn = (-not [bool]$loginProbe.timed_out -and $loginProbe.exit_code -eq 0)
         $checks += New-HiaCheckResult -Id 'codex.login' -Name 'Codex login status' `
             -Level $(if ($loggedIn) { 'green' } else { 'red' }) `
             -Message $(if ($loggedIn) { '项目本地 CODEX_HOME 已登录；未读取凭据内容。' } else { '项目本地 CODEX_HOME 尚未登录或状态探针失败。' }) `
-            -Advice $(if ($loggedIn) { '无需处理。' } else { '点击「复制登录命令」，在 PowerShell 中运行项目本地 device login。命令不含凭据，报告也不会读取凭据内容。' })
+            -Advice $(if ($loggedIn) { '无需处理。' } else { '点击「登录 Codex」打开项目本地 device login；完成后回到 Launcher 重新扫描。Launcher 不读取凭据内容。' })
     }
 
     if ($McpBackend -eq 'hia_v2') {
@@ -2954,12 +2997,29 @@ function Invoke-HiaProjectChecks {
             -Message $(if ($portable) { '.codex/config.toml 使用项目相对路径。' } else { '.codex/config.toml 含非便携 command/cwd。' }) `
             -Advice $(if ($portable) { '无需处理。' } else { '点击“修复安全项目”仅规范项目本地锁定路径。' })
 
-        $projectMcpOptional = $config -match '(?m)^required\s*=\s*false\s*$'
-        $projectMcpRequired = $config -match '(?m)^required\s*=\s*true\s*$'
+        $projectMcpSection = [regex]::Match(
+            $config,
+            '(?ms)^[ \t]*\[mcp_servers\.houdini_intelligence\][ \t]*(?:\r?\n)?(?<body>.*?)(?=^[ \t]*\[|\z)'
+        )
+        $projectMcpBody = if ($projectMcpSection.Success) {
+            [string]$projectMcpSection.Groups['body'].Value
+        } else {
+            ''
+        }
+        $projectMcpEnabled = $projectMcpSection.Success -and (
+            $projectMcpBody -match '(?m)^[ \t]*enabled[ \t]*=[ \t]*true[ \t]*(?:#.*)?\r?$'
+        )
+        $projectMcpOptional = $projectMcpSection.Success -and (
+            $projectMcpBody -match '(?m)^[ \t]*required[ \t]*=[ \t]*false[ \t]*(?:#.*)?\r?$'
+        )
+        $projectMcpRequired = $projectMcpSection.Success -and (
+            $projectMcpBody -match '(?m)^[ \t]*required[ \t]*=[ \t]*true[ \t]*(?:#.*)?\r?$'
+        )
+        $projectMcpSafe = $projectMcpEnabled -and $projectMcpOptional
         $checks += New-HiaCheckResult -Id 'project.codex_config_required' -Name 'Ordinary project MCP requirement' `
-            -Level $(if ($projectMcpOptional) { 'green' } else { 'red' }) `
-            -Message $(if ($projectMcpOptional) { '普通项目配置为 required=false，不会因离线 Houdini MCP 阻断任务恢复。' } elseif ($projectMcpRequired) { '普通项目配置为 required=true，会在相对 MCP command 不可执行时阻断任务恢复。' } else { '普通项目配置缺少明确的 required=false。' }) `
-            -Advice $(if ($projectMcpOptional) { '无需处理；Bridge 仍会为受控 Houdini 生命周期注入 required=true。' } else { '将跟踪配置设为 enabled=true、required=false；不要移除 Bridge 的进程级 required=true 覆盖。' })
+            -Level $(if ($projectMcpSafe) { 'green' } else { 'red' }) `
+            -Message $(if ($projectMcpSafe) { '普通项目配置为 enabled=true、required=false，不会因离线 Houdini MCP 阻断任务恢复。' } elseif ($projectMcpRequired) { '普通项目配置为 required=true，会在相对 MCP command 不可执行时阻断任务恢复。' } else { '普通项目 HIA MCP 配置缺少明确的 enabled=true、required=false。' }) `
+            -Advice $(if ($projectMcpSafe) { '无需处理；Bridge 仍会为受控 Houdini 生命周期注入 required=true。' } else { '点击“修复安全项目”将目标 HIA MCP 段规范为 enabled=true、required=false；不会改动其他 MCP server 配置。' })
     }
 
     $packageConfigPath = Join-Path $ProjectRoot 'houdini_package\packages\houdini_intelligence.json'
@@ -3037,7 +3097,7 @@ function Invoke-HiaPreflight {
                 -EmbeddingData $EmbeddingData `
                 -Profile $EmbeddingProfile
         } catch {
-            $EmbeddingProfile = [string]$EmbeddingData.contract.default_profile
+            $EmbeddingProfile = ''
         }
     }
     $EmbeddingDevice = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
@@ -3907,10 +3967,15 @@ function Write-HiaLauncherSettings {
         $resolvedEmbedding = Resolve-HiaEmbeddingProfile `
             -EmbeddingData $EmbeddingData `
             -Profile $EmbeddingProfile
-        $settings[[string]$EmbeddingData.contract.settings.profile] = $resolvedEmbedding
-        $settings[[string]$EmbeddingData.contract.settings.device] = (
-            Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
-        )
+        $profileSetting = [string]$EmbeddingData.contract.settings.profile
+        $deviceSetting = [string]$EmbeddingData.contract.settings.device
+        if ([string]::IsNullOrWhiteSpace($resolvedEmbedding)) {
+            [void]$settings.Remove($profileSetting)
+            [void]$settings.Remove($deviceSetting)
+        } else {
+            $settings[$profileSetting] = $resolvedEmbedding
+            $settings[$deviceSetting] = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
+        }
     }
     $json = $settings | ConvertTo-Json
     $settingsPath = Resolve-HiaLauncherStoragePath `
@@ -3925,7 +3990,7 @@ function Write-HiaEmbeddingPreference {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [Parameter(Mandatory = $true)]$EmbeddingData,
-        [Parameter(Mandatory = $true)][string]$EmbeddingProfile,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$EmbeddingProfile,
         [AllowEmptyString()][string]$EmbeddingDevice = ''
     )
 
@@ -3948,10 +4013,15 @@ function Write-HiaEmbeddingPreference {
             }
         } catch { }
     }
-    $settings[[string]$EmbeddingData.contract.settings.profile] = $resolved
-    $settings[[string]$EmbeddingData.contract.settings.device] = (
-        Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
-    )
+    $profileSetting = [string]$EmbeddingData.contract.settings.profile
+    $deviceSetting = [string]$EmbeddingData.contract.settings.device
+    if ([string]::IsNullOrWhiteSpace($resolved)) {
+        [void]$settings.Remove($profileSetting)
+        [void]$settings.Remove($deviceSetting)
+    } else {
+        $settings[$profileSetting] = $resolved
+        $settings[$deviceSetting] = Resolve-HiaEmbeddingDevice -Device $EmbeddingDevice
+    }
     $json = $settings | ConvertTo-Json
     $settingsPath = Resolve-HiaLauncherStoragePath `
         -ProjectRoot $ProjectRoot `
@@ -4001,34 +4071,64 @@ function Repair-HiaSafeProject {
     $codexConfigPath = Join-Path $ProjectRoot '.codex\config.toml'
     if (Test-Path -LiteralPath $codexConfigPath -PathType Leaf) {
         $source = [System.IO.File]::ReadAllText($codexConfigPath)
+        $newline = if ($source.Contains("`r`n")) { "`r`n" } else { "`n" }
         $lines = @($source -split "`r?`n")
         $insideTarget = $false
+        $targetFound = $false
         $commandFound = $false
         $cwdFound = $false
-        $updatedLines = foreach ($line in $lines) {
-            if ($line -match '^\s*\[mcp_servers\.houdini_intelligence\]\s*$') {
-                $insideTarget = $true
-                $line
+        $enabledFound = $false
+        $requiredFound = $false
+        $updatedLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in $lines) {
+            if ($line -match '^\s*\[') {
+                if ($insideTarget) {
+                    if (-not $enabledFound) { $updatedLines.Add('enabled = true') }
+                    if (-not $requiredFound) { $updatedLines.Add('required = false') }
+                }
+                $insideTarget = $line -match '^\s*\[mcp_servers\.houdini_intelligence\]\s*$'
+                if ($insideTarget) { $targetFound = $true }
+                $updatedLines.Add($line)
                 continue
             }
-            if ($line -match '^\s*\[') { $insideTarget = $false }
             if ($insideTarget -and $line -match '^\s*command\s*=') {
                 $commandFound = $true
-                "command = '.runtime\fxhoudinimcp\1.3.0\venv\Scripts\python.exe'"
+                $updatedLines.Add("command = '.runtime\fxhoudinimcp\1.3.0\venv\Scripts\python.exe'")
                 continue
             }
             if ($insideTarget -and $line -match '^\s*cwd\s*=') {
                 $cwdFound = $true
-                "cwd = '.'"
+                $updatedLines.Add("cwd = '.'")
                 continue
             }
-            $line
+            if ($insideTarget -and $line -match '^\s*enabled\s*=') {
+                if (-not $enabledFound) {
+                    $updatedLines.Add('enabled = true')
+                    $enabledFound = $true
+                }
+                continue
+            }
+            if ($insideTarget -and $line -match '^\s*required\s*=') {
+                if (-not $requiredFound) {
+                    $updatedLines.Add('required = false')
+                    $requiredFound = $true
+                }
+                continue
+            }
+            $updatedLines.Add($line)
         }
-        $updated = $updatedLines -join [Environment]::NewLine
-        if (-not $commandFound -or -not $cwdFound) { $updated = $source }
-        if ($updated -ne $source -and $PSCmdlet.ShouldProcess($codexConfigPath, 'Normalize project-relative MCP paths')) {
+        if ($insideTarget) {
+            if (-not $enabledFound) { $updatedLines.Add('enabled = true') }
+            if (-not $requiredFound) { $updatedLines.Add('required = false') }
+        }
+        $updated = @($updatedLines) -join $newline
+        if (-not $targetFound) { $updated = $source }
+        if ($updated -ne $source -and $PSCmdlet.ShouldProcess($codexConfigPath, 'Normalize project-local HIA MCP settings')) {
             [System.IO.File]::WriteAllText($codexConfigPath, $updated, [System.Text.UTF8Encoding]::new($false))
-            $actions.Add('已将 .codex/config.toml 的 command/cwd 规范为项目相对路径')
+            if ($commandFound -and $cwdFound) {
+                $actions.Add('已将 .codex/config.toml 的 command/cwd 规范为项目相对路径')
+            }
+            $actions.Add('已将项目 HIA MCP 配置规范为 enabled=true、required=false')
         }
     }
 
@@ -4083,6 +4183,7 @@ Export-ModuleMember -Function @(
     'Copy-HiaLauncherRecoveryHip',
     'Get-HiaBridgePythonCandidates',
     'Get-HiaCodexLoginCommand',
+    'Get-HiaCodexContractVersions',
     'Get-HiaCrashRecoveryDecision',
     'Get-HiaEmbeddingCheckResult',
     'Get-HiaEmbeddingContractData',

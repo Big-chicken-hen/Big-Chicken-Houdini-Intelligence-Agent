@@ -248,6 +248,8 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual(
             [
+                'cli_auth_credentials_store="file"',
+                'web_search="live"',
                 "mcp_servers.houdini_intelligence.command="
                 + bridge_main._toml_basic_string(
                     str(
@@ -257,7 +259,6 @@ class BridgeMainLifecycleTests(unittest.TestCase):
                 ),
                 "mcp_servers.houdini_intelligence.required=true",
                 'mcp_servers.houdini_intelligence.default_tools_approval_mode="approve"',
-                'model_provider="hia_chatgpt_http"',
                 'model_providers.hia_chatgpt_http.name="HIA ChatGPT HTTP"',
                 "model_providers.hia_chatgpt_http.base_url="
                 '"https://chatgpt.com/backend-api/codex"',
@@ -387,7 +388,15 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         hia_server = "mcp_servers.hia_mcp_v2"
         self.assertEqual(str(REPOSITORY_ROOT / "codex.exe"), command[0])
         self.assertEqual(1, command.count("--strict-config"))
-        self.assertIn("mcp_servers.houdini_intelligence.enabled=false", overrides)
+        legacy_command = (
+            "mcp_servers.houdini_intelligence.command="
+            + bridge_main._toml_basic_string(str(Path(sys.executable).resolve()))
+        )
+        legacy_disabled = "mcp_servers.houdini_intelligence.enabled=false"
+        self.assertIn('cli_auth_credentials_store="file"', overrides)
+        self.assertIn(legacy_command, overrides)
+        self.assertIn(legacy_disabled, overrides)
+        self.assertLess(overrides.index(legacy_command), overrides.index(legacy_disabled))
         self.assertIn(
             f"{hia_server}.command="
             + bridge_main._toml_basic_string(str(Path(sys.executable).resolve())),
@@ -502,7 +511,9 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             for index, value in enumerate(command[:-1])
             if value == "-c"
         ]
-        self.assertEqual(9, len(overrides))
+        self.assertEqual(10, len(overrides))
+        self.assertEqual('cli_auth_credentials_store="file"', overrides[0])
+        self.assertEqual('web_search="live"', overrides[1])
         self.assertEqual(
             1,
             overrides.count(
@@ -512,24 +523,23 @@ class BridgeMainLifecycleTests(unittest.TestCase):
         self.assertEqual(
             "mcp_servers.houdini_intelligence.command="
             + json.dumps(mcp_python, ensure_ascii=True),
-            overrides[0],
+            overrides[2],
         )
         self.assertEqual(
             [
                 mcp_python,
                 "approve",
-                "hia_chatgpt_http",
+                "file",
                 "HIA ChatGPT HTTP",
                 "https://chatgpt.com/backend-api/codex",
                 "responses",
             ],
             [call.args[0] for call in encoder.call_args_list],
         )
-        provider_overrides = overrides[3:]
-        self.assertEqual(6, len(provider_overrides))
+        provider_overrides = overrides[5:]
+        self.assertEqual(5, len(provider_overrides))
         self.assertEqual(
             {
-                'model_provider="hia_chatgpt_http"',
                 'model_providers.hia_chatgpt_http.name="HIA ChatGPT HTTP"',
                 "model_providers.hia_chatgpt_http.base_url="
                 '"https://chatgpt.com/backend-api/codex"',
@@ -539,6 +549,8 @@ class BridgeMainLifecycleTests(unittest.TestCase):
             },
             set(provider_overrides),
         )
+        self.assertEqual(1, overrides.count('web_search="live"'))
+        self.assertFalse(any(item.startswith("model_provider=") for item in overrides))
         command_text = "\n".join(command).casefold()
         for forbidden in (
             "responses_websockets",

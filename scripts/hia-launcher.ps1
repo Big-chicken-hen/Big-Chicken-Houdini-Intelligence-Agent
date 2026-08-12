@@ -117,17 +117,17 @@ function Get-SelectedInputs {
             $settingKey = [string]$embeddingData.contract.settings.profile
             $savedProperty = $Settings.PSObject.Properties[$settingKey]
             if ($null -ne $savedProperty) { $savedEmbedding = [string]$savedProperty.Value }
-            if ($RequestedEmbedding) {
+            if (-not [string]::IsNullOrWhiteSpace($RequestedEmbedding)) {
                 $selectedEmbedding = Resolve-HiaEmbeddingProfile `
                     -EmbeddingData $embeddingData `
                     -Profile $RequestedEmbedding
-            } else {
+            } elseif (-not [string]::IsNullOrWhiteSpace($savedEmbedding)) {
                 try {
                     $selectedEmbedding = Resolve-HiaEmbeddingProfile `
                         -EmbeddingData $embeddingData `
                         -Profile $savedEmbedding
                 } catch {
-                    $selectedEmbedding = [string]$embeddingData.contract.default_profile
+                    $selectedEmbedding = ''
                 }
             }
         }
@@ -266,7 +266,7 @@ function Start-ExistingHoudiniLauncher {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { throw 'The existing Houdini launcher process did not start.' }
-    $process.Dispose()
+    return $process
 }
 
 if ($PrintCodexLoginCommand) {

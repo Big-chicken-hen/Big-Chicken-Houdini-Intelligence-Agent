@@ -85,9 +85,32 @@ class ReleasePackagingTests(unittest.TestCase):
             )
             self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
 
+    def test_product_version_defaults_are_the_beta_candidate(self) -> None:
+        expected = "1.0.0-beta.1"
+        pyproject_text = (REPOSITORY_ROOT / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        pyproject_match = re.search(
+            r'(?m)^\s*version\s*=\s*"([^"]+)"\s*$', pyproject_text
+        )
+        launcher = ET.parse(CS_PROJECT_PATH).getroot()
+        launcher_version = launcher.findtext(".//Version")
+        release_source = BUILD_RELEASE_PATH.read_text(encoding="utf-8-sig")
+
+        self.assertIsNotNone(pyproject_match)
+        self.assertEqual(expected, pyproject_match.group(1))
+        self.assertEqual(expected, launcher_version)
+        self.assertIn("[string]$Version = '1.0.0-beta.1'", release_source)
+        self.assertNotIn("Release version mismatch", release_source)
+
     def test_codex_bootstrap_is_pinned_and_project_local(self) -> None:
         source = BOOTSTRAP_PATH.read_text(encoding="utf-8-sig")
         for required in (
+            "[switch]$Repair",
+            r"contracts\codex-app-server",
+            "$contractVersions.Count -ne 1",
+            "$version = $contractVersion.Name",
+            "$supportedVersion = '0.144.3'",
             "rust-v0.144.3/codex-x86_64-pc-windows-msvc.exe.zip",
             "5490114D8684B30F91E6E6F7B1238B2544FA3B957E42C9836AA959E8F563C01F",
             "E5DCC9F9B08102C58596AF85345F689A69FD53A87D8D408BDC0FCDAF99FCF6E3",
@@ -95,6 +118,10 @@ class ReleasePackagingTests(unittest.TestCase):
             "7EFA768607D8E3F3FBF8F018C7A3454695FAE718984345125BAB387A863F089F",
             "6D5ECE62E405BFD318FEB942FCBB37E5FD6C4AB3",
             "Get-AuthenticodeSignature",
+            "Assert-HiaNoReparsePathChain",
+            "Assert-HiaManagedCodexRepairTarget",
+            "Remove-HiaManagedCodexRepairTarget",
+            "[System.IO.FileAttributes]::ReparsePoint",
             r"downloads\codex\$version",
             r"toolchains\codex\$version",
             r"tmp\codex-bootstrap",
@@ -107,7 +134,33 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertNotIn("setx", source.lower())
         self.assertNotIn("Remove-Item", source)
         self.assertNotIn("Get-Command -Name 'python.exe'", source)
+        self.assertNotIn("$version = '0.144.3'", source)
         self.assertIsNone(re.search(r"(?i)(?:^|[\"'\s])[a-z]:[\\/]", source))
+
+    def test_codex_repair_validates_staging_before_exact_runtime_replacement(self) -> None:
+        source = BOOTSTRAP_PATH.read_text(encoding="utf-8-sig")
+
+        self.assertIn("[ValidateSet('InstallDirectory', 'ArchiveFile', 'PartialFile')]", source)
+        self.assertIn("$partialPath = $archivePath + '.partial'", source)
+        self.assertIn("-Path $safeArchivePath -Kind ArchiveFile", source)
+        self.assertIn("-Path $safePartialPath -Kind PartialFile", source)
+        self.assertIn("-Path $safeInstallRoot -Kind InstallDirectory", source)
+        self.assertIn("[System.IO.File]::Delete($safePath)", source)
+        self.assertIn("[System.IO.Directory]::Delete($safePath, $true)", source)
+
+        staged_verification = source.rindex(
+            "Assert-CodexExecutable -Path $destination -ExpectedSha256 $entry.Value"
+        )
+        install_removal = source.index(
+            "Remove-HiaManagedCodexRepairTarget -Path $safeInstallRoot"
+        )
+        install_move = source.index(
+            "[System.IO.Directory]::Move($preparedRoot, $installRoot)"
+        )
+        self.assertLess(staged_verification, install_removal)
+        self.assertLess(install_removal, install_move)
+        self.assertNotIn("Start-BitsTransfer", source)
+        self.assertNotIn("Invoke-RestMethod", source)
 
     def test_release_builder_uses_a_strict_allowlist_and_fresh_launcher_files(self) -> None:
         source = BUILD_RELEASE_PATH.read_text(encoding="utf-8-sig")
@@ -159,6 +212,8 @@ class ReleasePackagingTests(unittest.TestCase):
             "licenses\\dotnet",
             "ThirdPartyNotices.txt",
             "assets/launcher/launcher-hero.png",
+            "assets/launcher/big-chicken-hen.ico",
+            "assets/launcher/big-chicken-hen.png",
             "launcher/HoudiniIntelligenceLauncher/App.xaml",
             "launcher/HoudiniIntelligenceLauncher/App.xaml.cs",
             "launcher/HoudiniIntelligenceLauncher/HoudiniIntelligenceLauncher.csproj",
@@ -443,10 +498,25 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertNotIn("sakurakouji-luna", combined.lower())
         self.assertIn("Initialize-HiaOptionalArtwork", combined)
         self.assertIn("launcher-hero.png", combined)
+        self.assertIn("big-chicken-hen.ico", combined)
+        self.assertIn("ApplicationIcon", combined)
         self.assertIn("'assets'", combined)
         self.assertTrue(
             (REPOSITORY_ROOT / "assets" / "launcher" / "launcher-hero.png").is_file()
         )
+        self.assertTrue(
+            (REPOSITORY_ROOT / "assets" / "launcher" / "big-chicken-hen.ico").is_file()
+        )
+        self.assertTrue(
+            (REPOSITORY_ROOT / "assets" / "launcher" / "big-chicken-hen.png").is_file()
+        )
+        notices = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Erik Karits", notices)
+        self.assertIn("22882004", notices)
+        self.assertIn("Pexels License", notices)
+        self.assertIn("not as a trademark", notices)
         self.assertIn("BIG-CHICKEN", combined)
         project = ET.parse(CS_PROJECT_PATH).getroot()
         self.assertEqual([], project.findall(".//Content"))
@@ -464,7 +534,7 @@ class ReleasePackagingTests(unittest.TestCase):
             r".runtime\release",
             "SHA256SUMS-v<version>.txt",
             "check-public-release.py",
-            "0.1.1-preview",
+            "1.0.0-beta.1",
         ):
             self.assertIn(required, readme)
 

@@ -2,13 +2,13 @@
 
 [![Tests](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/actions/workflows/tests.yml/badge.svg)](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Published Preview](https://img.shields.io/badge/published-v0.1.1--preview-orange.svg)](https://github.com/Big-chicken-hen/Big-Chicken-Houdini-Intelligence-Agent/releases/tag/v0.1.1-preview)
+[![Candidate](https://img.shields.io/badge/candidate-v1.0.0--beta.1-orange.svg)](CHANGELOG.md)
 
 Build and revise editable Houdini node networks with Codex, natural language, reference images, and live scene context.
 
 Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It embeds a conversation panel inside Houdini while the compatible local runtime supplies the connection to the scene that is already open. Codex remains the reasoning system. The default HIA MCP V2 backend lets Codex inspect the scene, search the installed node catalog, execute batched HOM Python on Houdini's UI thread, validate results, and capture the viewport when visual feedback is needed.
 
-> **Preview software:** Big-Chicken Houdini Intelligence Agent can run Codex-generated HOM/Python that modifies the current HIP. Save or version important work before use and review the result in Houdini.
+> **1.0 beta software:** Big-Chicken Houdini Intelligence Agent can run Codex-generated HOM/Python that modifies the current HIP. Save or version important work before use and review the result in Houdini. `1.0.0-beta.1` is a source candidate until its release archive, checksum, CI, and embedded Houdini acceptance are completed.
 
 ## Highlights
 
@@ -17,6 +17,7 @@ Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It emb
 - Continue refining an active Turn without starting a separate conversation.
 - Use Goal focus mode for long, multi-step work and launcher-assisted recovery after a confirmed Houdini crash.
 - Search the live Houdini node catalog instead of relying on a fixed node whitelist.
+- Search current web sources through Codex native live Web Search; ordinary Turns may also use network-enabled workspace commands when needed.
 - Search local help and explicitly recorded project memory through SQLite FTS5, with an optional project-local Qwen text encoder for hybrid retrieval.
 - Keep internal data project-local while placing HIA captures and AI stage checkpoints beside a safely saved HIP under its single `.hia` directory.
 - Choose a separate delivery directory for final renders, USD, exports, or simulation caches.
@@ -29,11 +30,11 @@ Big-Chicken Houdini Intelligence Agent is a Codex-powered Houdini plugin. It emb
 | Houdini | Dynamically discovered from the selected installation; bundled UI startup adapters cover Python 3.10, 3.11, and 3.13, including Houdini 22's default Python 3.13 and separate Python 3.11 builds |
 | Real-GUI evidence | Houdini 21.0.440/Python 3.11 is the currently completed live acceptance configuration; untested builds are reported as unverified, not rejected by version |
 | Bridge and local knowledge Python | One project-managed CPython 3.10.11 virtual environment at `<project-root>\.venv` |
-| Codex | Project-pinned Codex CLI/app-server 0.144.3 |
+| Codex | A package-compatible Codex CLI/app-server runtime stored under this plugin's `.runtime`; this package currently carries contract `0.144.3`, without replacing or constraining the user's system Codex |
 | Account and network | A valid Codex/ChatGPT sign-in and access to the OpenAI service |
 | Default backend | HIA MCP V2 |
 
-Houdini must be installed and licensed separately. The Preview ZIP can prepare the pinned Codex runtime, project-managed Python, local knowledge parser, and optional embedding runtime inside its extracted project directory. It never installs packages into global Python, Houdini Python, or the user site-packages directory.
+Houdini must be installed and licensed separately. The 1.0 beta package can prepare its compatible Codex runtime, project-managed Python, and local knowledge parser inside its extracted project directory. PyTorch and Qwen remain optional and are not required for the default FTS5 lexical path. It never installs packages into global Python, Houdini Python, or the user site-packages directory.
 
 ## Published historical Preview ZIP
 
@@ -52,7 +53,7 @@ For users reproducing that published snapshot, the ZIP is the simplest installat
 3. Run `BigChickenLauncher.exe` from the extracted package root. The launcher is not currently code-signed, so Windows SmartScreen may show an unknown-publisher warning. Continue with **More info → Run anyway** only when the file came from this official Release and its SHA-256 matches `SHA256SUMS.txt`.
 4. Select the Houdini executable and **HIA MCP V2**, keep the recommended project-managed Python mode, then run or refresh the checks. If the local knowledge environment is missing, use its project-local install/repair action.
 5. If the action button says **安装/修复 Codex**, click it. The launcher downloads and verifies the pinned official Codex runtime only under the extracted package's `.runtime` directory.
-6. After the checks refresh, if the action button says **复制登录命令**, click it, paste the copied command into PowerShell, run it, and complete the official device-login flow. Return to the launcher and click **重新扫描**.
+6. After the checks refresh, if the action button says **登录 Codex**, click it and complete the plugin-local device-login flow in the window opened by the launcher. When the window closes, the launcher scans again automatically; use **重新扫描** only if that scan reports a problem.
 7. When no red checks remain, click **Launch Houdini**. In Houdini, open **New Pane Tab Type → Python Panel → Big-Chicken Houdini Intelligence Agent**.
 8. Confirm that the Panel reports Codex, Houdini, and HIA MCP V2 as available. Start with the read-only verification request in [Installation](docs/INSTALLATION.md) before editing an important HIP.
 
@@ -62,7 +63,13 @@ See [Installation and first run](docs/INSTALLATION.md) for the expanded walkthro
 
 ## Source checkout
 
-Cloning the source is intended for development. From the project root, install the project-local Codex runtime, complete login, and start the PowerShell launcher:
+Cloning the source is intended for development. From the checkout root,
+double-click `Start-Big-Chicken-HIA.cmd` to open the same WPF launcher without
+navigating into `scripts`. The wrapper only delegates to the tracked launcher
+and keeps failures visible; published ZIP users should continue to use the
+root-level `BigChickenLauncher.exe`.
+
+The equivalent command-line setup is:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-runtime.ps1
@@ -345,7 +352,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
 .\.runtime\dist\launcher\BigChickenLauncher.exe
 ```
 
-The build downloads the .NET 8 SDK only into the ignored project runtime, verifies the Microsoft archive, and does not install a global SDK. Public launcher builds include the project launcher illustration at `assets\launcher\launcher-hero.png`, so a fresh clone or Release archive shows the same startup artwork without relying on `.runtime`.
+The build downloads the .NET 8 SDK only into the ignored project runtime, verifies the Microsoft archive, and does not install a global SDK. Public launcher builds include the launcher illustration at `assets\launcher\launcher-hero.png` and the documented hen taskbar icon at `assets\launcher\big-chicken-hen.ico`, so a fresh clone or Release archive shows the same startup artwork and Windows icon without relying on `.runtime`. The icon's source and Pexels license are recorded in `THIRD_PARTY_NOTICES.md`.
 
 Build the strict public Preview archive:
 
@@ -364,8 +371,8 @@ The archive and version-bound `SHA256SUMS-v<version>.txt` are written to
 uses an explicit runtime allowlist, rebuilds the launcher, and runs
 `scripts\check-public-release.py` before publishing the checksum. It excludes
 project runtime state, credentials, tests, HIP files, renders, historical Gate
-reports, and unlicensed artwork. The project-owned launcher illustration is
-included explicitly. `-PreflightOnly` is read-only: it requires the canonical
+reports, and unlicensed artwork. The documented launcher illustration and
+taskbar icon are included explicitly. `-PreflightOnly` is read-only: it requires the canonical
 project `.venv`, rejects missing or untracked release/build inputs, and verifies
 the built-in knowledge manifests before the .NET build or archive staging
 begins. The final archive scan also rejects the current checkout's absolute path.

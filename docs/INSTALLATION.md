@@ -1,6 +1,6 @@
 # Installation and first run
 
-Big-Chicken Houdini Intelligence Agent is currently a Windows x64 Preview for Houdini. The launcher discovers the selected Houdini installation dynamically rather than pinning a Houdini major version. The source package includes UI startup adapters for Python 3.10, 3.11, and 3.13, covering Houdini 22's standard Python 3.13 build and its separate Python 3.11 build. Houdini 21.0.440/Python 3.11 remains the configuration with completed live-GUI evidence on this machine. The Bridge/local-knowledge environment uses project-managed CPython 3.10.11 and Codex 0.144.3. The published v0.1.1 Preview ZIP is the historical 2026-07-24 snapshot and does not represent later source changes. Use that ZIP only to reproduce its published version; use a source checkout to inspect current development until a newer Preview is published.
+Big-Chicken Houdini Intelligence Agent `1.0.0-beta.1` is a Windows x64 beta candidate for Houdini. The launcher discovers the selected Houdini installation dynamically rather than pinning a Houdini major version. The source package includes UI startup adapters for Python 3.10, 3.11, and 3.13, covering Houdini 22's standard Python 3.13 build and its separate Python 3.11 build. Houdini 21.0.440/Python 3.11 remains the configuration with completed live-GUI evidence on this machine; the exact beta candidate still requires embedded Pane acceptance. The Bridge/local-knowledge environment uses project-managed CPython 3.10.11. The plugin uses the Codex app-server runtime declared by the current package contract (`0.144.3` in this package); it does not replace, reconfigure, or constrain a user's separately installed Codex. The published v0.1.1 Preview ZIP is the historical 2026-07-24 snapshot and does not represent this beta candidate. Use that ZIP only to reproduce its published version; use a source checkout until the beta archive and checksum are published.
 
 ## 1. Download and fully extract the historical Preview ZIP
 
@@ -182,17 +182,19 @@ Do not commit `.runtime`; it is the local state directory.
 ## 4. Complete the project-local Codex login
 
 After Codex installation and the automatic check refresh, a missing login changes
-the action button to **复制登录命令**. Click it, open PowerShell, paste and run
-the copied command, and complete the official device-login flow in your browser.
-The copied command contains paths but no credentials. Return to the launcher and
-click **重新扫描** when login finishes.
+the action button to **登录 Codex**. Click it and complete the plugin-local
+device-login flow in the visible window opened by the launcher. The launcher
+automatically scans again after that window closes; use **重新扫描** only if the
+automatic scan reports a problem. The plugin runtime uses its own `CODEX_HOME`
+and a process-level file credential-store override, without changing the user's
+system Codex version or global Codex configuration.
 
 If the clipboard action is unavailable, open PowerShell in the extracted package
 root and run:
 
 ```powershell
 $env:CODEX_HOME = (Join-Path (Get-Location) '.runtime\codex-home')
-& '.\.runtime\toolchains\codex\0.144.3\codex.exe' login --device-auth
+& '.\.runtime\toolchains\codex\0.144.3\codex.exe' -c 'cli_auth_credentials_store="file"' login --device-auth
 ```
 
 The access and refresh tokens remain managed by Codex under the ignored
@@ -231,7 +233,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
 .\.runtime\dist\launcher\BigChickenLauncher.exe
 ```
 
-`-InstallLocalSdk` downloads and verifies a Microsoft .NET 8 SDK under `.runtime`; it does not install a global SDK. The published EXE and its native sidecars must remain together. Release archives include the project-owned launcher illustration at `assets\launcher\launcher-hero.png`. If that file is missing or cannot be decoded, the launcher falls back to its built-in dark gradient without blocking preflight or Houdini launch.
+`-InstallLocalSdk` downloads and verifies a Microsoft .NET 8 SDK under `.runtime`; it does not install a global SDK. The published EXE and its native sidecars must remain together. Release archives include the launcher illustration at `assets\launcher\launcher-hero.png` and the hen taskbar icon at `assets\launcher\big-chicken-hen.ico`; the icon's source and license are recorded in `THIRD_PARTY_NOTICES.md`. If the optional hero illustration is missing or cannot be decoded, the launcher falls back to its built-in dark gradient without blocking preflight or Houdini launch. A missing taskbar icon indicates an incomplete package and the launcher reports that explicitly.
 
 ## Use local knowledge without WPF
 

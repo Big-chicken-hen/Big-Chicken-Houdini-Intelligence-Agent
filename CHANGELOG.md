@@ -2,6 +2,31 @@
 
 All notable user-facing changes to Big-Chicken Houdini Intelligence Agent are recorded here.
 
+## 1.0.0-beta.1 - Unreleased
+
+### Added
+
+- A project-root launcher entry and packaged hen taskbar icon for a visible first-run experience.
+- Launcher-guided project-local Codex login, runtime repair feedback, and parser-only local knowledge setup without requiring PyTorch or a Qwen model.
+- Codex native live Web Search plus ordinary Turn network access for current SideFX documentation and original-source research.
+
+### Changed
+
+- Product versioning now identifies this line as a 1.0 beta candidate while preserving protocol and bundled runtime contract versions independently.
+- The Bridge uses Codex's built-in authenticated provider by default; the legacy provider definition remains available for existing history but is no longer forced on new tasks.
+- The optional vector retrieval stack remains opt-in. FTS5 lexical retrieval and normal Houdini operation do not require a local large model.
+
+### Fixed
+
+- Clean project-local Codex homes receive a complete strict app-server configuration and expose the native Web Search tool.
+- Launcher failures now surface bounded, redacted diagnostics instead of only reporting a generic bootstrap exit.
+
+### Beta limitations
+
+- Embedded Houdini Pane acceptance for this exact candidate has not yet been completed.
+- The launcher executable is not code-signed.
+- Qwen/PyTorch installation and vector retrieval are intentionally outside this candidate's required acceptance path.
+
 ## 0.1.1-preview - 2026-07-24
 
 ### Added
@@ -38,7 +63,7 @@ All notable user-facing changes to Big-Chicken Houdini Intelligence Agent are re
 - Complex scene changes prefer one or a few batched HOM operations instead of a large sequence of fine-grained tool calls.
 - Launcher and project paths are derived from the project location instead of a fixed drive.
 - Internal screenshots, previews, attachments, diagnostics, and temporary files use the ignored project `.runtime` tree.
-- Public launcher presentation uses the built-in dark gradient and does not require third-party artwork.
+- Public launcher presentation uses the built-in dark gradient plus a documented, separately licensed hen taskbar icon; unlicensed promotional artwork is not required.
 
 ### Known Preview limitations
 

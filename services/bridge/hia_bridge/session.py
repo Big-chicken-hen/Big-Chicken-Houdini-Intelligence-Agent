@@ -1260,7 +1260,7 @@ class BridgeSession:
                 "approvalPolicy": "on-request",
                 "sandboxPolicy": {
                     "type": "workspaceWrite",
-                    "networkAccess": False,
+                    "networkAccess": True,
                 },
                 "serviceTier": service_tier,
             }

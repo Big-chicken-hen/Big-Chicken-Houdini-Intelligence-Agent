@@ -54,6 +54,47 @@ function Write-LauncherSessionManifest {
     )
 }
 
+function Get-BridgeStartupFailureMessage {
+    param([AllowEmptyString()][string]$StandardError = '')
+
+    $fallback = 'Bridge exited without bootstrap data'
+    $lines = @(
+        $StandardError -split "`r?`n" |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    for ($index = $lines.Count - 1; $index -ge 0; $index--) {
+        $line = [string]$lines[$index]
+        if ($line.Length -gt 8192) { continue }
+        try {
+            $payload = $line | ConvertFrom-Json
+        } catch {
+            continue
+        }
+        if ($null -eq $payload) { continue }
+        $okProperty = $payload.PSObject.Properties['ok']
+        $errorProperty = $payload.PSObject.Properties['structured_error']
+        if (
+            $null -eq $okProperty -or
+            $okProperty.Value -ne $false -or
+            $null -eq $errorProperty -or
+            $null -eq $errorProperty.Value
+        ) {
+            continue
+        }
+        $errorPayload = $errorProperty.Value
+        $codeProperty = $errorPayload.PSObject.Properties['code']
+        $messageProperty = $errorPayload.PSObject.Properties['message']
+        if ($null -eq $codeProperty -or $null -eq $messageProperty) { continue }
+        $code = [string]$codeProperty.Value
+        $message = ([string]$messageProperty.Value) -replace '[\x00-\x1F\x7F]', ' '
+        $message = $message.Trim()
+        if ($code -notmatch '^[A-Z][A-Z0-9_]{0,63}$' -or -not $message) { continue }
+        if ($message.Length -gt 800) { $message = $message.Substring(0, 800) }
+        return "Bridge startup failed [$code]: $message"
+    }
+    return $fallback
+}
+
 function Invoke-LauncherBridgeJson {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('GET', 'POST')][string]$Method,
@@ -927,28 +968,31 @@ function New-EmbeddingChildEnvironment {
             throw 'Embedding launcher contract contains an invalid profile identity.'
         }
     }
-    $selection = if ($RequestedProfile -eq '') {
-        [string]$contract.default_profile
-    } else {
-        $RequestedProfile
-    }
-    if (-not $profileIdSet.Contains($selection)) {
+    $selection = $RequestedProfile.Trim()
+    $lexicalOnly = [string]::IsNullOrWhiteSpace($selection)
+    if (-not $lexicalOnly -and -not $profileIdSet.Contains($selection)) {
         throw [System.ArgumentException]::new(
             'EmbeddingProfile must exactly match one of the two contract profiles.'
         )
     }
-    $selectedProfile = $contract.profiles.PSObject.Properties[$selection].Value
-    $dimension = 0
-    try {
-        $dimension = [int]$selectedProfile.default_dimension
-    } catch {
-        throw 'The selected embedding profile default dimension is invalid.'
+    $selectedProfile = if ($lexicalOnly) {
+        $null
+    } else {
+        $contract.profiles.PSObject.Properties[$selection].Value
     }
-    if (
-        $dimension -lt [int]$selectedProfile.min_mrl_dimension -or
-        $dimension -gt [int]$selectedProfile.max_dimension
-    ) {
-        throw 'The selected embedding profile default dimension is outside its contract range.'
+    $dimension = 0
+    if (-not $lexicalOnly) {
+        try {
+            $dimension = [int]$selectedProfile.default_dimension
+        } catch {
+            throw 'The selected embedding profile default dimension is invalid.'
+        }
+        if (
+            $dimension -lt [int]$selectedProfile.min_mrl_dimension -or
+            $dimension -gt [int]$selectedProfile.max_dimension
+        ) {
+            throw 'The selected embedding profile default dimension is outside its contract range.'
+        }
     }
 
     $contractEnvironmentNameSet = [System.Collections.Generic.HashSet[string]]::new(
@@ -974,9 +1018,11 @@ function New-EmbeddingChildEnvironment {
         $environmentNames[$field] = $name
     }
     $values = @{}
-    $values[$environmentNames['profile']] = $selection
-    $values[$environmentNames['dimension']] = [string]$dimension
-    $values[$environmentNames['device']] = $RequestedDevice
+    if (-not $lexicalOnly) {
+        $values[$environmentNames['profile']] = $selection
+        $values[$environmentNames['dimension']] = [string]$dimension
+        $values[$environmentNames['device']] = $RequestedDevice
+    }
 
     $workerPythonValue = [string]$Payload.layout.worker_python
     $workerPythonRelative = [string]$contract.worker.python
@@ -1008,7 +1054,7 @@ function New-EmbeddingChildEnvironment {
             -Root $Root `
             -AllowMissingLeaf
     } catch { }
-    if ($workerPython -and (Test-Path -LiteralPath $workerPython -PathType Leaf)) {
+    if (-not $lexicalOnly -and $workerPython -and (Test-Path -LiteralPath $workerPython -PathType Leaf)) {
         try {
             $workerPython = Assert-OrdinaryProjectPath `
                 -Path $workerPython `
@@ -1045,7 +1091,7 @@ function New-EmbeddingChildEnvironment {
             -Layout $Payload.layout `
             -Profile $profile `
             -Root $Root
-        if ($installation.installed) {
+        if (-not $lexicalOnly -and $installation.installed) {
             $values[$modelDirectoryEnvironment] = [string]$installation.model_directory
             $values[$modelRevisionEnvironment] = [string]$installation.revision
         }
@@ -1442,7 +1488,7 @@ $bridgeInfo.WorkingDirectory = $ResolvedRoot
 $bridgeInfo.UseShellExecute = $false
 $bridgeInfo.CreateNoWindow = $true
 $bridgeInfo.RedirectStandardOutput = $true
-$bridgeInfo.RedirectStandardError = $false
+$bridgeInfo.RedirectStandardError = $true
 $bridgeEnvironment = @{
     'PATH' = "$pythonDirectory;$houdiniBinDirectory;$($env:PATH)"
     'PYTHONPATH' = $bridgeProcessPythonPath -join ';'
@@ -1488,13 +1534,20 @@ try {
         throw 'Bridge process did not start'
     }
     $bridgeStarted = $true
+    $bridgeErrorTask = $bridgeProcess.StandardError.ReadToEndAsync()
     $bootstrapTask = $bridgeProcess.StandardOutput.ReadLineAsync()
     if (-not $bootstrapTask.Wait(60000)) {
         throw 'Bridge did not publish bootstrap data within 60 seconds'
     }
     $bootstrapLine = $bootstrapTask.Result
     if (-not $bootstrapLine) {
-        throw 'Bridge exited without bootstrap data'
+        $bridgeStandardError = ''
+        try {
+            if ($bridgeErrorTask.Wait(2000)) {
+                $bridgeStandardError = [string]$bridgeErrorTask.Result
+            }
+        } catch { }
+        throw (Get-BridgeStartupFailureMessage -StandardError $bridgeStandardError)
     }
     $bootstrap = $bootstrapLine | ConvertFrom-Json
     if (-not $bootstrap.ok) {

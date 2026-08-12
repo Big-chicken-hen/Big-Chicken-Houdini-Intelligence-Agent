@@ -317,7 +317,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             ["lexical", "vector", "hybrid"],
             local_help_properties["mode"]["enum"],
         )
-        self.assertEqual("hybrid", local_help_properties["mode"]["default"])
+        self.assertEqual("lexical", local_help_properties["mode"]["default"])
         self.assertEqual(16, local_help_properties["queries"]["maxItems"])
         self.assertIn("refresh", local_help_properties)
         self.assertIn(
@@ -376,7 +376,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         self.assertEqual(256, memory_properties["source_thread_id"]["maxLength"])
         self.assertEqual(256, memory_properties["source_turn_id"]["maxLength"])
         self.assertEqual(100, memory_properties["limit"]["maximum"])
-        self.assertEqual("hybrid", memory_properties["mode"]["default"])
+        self.assertEqual("lexical", memory_properties["mode"]["default"])
         self.assertNotIn("model", memory_properties)
         self.assertNotIn("model_id", memory_properties)
         self.assertNotIn("profile", memory_properties)
@@ -385,7 +385,7 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
         memory_description = memory_tool["description"].casefold()
         self.assertIn("nothing is saved automatically", memory_description)
         self.assertIn("qwen only encodes text", memory_description)
-        self.assertIn("lexical fallback", memory_description)
+        self.assertIn("defaults to lexical", memory_description)
         self.assertIn("requested/active embedding profiles", memory_description)
 
         execute_tool = next(
@@ -510,6 +510,46 @@ class HiaMcpV2ProtocolTests(unittest.TestCase):
             list(TOOL_NAMES),
             [item["name"] for item in codex_response["result"]["tools"]],
         )
+
+    def test_node_help_limit_is_explicit_and_reports_the_allowed_maximum(self) -> None:
+        transport = FakeTransport()
+        adapter = HiaMcpAdapter(transport)
+        initialize(adapter)
+        listed = adapter.handle_message(rpc(2, "tools/list", {}))
+        help_tool = next(
+            item for item in listed["result"]["tools"] if item["name"] == "hia_node_help"
+        )
+        request_limit = help_tool["inputSchema"]["properties"]["requests"]["items"][
+            "properties"
+        ]["limit"]
+
+        self.assertEqual(500, request_limit["maximum"])
+        self.assertIn("at most 500 parameters", request_limit["description"])
+        self.assertIn("limit must be 1-500", help_tool["description"])
+
+        rejected = adapter.handle_message(
+            rpc(
+                3,
+                "tools/call",
+                {
+                    "name": "hia_node_help",
+                    "arguments": {
+                        "requests": [
+                            {
+                                "node_type": "Cop/streakblur",
+                                "include_parameters": True,
+                                "limit": 600,
+                            }
+                        ]
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(-32602, rejected["error"]["code"])
+        self.assertEqual("INVALID_ARGUMENTS", rejected["error"]["data"]["code"])
+        self.assertEqual(500, rejected["error"]["data"]["details"]["maximum"])
+        self.assertEqual([], transport.calls)
 
     def test_execute_hom_is_one_batch_transport_dispatch(self) -> None:
         transport = FakeTransport()

@@ -32,6 +32,15 @@ publish/
 Thumbs.db
 Desktop.ini
 
+# Root launcher binaries are local build outputs. Release packaging rebuilds
+# them in project-local staging; the source launcher and icon remain tracked.
+/BigChickenLauncher.exe
+/D3DCompiler_47_cor3.dll
+/PenImc_cor3.dll
+/PresentationNative_cor3.dll
+/vcruntime140_cor3.dll
+/wpfgfx_cor3.dll
+
 *.log
 *.trace
 *.tmp

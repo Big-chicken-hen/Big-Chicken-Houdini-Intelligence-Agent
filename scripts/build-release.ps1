@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.-]*$')]
-    [string]$Version = '0.1.1-preview',
+    [string]$Version = '1.0.0-beta.1',
     [switch]$InstallLocalSdk,
     [switch]$PreflightOnly
 )
@@ -35,6 +35,8 @@ $releaseFileAllowlist = @(
     'SECURITY.md',
     'THIRD_PARTY_NOTICES.md',
     'pyproject.toml',
+    'assets/launcher/big-chicken-hen.ico',
+    'assets/launcher/big-chicken-hen.png',
     'assets/launcher/launcher-hero.png',
     'docs/ARCHITECTURE.md',
     'docs/DIAGNOSTICS.md',
@@ -101,9 +103,11 @@ $releaseDirectoryAllowlist = @(
     'services/hia_mcp_v2/'
 )
 $releaseBuildInputFiles = @(
+    'Start-Big-Chicken-HIA.cmd',
     'scripts/build-launcher.ps1',
     'scripts/build-release.ps1',
     'scripts/check-public-release.py',
+    'assets/launcher/big-chicken-hen.ico',
     'launcher/HoudiniIntelligenceLauncher/App.xaml',
     'launcher/HoudiniIntelligenceLauncher/App.xaml.cs',
     'launcher/HoudiniIntelligenceLauncher/HoudiniIntelligenceLauncher.csproj',
@@ -472,4 +476,4 @@ try {
 Write-Output "[release] archive: $archivePath"
 Write-Output "[release] sha256: $archiveHash"
 Write-Output "[release] checksums: $checksumsPath"
-Write-Output '[release] Only the project-owned launcher artwork was included; runtime state, user data, tests, HIP files, renders, credentials, and historical Gate reports were not packaged.'
+Write-Output '[release] Only the documented launcher artwork was included; runtime state, user data, tests, HIP files, renders, credentials, and historical Gate reports were not packaged.'

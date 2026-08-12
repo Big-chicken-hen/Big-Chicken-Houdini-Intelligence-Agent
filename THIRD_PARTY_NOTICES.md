@@ -11,11 +11,11 @@ Big-Chicken Houdini Intelligence Agent integrates with the Codex CLI/app-server 
 - License: Apache License 2.0
 - Copyright: OpenAI and Codex contributors
 
-The source repository and public Preview package do not contain Codex credentials. If a Codex binary is distributed with a future package, that package must also include the complete applicable Apache 2.0 license and any upstream notices.
+The source repository and public beta package do not contain Codex credentials. If a Codex binary is distributed with a package, that package must also include the complete applicable Apache 2.0 license and any upstream notices.
 
 ## FXHoudiniMCP
 
-Big-Chicken Houdini Intelligence Agent can use FXHoudiniMCP 1.3.0 as an explicitly selected compatibility fallback. It is not copied into Big-Chicken Houdini Intelligence Agent source and is not included in the default public Preview package.
+Big-Chicken Houdini Intelligence Agent can use FXHoudiniMCP 1.3.0 as an explicitly selected compatibility fallback. It is not copied into Big-Chicken Houdini Intelligence Agent source and is not included in the default public beta package.
 
 - Project: FXHoudiniMCP
 - Source: <https://github.com/healkeiser/fxhoudinimcp>
@@ -55,10 +55,21 @@ Installed help is read from each user's own Houdini installation at runtime.
 
 ## Artwork
 
-The public Preview includes the project-owned launcher illustration at
+The public beta includes the project-owned launcher illustration at
 `assets/launcher/launcher-hero.png`. It is distributed with this project under
-the repository's Apache-2.0 license. Third-party character or promotional
-artwork is not included.
+the repository's Apache-2.0 license.
+
+The Windows launcher and taskbar interface also use an edited close crop based
+on the photograph "Hen at Farm" by Erik Karits:
+
+- Source: <https://www.pexels.com/photo/hen-at-farm-22882004/>
+- License: Pexels License, <https://www.pexels.com/license/>
+- Distributed files: `assets/launcher/big-chicken-hen.png` and
+  `assets/launcher/big-chicken-hen.ico`
+
+This image is used as application-interface artwork, not as a trademark,
+design mark, trade name, business name, or service mark. Other third-party
+character or promotional artwork is not included.
 
 ## No endorsement
 
